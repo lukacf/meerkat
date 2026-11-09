@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790773045898,
+  "sources": [
+    {
+      "id": "google-calendar",
+      "url": "https://developers.google.com/workspace/calendar/api/quickstart/python",
+      "observed_sha256": "338a537bf3ba937a7cd2f269f8bf1db13f755cba20e457ed1ef66dec83979a00",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Provider documentation and hosted service retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "setup",
+      "export": "google-calendar-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "developer_registration",
+          "instruction": "A Google Cloud project, enabled Calendar API, consent setup and OAuth client suitable for this host."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Explicit account/calendar selection plus application-owned write restrictions if write operations are later requested."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "No Calendar implementation artifact or credential binding is retained.",
+          "Requested operation schemas, production OAuth route and application migration constraints remain unresolved."
+        ]
+      }
+    }
+  ]
+}

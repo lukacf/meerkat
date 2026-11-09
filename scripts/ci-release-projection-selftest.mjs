@@ -542,6 +542,7 @@ if (args[0] === "api") {
   const gateCheck = extractStepRun(workflow, "Check lane results");
   const gateEnv = {
     CHANGES_RESULT: "success", FMT_GOVERNANCE_RESULT: "success", RATCHETS_RESULT: "success", STAGGER_RESULT: "success",
+    CI_LANES_SELFTEST_RESULT: "success", PATH_CLASSIFIER_SELFTEST_RESULT: "success",
     TLC_AUDITS_RESULT: "skipped", MACHINE_AUTHORITY: "false", CLIPPY_RESULT: "skipped",
     GOVERNANCE_GATES_RESULT: "skipped", GOVERNANCE_GATES: "false",
     UNIT_RESULT: "success", INTEGRATION_RESULT: "skipped", GOVERNED_JSONL_RESULT: "skipped",
@@ -559,6 +560,10 @@ if (args[0] === "api") {
     UNIT_DEFERRED: "", UNIT_DEFERRED_COUNT: "0", PACKAGE_COUNT: "0", CLOSURE_COUNT: "0",
     GENERATED_CONTRACT: "true", RELEASE_PROJECTION: "true",
     RELEASE_EVIDENCE_COMMIT: BUMP_PARENT, RELEASE_EVIDENCE_RUN_ID: String(RUN_ID), RELEASE_EVIDENCE_RUN_ATTEMPT: "1",
+    // A Core version bump: Core's tree only, no product lane (ci/products.json).
+    CORE_CHANGED: "false", CORE_PATHS_CHANGED: "true", PRODUCTS_CHANGED: "core",
+    FLOOR_CHECK_COUNT: "0", PUBLISHED_FLOOR_RESULT: "skipped", DOWNSTREAM_PRODUCTS: "",
+    CONNECT_CHECKS: "false", CONNECT_CHECKS_RESULT: "skipped", GOVERNANCE_DOCS_GATE_RESULT: "skipped",
   };
   // The gate reads each two-wave lane (long rows first) as two jobs and their
   // row counts. The cases below name a lane's result and count once: all its
@@ -592,6 +597,8 @@ if (args[0] === "api") {
   );
   for (const [label, change] of [
     ["a failed ratchet", { RATCHETS_RESULT: "failure" }],
+    ["a failed lane classifier selftest", { CI_LANES_SELFTEST_RESULT: "failure" }],
+    ["a path classifier selftest that did not run", { PATH_CLASSIFIER_SELFTEST_RESULT: "skipped" }],
     ["a failed stagger job", { STAGGER_RESULT: "failure" }],
     ["a failed governance gate", { GOVERNANCE_GATES_RESULT: "failure" }],
     ["a governance change whose gates did not run", { GOVERNANCE_GATES: "true" }],
@@ -623,6 +630,8 @@ if (args[0] === "api") {
     RELEASE_EVIDENCE_COMMIT: "", RELEASE_EVIDENCE_RUN_ID: "", RELEASE_EVIDENCE_RUN_ATTEMPT: "", RUST_CHANGED: "true",
     SHARD_COUNT: "1", CLIPPY_RESULT: "success", UNIT_SHARD_COUNT: "1", UNIT_RESULT: "success", PACKAGE_COUNT: "1",
     GENERATED_CONTRACT: "false", BAZEL_GRAPH: "false", BAZEL_GRAPH_RESULT: "skipped",
+    // A Core package changed: Core's push lanes are required.
+    CORE_CHANGED: "true",
   };
   const pullRequestGate = {
     ...rustGate, IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true", PLAN_EVENT: "pull_request",
@@ -687,6 +696,24 @@ if (args[0] === "api") {
     ["unit rows on main whose packed main unit lane failed", { ...unitOnMainGate, MAIN_UNIT_PACKED_RESULT: "failure" }],
     ["a push with neither unit rows nor a deferral", { ...unitOnMainGate, UNIT_ROWS_ON_MAIN: "", UNIT_ROWS_ON_MAIN_COUNT: "0" }],
     ["unit rows on main beside a failed unit lane", { ...unitOnMainGate, UNIT_RESULT: "failure" }],
+  ]) {
+    assert.equal(runGate(env).status, 1, `the gate refuses ${label}`);
+  }
+  // A push that changed only a product's crates (ci/products.json) runs none
+  // of Core's guard, wasm, SDK or example lanes, and the gate requires none.
+  const productPush = {
+    ...pushGate, CORE_CHANGED: "false", CORE_PATHS_CHANGED: "false", PRODUCTS_CHANGED: "meta",
+    GOVERNED_JSONL: "false", GOVERNED_JSONL_RESULT: "skipped", MCP_CONFINEMENT_POSITIVE: "false",
+    MCP_CONFINEMENT_POSITIVE_RESULT: "skipped", WASM_CHECK_RESULT: "skipped", SDK_HOST_RESULT: "skipped",
+    EXAMPLE_WEB_RESULT: "skipped", WASM_TIMERS_RESULT: "skipped",
+    FLOOR_CHECK_COUNT: "1", PUBLISHED_FLOOR_RESULT: "success",
+  };
+  const productPushRun = runGate(productPush);
+  assert.equal(productPushRun.status, 0, `the gate accepts a product-only push: ${productPushRun.stdout}`);
+  for (const [label, env] of [
+    ["a product push whose floor check did not run", { ...productPush, PUBLISHED_FLOOR_RESULT: "skipped" }],
+    ["a product push whose skipped wasm check failed", { ...productPush, WASM_CHECK_RESULT: "failure" }],
+    ["a product push without its main unit rows", { ...productPush, MAIN_UNIT_PACKED_RESULT: "skipped" }],
   ]) {
     assert.equal(runGate(env).status, 1, `the gate refuses ${label}`);
   }
@@ -767,15 +794,22 @@ process.stdout.write(JSON.stringify(fixture[path]));
   const job = (name, created, started, completed) => ({
     name, created_at: at(created), started_at: at(started), completed_at: at(completed), conclusion: "success",
   });
-  const runBudget = (attemptStarts, jobs, extraEnv = {}) =>
-    runBudgetAt(attemptStarts.map(at), jobs, extraEnv);
+  const runBudget = (attemptStarts, jobs, extraEnv = {}, listings = {}) =>
+    runBudgetAt(attemptStarts.map(at), jobs, extraEnv, listings);
   // The plan's GUARD_LANE_REASONS is "{}" unless a row sets it: no
-  // exact-profile lane ran.
-  const runBudgetAt = (attemptStarts, jobs, extraEnv = {}) => {
+  // exact-profile lane ran. `jobs` is the last attempt's job listing; an
+  // earlier attempt's listing (`listings[n]`) defaults to the jobs of
+  // `jobs` that started in that attempt, as given.
+  const runBudgetAt = (attemptStarts, jobs, extraEnv = {}, listings = {}) => {
     const run = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`;
-    const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=100`]: [{ jobs }] };
+    const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=30`]: [{ jobs }] };
     attemptStarts.forEach((start, index) => {
       pages[`${run}/attempts/${index + 1}`] = [{ run_started_at: start }];
+      if (index + 1 === attemptStarts.length) return;
+      const next = attemptStarts[index + 1];
+      const own = listings[index + 1] ??
+        jobs.filter((entry) => entry.started_at && entry.started_at >= start && entry.started_at < next);
+      pages[`${run}/attempts/${index + 1}/jobs?per_page=30`] = [{ jobs: own }];
     });
     writeFileSync(budgetFixture, JSON.stringify(pages));
     const outputFile = join(scratch, "budget-output");
@@ -825,12 +859,96 @@ process.stdout.write(JSON.stringify(fixture[path]));
   budget = runBudget([0, 2000], [...busy.slice(0, 4), job("Clippy (core+12)", 2000, 2003, 2473)]);
   assert.equal(budget.status, 0, `a re-run rest-wave row: ${budget.stdout}${budget.stderr}`);
   assert.match(budget.stdout, /^\| Clippy \(core\+12\) \| 2 \| 3 \| 470 \| 500 \| 473 \| 470 \| success \|$/m, "a re-run row is not behind the stagger job");
+  // A re-run attempt lists the jobs it carried over with its own creation
+  // time. Read from that listing alone, a carried-over row's runner queue in
+  // its own attempt counted toward the runaway ceiling (run 42362604651
+  // attempt 2: 5386 s against attempt 1's 1160 s for the same Clippy row),
+  // and the row looked created after the stagger job. The step reads a
+  // carried-over job's creation time from the attempt it ran in.
+  {
+    const rerunAt = 5000;
+    const firstAttempt = [
+      job(budgetEnv.CLASSIFICATION_JOB_NAME, 0, 5, 35),
+      job("Format + governance", 0, 5, 400),
+      job(budgetEnv.STAGGER_JOB_NAME, 36, 40, 44),
+      // 3000 s waiting for a hosted runner, then 900 s of Clippy.
+      job("Clippy (mob)", 36, 3036, 3936),
+    ];
+    const relisted = firstAttempt.map((entry) => ({ ...entry, created_at: at(rerunAt) }));
+    const rerun = [...relisted, job("Unit tests (xtask)", rerunAt, rerunAt + 3, rerunAt + 300)];
+    budget = runBudget([0, rerunAt], rerun, {}, { 1: firstAttempt });
+    assert.equal(budget.status, 0, `a carried-over row's own runner queue never counts: ${budget.stdout}${budget.stderr}`);
+    assert.match(
+      budget.stdout,
+      /^\| Clippy \(mob\) \| 1 \| 3000 \| 900 \| 930 \| 3936 \| 931 \| success \|$/m,
+      "the carried-over row keeps its attempt's queue and waited for no stagger job",
+    );
+    assert.equal(budget.outputs.terminal_excluding_queue_seconds, "931");
+    assert.equal(budget.outputs.budget_verdict, "queue_delayed");
+    // A carried-over job its attempt's listing lacks keeps the re-run's
+    // creation time: no queue is read for it, so the runaway ceiling fails
+    // closed.
+    budget = runBudget([0, rerunAt], rerun, {}, { 1: firstAttempt.filter((entry) => entry.name !== "Clippy (mob)") });
+    assert.equal(budget.status, 1, `an unmatched carried-over row reads no queue: ${budget.stdout}`);
+    assert.equal(budget.outputs.budget_verdict, "runaway");
+  }
   // The execution overrun still fails: the stagger job's run time counts.
   const overBudget = [...busy.slice(0, 2), { ...stagger, completed_at: at(741) }, job("Clippy (core+12)", 741, 745, 1791)];
   budget = runBudget([0], overBudget);
   assert.equal(budget.status, 1, `a rest-wave row over the execution budget fails: ${budget.stdout}`);
   assert.equal(budget.outputs.exec_path_seconds, "1081", "1046 s of the row, 30 s of classification, 5 s of stagger");
   assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+
+  // Meta CI's gate runs this same step (.github/workflows/meta-ci.yml), byte
+  // for byte, with its own job names, and names the jobs its lanes wait for
+  // besides the classification (LANE_UPSTREAMS): such a lane's execution
+  // path is its own run time plus the longest path among them, and its path
+  // queue that path's queue. This workflow sets no LANE_UPSTREAMS, so its
+  // paths are the classification's and the stagger job's, as above.
+  const metaWorkflow = readFileSync(resolve(root, ".github/workflows/meta-ci.yml"), "utf8");
+  assert.equal(
+    extractStepRun(metaWorkflow, "Enforce lane execution budget").trimEnd(),
+    budgetStep.trimEnd(),
+    "meta-ci.yml's gate runs ci.yml's budget step unchanged",
+  );
+  assert.equal(budgetEnv.LANE_UPSTREAMS, undefined, "ci.yml's lanes wait for no other lane");
+  const metaEnv = Object.fromEntries(
+    Object.entries(extractStepLiteralEnv(metaWorkflow, "Enforce lane execution budget"))
+      .map(([key, value]) => [key, value.replace(/^"(.*)"$/, "$1")]),
+  );
+  assert.equal(metaEnv.GATE_JOB_NAME, "Meta gate");
+  assert.equal(metaEnv.LANE_UPSTREAMS, "console=console-backends;console-browser*=console-backends");
+  // The backends waited 100 s for a runner and ran 500 s; the console job
+  // ran 400 s after them, a browser leg 300 s after a 63 s queue.
+  const metaRun = (consoleSeconds) => [
+    job(metaEnv.CLASSIFICATION_JOB_NAME, 0, 5, 35),
+    job("console-backends", 36, 136, 636),
+    job("console", 637, 640, 640 + consoleSeconds),
+    job("console-browser (3)", 637, 700, 1000),
+    job("test-typescript", 36, 40, 100),
+    { name: metaEnv.GATE_JOB_NAME, created_at: at(1500), started_at: at(1504), completed_at: null, conclusion: null },
+  ];
+  budget = runBudget([0], metaRun(400), metaEnv);
+  assert.equal(budget.status, 0, `a chain within the budget: ${budget.stdout}${budget.stderr}`);
+  assert.deepEqual(
+    budget.outputs,
+    {
+      exec_path_seconds: "930", terminal_seconds: "1040", terminal_excluding_queue_seconds: "932",
+      queue_seconds: "108", budget_verdict: "within_budget", guard_lanes_outside_budget: "[]",
+    },
+    `the console job's path holds the backends' and the classification's: ${budget.stdout}`,
+  );
+  assert.match(budget.stdout, /^\| console \| 1 \| 3 \| 400 \| 930 \| 1040 \| 932 \| success \|$/m, "the console job waits for the backends");
+  assert.match(budget.stdout, /^\| console-browser \(3\) \| 1 \| 63 \| 300 \| 830 \| 1000 \| 832 \| success \|$/m, "so does a browser leg");
+  assert.match(budget.stdout, /^\| test-typescript \| 1 \| 4 \| 60 \| 90 \| 100 \| 91 \| success \|$/m, "a lane that waits only for the classification");
+  budget = runBudget([0], metaRun(600), metaEnv);
+  assert.equal(budget.status, 1, `a chain over the budget fails: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "1130", "600 s of the console job, 500 s of the backends, 30 s of classification");
+  assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+  // Without the upstream names the same run would measure the console job
+  // alone after the classification, and pass.
+  budget = runBudget([0], metaRun(600), { ...metaEnv, LANE_UPSTREAMS: "" });
+  assert.equal(budget.outputs.exec_path_seconds, "630");
 
   // An exact-profile lane the plan ran only because the change touched its
   // inputs or changed its definition is outside a pull request's budget:
@@ -990,7 +1108,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
   // delay. It fails an enforced measurement only after the last retry, and
   // any other error fails it at once, as before.
   assert.equal(budgetEnv.API_RETRY_DELAYS, "5 10 20", "the budget retries a server error three times");
-  const jobsPath = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/1/jobs?per_page=100`;
+  const jobsPath = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/1/jobs?per_page=30`;
   const failuresFile = join(scratch, "budget-failures.json");
   const callsFile = join(scratch, "budget-calls");
   const flaky = (count, message, extraEnv = {}) => {

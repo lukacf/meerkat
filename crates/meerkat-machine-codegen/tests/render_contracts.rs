@@ -12,9 +12,12 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_module, render_machine_semantic_model,
 };
 use meerkat_machine_schema::catalog::dsl::{
-    dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
-    dsl_mob_machine as mob_machine, dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
+    dsl_auth_machine as auth_machine, dsl_durable_decision_machine as durable_decision_machine,
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
     dsl_schedule_lifecycle_machine as schedule_lifecycle,
+    dsl_session_document_machine as session_document_machine,
+    dsl_tool_grant_lifecycle_machine as tool_grant_lifecycle_machine,
     dsl_workgraph_lifecycle_machine as workgraph_lifecycle,
 };
 use meerkat_machine_schema::catalog::{
@@ -124,6 +127,31 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     }
     assert!(rendered.contains("AgentIdentity"));
     assert!(!rendered.contains("MeerkatId"));
+}
+
+#[test]
+fn renders_the_ci_profile_samples_in_contract_markdown() {
+    let contract = |schema: &MachineSchema| {
+        let coverage = canonical_machine_coverage_manifests()
+            .into_iter()
+            .find(|coverage| coverage.machine == schema.machine)
+            .expect("machine coverage manifest");
+        render_machine_contract_markdown(schema, &coverage)
+    };
+    let rendered = contract(&durable_decision_machine());
+    let expected = "\n## CI Profile Samples\nThe CI profile samples `Decide`.`carried_audience` as \
+         `{Some(\"alpha\")}`, `Decide`.`carried_digest` as `{Some(\"alpha\")}`, \
+         `Decide`.`carried_complete` as `{FALSE}` and `Decide`.`carried_link_served_digest` as \
+         `{Some(\"alpha\")}`; the Deep profile and every composition explore each field's whole \
+         domain.\n\n## Signals\n";
+    assert!(
+        rendered.contains(expected),
+        "DurableDecisionMachine's contract states its CI samples after its inputs:\n{rendered}"
+    );
+    assert!(
+        !contract(&session_document_machine()).contains("## CI Profile Samples"),
+        "a machine with no CiSamples declaration renders no such section"
+    );
 }
 
 #[test]
@@ -609,6 +637,297 @@ fn generated_meerkat_transition_enum_order_is_decoupled_from_dispatch_order() {
     );
 }
 
+/// SessionDocumentMachine's `TransitionId` variants as 0.9.8 published them,
+/// in order (`ClassifyDurableTailContinuable` last, at index 116).
+const SESSION_DOCUMENT_TRANSITIONS_0_9_8: [&str; 117] = [
+    "MarkSessionInitialTurnPendingInactiveOrPending",
+    "MarkSessionInitialTurnPendingConsumed",
+    "StartSessionInitialTurnPending",
+    "StartSessionInitialTurnInactive",
+    "StartSessionInitialTurnConsumed",
+    "ResolveSessionFirstTurnOverridesAllowed",
+    "ResolveSessionFirstTurnOverridesDenied",
+    "StageSessionInitialPromptStore",
+    "StageSessionInitialPromptClear",
+    "StageSessionToolResults",
+    "ConsumeSessionDeferredInputsPending",
+    "ConsumeSessionDeferredInputsInactive",
+    "ConsumeSessionDeferredInputsConsumed",
+    "RestoreSessionConsumedInputs",
+    "RestoreSessionConsumedInputsNoPhaseRollback",
+    "RecoverSessionFirstTurnPhase",
+    "ResolveRealtimeItemObservedDiscardedAssistant",
+    "ResolveRealtimeItemObservedPresent",
+    "ResolveRealtimeItemSkipped",
+    "ResolveRealtimeUserTranscriptFinalEmpty",
+    "ResolveRealtimeUserTranscriptFinalStore",
+    "ResolveRealtimeUserTranscriptFinalReplayOrConflict",
+    "ResolveRealtimeUserContentIdentityInvalid",
+    "ResolveRealtimeUserContentIdentityUnmaterializedPredecessor",
+    "ResolveRealtimeUserContentIdentityConflict",
+    "ResolveRealtimeUserContentIdentityReplay",
+    "ResolveRealtimeUserContentIdentityCommitNew",
+    "ResolveRealtimeUserContentBlobStageNew",
+    "ResolveRealtimeUserContentBlobStageReuseExact",
+    "ResolveRealtimeUserContentBlobStageRejectOccupied",
+    "ResolveRealtimeUserContentBlobRecoveryNone",
+    "ResolveRealtimeUserContentBlobRecoveryExact",
+    "ResolveRealtimeUserContentBlobRecoveryCommitVerified",
+    "ResolveRealtimeUserContentBlobRecoveryClearInvalid",
+    "ResolveRealtimeUserContentBlobFinalizeNone",
+    "ResolveRealtimeUserContentBlobFinalizeClearCommitted",
+    "ResolveRealtimeUserContentBlobFinalizeRejectMismatch",
+    "ResolveRealtimeUserContentFinalEmpty",
+    "ResolveRealtimeUserContentFinalStore",
+    "ResolveRealtimeUserContentFinalReplayOrConflict",
+    "ResolveRealtimeAssistantDeltaInvalidOrDuplicate",
+    "ResolveRealtimeAssistantDeltaDiscarded",
+    "ResolveRealtimeAssistantDeltaLaneConflict",
+    "ResolveRealtimeAssistantDeltaAccepted",
+    "ResolveRealtimeAssistantReplacementInvalid",
+    "ResolveRealtimeAssistantReplacementDiscarded",
+    "ResolveRealtimeAssistantReplacementLocked",
+    "ResolveRealtimeAssistantReplacementLaneConflict",
+    "ResolveRealtimeAssistantReplacementAccepted",
+    "ResolveRealtimeAssistantTurnCompletedInvalid",
+    "ResolveRealtimeAssistantTurnCompletedDiscard",
+    "ResolveRealtimeAssistantTurnCompletedToolUse",
+    "ResolveRealtimeAssistantTurnCompletedRecord",
+    "ResolveRealtimeAssistantPlaybackSnapshot",
+    "ResolveRealtimeAssistantTurnInterruptedInvalid",
+    "ResolveRealtimeAssistantTurnInterruptedValid",
+    "ResolveRealtimeMaterializeAlreadyDone",
+    "ResolveRealtimeMaterializeWaitForPredecessor",
+    "ResolveRealtimeMaterializeSkipped",
+    "ResolveRealtimeMaterializeWaitForReadyText",
+    "ResolveRealtimeMaterializeUser",
+    "ResolveRealtimeMaterializeAssistant",
+    "ResolveRealtimeMaterializeAssistantMissingCompletion",
+    "AuthorizeRestoreRealtimeTranscriptState",
+    "AdmitLiveInteractionTranscript",
+    "StageLiveProvisionalUserTranscript",
+    "ReconcileLiveFinalUserTranscript",
+    "CompleteLiveInteractionTranscript",
+    "AdmitLiveAssistantPlaybackTarget",
+    "RecoverLiveAssistantPlaybackTarget",
+    "ResolveLiveAssistantPlaybackOnChannelClose",
+    "ObserveLiveAssistantPlaybackSnapshot",
+    "ObserveLiveAssistantPlaybackFinalPendingTerminal",
+    "RecoverLiveAssistantPlaybackFinal",
+    "ObserveLiveAssistantPlaybackTerminalPendingFinal",
+    "RecoverLiveAssistantPlaybackTerminal",
+    "ObserveLiveAssistantPlaybackFinalJoinsComplete",
+    "ObserveLiveAssistantPlaybackFinalJoinsPrefix",
+    "ObserveLiveAssistantPlaybackTerminalJoinsComplete",
+    "ObserveLiveAssistantPlaybackTerminalJoinsPrefix",
+    "ObserveLiveAssistantPlaybackUnmeasured",
+    "ClassifyLiveContextCommittedRow",
+    "AuthorizeSessionMetadataPersist",
+    "AuthorizeSessionBuildStatePersist",
+    "RestoreSessionBuildState",
+    "ResolvePendingContinuationWithBoundary",
+    "ResolvePendingContinuationWithoutBoundary",
+    "AuthorizeSessionResumeOverridesRejectProviderRequiresModel",
+    "AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn",
+    "AuthorizeSessionResumeOverridesAcceptRecomputeProvider",
+    "AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride",
+    "AuthorizeSessionResumeOverridesAcceptUseOverride",
+    "AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride",
+    "AuthorizeSessionResumeOverridesAcceptRetainStored",
+    "AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride",
+    "ClassifyLiveSessionAuthorityLive",
+    "ClassifyLiveSessionAuthorityDurableArchived",
+    "ClassifyLiveSessionAuthorityDurableUncommitted",
+    "ClassifyLiveSessionAuthorityDurableRevision",
+    "RecoverSessionFromStoreAuthorized",
+    "RecoverSessionFromStoreUnrecoverable",
+    "ClassifyDurableTailCompleted",
+    "ClassifyDurableTailRepairable",
+    "ClassifyDurableTailAmbiguous",
+    "ResolveRuntimeCheckpointProjectionActive",
+    "ResolveRuntimeCheckpointProjectionArchived",
+    "ResolveSessionDocumentLifecycleMergeArchivedAbsorbing",
+    "ResolveSessionDocumentLifecycleMergeAuthority",
+    "ApplyPendingToolResults",
+    "TranscriptEditFork",
+    "TranscriptEditRewrite",
+    "RecoverSessionLifecycleTerminal",
+    "ReviveArchivedSessionDocument",
+    "ArchiveSessionDocumentActive",
+    "ArchiveSessionDocumentAlreadyArchived",
+    "ArchiveSessionDocumentCompleteRetire",
+    "ClassifyDurableTailContinuable",
+];
+
+/// The variants of a rendered kernel's `pub enum TransitionId`, in order.
+fn transition_id_variants(rendered: &str) -> Vec<String> {
+    let head = "pub enum TransitionId {";
+    let start = rendered
+        .find(head)
+        .expect("the kernel renders its TransitionId enum")
+        + head.len();
+    let body = &rendered[start..];
+    let end = body.find("\n}").expect("the TransitionId enum closes");
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("//"))
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .collect()
+}
+
+/// SessionDocumentMachine's public `TransitionId` order keeps 0.9.8's as its
+/// prefix: the operator-instruction arms sit on the machine's late tail after
+/// `ClassifyDurableTailContinuable`, the variant 0.9.8 published last, so no
+/// published variant moves when an arm is added beside its siblings.
+#[test]
+fn session_document_transition_enum_keeps_the_published_order() {
+    let rendered = render_machine_kernel_module(&session_document_machine());
+    let variants = transition_id_variants(&rendered);
+    let published = variants
+        .iter()
+        .take(SESSION_DOCUMENT_TRANSITIONS_0_9_8.len())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published,
+        SESSION_DOCUMENT_TRANSITIONS_0_9_8.to_vec(),
+        "0.9.8's TransitionId order must stay a prefix of the rendered order"
+    );
+}
+
+/// ToolGrantLifecycleMachine's `TransitionId` variants as 0.9.10 published
+/// them, in order.
+const TOOL_GRANT_LIFECYCLE_TRANSITIONS_0_9_10: [&str; 17] = [
+    "Issue",
+    "IssueRefusedWindow",
+    "IssueRefusedIssuedActive",
+    "IssueRefusedIssuedExpired",
+    "IssueRefusedIssuedRevoked",
+    "ExpireDue",
+    "ExpireNotDue",
+    "ExpireSettledExpired",
+    "ExpireSettledRevoked",
+    "RevokeActive",
+    "RevokeAfterDeadline",
+    "RevokeSettledExpired",
+    "RevokeSettledRevoked",
+    "AdmitLive",
+    "AdmitDue",
+    "AdmitEndedExpired",
+    "AdmitEndedRevoked",
+];
+
+/// The variants of a rendered kernel's `pub enum NAME`, in order, each
+/// without its fields.
+fn enum_variants(rendered: &str, name: &str) -> Vec<String> {
+    let head = format!("pub enum {name} {{");
+    let start = rendered
+        .find(&head)
+        .expect("the kernel renders the named enum")
+        + head.len();
+    let body = &rendered[start..];
+    let end = body.find("\n}").expect("the enum closes");
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("//"))
+        .filter_map(|line| line.split(['(', ',', ' ']).next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// ToolGrantLifecycleMachine's public `TransitionId` keeps 0.9.10's order as
+/// its prefix, then the run-scope arms in catalog order, then the machine's
+/// late tail: the arms of a grant's end with its subject, and last the end
+/// with its subject of a grant whose run ended.
+#[test]
+fn tool_grant_lifecycle_transition_enum_keeps_the_published_order() {
+    let rendered = render_machine_kernel_module(&tool_grant_lifecycle_machine());
+    let expected: Vec<&str> = TOOL_GRANT_LIFECYCLE_TRANSITIONS_0_9_10
+        .into_iter()
+        .chain([
+            "AdmitEndedRunEnded",
+            "AdmitOtherRun",
+            "AdmitOutsideRun",
+            "EndRunMatching",
+            "EndRunAfterDeadline",
+            "EndRunOther",
+            "EndRunSettledExpired",
+            "EndRunSettledRevoked",
+            "EndRunSettledRunEnded",
+            "IssueRefusedIssuedRunEnded",
+            "ExpireSettledRunEnded",
+            "RevokeSettledRunEnded",
+            "EndWithSubjectActive",
+            "EndWithSubjectAfterDeadline",
+            "EndWithSubjectSettledExpired",
+            "EndWithSubjectSettledRevoked",
+            "AdmitEndedWithSubject",
+            "EndWithSubjectSettledRunEnded",
+        ])
+        .collect();
+    assert_eq!(
+        transition_id_variants(&rendered),
+        expected,
+        "0.9.10's TransitionId order stays a prefix, the run scope's arms follow it, \
+         and the end with its subject is the late tail"
+    );
+}
+
+/// ToolGrantLifecycleMachine's vocabularies keep 0.9.10's variants first,
+/// then the run scope's, then the end with its subject's.
+#[test]
+fn tool_grant_lifecycle_vocabularies_keep_the_published_order() {
+    let rendered = render_machine_kernel_module(&tool_grant_lifecycle_machine());
+    let expected: [(&str, &[&str]); 5] = [
+        (
+            "ToolGrantEndReason",
+            &["Deadline", "Revoked", "RunEnded", "SubjectEnded"],
+        ),
+        (
+            "ToolGrantUseRefusal",
+            &[
+                "Expired",
+                "Revoked",
+                "RunEnded",
+                "OutsideRun",
+                "SubjectEnded",
+            ],
+        ),
+        (
+            "Phase",
+            &["Unissued", "Active", "Expired", "Revoked", "RunEnded"],
+        ),
+        (
+            "InputKind",
+            &[
+                "Issue",
+                "Expire",
+                "Revoke",
+                "AdmitUse",
+                "EndRun",
+                "EndWithSubject",
+            ],
+        ),
+        (
+            "EffectKind",
+            &[
+                "Issued",
+                "Expired",
+                "Revoked",
+                "UseAdmitted",
+                "UseRefused",
+                "IssueRefused",
+                "RunEnded",
+            ],
+        ),
+    ];
+    for (name, variants) in expected {
+        assert_eq!(enum_variants(&rendered, name), variants, "{name}");
+    }
+}
+
 /// An input appended after the appended-input section
 /// (`MEERKAT_APPENDED_INPUT_SECTION_LAST`) would emit its transitions ahead of
 /// the late tail and move that tail's published `TransitionId` variants, so
@@ -664,6 +983,265 @@ fn generated_meerkat_transition_tail_missing_name_is_a_structured_error() {
         MachineKernelRenderError::MissingPublicTransitionTail { transition }
             if transition == "RegisterSessionRefusedUnregisterDrainingIdle"
     ));
+}
+
+/// MeerkatMachine's transcript-unsupported routing arms (0.9.9) are declared
+/// ahead of their siblings in the catalog, for first-match dispatch, and are
+/// emitted on the late tail after every variant 0.9.8 published, so no
+/// published `TransitionId` discriminant moves:
+/// `RequestFiniteSwitchTurnApprovalUnavailableIdle` keeps 0.9.8's index 107
+/// and `ClaimCompositionResidencyStopped`, the variant 0.9.8 published last,
+/// keeps index 2707.
+#[test]
+fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("RequestFiniteSwitchTurnApprovalUnavailableIdle"), 107);
+    assert_eq!(index("ClaimCompositionResidencyStopped"), 2707);
+    for arm in [
+        "RequestFiniteSwitchTurnTranscriptUnsupportedIdle",
+        "RequestFiniteSwitchTurnTranscriptUnsupportedAttached",
+        "RequestFiniteSwitchTurnTranscriptUnsupportedRunning",
+        "RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle",
+        "RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached",
+        "RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning",
+    ] {
+        assert!(
+            index(arm) > 2707,
+            "`{arm}` must follow every variant 0.9.8 published"
+        );
+    }
+}
+
+/// MobMachine's arms of a host's adoption over a declared identity entry
+/// (0.9.11: the archive terminals that end the entry, the takeover's
+/// verdicts and the replay of its mark) are emitted on the machine's late
+/// tail after the legacy adoption's arms. 0.9.11 removes the two arms that
+/// blocked a placed member's instruction delivery
+/// (`PrepareMemberInstructionDeliveryPlacedRunning` and
+/// `PrepareMemberInstructionDeliveryPlacedStopped`, declared Breaking),
+/// which moves every later 0.9.10 `TransitionId` variant down by two:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, 0.9.10's last variant, is
+/// at index 1900, and this pin guards that order from here on. The build
+/// preparation retry's arms follow them directly
+/// (`mob_build_preparation_retry_arms_precede_the_seal_refusal`).
+#[test]
+fn mob_host_adoption_arms_follow_every_earlier_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
+    let host_adoption_arms = [
+        "ObserveMemberRetirementArchivedLiveHostAdopted",
+        "ObserveMemberRetirementArchivedRetiredHostAdopted",
+        "TakeOverIdentityEntryAdopting",
+        "TakeOverIdentityEntryEnded",
+        "TakeOverIdentityEntryDeferred",
+        "TakeOverIdentityEntryNotADeclaredEntry",
+        "TakeOverIdentityEntryNonAuthoritative",
+        "TakeOverIdentityEntryMobNotRunningStopped",
+        "TakeOverIdentityEntryMobNotRunningCompleted",
+        "TakeOverIdentityEntryMobNotRunningDestroyed",
+        "RecoverIdentityEntryAdoptingMarkedRunning",
+        "RecoverIdentityEntryAdoptingStaleRunning",
+    ];
+    for arm in host_adoption_arms {
+        assert!(
+            index(arm) > 1900,
+            "{arm} follows every variant 0.9.10 renders"
+        );
+    }
+    let end = index(MOB_BUILD_PREPARATION_RETRY_ARMS[0]);
+    assert_eq!(
+        variants[end - host_adoption_arms.len()..end].to_vec(),
+        host_adoption_arms.to_vec(),
+        "the host adoption's arms are the TransitionId variants directly before the build preparation retry's"
+    );
+    // The refusals of external work to an identity entry (0.9.11) are the
+    // last TransitionId variants.
+    assert_eq!(
+        variants[variants.len() - MOB_IDENTITY_MEMBER_REFUSAL_ARMS.len()..].to_vec(),
+        MOB_IDENTITY_MEMBER_REFUSAL_ARMS.to_vec(),
+        "the identity member refusals of external work are the last TransitionId variants"
+    );
+    assert!(
+        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1900,
+        "the legacy adoption's arms follow every variant 0.9.10 renders"
+    );
+}
+
+/// MobMachine's arms of a build preparation the host asked to retry
+/// (0.9.11: the wake feedback that records the cause, and the host's
+/// resolve in each phase), appended on the machine's late tail right after
+/// the host adoption's arms, so no earlier variant's discriminant moves.
+const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
+    "ResolveMemberRevivalRetryableBuildPreparationRunning",
+    "ResolveMemberBuildPreparationRunning",
+    "ResolveMemberBuildPreparationStopped",
+    "ResolveMemberBuildPreparationCompleted",
+];
+
+/// MobMachine's refusals of external work to an identity entry and to a
+/// name reserved unreadable (0.9.11): the last `TransitionId` variants.
+const MOB_IDENTITY_MEMBER_REFUSAL_ARMS: [&str; 2] = [
+    "ResolveSubmitWorkRejectionIdentityMember",
+    "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+];
+
+/// The build preparation retry's arms are contiguous, after every variant
+/// 0.9.10 renders, and the seal's refusal (`SealDeclaredRosterRefused`,
+/// 0.9.11) is appended after them: the tail pins each arm group by its
+/// neighbours, not by the end of the enum, which later groups extend. Every
+/// arm it names follows `UnlistIdentityEntryMobNotRunningDestroyed`, the
+/// last variant 0.9.10 published, which is at index 1900.
+#[test]
+fn mob_build_preparation_retry_arms_precede_the_seal_refusal() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
+    for arm in MOB_BUILD_PREPARATION_RETRY_ARMS
+        .into_iter()
+        .chain(["SealDeclaredRosterRefused"])
+    {
+        assert!(
+            index(arm) > 1900,
+            "{arm} follows every variant 0.9.10 renders"
+        );
+    }
+    let first = index(MOB_BUILD_PREPARATION_RETRY_ARMS[0]);
+    let after = first + MOB_BUILD_PREPARATION_RETRY_ARMS.len();
+    assert_eq!(
+        variants[first..after].to_vec(),
+        MOB_BUILD_PREPARATION_RETRY_ARMS.to_vec(),
+        "the build preparation retry's arms are contiguous"
+    );
+    assert!(
+        index("SealDeclaredRosterRefused") >= after,
+        "the seal's refusal follows the build preparation retry's arms"
+    );
+}
+
+#[test]
+fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.9 published.
+    assert_eq!(index("StopCurrentRunForRunResumableAttached"), 2742);
+    for arm in [
+        "AbortUntilChangedSwitchTurnReconfigureIdle",
+        "AbortUntilChangedSwitchTurnReconfigureAttached",
+        "AbortUntilChangedSwitchTurnReconfigureRunning",
+        "AbortUntilChangedSwitchTurnReconfigureRetired",
+        "AbortUntilChangedSwitchTurnReconfigureStopped",
+        "RequestUntilChangedSwitchTurnPendingConflictIdle",
+        "RequestUntilChangedSwitchTurnPendingConflictAttached",
+        "RequestUntilChangedSwitchTurnPendingConflictRunning",
+        "CompleteUntilChangedSwitchTurnReconfigureRetired",
+        "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    ] {
+        assert!(
+            index(arm) > 2742,
+            "`{arm}` must follow every variant 0.9.9 published"
+        );
+    }
+}
+
+/// MobMachine's stale respawn abandonment arm (0.9.11) is declared beside
+/// its siblings in the catalog and emitted on the late tail, after every
+/// variant 0.9.10 published and after the arms 0.9.11 appended before it:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, the variant 0.9.10 published
+/// last, is at index 1900.
+#[test]
+fn mob_stale_abandonment_arm_follows_every_published_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
+    let stale = index("ObserveRespawnTopologyAbandonedStaleEndedSuccessor");
+    for earlier in [
+        "UnlistIdentityEntryMobNotRunningDestroyed",
+        "AdoptLegacyIdentityEntryAdoptedUnlisted",
+        "AdoptLegacyIdentityEntryRetireUnadopted",
+        "SealDeclaredRosterRefused",
+    ] {
+        assert!(
+            stale > index(earlier),
+            "the stale abandonment arm must follow `{earlier}`"
+        );
+    }
+}
+/// MobMachine's member dispatch admission arms (0.9.11) sit on the machine's
+/// late tail after every variant 0.9.10 published:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, the variant 0.9.10 published
+/// last, is at index 1900. The arms are
+/// rendered as one block, each verdict in every phase, in this order, and
+/// the record of a member incarnation's lineage follows them.
+#[test]
+fn mob_dispatch_admission_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.10 published.
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
+    let arms = ["AskHost", "Inherit", "Refused", "NoneRequired"]
+        .into_iter()
+        .flat_map(|verdict| {
+            ["Running", "Stopped", "Completed", "Destroyed"]
+                .into_iter()
+                .map(move |phase| format!("ResolveMemberDispatchAdmission{verdict}{phase}"))
+        })
+        .chain(
+            ["Running", "Stopped"]
+                .into_iter()
+                .map(|phase| format!("RecordMemberDispatchAdmissionLineage{phase}")),
+        )
+        .collect::<Vec<_>>();
+    let first = index(&arms[0]);
+    assert!(
+        first > 1900,
+        "`{}` must follow every variant 0.9.10 published",
+        arms[0]
+    );
+    for (offset, arm) in arms.iter().enumerate() {
+        assert_eq!(
+            index(arm),
+            first + offset,
+            "`{arm}` keeps its place in the dispatch admission block"
+        );
+    }
 }
 
 #[test]

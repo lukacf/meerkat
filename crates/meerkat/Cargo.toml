@@ -21,6 +21,8 @@ exclude = [
     "tests/brain_swap_surface_parity.rs",
     # workspace launch-site gate over clippy.toml and every crate's sources
     "tests/host_launch_sites.rs",
+    # workspace admission fence gate over every crate's sources
+    "tests/admission_fence_sites.rs",
     # needs the unpublished mcp-test-server crate
     "tests/integration.rs",
     # needs the unpublished mcp-test-server crate
@@ -75,6 +77,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }
@@ -126,46 +129,6 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 which = { workspace = true }
 indexmap = { workspace = true }
-# Path-only self-dependency (no version, stripped at publish), same hazard and
-# same remedy as meerkat-runtime's.
-#
-# Without it, `cargo test -p meerkat` compiles away every feature-gated test in
-# this crate and REPORTS SUCCESS OVER ZERO TESTS - the failure mode is silence,
-# not a red lane. Measured: 28 tests in src/persistence.rs disappear (including
-# the pre-0.8.10 bridge tests that guard a field-reported P0) because
-# `session-store` is not a default feature here; `jsonl-store` hides another 28
-# and `comms` another 5.
-#
-# CI was never affected - `cargo unit` is --workspace, and rpc/rest/mcp-server/
-# mob all enable `session-store` on the facade, so feature unification builds
-# these files on. That is exactly why this survived: the evidence was intact in
-# the lane nobody doubted and absent from the one a developer actually runs.
-# Test coverage must not depend on which sibling crates happen to share the
-# build graph.
-#
-# The full non-live set is deliberate. `session-store` alone would leave the
-# identical defect alive for the other gates, which is not progress under
-# Rule 9. `integration-real-tests` and the live/realtime features stay out:
-# those need real resources and belong to the e2e lanes.
-meerkat = { path = ".", features = [
-    "workspace-tests",
-    "local-authorization",
-    "session-store",
-    # Enabling `session-store` alone makes the cold-restart compaction batteries
-    # RUN without the feature they need, so all four fail in setup with
-    # "compaction did not run before the restart" - visible but not honest.
-    # Whatever a test needs to be meaningful belongs in this list.
-    "session-compaction",
-    "jsonl-store",
-    "memory-store",
-    "memory-store-session",
-    "comms",
-    "mcp",
-    "skills",
-    "schedule",
-    "workgraph",
-    "atif",
-] }
 # meerkat-mob and meerkat-mcp-server depend on us, not the other way around.
 # Binaries (rkat, meerkat-rest) depend on them directly.
 
@@ -309,18 +272,29 @@ test-mcp-oauth-fixtures = ["meerkat-mcp?/test-support"]
 test-support = ["meerkat-runtime/test-support"]
 # Internal, not for consumers: compiles the unit tests that need the
 # workspace (a crate this one cannot depend on once published). Only the
-# path-only self dev-dependency enables it, and `cargo package` strips that
-# dev-dependency, so the published package compiles those tests out
-# (ci/standalone-workspace-only.toml names them).
+# workspace's own test builds turn it on (they pass every crate's test
+# features: scripts/core-workspace-args.mjs --tests), so the published
+# package compiles those tests out (ci/standalone-workspace-only.toml
+# names them).
 workspace-tests = []
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests
 
-# The feature set this crate's own tests need. The published package
-# has no self dev-dependency to turn them on, so its README.md prints the
-# command with these features, and the standalone test lane
-# (scripts/published_crates_standalone.py) reads them from here.
+# The feature set this crate's own tests need. No dev-dependency turns
+# them on: the workspace's test builds pass them (scripts/core-workspace-args.mjs
+# --tests, the CI planner and the Bazel generator read them from here), the
+# published package's README.md prints the command with them, and the
+# standalone test lane (scripts/published_crates_standalone.py) reads them
+# from here too.
+#
+# The full non-live set is deliberate. Without `session-store` the 28 tests in
+# src/persistence.rs (the pre-0.8.10 bridge tests among them) compile away,
+# `jsonl-store` gates another 28 and `comms` another 5; `session-store`
+# without `session-compaction` runs the cold-restart compaction batteries
+# without the feature they need. `integration-real-tests` and the
+# live/realtime features stay out: they need real resources and belong to the
+# e2e lanes.
 [package.metadata.meerkat.standalone-tests]
 features = ["local-authorization", "session-store", "session-compaction", "jsonl-store", "memory-store", "memory-store-session", "comms", "mcp", "skills", "schedule", "workgraph", "atif"]
 # The README's command sets this thread stack, the workspace's

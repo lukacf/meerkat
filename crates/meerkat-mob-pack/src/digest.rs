@@ -129,7 +129,7 @@ fn hash_canonical_index(mut index: Vec<(CanonicalPath, [u8; 32], bool)>) -> Mobp
         hasher.update(hex::encode(file_digest).as_bytes());
         hasher.update([0]);
         hasher.update([if executable_bit { b'1' } else { b'0' }]);
-        hasher.update([b'\n']);
+        hasher.update(*b"\n");
     }
     MobpackDigest(hasher.finalize().into())
 }

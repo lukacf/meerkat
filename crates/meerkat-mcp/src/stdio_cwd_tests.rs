@@ -316,7 +316,7 @@ mod fixture {
             let _ = std::io::Read::read_to_string(&mut stderr, &mut err);
             let _ = sender.send((out, err));
         });
-        let Ok((out, err)) = receiver.recv_timeout(Duration::from_secs(120)) else {
+        let Ok((out, err)) = receiver.recv_timeout(Duration::from_mins(2)) else {
             let _ = child.kill();
             let _ = child.wait();
             panic!("the child test did not finish within its bound");

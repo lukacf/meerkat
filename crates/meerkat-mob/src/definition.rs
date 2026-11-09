@@ -68,6 +68,48 @@ pub struct WiringRules {
     pub role_wiring: Vec<RoleWiringRule>,
 }
 
+/// Whether the mob definition's wiring rules ([`WiringRules`]:
+/// `auto_wire_orchestrator` and `role_wiring`) apply to a member.
+///
+/// A durable fact of the member, chosen by its spawn request
+/// ([`crate::SpawnMemberSpec::definition_wiring`]), recorded on its
+/// `MemberSpawned` row and its roster entry (`RosterEntry::definition_wiring`),
+/// and kept by its restore and its respawn. MobMachine holds the exempt members
+/// (`member_definition_wiring_exempt`) and every seat, spawn and rotation
+/// reads them there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DefinitionWiring {
+    /// The definition's wiring rules wire the member like any other: when it
+    /// is seated, to the members they pair it with, and other members to it
+    /// when they are seated.
+    #[default]
+    Applies,
+    /// The definition's wiring rules never touch the member: they wire it to
+    /// no member when it is seated, and no other member to it when that
+    /// member is seated or rotated. Explicit wiring
+    /// ([`crate::MobHandle::wire`], topology operations) is unaffected, and a
+    /// respawn restores the explicit edges it held. The member is outside
+    /// role-wide flow steps too: a step that dispatches to every member of
+    /// its role, a flow's supervisor escalation and flow target provisioning
+    /// leave it out, and only a role-targeted run that names it in its
+    /// `role_targets` binds it.
+    Exempt,
+}
+
+impl DefinitionWiring {
+    /// Whether this is the default, [`Self::Applies`] (serde skips it).
+    pub fn is_applies(&self) -> bool {
+        matches!(self, Self::Applies)
+    }
+
+    /// Whether the definition's wiring rules never touch the member.
+    pub fn is_exempt(&self) -> bool {
+        matches!(self, Self::Exempt)
+    }
+}
+
 /// External backend configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalBackendConfig {
@@ -849,6 +891,8 @@ fn inspect_profile_keys(
         }
         // The `tools` sub-table of an inline profile has its own closed field
         // set; a typo there (`comm = true`) silently leaves the category off.
+        // The grant gate inside it is closed the same way: a typo there
+        // (`famlies`) would silently leave the gate narrower.
         if binding.as_inline().is_some() {
             if let Some(raw_tools) = raw_profile.get("tools").and_then(toml::Value::as_table) {
                 keys.extend(
@@ -857,6 +901,18 @@ fn inspect_profile_keys(
                         .filter(|key| !ToolConfig::FIELD_NAMES.contains(&key.as_str()))
                         .map(|key| format!("tools.{key}")),
                 );
+                if let Some(raw_gate) = raw_tools.get("grant_gated").and_then(toml::Value::as_table)
+                {
+                    keys.extend(
+                        raw_gate
+                            .keys()
+                            .filter(|key| {
+                                !meerkat_core::tool_grant::GrantGatedTools::FIELD_NAMES
+                                    .contains(&key.as_str())
+                            })
+                            .map(|key| format!("tools.grant_gated.{key}")),
+                    );
+                }
             }
         }
         if !keys.is_empty() {
@@ -901,8 +957,49 @@ impl MobDefinition {
     /// does not own those facts.
     /// The owning session is wired as an external peer by the delegate tool;
     /// implicit mobs do not create a local orchestrator member.
+    ///
+    /// The `delegate` profile names `model` alone, so the definition
+    /// validates only for a catalogued model; see
+    /// [`Self::implicit_with_provider`].
     #[doc(hidden)]
     pub fn implicit(bridge_session_id: &str, model: &str) -> Self {
+        Self::implicit_with_provider(bridge_session_id, model, None, None)
+    }
+
+    /// [`Self::implicit`] whose `delegate` profile also names `provider` and
+    /// `self_hosted_server_id`: the route the owner session's build resolved
+    /// for `model`, so its helpers run on the owner's own route. A model
+    /// outside the catalog (a realm `[models.<id>]` entry, a self-hosted
+    /// model) validates only with its provider named.
+    #[doc(hidden)]
+    pub fn implicit_with_provider(
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<String>,
+    ) -> Self {
+        Self::implicit_on_route(
+            bridge_session_id,
+            model,
+            provider,
+            self_hosted_server_id,
+            None,
+        )
+    }
+
+    /// [`Self::implicit_with_provider`] whose `delegate` profile also records
+    /// `auth_binding`, the binding the owner session resolves its credentials
+    /// through, so its helpers authenticate as the session does. `None`
+    /// leaves the helpers on the binding their realm resolves for the
+    /// provider.
+    #[doc(hidden)]
+    pub fn implicit_on_route(
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<String>,
+        auth_binding: Option<meerkat_core::AuthBindingRef>,
+    ) -> Self {
         let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -910,8 +1007,9 @@ impl MobDefinition {
             ProfileBinding::Inline(Box::new(Profile {
                 model_fallback: None,
                 model: model.to_string(),
-                provider: None,
-                self_hosted_server_id: None,
+                provider,
+                self_hosted_server_id,
+                auth_binding,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1405,6 +1503,40 @@ model = "claude-sonnet-4-5"
         );
     }
 
+    /// `tools.grant_gated` is a key the tools table declares, and a
+    /// typo inside the gate is reported with its location, as a typo under
+    /// `tools` is, instead of silently leaving the gate narrower.
+    #[test]
+    fn parse_toml_reads_the_grant_gate_and_warns_on_its_unknown_keys() {
+        let content = r#"
+[mob]
+id = "gated"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[profiles.worker.tools]
+comms = true
+grant_gated = { families = ["shell"], famlies = ["memory"] }
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("a gate typo warns, not refuses");
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("worker"),
+                keys: vec!["tools.grant_gated.famlies".to_string()],
+            }]
+        );
+        let worker = parsed.definition.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .expect("inline profile");
+        assert_eq!(
+            serde_json::to_value(&worker.tools).expect("tools serialize")["grant_gated"],
+            serde_json::json!({"families": ["shell"]}),
+            "the gate's known keys are kept"
+        );
+    }
+
     #[test]
     fn parse_toml_warns_on_unknown_tools_keys_with_the_sub_table_location() {
         // `comm = true` is the exact typo that yields the comms=false wiring
@@ -1667,6 +1799,7 @@ deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
             model: "claude-sonnet-4-5".to_string(),
             provider: Some(meerkat_core::Provider::Anthropic),
             self_hosted_server_id: Some("local-a".to_string()),
+            auth_binding: None,
             image_generation_provider: Some(meerkat_core::Provider::Gemini),
             auto_compact_threshold: std::num::NonZeroU64::new(120_000),
             resume_overrides: vec![crate::profile::ResumeOverrideField::Model],
@@ -1835,6 +1968,7 @@ deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
                         model: "claude-opus-4-8".to_string(),
                         provider: None,
                         self_hosted_server_id: None,
+                        auth_binding: None,
                         image_generation_provider: None,
                         auto_compact_threshold: None,
                         resume_overrides: Vec::new(),
@@ -1901,6 +2035,97 @@ id = "minimal"
             !def.wiring.auto_wire_orchestrator,
             "implicit delegate mobs rely on external owner wiring"
         );
+    }
+
+    /// The implicit definition's `delegate` profile names the owner's
+    /// resolved provider route when given one, so a model outside the
+    /// catalog validates; without one it names the model alone, which
+    /// validates only for a catalogued model.
+    #[test]
+    fn implicit_definition_names_the_owners_provider_route() {
+        let model = "realm-gateway-model";
+        let unknown_model = |def: &MobDefinition| {
+            crate::validate::validate_definition(def)
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::UnknownModel)
+        };
+        let delegate = ProfileName::from("delegate");
+        assert!(unknown_model(&MobDefinition::implicit(
+            "bridge-session",
+            model
+        )));
+        assert_eq!(
+            MobDefinition::implicit_with_provider("bridge-session", model, None, None),
+            MobDefinition::implicit("bridge-session", model),
+            "no route is exactly the provider-less definition"
+        );
+
+        let def = MobDefinition::implicit_with_provider(
+            "bridge-session",
+            model,
+            Some(meerkat_core::Provider::OpenAI),
+            None,
+        );
+        assert!(!unknown_model(&def));
+        let profile = def.resolve_inline_profile(&delegate).unwrap();
+        assert_eq!(profile.model, model);
+        assert_eq!(profile.provider, Some(meerkat_core::Provider::OpenAI));
+        assert_eq!(profile.self_hosted_server_id, None);
+
+        let self_hosted = MobDefinition::implicit_with_provider(
+            "bridge-session",
+            "gemma-4-31b",
+            Some(meerkat_core::Provider::SelfHosted),
+            Some("local".to_string()),
+        );
+        assert!(!unknown_model(&self_hosted));
+        let profile = self_hosted.resolve_inline_profile(&delegate).unwrap();
+        assert_eq!(profile.provider, Some(meerkat_core::Provider::SelfHosted));
+        assert_eq!(profile.self_hosted_server_id.as_deref(), Some("local"));
+    }
+
+    /// The implicit definition's `delegate` profile records the owner's auth
+    /// binding when given one, and that record survives persistence (a
+    /// serialize and parse); without one it is exactly the provider-route
+    /// definition.
+    #[test]
+    fn implicit_definition_records_the_owners_auth_binding() {
+        let delegate = ProfileName::from("delegate");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").unwrap(),
+            binding: meerkat_core::BindingId::parse("endpoint_two").unwrap(),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        assert_eq!(
+            MobDefinition::implicit_on_route(
+                "bridge-session",
+                "gpt-5.4",
+                Some(meerkat_core::Provider::OpenAI),
+                None,
+                None,
+            ),
+            MobDefinition::implicit_with_provider(
+                "bridge-session",
+                "gpt-5.4",
+                Some(meerkat_core::Provider::OpenAI),
+                None,
+            ),
+            "no binding is exactly the provider-route definition"
+        );
+
+        let def = MobDefinition::implicit_on_route(
+            "bridge-session",
+            "gpt-5.4",
+            Some(meerkat_core::Provider::OpenAI),
+            None,
+            Some(binding.clone()),
+        );
+        let profile = def.resolve_inline_profile(&delegate).unwrap();
+        assert_eq!(profile.auth_binding.as_ref(), Some(&binding));
+        let restored: MobDefinition =
+            serde_json::from_value(serde_json::to_value(&def).unwrap()).unwrap();
+        assert_eq!(restored, def, "the binding survives persistence");
     }
 
     #[test]

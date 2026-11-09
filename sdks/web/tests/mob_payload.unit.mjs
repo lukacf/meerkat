@@ -1127,6 +1127,7 @@ test('memberStatus surfaces the typed preview_unavailable marker and omits it wh
     'read_failed',
     'session_absent',
     'not_observed_while_retiring',
+    'store_refused',
   ]) {
     const snapshot = await statusMob({ preview_unavailable: marker }).memberStatus('worker-1');
     assert.equal(snapshot.preview_unavailable, marker);
@@ -1191,7 +1192,13 @@ test('memberStatus surfaces custody_deferred and omits it when unset', async () 
       },
     });
   for (const restore of ['startup_binding', 'cleanup_delivery']) {
-    for (const cause of ['served_elsewhere', 'hosting_unavailable', 'durable_tail_unprovable']) {
+    for (const cause of [
+      'served_elsewhere',
+      'hosting_unavailable',
+      'durable_tail_unprovable',
+      'store_unavailable',
+      'store_unreadable',
+    ]) {
       const snapshot = await statusMob({ custody_deferred: { restore, cause } }).memberStatus(
         'worker-1',
       );

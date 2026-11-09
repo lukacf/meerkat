@@ -607,7 +607,7 @@ impl Default for PairingRateLimit {
     fn default() -> Self {
         Self {
             max_attempts: 10,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
         }
     }
 }
@@ -2262,7 +2262,7 @@ mod tests {
             read_deadline: Duration::from_secs(10),
             pairing_rate: PairingRateLimit {
                 max_attempts: 2,
-                window: Duration::from_secs(60),
+                window: Duration::from_mins(1),
             },
         };
         let handle = spawn_loopback_acceptor(registry, Some(pairing), bounds).await;
@@ -2323,7 +2323,7 @@ mod tests {
     fn pairing_rate_limiter_zero_budget_refuses_everything() {
         let limiter = PairingRateLimiter::new(PairingRateLimit {
             max_attempts: 0,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
         });
         assert!(!limiter.try_admit("127.0.0.1".parse().unwrap()));
     }
@@ -2332,7 +2332,7 @@ mod tests {
     fn pairing_rate_limiter_is_per_source() {
         let limiter = PairingRateLimiter::new(PairingRateLimit {
             max_attempts: 1,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
         });
         let a: IpAddr = "127.0.0.1".parse().unwrap();
         let b: IpAddr = "127.0.0.2".parse().unwrap();

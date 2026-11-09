@@ -106,7 +106,7 @@ The main agent is responsible for integration:
 - ensure the final criteria below are satisfied before the PR is considered
   ready
 
-## Lane A: Runtime Host and Capability Surface
+## Feature lane A: Runtime Host and Capability Surface
 
 ### Feature Requests
 
@@ -132,7 +132,7 @@ This is mostly a read-only projection lane and can start early. It should report
 facts owned by runtime, auth, artifact, approval, mob, and comms subsystems. It
 must not become a semantic authority for placement or topology.
 
-## Lane B: Metadata Contract
+## Feature lane B: Metadata Contract
 
 ### Feature Requests
 
@@ -158,7 +158,7 @@ This is cross-cutting but can begin as an additive type introduction plus
 surface pass-through. Indexing and query support can follow. Reserved Meerkat
 keys must be protected so clients cannot spoof runtime-owned facts.
 
-## Lane C: Durable Event Replay and Snapshots
+## Feature lane C: Durable Event Replay and Snapshots
 
 ### Feature Requests
 
@@ -182,11 +182,11 @@ keys must be protected so clients cannot spoof runtime-owned facts.
 
 ### Parallelization Notes
 
-This is foundational and should share envelope vocabulary with Lane B. It can
-progress beside mob-specific replay as long as both lanes converge on cursor
-and envelope contracts.
+This is foundational and should share envelope vocabulary with feature
+lane B. It can progress beside mob-specific replay as long as both lanes
+converge on cursor and envelope contracts.
 
-## Lane D: Mob Snapshot, Replay, and Ingress
+## Feature lane D: Mob Snapshot, Replay, and Ingress
 
 ### Feature Requests
 
@@ -214,7 +214,7 @@ This lane is primarily `meerkat-mob` owned. It can start from the existing
 `MobEventStore` cursor model and `mob/snapshot` surface, then align with the
 generic event replay lane as shared envelope work lands.
 
-## Lane E: External Member V2
+## Feature lane E: External Member V2
 
 ### Feature Requests
 
@@ -245,7 +245,7 @@ ingress. It touches identity, runtime binding, fences, supervisor bridge, and
 comms trust. It will consume approval and artifact hooks when those lanes land,
 but it can define forwarding seams before the full protocols are complete.
 
-## Lane F: Durable Approvals
+## Feature lane F: Durable Approvals
 
 ### Feature Requests
 
@@ -279,7 +279,7 @@ machine-owned rather than surface-owned. This lane intersects strongly with
 auth and visibility, but an initial single-principal durable protocol can land
 before full multiplayer grants.
 
-## Lane G: Artifacts
+## Feature lane G: Artifacts
 
 ### Feature Requests
 
@@ -312,7 +312,7 @@ the existing blob surface where possible instead of inventing a competing binary
 transport. Tool output can gradually move from transcript-only rendering to
 artifact-backed references.
 
-## Lane H: Auth, Principals, Grants, and Visibility
+## Feature lane H: Auth, Principals, Grants, and Visibility
 
 ### Feature Requests
 
@@ -342,7 +342,7 @@ principal and grant contracts before enforcing replay filtering everywhere.
 Labels may project product audiences, but policy must key off canonical
 principal and visibility handles.
 
-## Lane I: Secure Remote RPC
+## Feature lane I: Secure Remote RPC
 
 ### Feature Requests
 
@@ -367,10 +367,10 @@ principal and visibility handles.
 ### Parallelization Notes
 
 Transport hardening can start independently from mobs. It should eventually
-consume principal and grant types from Lane H, but safe defaults and explicit
-remote enablement can land first.
+consume principal and grant types from feature lane H, but safe defaults and
+explicit remote enablement can land first.
 
-## Lane J: Placement Handles
+## Feature lane J: Placement Handles
 
 ### Feature Requests
 
@@ -402,7 +402,7 @@ This can begin as a structured execution-context contract for shell/tool
 execution. Mob support should layer on by assigning member-level placement
 without making `cwd` the semantic authority.
 
-## Lane K: Mob Coordination Primitives
+## Feature lane K: Mob Coordination Primitives
 
 ### Feature Requests
 
@@ -431,34 +431,34 @@ project, domain, and team workflows.
 
 ### Wave 1: Surface Facts and Basic Ergonomics
 
-- Lane A: Runtime Host and Capability Surface
-- Lane B: Metadata Contract
-- Lane D: basic Mob Snapshot, Replay, and Ingress
-- Lane J: Placement Handles
+- Feature lane A: Runtime Host and Capability Surface
+- Feature lane B: Metadata Contract
+- Feature lane D: basic Mob Snapshot, Replay, and Ingress
+- Feature lane J: Placement Handles
 
 This wave establishes the handles and projections that later features will
 reference.
 
 ### Wave 2: Durable Objects and Replay
 
-- Lane C: Durable Event Replay and Snapshots
-- Lane G: Artifacts
-- Lane F: Durable Approvals
+- Feature lane C: Durable Event Replay and Snapshots
+- Feature lane G: Artifacts
+- Feature lane F: Durable Approvals
 
 This wave makes long-running remote work reconstructible and auditable.
 
 ### Wave 3: Remote and Multiplayer Authority
 
-- Lane E: External Member V2
-- Lane H: Auth, Principals, Grants, and Visibility
-- Lane I: Secure Remote RPC
+- Feature lane E: External Member V2
+- Feature lane H: Auth, Principals, Grants, and Visibility
+- Feature lane I: Secure Remote RPC
 
 This wave enables production remote execution, cross-host members, and
 multi-client or multiplayer visibility boundaries.
 
 ### Wave 4: Rich Mob Coordination
 
-- Lane K: Mob Coordination Primitives
+- Feature lane K: Mob Coordination Primitives
 
 This wave adds generic mob-level work coordination after replay, metadata,
 visibility, artifacts, and approvals have stable reference types.

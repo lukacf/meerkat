@@ -148,7 +148,7 @@ async fn run_rkat(
             .env("RKAT_ANTHROPIC_API_KEY", key);
     }
     cmd.args(args);
-    let output = timeout(Duration::from_secs(180), cmd.output()).await??;
+    let output = timeout(Duration::from_mins(3), cmd.output()).await??;
     Ok(output)
 }
 
@@ -588,7 +588,7 @@ async fn poll_flow_status_until_terminal(
     mob_id: &str,
     run_id: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
     let mut request_id = 10_000u64;
     loop {
         let status = rpc_call(

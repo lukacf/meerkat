@@ -575,6 +575,9 @@ pub fn resolve_effective_turn_config(
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
         llm_client_override: context.llm_client_override,
+        // Process-local like the client override, but never carried by
+        // recovery: the owning host supplies it on every build it makes.
+        mcp_auth_resolver_override: None,
         agent_llm_client_decorator: context.agent_llm_client_decorator,
         override_builtins: overrides
             .override_builtins
@@ -667,6 +670,7 @@ pub fn resolve_effective_turn_config(
         // Durable mob-member identity is carried forward verbatim at resume so
         // mob ownership routing keeps recognizing the member after restart.
         mob_member_binding: metadata.mob_member_binding.clone(),
+        mob_incarnation: None,
         keep_alive,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
@@ -709,6 +713,13 @@ pub fn resolve_effective_turn_config(
         runtime_build_mode: context.runtime_build_mode,
         initial_turn_metadata: None,
         initial_work_authorization: None,
+        // The grant gate is durable session truth, like the access policy:
+        // a recovered session keeps its gated names closed until a live
+        // grant opens them. The recorded gate holds every entry the last
+        // build installed, a member's role entries included.
+        grant_gated_tools: (!metadata.tooling.grant_gated.is_empty())
+            .then(|| metadata.tooling.grant_gated.clone()),
+        grant_gated_tools_where_mounted: None,
     };
     if let Some(override_mob) = overrides.override_mob {
         build.apply_generated_create_only_mob_operator_access(
@@ -789,6 +800,7 @@ mod tests {
                     spawn_tool_access_policy: None,
                     application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
+                    grant_gated: Default::default(),
                 },
                 keep_alive: false,
                 comms_name: Some("peer-a".to_string()),

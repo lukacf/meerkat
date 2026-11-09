@@ -4,14 +4,14 @@
 //! deleted name is refused if created again. Faults are injected per call.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeVersion,
-    VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeVersion, VersionedHead,
 };
 use tokio::time::Instant;
 
@@ -26,7 +26,8 @@ pub(crate) struct StoredScope {
 }
 
 /// One call the host answered or refused, with the scope it named (a
-/// listing names its kind, a commit names none).
+/// listing names its kind); a commit names its batch's commit id and the
+/// instant it arrived.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostCall {
     AcquireFence,
@@ -34,7 +35,7 @@ pub(crate) enum HostCall {
     LoadHead { kind: ScopeKind, name: String },
     ListHeads { kind: ScopeKind },
     ReadRows { kind: ScopeKind, name: String },
-    Commit,
+    Commit { commit_id: String, at: Instant },
 }
 
 /// One visible scope as a row reads it, without copying its rows: its
@@ -57,6 +58,22 @@ struct HostState {
     deleted: HashSet<(ScopeKind, String)>,
     landed: HashSet<String>,
     commits: u64,
+    /// Scopes the host loads as a typed conflict.
+    conflicts: BTreeMap<(ScopeKind, String), ConflictedScope>,
+}
+
+/// A scope the host loads as a typed conflict: two batches hold one of its
+/// versions (a superseded writer's late batch, folded at that version), so
+/// every load of it answers `Conflict` naming that version, as a store that
+/// meets obligation 4 at load does. A listing reports it per scope
+/// (`HeadPage::conflicts`).
+#[derive(Debug, Clone)]
+pub(crate) struct ConflictedScope {
+    pub(crate) version: ScopeVersion,
+    pub(crate) commit_ids: Vec<CommitId>,
+    /// The conflict arose after the listing the rows make: listings still
+    /// show the scope's head, and only its loads answer the conflict.
+    pub(crate) after_listing: bool,
 }
 
 /// Faults the next calls meet.
@@ -64,6 +81,10 @@ struct HostState {
 pub(crate) struct Faults {
     /// Commits that apply and then answer `Indeterminate`.
     pub(crate) indeterminate_after_apply: u32,
+    /// Commits that answer `Indeterminate` without applying, before any
+    /// other commit fault: a call that failed after it was sent, of a batch
+    /// that never reached the store.
+    pub(crate) indeterminate_without_apply: u32,
     /// Commits that answer `Unavailable` without applying.
     pub(crate) unavailable: u32,
     /// Commits that answer `Conflict` without applying.
@@ -78,10 +99,26 @@ pub(crate) struct Faults {
     /// Acquires that never answer and grant nothing: the realm's acquire
     /// timeout gives up on them.
     pub(crate) acquire_hang: u32,
+    /// The next acquire of this mode never answers, and the host grants it
+    /// on its own this long after it arrived, as the store decides it then:
+    /// a store that completes a request its caller gave up on (the realm's
+    /// acquire timeout dropped the call before the grant). The grant's answer
+    /// reaches nobody.
+    pub(crate) acquire_granted_late: Option<(AcquireMode, Duration)>,
+    /// `Held` answers name their remaining lease rounded down to a
+    /// multiple of this unit: a store that keeps its lease accounting in
+    /// whole units (an integer TTL, a seconds column).
+    pub(crate) held_remaining_floor: Option<Duration>,
+    /// `Held` answers name this remaining lease instead: a store that
+    /// answers outside the contract (a remaining lease beyond any lease).
+    pub(crate) held_remaining_override: Option<Duration>,
     /// How long every acquire takes to answer: the host decides when the
     /// call arrives, and the answer reaches the caller this much later, as
     /// over a slow network.
     pub(crate) acquire_delay: Option<Duration>,
+    /// Grants that answer the token they superseded, which holds the fence
+    /// again, instead of a new one: a store that broke its token order.
+    pub(crate) grant_reuses_token: u32,
     /// Head loads that answer `Unavailable`.
     pub(crate) load_head_unavailable: u32,
     /// Retries of a batch that already landed that answer `Unavailable`
@@ -91,6 +128,11 @@ pub(crate) struct Faults {
     pub(crate) renew_delay: Option<Duration>,
     /// How long the next listing call takes before it answers (once).
     pub(crate) list_delay: Option<Duration>,
+    /// How long every listing call takes before it answers, a page of each
+    /// kind alike: a store whose listing is slow.
+    pub(crate) list_delay_each: Option<Duration>,
+    /// Listing calls that answer `Unavailable` without listing anything.
+    pub(crate) list_unavailable: u32,
     /// The most heads every listing call answers, whatever limit it was
     /// asked for: a store whose pages are shorter than Core's.
     pub(crate) list_page_cap: Option<usize>,
@@ -106,7 +148,9 @@ pub(crate) struct Faults {
 /// The test host store.
 #[derive(Debug)]
 pub(crate) struct TestHost {
-    state: Mutex<HostState>,
+    /// Shared with the grants the host makes on its own after their caller
+    /// gave up ([`Faults::acquire_granted_late`]).
+    state: Arc<Mutex<HostState>>,
     timing: FenceTiming,
     pub(crate) faults: Mutex<Faults>,
     /// When set, every commit waits here until notified.
@@ -151,7 +195,7 @@ impl TestHost {
 
     pub(crate) fn with_timing(timing: FenceTiming) -> Self {
         Self {
-            state: Mutex::new(HostState::default()),
+            state: Arc::new(Mutex::new(HostState::default())),
             timing,
             faults: Mutex::new(Faults::default()),
             commit_gate: Mutex::new(None),
@@ -253,6 +297,123 @@ impl TestHost {
         self.state().lease_until = None;
     }
 
+    /// Make the only visible scope of `kind` whose name starts with `prefix`
+    /// load as a typed conflict at its version: a superseded writer's late
+    /// batch was folded at that version beside the batch that wrote it. Its
+    /// conflicting batches are the one the scope shows and `late-<name>`.
+    /// Answers the scope's name, or `None` unless exactly one scope matches.
+    pub(crate) fn conflict_scope(&self, kind: ScopeKind, prefix: &str) -> Option<String> {
+        self.mark_conflicted(kind, prefix, false)
+    }
+
+    /// [`Self::conflict_scope`] for a conflict that arises after the listing
+    /// the row makes next: that listing shows the scope's head, and its loads
+    /// answer the conflict.
+    pub(crate) fn conflict_scope_after_listing(
+        &self,
+        kind: ScopeKind,
+        prefix: &str,
+    ) -> Option<String> {
+        self.mark_conflicted(kind, prefix, true)
+    }
+
+    fn mark_conflicted(
+        &self,
+        kind: ScopeKind,
+        prefix: &str,
+        after_listing: bool,
+    ) -> Option<String> {
+        let mut state = self.state();
+        let mut matching = state
+            .scopes
+            .iter()
+            .filter(|((scope_kind, name), _)| *scope_kind == kind && name.starts_with(prefix));
+        let ((_, name), stored) = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        let name = name.clone();
+        let mut commit_ids = vec![
+            stored.commit_id.clone(),
+            CommitId::try_new(format!("late-{name}")).ok()?,
+        ];
+        commit_ids.sort();
+        let version = stored.version;
+        state.conflicts.insert(
+            (kind, name.clone()),
+            ConflictedScope {
+                version,
+                commit_ids,
+                after_listing,
+            },
+        );
+        Some(name)
+    }
+
+    /// Make the deleted incarnation `name` of `kind` load as a typed conflict
+    /// at `version`: a superseded writer's late batch landed on it after the
+    /// batch that deleted it, at the version that batch deleted.
+    pub(crate) fn conflict_deleted(&self, kind: ScopeKind, name: &str, version: ScopeVersion) {
+        let late = CommitId::try_new(format!("late-{name}")).ok();
+        self.state().conflicts.insert(
+            (kind, name.to_string()),
+            ConflictedScope {
+                version,
+                commit_ids: late.into_iter().collect(),
+                after_listing: false,
+            },
+        );
+    }
+
+    /// List the conflict of `name` with these commit ids from now on: the
+    /// same conflict, with its ids in another order, or with none.
+    pub(crate) fn set_conflict_ids(&self, kind: ScopeKind, name: &str, ids: &[&str]) {
+        if let Some(conflicted) = self.state().conflicts.get_mut(&(kind, name.to_string())) {
+            conflicted.commit_ids = ids
+                .iter()
+                .filter_map(|id| CommitId::try_new(*id).ok())
+                .collect();
+        }
+    }
+
+    /// The conflict of `name` is repaired in the store: a visible scope is
+    /// listed among the heads again, and a deleted incarnation is in neither
+    /// list.
+    pub(crate) fn repair_conflict(&self, kind: ScopeKind, name: &str) {
+        self.state().conflicts.remove(&(kind, name.to_string()));
+    }
+
+    /// Replace the head of the only visible scope of `kind` whose name starts
+    /// with `prefix` by bytes no head format decodes. Answers its name, or
+    /// `None` unless exactly one scope matches.
+    pub(crate) fn corrupt_head(&self, kind: ScopeKind, prefix: &str) -> Option<String> {
+        let mut state = self.state();
+        let matching: Vec<String> = state
+            .scopes
+            .keys()
+            .filter(|(scope_kind, name)| *scope_kind == kind && name.starts_with(prefix))
+            .map(|(_, name)| name.clone())
+            .collect();
+        let [name] = matching.as_slice() else {
+            return None;
+        };
+        let stored = state.scopes.get_mut(&(kind, name.clone()))?;
+        stored.head = b"not a head".to_vec();
+        Some(name.clone())
+    }
+
+    /// The typed conflict a load of `scope` answers, when the host holds it
+    /// conflicted.
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.state()
+            .conflicts
+            .get(&(scope.kind, scope.name.as_str().to_string()))
+            .map(|conflicted| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(conflicted.version),
+            })
+    }
+
     /// Every visible scope of a kind, by name.
     pub(crate) fn scopes_of(&self, kind: ScopeKind) -> BTreeMap<String, StoredScope> {
         self.state()
@@ -268,51 +429,136 @@ impl TestHost {
         self.state().commits
     }
 
+    /// The highest token the host acquired.
+    pub(crate) fn token(&self) -> u64 {
+        self.state().token
+    }
+
     /// An acquire's answer, decided when the call arrives.
     fn decide_acquire(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
-        let now = Instant::now();
+        decide_acquire(&self.state, self.timing, mode)
+    }
+
+    /// `answer` as the store answers it: a `Held` answer's remaining lease
+    /// rounded down ([`Faults::held_remaining_floor`]) or replaced
+    /// ([`Faults::held_remaining_override`]).
+    fn held_remaining_as_answered(
+        &self,
+        answer: Result<FenceGrant, HostStoreError>,
+    ) -> Result<FenceGrant, HostStoreError> {
+        let Err(HostStoreError::Held { holder, remaining }) = answer else {
+            return answer;
+        };
+        let (floor, replaced) = {
+            let faults = self.faults();
+            (faults.held_remaining_floor, faults.held_remaining_override)
+        };
+        let remaining = match (replaced, floor) {
+            (Some(replaced), _) => replaced,
+            (None, Some(unit)) if !unit.is_zero() => {
+                let units = remaining.as_nanos() / unit.as_nanos();
+                unit * u32::try_from(units).unwrap_or(u32::MAX)
+            }
+            _ => remaining,
+        };
+        Err(HostStoreError::Held { holder, remaining })
+    }
+
+    /// [`Self::decide_acquire`], except that a grant answers the token it
+    /// superseded, which holds the fence again with a fresh lease.
+    fn decide_acquire_reusing_token(
+        &self,
+        mode: AcquireMode,
+    ) -> Result<FenceGrant, HostStoreError> {
+        let grant = self.decide_acquire(mode)?;
         let mut state = self.state();
-        let remaining = state
-            .lease_until
-            .filter(|until| *until > now)
-            .map(|until| until - now);
-        if let Some(remaining) = remaining
-            && mode == AcquireMode::Exclusive
-        {
-            return Err(HostStoreError::Held {
-                holder: FenceToken::new(state.token),
-                remaining,
-            });
-        }
-        state.token += 1;
-        state.lease_until = Some(now + self.timing.lease());
+        state.token -= 1;
         Ok(FenceGrant {
             token: FenceToken::new(state.token),
-            superseded_lease: remaining.unwrap_or(Duration::ZERO),
+            ..grant
         })
     }
+}
+
+/// An acquire's answer, decided now: a live holder answers an exclusive
+/// acquire `Held`; otherwise the host grants the next token and records its
+/// lease from now.
+fn decide_acquire(
+    state: &Mutex<HostState>,
+    timing: FenceTiming,
+    mode: AcquireMode,
+) -> Result<FenceGrant, HostStoreError> {
+    let now = Instant::now();
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let remaining = state
+        .lease_until
+        .filter(|until| *until > now)
+        .map(|until| until - now);
+    if let Some(remaining) = remaining
+        && mode == AcquireMode::Exclusive
+    {
+        return Err(HostStoreError::Held {
+            holder: FenceToken::new(state.token),
+            remaining,
+        });
+    }
+    state.token += 1;
+    state.lease_until = Some(now + timing.lease());
+    Ok(FenceGrant {
+        token: FenceToken::new(state.token),
+        superseded_lease: remaining.unwrap_or(Duration::ZERO),
+    })
 }
 
 #[async_trait]
 impl HostStore for TestHost {
     async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
         self.record(HostCall::AcquireFence);
-        let (delay, hang) = {
+        let (delay, hang, granted_late) = {
             let mut faults = self.faults();
             if faults.acquire_unavailable > 0 {
                 faults.acquire_unavailable -= 1;
                 return Err(HostStoreError::Unavailable("injected".into()));
             }
-            let hang = faults.acquire_hang > 0;
+            let granted_late = match faults.acquire_granted_late {
+                Some((late_mode, after)) if late_mode == mode => {
+                    faults.acquire_granted_late = None;
+                    Some(after)
+                }
+                _ => None,
+            };
+            let hang = granted_late.is_none() && faults.acquire_hang > 0;
             if hang {
                 faults.acquire_hang -= 1;
             }
-            (faults.acquire_delay, hang)
+            (faults.acquire_delay, hang, granted_late)
         };
+        if let Some(after) = granted_late {
+            // The store goes on with the request on its own: it grants it
+            // later, and its answer reaches nobody.
+            let state = Arc::clone(&self.state);
+            let timing = self.timing;
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                let _late = decide_acquire(&state, timing, mode);
+            });
+            std::future::pending::<()>().await;
+        }
         if hang {
             std::future::pending::<()>().await;
         }
-        let answer = self.decide_acquire(mode);
+        let reuse = self.faults().grant_reuses_token > 0;
+        let answer = if reuse {
+            self.decide_acquire_reusing_token(mode)
+        } else {
+            self.decide_acquire(mode)
+        };
+        if reuse && answer.is_ok() {
+            self.faults().grant_reuses_token -= 1;
+        }
+        let answer = self.held_remaining_as_answered(answer);
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
@@ -366,6 +612,9 @@ impl HostStore for TestHost {
                 return Err(HostStoreError::Unavailable("injected".into()));
             }
         }
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         Ok(self
             .state()
             .scopes
@@ -385,40 +634,80 @@ impl HostStore for TestHost {
     ) -> Result<HeadPage, HostStoreError> {
         self.count_read();
         self.record(HostCall::ListHeads { kind });
-        let (delay, cap) = {
+        let (delay, cap, each) = {
             let mut faults = self.faults();
-            (faults.list_delay.take(), faults.list_page_cap)
+            if faults.list_unavailable > 0 {
+                faults.list_unavailable -= 1;
+                return Err(HostStoreError::Unavailable("injected".into()));
+            }
+            (
+                faults.list_delay.take(),
+                faults.list_page_cap,
+                faults.list_delay_each,
+            )
         };
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+        if let Some(each) = each {
+            tokio::time::sleep(each).await;
+        }
         let limit = cap.map_or(limit, |cap| limit.min(cap));
         let state = self.state();
+        // Every name of the kind after `after`, in name order: a visible
+        // scope, or a conflicted one (a deleted incarnation a late batch
+        // landed on included). A conflicted name is reported per scope,
+        // never as a head and never by failing the page, unless its conflict
+        // arose after this listing.
+        let names: std::collections::BTreeSet<&String> = state
+            .scopes
+            .keys()
+            .chain(state.conflicts.keys())
+            .filter(|(scope_kind, name)| {
+                *scope_kind == kind && after.is_none_or(|after| name.as_str() > after.as_str())
+            })
+            .map(|(_, name)| name)
+            .collect();
         let mut heads = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut last: Option<String> = None;
         let mut more = false;
-        for ((scope_kind, name), stored) in &state.scopes {
-            if *scope_kind != kind || after.is_some_and(|after| name.as_str() <= after.as_str()) {
-                continue;
-            }
-            if heads.len() == limit {
+        for name in names {
+            if heads.len() + conflicts.len() == limit {
                 more = true;
                 break;
             }
-            heads.push(ScopeHead {
-                name: ScopeName::try_new(name.clone())?,
-                head: VersionedHead {
-                    version: stored.version,
-                    commit_id: stored.commit_id.clone(),
-                    head: stored.head.clone(),
-                },
-            });
+            let key = (kind, name.clone());
+            match state.conflicts.get(&key) {
+                Some(conflicted) if !conflicted.after_listing => {
+                    conflicts.push(ScopeConflict::new(
+                        ScopeName::try_new(name.clone())?,
+                        conflicted.version,
+                        conflicted.commit_ids.clone(),
+                    ));
+                }
+                _ => {
+                    let Some(stored) = state.scopes.get(&key) else {
+                        continue;
+                    };
+                    heads.push(ScopeHead {
+                        name: ScopeName::try_new(name.clone())?,
+                        head: VersionedHead {
+                            version: stored.version,
+                            commit_id: stored.commit_id.clone(),
+                            head: stored.head.clone(),
+                        },
+                    });
+                }
+            }
+            last = Some(name.clone());
         }
         let next = if more {
-            heads.last().map(|head| head.name.clone())
+            last.map(ScopeName::try_new).transpose()?
         } else {
             None
         };
-        Ok(HeadPage { heads, next })
+        Ok(HeadPage::new(heads, next).with_conflicts(conflicts))
     }
 
     async fn read_rows(
@@ -432,6 +721,9 @@ impl HostStore for TestHost {
             kind: scope.kind,
             name: scope.name.as_str().to_string(),
         });
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         if scope.kind == ScopeKind::Session {
             let (delay, failing) = {
                 let faults = self.faults();
@@ -473,7 +765,10 @@ impl HostStore for TestHost {
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
-        self.record(HostCall::Commit);
+        self.record(HostCall::Commit {
+            commit_id: batch.commit_id().as_str().to_string(),
+            at: Instant::now(),
+        });
         self.commits_started
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let gate = self
@@ -486,6 +781,12 @@ impl HostStore for TestHost {
         }
         let indeterminate = {
             let mut faults = self.faults();
+            if faults.indeterminate_without_apply > 0 {
+                faults.indeterminate_without_apply -= 1;
+                return Err(HostStoreError::Indeterminate(
+                    "injected, not applied".into(),
+                ));
+            }
             if faults.unavailable > 0 {
                 faults.unavailable -= 1;
                 return Err(HostStoreError::Unavailable("injected".into()));

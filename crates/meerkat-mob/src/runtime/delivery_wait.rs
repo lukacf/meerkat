@@ -841,7 +841,7 @@ mod observe {
         #[test]
         fn only_the_evidence_floor_is_kept_back_from_the_wait() {
             let now = Instant::now();
-            for budget in [Duration::from_secs(4), Duration::from_secs(60)] {
+            for budget in [Duration::from_secs(4), Duration::from_mins(1)] {
                 let end = call_end(now + budget);
                 assert_eq!(end, now + budget);
                 assert_eq!(Some(wait_until(end)), end.checked_sub(EVIDENCE_READ_FLOOR));

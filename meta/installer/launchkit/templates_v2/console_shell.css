@@ -1,0 +1,42 @@
+/* Loaded after native CSS. All presentation rules belong to this shell only. */
+body.forge-console-shell-page { margin: 0; padding: 0; overflow: hidden; }
+.forge-console-shell { --shell-paper: #faf8f3; --shell-ink: #292b27; --shell-line: #dedfd5; display: flex; flex-direction: column; width: 100%; height: 100dvh; min-height: 0; overflow: hidden; background: var(--shell-paper); }
+.forge-console-shell *, .forge-console-shell *::before, .forge-console-shell *::after { box-sizing: border-box; }
+.forge-console-shell [hidden] { display: none !important; }
+.forge-console-shell__toolbar { flex: 0 0 52px; display: flex; align-items: center; gap: 20px; padding: 0 20px; border-bottom: 1px solid var(--shell-line); background: var(--shell-paper); color: var(--shell-ink); font: 12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.forge-console-shell__brand { display: flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -.01em; }
+.forge-console-shell__mark { display: inline-block; width: 19px; height: 19px; border: 1px solid #969d8e; border-radius: 50%; position: relative; }
+.forge-console-shell__mark::before { content: ""; position: absolute; inset: 4px; border: 1px solid var(--shell-ink); border-radius: 50%; }
+.forge-console-shell__mark::after { content: ""; position: absolute; inset: 7px; background: #bf582f; border-radius: 50%; }
+.forge-console-shell__hint { color: #75776e; margin-left: auto; }
+.forge-console-shell__open { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 13px; border: 1px solid #c7cabd; border-radius: 8px; color: var(--shell-ink); background: #fffefb; font: 12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; cursor: pointer; }
+.forge-console-shell__open:hover { background: #eeece5; }
+.forge-console-shell__open:focus-visible { outline: 2px solid #bf582f; outline-offset: 3px; }
+.forge-console-shell__logout { margin: 0; flex: 0 0 auto; }
+.forge-console-shell[data-setup="false"] .forge-console-shell__logout { margin-left: auto; }
+.forge-console-shell__sign-out { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 8px 9px; border: 1px solid transparent; border-radius: 8px; color: var(--shell-ink); background: transparent; font: 12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; white-space: nowrap; cursor: pointer; }
+.forge-console-shell__sign-out:hover { background: #eeece5; }
+.forge-console-shell__sign-out:focus-visible { outline: 2px solid #bf582f; outline-offset: 3px; }
+.forge-console-shell__workspace { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1 1 0; min-height: 0; position: relative; overflow: hidden; }
+.forge-console-shell[data-open="true"][data-modal="false"] .forge-console-shell__workspace { grid-template-columns: minmax(0, 1fr) 480px; }
+.forge-console-shell__native { position: relative; z-index: 0; isolation: isolate; min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
+.forge-console-shell__native > #root { width: 100%; height: 100%; min-height: 0; }
+.forge-console-shell__drawer { width: 480px; min-width: 0; height: 100%; min-height: 0; overflow: hidden; background: var(--shell-paper); z-index: 2; outline: none; }
+.forge-console-shell__drawer > .forge-setup { width: 100%; }
+.forge-console-shell__drawer[data-view="controller-review"] { display: flex; flex-direction: column; }
+.forge-console-shell__review-toolbar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--shell-line); color: var(--shell-ink); font: 13px/1.4 system-ui, sans-serif; }
+.forge-console-shell__review-content { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.forge-console-shell__shade { position: absolute; inset: 0; z-index: 1; background: #20251f66; }
+.forge-console-shell[data-modal="true"] .forge-console-shell__shade { position: fixed; }
+.forge-console-shell[data-modal="true"] .forge-console-shell__drawer { position: fixed; inset: 0 0 0 auto; width: min(480px, 100%); height: 100dvh; box-shadow: -14px 0 40px #20251f29; }
+.forge-console-shell__error { margin: 24px; color: var(--shell-ink); font: 14px/1.6 system-ui, sans-serif; }
+.forge-console-shell__error + button { margin: 0 24px; }
+@media (max-width: 640px) {
+  .forge-console-shell__toolbar { flex-basis: 56px; padding-inline: 14px; gap: 12px; }
+  .forge-console-shell[data-review="true"] .forge-console-shell__toolbar { flex: 0 0 auto; flex-wrap: wrap; min-height: 56px; padding-block: 8px; }
+  .forge-console-shell[data-review="true"] .forge-console-shell__brand { flex-basis: 100%; }
+  .forge-console-shell__hint { display: none; }
+  .forge-console-shell__open { margin-left: auto; min-height: 44px; }
+  .forge-console-shell__sign-out { min-height: 44px; padding-inline: 8px; }
+  .forge-console-shell[data-modal="true"] .forge-console-shell__drawer { width: 100%; box-shadow: none; }
+}

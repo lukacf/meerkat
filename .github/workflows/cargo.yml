@@ -67,7 +67,7 @@ env:
   # reuse (rust-cache + sccache) requires registry source paths that do not
   # change between runs.
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   # Keep repo-cargo's per-worktree redirection out of CI: pin the target dir
   # where Swatinem/rust-cache caches it (scripts/repo-cargo respects a
   # pre-set CARGO_TARGET_DIR).
@@ -83,6 +83,9 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   # Cache-service hiccups must degrade to plain compiles, never fail a job.
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (nightly.yml says why): at the default 600 s the
+  # server exits under a long compile, which then starts again uncached.
+  SCCACHE_IDLE_TIMEOUT: "0"
   # A failed sccache install never fails a job either: each Setup sccache
   # step continues on error (so does the action's post step, which reads
   # the stats), and the step after it then sets an empty RUSTC_WRAPPER,
@@ -311,8 +314,16 @@ jobs:
         with:
           shared-key: ci-clippy
 
+      # Core's members only: `--workspace` and an `--exclude` for every
+      # package of the other products (scripts/core-workspace-args.mjs), so
+      # Core's crates are linted with Core's own feature resolution.
       - name: Clippy (lib/bin targets; --all-targets runs nightly)
-        run: ./scripts/repo-cargo clippy --workspace --all-features -- -D warnings
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_selection="$(node scripts/core-workspace-args.mjs)"
+          mapfile -t core_workspace <<<"${core_selection}"
+          ./scripts/repo-cargo clippy "${core_workspace[@]}" --all-features -- -D warnings
 
   unit-archive:
     name: Build unit-test archive

@@ -190,7 +190,7 @@ impl AnthropicOAuthRuntime {
         let token_store = self.token_store();
         let key = self.key.clone();
         let preparation_for_refresh = preparation.clone();
-        let refresh_fn: RefreshFn = Box::new(move || {
+        let refresh_fn: RefreshFn = Box::new(move |fence| {
             let http = http.clone();
             let endpoints = endpoints.clone();
             let token_store = Arc::clone(&token_store);
@@ -206,7 +206,10 @@ impl AnthropicOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                match preparation.claim_refresh_owner(current.clone()).await? {
+                match preparation
+                    .claim_refresh_owner(fence, current.clone())
+                    .await?
+                {
                     LockedManagedStoreOAuthRefresh::UseCached(cached) => Ok(cached),
                     LockedManagedStoreOAuthRefresh::Refresh(transaction) => {
                         let refresh_token = match current.refresh_token.clone() {

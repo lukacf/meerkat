@@ -1,0 +1,5 @@
+title = "Extension example"
+panel_modules = ["/extensions/example.js"]
+
+[layout]
+initial_agent = "identity:example"

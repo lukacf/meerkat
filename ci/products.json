@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "description": "The products of this repository and their release lines. Core owns the repository root; every other product owns one top-level directory, and its crates are the workspace members whose manifests lie under it. Each product releases on its own version line, tag prefix and CHANGELOG. Read by the CI planner (scripts/ci-cargo-lanes.mjs), the release gates and the whole-checkout tests, which scan Core's tree and leave the product roots to their products.",
+  "products": [
+    {
+      "name": "core",
+      "root": "",
+      "tag_prefix": "v",
+      "release_branch_prefix": "release/",
+      "changelog": "CHANGELOG.md",
+      "version_source": "workspace.package.version",
+      "publish_order": "scripts/release-rust-crates.sh"
+    },
+    {
+      "name": "meta",
+      "root": "meta",
+      "tag_prefix": "meta-v",
+      "release_branch_prefix": "release/meta-",
+      "changelog": "meta/CHANGELOG.md",
+      "version_source": "package.version of every crate under the root",
+      "publish_order": ["meta-extension-state", "meerkat-meta"],
+      "test_stack": 16777216,
+      "test_stack_reason": "Meta's tests ran on a 16 MiB test-thread stack (its former .cargo/config.toml); Core's is 8 MiB."
+    },
+    {
+      "name": "connect",
+      "root": "connect",
+      "tag_prefix": "connect-v",
+      "release_branch_prefix": "release/connect-",
+      "changelog": "connect/CHANGELOG.md",
+      "version_source": "package.version of every crate under the root",
+      "publish_order": []
+    }
+  ]
+}

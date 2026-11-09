@@ -52,7 +52,7 @@ use meerkat_runtime::meerkat_machine::{
 /// The consented call's id, as the binding retains it.
 const CONSENTED_CALL: &str = "consented-read";
 /// Host-chosen validity of one consent request.
-const CONSENT_VALIDITY: Duration = Duration::from_secs(4 * 60 * 60);
+const CONSENT_VALIDITY: Duration = Duration::from_hours(4);
 
 /// The records owner, rating every record operation R3: a fresh qualified
 /// human decision is required. It selects no separate action account.
@@ -583,6 +583,7 @@ impl ConsentedWorld {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("controller"),
                 principal("executor"),
@@ -592,6 +593,7 @@ impl ConsentedWorld {
             .expect("actual controller lineage");
         let operation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("read-only"),
                 principal("executor"),
@@ -601,6 +603,7 @@ impl ConsentedWorld {
             .expect("actual read-only operation grant");
         let parent = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("helper-parent"),
                 principal("helper-operator"),
@@ -674,7 +677,7 @@ impl ConsentedWorld {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::DirectCaller,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("finite caller deadline"),
@@ -1180,6 +1183,7 @@ async fn cancelled_reviewed_run_with_a_held_step(held: HeldAt) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -1189,6 +1193,7 @@ async fn cancelled_reviewed_run_with_a_held_step(held: HeldAt) {
         .expect("actual controller lineage with unrestricted lifetime");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -1200,6 +1205,7 @@ async fn cancelled_reviewed_run_with_a_held_step(held: HeldAt) {
     // writer, so no owner change can land while it is held.
     let helper_parent = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("helper-parent"),
             principal("helper-operator"),
@@ -1233,6 +1239,7 @@ async fn cancelled_reviewed_run_with_a_held_step(held: HeldAt) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants: Arc::clone(&grants),
                 ingress,

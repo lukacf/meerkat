@@ -1,0 +1,10 @@
+{
+  "source": "forge-retained-login-source-20261009/upstream/host_control.py",
+  "sha256": "bec462e8e0538fb887151d76754998055cbd311b394cfcc30a5225d2cb7ea03f",
+  "scope": "Exact historical Toolkit Python source used with uncalled transport/runtime imports and inert typed doubles. Not a shipping SDK selection or native execution proof.",
+  "upstreamContract": {
+    "adoptedToolkitRevision": "279e2a9c",
+    "retainedToolkitRevision": "d8eb90af",
+    "evidence": "Original retained contract HANDOFF.md read alongside the hash-bound source. This historical test fixture does not select that SDK for deployment."
+  }
+}

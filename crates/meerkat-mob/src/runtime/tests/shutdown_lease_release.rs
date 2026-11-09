@@ -190,6 +190,10 @@ struct ExitGatedBuilder {
 impl SessionAgentBuilder for ExitGatedBuilder {
     type Agent = ExitGatedAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,

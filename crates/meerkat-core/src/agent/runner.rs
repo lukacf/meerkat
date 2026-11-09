@@ -235,7 +235,10 @@ fn run_input_from_admitted_pending_tail(
     messages: &[Message],
     admitted_tail: ObservedSessionTailKind,
 ) -> Result<RunInput, AgentError> {
-    match (admitted_tail, messages.last()) {
+    match (
+        admitted_tail,
+        crate::pending_continuation::last_non_entry_message(messages),
+    ) {
         (ObservedSessionTailKind::User, Some(Message::User(user)))
             if user.has_non_text_content() =>
         {
@@ -458,6 +461,29 @@ where
     T: AgentToolDispatcher + ?Sized + 'static,
     S: AgentSessionStore + ?Sized,
 {
+    /// Whether a call of `name` passes the visibility precheck to the dispatch
+    /// gate: the name is grant-gated and only its closed grant gate hides it.
+    /// The dispatch gate then adjudicates the grants, so every refusal of a
+    /// gated name has one site.
+    pub(crate) fn call_reaches_tool_grant_gate(&self, name: &str) -> bool {
+        let Some(gate) = self.tool_grant_gate.as_ref() else {
+            return false;
+        };
+        // The call's provenance, from the dispatcher that serves it: a tool of
+        // a gated MCP server is gated by it from the moment it appears.
+        let provenance = self
+            .tools
+            .tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.provenance.clone());
+        gate.is_gated(name, provenance.as_ref())
+            && self
+                .tool_scope
+                .hidden_only_by_closed_grant_gate(name)
+                .unwrap_or(false)
+    }
+
     /// Stage an external tool visibility filter update for subsequent turns.
     pub fn stage_external_tool_filter(
         &mut self,
@@ -1063,6 +1089,11 @@ where
     /// serialized through the session metadata authority, and auth rotation is
     /// staged. The final client, request policy, durable identity, and active
     /// profile publication is therefore an infallible in-memory commit.
+    ///
+    /// A target whose operator-instruction lowering (the request policy's)
+    /// cannot carry the entry rows the session wrote itself where they
+    /// stand is refused before anything changes
+    /// ([`crate::InstructionEntryPlacement::refusal`]).
     pub fn hot_swap_llm_identity(
         &mut self,
         client: Arc<C>,
@@ -1080,6 +1111,23 @@ where
                 "live LLM hot-swap request policy provider params do not match the durable target identity"
                     .to_string(),
             ));
+        }
+        // Every request carries the operator-instruction entry rows this
+        // session wrote itself where they stand: a target that cannot carry
+        // them there would refuse every later request. Every live model
+        // change reaches this swap, a direct session-service caller's
+        // included, so none bypasses it.
+        if let Some(refusal) = self
+            .session
+            .own_operator_instruction_entry_placement()?
+            .refusal(request_policy.operator_instruction_lowering)
+        {
+            return Err(AgentError::ConfigError(format!(
+                "live LLM hot-swap target '{}:{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+                identity.provider.as_str(),
+                identity.model,
+                self.session.id()
+            )));
         }
         let target_profile = self
             .effective_model_registry
@@ -1133,6 +1181,10 @@ where
             .provider_native_tools
             .narrow(request_policy.provider_native_tools);
         let next_auth_credential_identity = request_policy.credential_identity;
+        // The swap's witness is the model's catalog row, and the agent holds
+        // no config to judge the new binding: operator instructions lower as
+        // the host resolved for that binding's backend.
+        let next_operator_instruction_lowering = request_policy.operator_instruction_lowering;
 
         let _auth_rotation = self.stage_auth_lease_credential_identity(
             self.auth_credential_identity.as_ref(),
@@ -1151,6 +1203,7 @@ where
         self.tool_application_observations
             .refresh(self.session.messages());
         self.active_model_profile = Some(target_profile);
+        self.operator_instruction_lowering = Some(next_operator_instruction_lowering);
         Ok(())
     }
 
@@ -1348,9 +1401,14 @@ where
             .map_err(|err| AgentError::InternalError(err.to_string()))?
             .into_iter()
             .collect::<ToolNameSet>();
-        if let Err(error) =
+        // A gated name hidden only by its closed grant gate goes on to the
+        // dispatch gate, which adjudicates the grants: one refusal site.
+        let precheck = if self.call_reaches_tool_grant_gate(call.name.as_str()) {
+            Ok(())
+        } else {
             precheck_visible_tool_call(self.tools.as_ref(), &visible_tool_names, call.name.as_str())
-        {
+        };
+        if let Err(error) = precheck {
             return Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error));
         }
         // An external call belongs to no round of the agent's loop: it
@@ -1728,11 +1786,14 @@ where
     /// delivery, so the write itself cannot fail. The delivery's peer reply
     /// capabilities join the running turn's dispatch context in the same
     /// segment (typed, so that cannot fail either), so `reply_to_peer` can
-    /// answer it from the next tool call on. Returns the events to
-    /// publish when the appends were written (`BoundaryAppendApplied`, then
-    /// one `PeerContentIngested` per incoming comms block, exactly as the
-    /// turn-start path publishes them); `None` when the delivery was withdrawn
-    /// first (the actor was revoked), in which case nothing is written.
+    /// answer it from the next tool call on, and its request-only context
+    /// joins the turn's own: the values the turn does not carry yet reach
+    /// this request and every later one of the run, never as a row. Returns
+    /// the events to publish when the appends were written
+    /// (`BoundaryAppendApplied`, then one `PeerContentIngested` per incoming
+    /// comms block, exactly as the turn-start path publishes them); `None`
+    /// when the delivery was withdrawn first (the actor was revoked), in which
+    /// case nothing is written.
     pub(crate) fn apply_durable_boundary_appends(
         &mut self,
         run_id: &crate::lifecycle::RunId,
@@ -1752,6 +1813,7 @@ where
             model_projection,
             peer_ingested_events,
             peer_reply_capabilities,
+            request_only_context,
         } = appends.into_parts();
         let append_count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
         let transcript_start = self.session.messages().len() as u64;
@@ -1773,6 +1835,11 @@ where
         self.round_commits.bind_input(input_id.clone());
         self.tool_dispatch_context
             .record_boundary_peer_replies(peer_reply_capabilities);
+        for context in request_only_context {
+            if !self.active_turn_request_contexts.contains(&context) {
+                self.active_turn_request_contexts.push(context);
+            }
+        }
         let mut events = Vec::with_capacity(1 + peer_ingested_events.len());
         events.push(AgentEvent::BoundaryAppendApplied {
             run_id: run_id.clone(),
@@ -1874,7 +1941,11 @@ where
         self.session
             .validate_instruction_activation_turn_readiness()
             .map_err(AgentError::InstructionActivation)?;
-        let mut messages = self.session.messages_for_model_boundary()?;
+        // Operator-instruction rows a fork copied that this model cannot
+        // lower where they stand are left out of its request.
+        let mut messages = self
+            .session
+            .messages_for_model_request(self.operator_instruction_lowering())?;
         if let Some(instructions) = self.output_schema_request_instructions() {
             crate::structured_output::project_output_schema_instructions(
                 &mut messages,
@@ -2407,6 +2478,14 @@ where
         let saved_runtime_execution_kind_required = self.runtime_execution_kind_required;
         let saved_runtime_execution_kind = self.runtime_execution_kind;
         let saved_runtime_started_run_id = self.runtime_started_run_id.take();
+        let saved_run_started_fresh = self.run_started_fresh;
+        // The member's own run start: what its operator-instruction entry
+        // changed, whether its run started and a checkpoint holds the entry,
+        // and the run id it reserved. The bridge run neither notes nor adopts
+        // them.
+        let saved_unconcluded_run_start_instructions =
+            self.unconcluded_run_start_instructions.take();
+        let saved_run_start_reserved_run_id = self.run_start_reserved_run_id.take();
         let saved_runtime_terminal_failure_witness = self.runtime_terminal_failure_witness.take();
         let saved_active_transcript_identity = self.active_transcript_identity.take();
         let saved_active_turn_request_contexts =
@@ -2501,6 +2580,9 @@ where
         self.runtime_execution_kind_required = saved_runtime_execution_kind_required;
         self.runtime_execution_kind = saved_runtime_execution_kind;
         self.runtime_started_run_id = saved_runtime_started_run_id;
+        self.run_started_fresh = saved_run_started_fresh;
+        self.unconcluded_run_start_instructions = saved_unconcluded_run_start_instructions;
+        self.run_start_reserved_run_id = saved_run_start_reserved_run_id;
         self.runtime_terminal_failure_witness = saved_runtime_terminal_failure_witness;
         self.active_transcript_identity = saved_active_transcript_identity;
         self.active_turn_request_contexts = saved_active_turn_request_contexts;
@@ -2984,6 +3066,11 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
+            )
+            .with_requester(
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.requester.clone()),
             );
         if let Some(admission) = self.live_bridge_dispatch_admission.clone() {
             self.tool_dispatch_context = self
@@ -3175,6 +3262,11 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
+            )
+            .with_requester(
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.requester.clone()),
             );
         let loop_result = self
             .run_loop(Some(prompt), event_tx.clone(), deferred_callback, None)
@@ -3273,6 +3365,11 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
+            )
+            .with_requester(
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.requester.clone()),
             );
         let resumed = super::state::ResumedRunStart {
             cursor,
@@ -3397,6 +3494,28 @@ where
         owed.stream.then_some(event)
     }
 
+    /// End the run-scoped tool grants of the run [`Self::cancel_dropped_run`]
+    /// ended, through the build's grant gate, once. The cancel is
+    /// synchronous and the gate's end is not, so the caller awaits this right
+    /// after the cancel, as the session task does after a hard interrupt.
+    /// Best effort, as at any run's end: a failure is logged, and the grants
+    /// still admit no use of a later run, whose first use ends them. Without
+    /// a cancelled run or a gate it ends nothing.
+    pub async fn end_dropped_run_tool_grants(&mut self) {
+        let Some(run_id) = self.dropped_run_tool_grants_owed.take() else {
+            return;
+        };
+        let Some(gate) = self.tool_grant_gate.clone() else {
+            return;
+        };
+        if let Err(refusal) = gate.end_run(&run_id).await {
+            tracing::warn!(
+                error = %refusal,
+                "the dropped run's end could not end its run-scoped tool grants"
+            );
+        }
+    }
+
     /// End a run whose execution future the host dropped to suspend it, for
     /// a stop that keeps the session's queued work (a host draining and
     /// requeueing, for a deploy) or for a store fence gap (the session
@@ -3467,6 +3586,7 @@ where
                     self.apply_turn_input(TurnExecutionInput::CancellationObserved { run_id })?;
                 for effect in &transition.effects {
                     self.execute_turn_terminal_effect(effect)?;
+                    self.owe_dropped_run_tool_grant_end(effect);
                 }
             }
             None => {
@@ -3662,6 +3782,8 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             client: isolated_client,
             tools: Arc::clone(&self.tools),
             tool_scope: self.tool_scope.clone(),
+            tool_grant_gate: self.tool_grant_gate.clone(),
+            dropped_run_tool_grants_owed: None,
             store: Arc::clone(&self.store),
             session: snapshot,
             budget: self.budget.fork_shared_accounting(),
@@ -3728,9 +3850,13 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             pending_callback_async_ops: None,
             effective_model_registry: self.effective_model_registry.clone(),
             active_model_profile: self.active_model_profile.clone(),
+            operator_instruction_lowering: self.operator_instruction_lowering,
             runtime_execution_kind_required: false,
             runtime_execution_kind: None,
             runtime_started_run_id: None,
+            run_started_fresh: false,
+            run_start_reserved_run_id: None,
+            unconcluded_run_start_instructions: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
@@ -5322,6 +5448,177 @@ mod skill_activation_effect_tests {
         assert!(!entered.load(Ordering::SeqCst));
     }
 
+    /// An ingress that names `0` as the caller it authenticated.
+    struct RequesterIngress(Option<crate::PrincipalRef>);
+    impl crate::ToolApplicationIngress for RequesterIngress {
+        fn revalidate(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+        fn requester(&self) -> Option<crate::PrincipalRef> {
+            self.0.clone()
+        }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    /// App tools that record the requester each app action's dispatch
+    /// context names.
+    struct RequesterAppTools {
+        seen: Arc<std::sync::Mutex<Vec<Option<crate::types::TurnRequester>>>>,
+    }
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for RequesterAppTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                Arc::new(ToolDef::new(
+                    "show",
+                    "model source",
+                    serde_json::json!({"type":"object"}),
+                )),
+                Arc::new(
+                    ToolDef::new("action", "app action", serde_json::json!({"type":"object"}))
+                        .with_audience(crate::ToolAudience::App),
+                ),
+            ])
+        }
+        async fn resolve_tool_application(
+            &self,
+            _: &str,
+            _: &crate::ToolApplicationRequest,
+            _: &serde_json::Value,
+            _: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            Ok(crate::tool_application::ToolApplicationResolution::Call {
+                name: "action".into(),
+                binding: crate::tool_application::ToolApplicationBinding::new(
+                    "test.app",
+                    serde_json::json!({"bound":true}),
+                ),
+                project_result: |result| Ok(serde_json::json!({"text":result.text_content()})),
+            })
+        }
+        async fn dispatch(&self, _: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            panic!("app dispatch must retain its context")
+        }
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            self.seen
+                .lock()
+                .expect("requester log")
+                .push(context.requester().cloned());
+            Ok(crate::ToolResult::new(call.id.into(), "clicked".into(), false).into())
+        }
+    }
+
+    fn app_person(subject: &str) -> crate::PrincipalRef {
+        crate::PrincipalRef::in_domain(
+            crate::PrincipalKind::Human,
+            subject,
+            crate::TrustDomainId::new("oidc-issuer:https://issuer.example").expect("trust domain"),
+        )
+        .expect("qualified person")
+    }
+
+    /// An app action runs for the requester its trusted ingress names, as a
+    /// direct requester, never for the requester of the model run before it.
+    /// An ingress that names none dispatches with none, and an ingress that
+    /// names an unqualified principal is refused at submission.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn app_action_dispatch_carries_its_ingress_requester() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(RequesterAppTools {
+                    seen: Arc::clone(&seen),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .session
+            .push(Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "original".into(),
+                    name: "show".into(),
+                    args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )));
+        let mut original = crate::ToolResult::new("original".into(), "text fallback".into(), false);
+        original
+            .host_metadata
+            .insert("test.app".into(), serde_json::json!({"original":true}));
+        agent.session.push(Message::ToolResults {
+            results: vec![original],
+            created_at: crate::types::message_timestamp_now(),
+        });
+        // The model run's own requester, which no app action borrows: the
+        // agent holds it, and the context each action is handed carries it
+        // too, as a host that clones its run's context would pass it.
+        let model_run = || Some(crate::types::TurnRequester::direct(app_person("model-run")));
+        agent.tool_dispatch_context =
+            crate::ToolDispatchContext::default().with_requester(model_run());
+        let request = crate::ToolApplicationRequest {
+            tool_call_id: "original".into(),
+            extension: "test.app".into(),
+            operation: crate::ToolApplicationOperation::CallTool {
+                name: "raw-action".into(),
+                arguments: serde_json::json!({}),
+            },
+        };
+        for (named, expected) in [
+            (
+                Some(app_person("alice")),
+                Some(crate::types::TurnRequester::direct(app_person("alice"))),
+            ),
+            (None, None),
+        ] {
+            let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+                agent.session.id().clone(),
+                request.clone(),
+                Arc::new(RequesterIngress(named)),
+            )
+            .expect("a current ingress submits");
+            let result = agent
+                .tool_application(
+                    request.clone(),
+                    crate::ToolDispatchContext::default()
+                        .with_requester(model_run())
+                        .with_tool_application_control(control),
+                )
+                .await
+                .expect("the app action runs");
+            assert_eq!(result, serde_json::json!({"text":"clicked"}));
+            assert_eq!(
+                seen.lock().expect("requester log").pop(),
+                Some(expected.clone()),
+                "the action's dispatch names its ingress's requester: {expected:?}"
+            );
+        }
+
+        let unqualified =
+            crate::PrincipalRef::new(crate::PrincipalKind::Human, "alice").expect("principal");
+        assert!(
+            matches!(
+                crate::ToolApplicationControlRequest::from_trusted_ingress(
+                    agent.session.id().clone(),
+                    request,
+                    Arc::new(RequesterIngress(Some(unqualified))),
+                ),
+                Err(crate::OperationAuthorizationError::Unavailable)
+            ),
+            "an ingress naming an unqualified requester is refused"
+        );
+    }
+
     struct AppActionHooks {
         deny: Option<HookPoint>,
         fail: Option<HookPoint>,
@@ -6051,6 +6348,10 @@ mod skill_activation_effect_tests {
         ) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct PausedAppReviewer(Arc<(tokio::sync::Semaphore, tokio::sync::Semaphore)>);
@@ -6487,6 +6788,10 @@ mod skill_activation_effect_tests {
             assert!(self.0.same_operation(binding));
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct AttachmentRunAttempt {
@@ -6664,6 +6969,10 @@ mod skill_activation_effect_tests {
             ) -> Result<(), OperationAuthorizationError> {
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
         struct R3Work;
         impl WorkAuthorization for R3Work {
@@ -6729,7 +7038,7 @@ mod skill_activation_effect_tests {
                 approvals.clone(),
                 std::time::Duration::from_secs(30),
             )
-            .with_human_consent(route.clone(), std::time::Duration::from_secs(3600)),
+            .with_human_consent(route.clone(), std::time::Duration::from_hours(1)),
         );
         let mut agent =
             with_test_turn_state_handle(AgentBuilder::new().with_operation_review(review.clone()))
@@ -7410,6 +7719,7 @@ mod skill_activation_effect_tests {
             run_id: None,
             objective_id: Some(objective_id),
             turn_input: None,
+            requester: None,
         };
 
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
@@ -7779,6 +8089,7 @@ mod skill_activation_effect_tests {
             run_id: None,
             objective_id: None,
             turn_input: None,
+            requester: None,
         };
 
         let (tx, _rx) = mpsc::channel::<AgentEvent>(8);
@@ -7846,6 +8157,7 @@ mod skill_activation_effect_tests {
             run_id: None,
             objective_id: None,
             turn_input: None,
+            requester: None,
         }));
 
         agent

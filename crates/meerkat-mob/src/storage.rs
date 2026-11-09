@@ -17,10 +17,12 @@ use crate::store::{
     current_definition_authority,
 };
 use crate::{
-    MemberBindingHistory, MemberBindingHistoryReadError, MobDefinition, MobError,
+    IdentityRecordRows, IdentityRecordRowsReadError, MemberBindingHistory,
+    MemberBindingHistoryReadError, MobDefinition, MobError,
     error::MobDefinitionProjectionMismatchKind,
     event::{MobEvent, MobEventKind, NewMobEvent},
 };
+use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
@@ -126,8 +128,21 @@ pub struct MobStorage {
 impl MobStorage {
     /// Create a storage bundle with in-memory stores (for tests and ephemeral mobs).
     pub fn in_memory() -> Self {
-        let (runs, specs) = Self::in_memory_flow_stores();
+        Self::in_memory_over(InMemoryMobEventStore::new())
+    }
+
+    /// [`Self::in_memory`], and a handle on its event log, for rows that need
+    /// a stored row as an older build wrote it.
+    #[cfg(test)]
+    pub(crate) fn in_memory_with_event_log_for_test()
+    -> (Self, crate::store::InMemoryEventLogForTest) {
         let events = InMemoryMobEventStore::new();
+        let log = events.event_log_for_test();
+        (Self::in_memory_over(events), log)
+    }
+
+    fn in_memory_over(events: InMemoryMobEventStore) -> Self {
+        let (runs, specs) = Self::in_memory_flow_stores();
         let identity = InMemoryMobIdentityStore::paired_with_event_store(
             &events,
             Arc::new(crate::store::SystemMobIdentityStoreClock),
@@ -512,9 +527,70 @@ impl MobStorage {
         ))
     }
 
+    /// Count the identity-store rows of schema version 2 and later of the
+    /// persistent mob store at `path`, per mob, with no running mob: the
+    /// rows [`crate::MobHandle::identity_record_census`] counts for a running
+    /// mob, each read by the same created identity scan and counted by the
+    /// same rule ([`IdentityRecordRows`]), for every mob of the file, read
+    /// together in one read transaction.
+    ///
+    /// It opens the file read-only and never creates, migrates or otherwise
+    /// writes it, as [`Self::read_member_binding_history`] does, so it is
+    /// safe on the store of a running mob. A missing file is
+    /// [`IdentityRecordRowsReadError::StoreMissing`]; a file that is not a
+    /// mob store this build reads (no mob schema, a schema from a newer
+    /// build, an unrecognized schema) is
+    /// [`IdentityRecordRowsReadError::ForeignSchema`].
+    ///
+    /// The answer holds each mob of the file with at least one such row; a
+    /// store with none answers an empty map. A row whose mob id is not text
+    /// is in no mob's census and is not counted. Every mob in the answer has
+    /// no supported downgrade to a release before 0.9.9 but the downgrade
+    /// cycle: those releases do not read these rows, and only the cycle's
+    /// purge ([`crate::MobHandle::purge_created_identities`]) deletes them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_identity_record_rows(
+        path: impl AsRef<Path>,
+    ) -> Result<BTreeMap<crate::MobId, IdentityRecordRows>, IdentityRecordRowsReadError> {
+        crate::store::read_identity_record_rows_at(path.as_ref().to_path_buf()).await
+    }
+
+    /// The identity-store rows of schema version 2 and later of this
+    /// storage's mob, counted with no running mob and no path, through this
+    /// storage's identity member store, by the rule
+    /// [`Self::read_identity_record_rows`] counts a store file by. It works
+    /// over every storage that has the built-in identity member store (a
+    /// store file, a host store, memory).
+    ///
+    /// The mob is the one whose definition is current in the storage's
+    /// journal, selected as [`Self::member_binding_history`] selects it. A
+    /// storage that holds no mob, or whose mob holds no such row, answers an
+    /// empty map. Only the built-in identity member store writes these rows,
+    /// so a storage without it (a custom store composition) holds none and
+    /// answers an empty map, as the census counts none there. It only reads,
+    /// and a failed read is an error, never an empty map.
+    pub async fn identity_record_rows(
+        &self,
+    ) -> Result<BTreeMap<crate::MobId, IdentityRecordRows>, IdentityRecordRowsReadError> {
+        let Some(identity_member) = self.identity_member.as_ref() else {
+            return Ok(BTreeMap::new());
+        };
+        let events = self.events.replay_all().await?;
+        let Some(mob_id) = Self::member_binding_history_mob(&events)? else {
+            return Ok(BTreeMap::new());
+        };
+        let rows = IdentityRecordRows::scan(identity_member.as_ref(), &mob_id, |_, _| {}).await?;
+        let mut counted = BTreeMap::new();
+        if rows.created_rows > 0 {
+            counted.insert(mob_id, rows);
+        }
+        Ok(counted)
+    }
+
     /// The mob a member binding history folds: the one whose definition is
     /// current in the store's journal (`events`, in cursor order), if any.
-    /// Both member binding history readers select it here.
+    /// Both member binding history readers select it here, and so does the
+    /// storage's identity row count ([`Self::identity_record_rows`]).
     fn member_binding_history_mob(
         events: &[MobEvent],
     ) -> Result<Option<crate::MobId>, crate::store::MobStoreError> {

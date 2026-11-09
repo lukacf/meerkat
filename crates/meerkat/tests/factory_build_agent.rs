@@ -1429,7 +1429,7 @@ async fn build_agent_applies_configured_retry_schedule_without_call_timeout() {
     let mut config = Config::default();
     config.retry.max_retries = 8;
     config.retry.initial_delay = std::time::Duration::from_millis(750);
-    config.retry.max_delay = std::time::Duration::from_secs(120);
+    config.retry.max_delay = std::time::Duration::from_mins(2);
     config.retry.multiplier = 2.5;
     config.retry.call_timeout_override =
         meerkat_core::CallTimeoutOverride::Value(std::time::Duration::from_secs(90));
@@ -1444,7 +1444,7 @@ async fn build_agent_applies_configured_retry_schedule_without_call_timeout() {
 
     assert_eq!(retry.max_retries, 8);
     assert_eq!(retry.initial_delay, std::time::Duration::from_millis(750));
-    assert_eq!(retry.max_delay, std::time::Duration::from_secs(120));
+    assert_eq!(retry.max_delay, std::time::Duration::from_mins(2));
     assert_eq!(retry.multiplier, 2.5);
     assert_eq!(
         retry.call_timeout, None,
@@ -1871,6 +1871,7 @@ async fn build_agent_with_resume_preserves_messages() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -1952,6 +1953,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
+            grant_gated: Default::default(),
         },
         keep_alive: false,
         comms_name: Some("persisted-resume-name".to_string()),
@@ -2080,6 +2082,7 @@ async fn build_agent_workgraph_enabled_without_dispatcher_fails_closed() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -2178,6 +2181,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: true,
             comms_name: Some("persisted-name".to_string()),
@@ -2300,6 +2304,7 @@ async fn explicit_resume_prompts_append_without_rewriting_prior_systems() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -2401,6 +2406,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -2472,6 +2478,7 @@ async fn build_agent_with_resume_carries_explicit_comms_override_and_rehydrates(
                     spawn_tool_access_policy: None,
                     application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                     active_skills: None,
+                    grant_gated: Default::default(),
                 },
                 keep_alive: false,
                 comms_name: None,
@@ -2566,6 +2573,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: Some("resume-peer".to_string()),
@@ -2654,6 +2662,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: Some("resume-peer-across-roots".to_string()),
@@ -2695,6 +2704,62 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
     assert_eq!(
         peer_id_b, peer_id_a,
         "same resumed session_id should preserve peer_id even when runtime roots differ"
+    );
+}
+
+/// The comms identity root a factory reports
+/// (`AgentFactory::session_comms_identity_root`, which a session service over
+/// it reports for a mob's dormant seats) is the root its builds keep each
+/// session's key pair under: a build with a comms name keys its session-scoped
+/// in-process runtime from `<root>/<session id>`.
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn the_reported_session_comms_identity_root_is_where_a_build_keeps_the_key() {
+    let identity_home = tempfile::tempdir().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp)
+        .runtime_root(temp.path())
+        .user_config_root(identity_home.path());
+    let mut config = Config::default();
+    config.comms.mode = meerkat_core::CommsRuntimeMode::Inproc;
+
+    let meerkat_core::SessionCommsIdentityRoot::Durable(root) =
+        factory.session_comms_identity_root()
+    else {
+        panic!("a factory with a user config root reports a durable root")
+    };
+    assert_eq!(
+        root,
+        identity_home
+            .path()
+            .join(".rkat")
+            .join("session_comms_identity")
+    );
+
+    let agent = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                comms_name: Some("reported-root-peer".to_string()),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &config,
+        )
+        .await
+        .unwrap();
+    let public_key = agent
+        .comms_arc()
+        .and_then(|runtime| runtime.public_key_bytes())
+        .expect("a build with a comms name has a session-scoped comms identity");
+    let keys = root.join(agent.session().id().to_string());
+    assert!(
+        keys.join("identity.key").is_file(),
+        "the build keeps the session's key pair under the reported root"
+    );
+    assert_eq!(
+        std::fs::read(keys.join("identity.pub")).unwrap(),
+        public_key.to_vec(),
+        "the key under the reported root is the one the built runtime uses"
     );
 }
 
@@ -2999,6 +3064,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
                     meerkat_core::skills::SkillName::parse("nonexistent-legacy-skill")
                         .expect("valid skill name"),
                 )]),
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3158,6 +3224,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3220,6 +3287,7 @@ async fn resume_with_disable_mob_stays_disabled() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3281,6 +3349,7 @@ async fn resume_with_metadata_mob_enable_becomes_inherit() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3385,6 +3454,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3449,6 +3519,7 @@ async fn resumed_enable_mob_metadata_does_not_mount_mob_surface() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3516,6 +3587,7 @@ async fn recovered_create_request_mob_metadata_enable_does_not_mint_operator_cap
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3579,6 +3651,109 @@ async fn explicit_mob_override_generates_create_only_operator_capabilities() {
     let observed = observed.lock().expect("recording mutex");
     assert_eq!(observed.len(), 1);
     assert_generated_create_only_authority(observed[0].as_ref());
+}
+
+/// The owning agent's model and the provider route its build resolved for
+/// it, as a mob tools factory receives them.
+type RecordedModelRoute = (String, Provider, Option<String>);
+
+struct RecordingModelRouteFactory {
+    observed: Arc<std::sync::Mutex<Vec<RecordedModelRoute>>>,
+}
+
+#[async_trait]
+impl meerkat_core::service::MobToolsFactory for RecordingModelRouteFactory {
+    async fn build_mob_tools(
+        &self,
+        args: meerkat_core::service::MobToolsBuildArgs,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
+        self.observed.lock().expect("recording mutex").push((
+            args.model,
+            args.provider,
+            args.self_hosted_server_id,
+        ));
+        Ok(Arc::new(EmptyDispatcher))
+    }
+}
+
+/// The mob tools get the provider route the agent's build resolved for its
+/// model, which implicit mob helpers inherit with the model: a realm
+/// `[models.<id>]` entry's provider, and a self-hosted alias's provider and
+/// server.
+#[tokio::test]
+async fn explicit_mob_override_passes_the_resolved_provider_route_to_the_mob_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let factory =
+        temp_factory(&temp)
+            .mob(false)
+            .mob_tools_factory(Arc::new(RecordingModelRouteFactory {
+                observed: Arc::clone(&observed),
+            }));
+    let mut config = Config::default();
+    config.models.custom.insert(
+        "realm-gateway-model".to_string(),
+        meerkat_core::config::CustomModelConfig {
+            provider: Provider::OpenAI,
+            display_name: None,
+            context_window: Some(200_000),
+            max_input_tokens: None,
+            max_output_tokens: Some(8_192),
+            vision: None,
+            web_search: None,
+            call_timeout_secs: None,
+        },
+    );
+    config.self_hosted.servers.insert(
+        "local".to_string(),
+        SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::Responses,
+        },
+    );
+    config.self_hosted.models.insert(
+        "gemma-4-31b".to_string(),
+        SelfHostedModelConfig {
+            server: "local".to_string(),
+            remote_model: "gemma4:31b".to_string(),
+            display_name: "Gemma 4 31B".into(),
+            family: "gemma-4".to_string(),
+            tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
+            context_window: Some(256_000),
+            max_input_tokens: None,
+            max_output_tokens: Some(8_192),
+            vision: true,
+            image_tool_results: true,
+            inline_video: false,
+            supports_temperature: true,
+            supports_thinking: false,
+            supports_reasoning: false,
+            supports_web_search: false,
+            call_timeout_secs: Some(600),
+            stream_inactivity_timeout_secs: None,
+        },
+    );
+
+    for model in ["realm-gateway-model", "gemma-4-31b"] {
+        let build_config = AgentBuildConfig {
+            override_mob: ToolCategoryOverride::Enable,
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            ..AgentBuildConfig::new(model)
+        };
+        let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    }
+    assert_eq!(
+        *observed.lock().expect("recording mutex"),
+        [
+            ("realm-gateway-model".to_string(), Provider::OpenAI, None),
+            (
+                "gemma-4-31b".to_string(),
+                Provider::SelfHosted,
+                Some("local".to_string())
+            ),
+        ]
+    );
 }
 
 #[cfg(feature = "comms")]
@@ -3678,6 +3853,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3768,6 +3944,7 @@ async fn resumed_explicit_mob_authority_is_not_erased_by_metadata() {
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -3856,6 +4033,7 @@ async fn resumed_persisted_mob_authority_is_not_forwarded_as_behavior_authority(
                 spawn_tool_access_policy: None,
                 application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
                 active_skills: None,
+                grant_gated: Default::default(),
             },
             keep_alive: false,
             comms_name: None,
@@ -5823,4 +6001,628 @@ async fn declared_deny_rejects_a_deferred_non_bundle_external_tool() {
         matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "bundle_deferred"),
         "got: {err:?}"
     );
+}
+
+/// Scoped tool grants at the factory: a build's grant gate mounts its gated
+/// families closed, refuses a gate no grant could honour, and is restored on
+/// resume.
+mod scoped_tool_grants {
+    use super::*;
+    use meerkat::{GrantGateBuildError, tool_family_names};
+    use meerkat_core::tool_grant::{
+        GatedToolView, GrantGatedTools, SessionToolGrants, ToolGrantIssuer, ToolGrantSubject,
+        ToolGrantTarget,
+    };
+    use meerkat_core::types::ToolName;
+    use meerkat_runtime::MeerkatMachine;
+    use meerkat_runtime::tool_grant::{ToolGrantRequest, ToolGrantWindow};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn shell_names() -> BTreeSet<ToolName> {
+        tool_family_names("shell")
+            .expect("shell is a built-in tool family")
+            .into_iter()
+            .map(ToolName::from)
+            .collect()
+    }
+
+    fn shell_gate() -> GrantGatedTools {
+        GrantGatedTools::default().with_family("shell")
+    }
+
+    /// A runtime-backed build of a fresh session on `machine`, the shell
+    /// family gated.
+    async fn gated_runtime_build(
+        machine: &Arc<MeerkatMachine>,
+        session: Session,
+        intent: meerkat_core::SessionBuildIntent,
+        grant_gated_tools: Option<GrantGatedTools>,
+    ) -> AgentBuildConfig {
+        let bindings = machine
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("runtime bindings");
+        AgentBuildConfig {
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            resume_session: Some(session),
+            resume_session_intent: intent,
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            grant_gated_tools,
+            ..AgentBuildConfig::new("claude-sonnet-4-5")
+        }
+    }
+
+    fn names(agent: &meerkat::DynAgent) -> (Vec<String>, BTreeSet<ToolName>) {
+        let base = agent
+            .tool_scope()
+            .base_tools_snapshot()
+            .expect("base tools")
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        let visible = agent.tool_scope().visible_tool_names().expect("visible");
+        (base, visible)
+    }
+
+    /// One model-request boundary over the session's grants: no MCP server
+    /// serves the shell family, so the view is its gated names.
+    async fn boundary(agent: &meerkat::DynAgent, grants: &Arc<dyn SessionToolGrants>) {
+        let view = GatedToolView::new(shell_names(), BTreeMap::new());
+        let open = grants.open_names(&view, None).await.expect("grants read");
+        agent
+            .tool_scope()
+            .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
+            .expect("the open set applies");
+    }
+
+    #[tokio::test]
+    async fn grant_gated_shell_family_is_mounted_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        // The factory's own default leaves the shell family off.
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let build = gated_runtime_build(
+            &machine,
+            session,
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(shell_gate()),
+        )
+        .await;
+        let RuntimeBuildModeGrants(grants) = RuntimeBuildModeGrants::of(&build);
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a gated build builds");
+
+        let (base, visible) = names(&agent);
+        assert!(
+            base.iter().any(|name| name == "shell"),
+            "the gated family is mounted: {base:?}"
+        );
+        assert!(
+            !visible.contains("shell") && !visible.contains("shell_job_status"),
+            "and closed: {visible:?}"
+        );
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(metadata.tooling.grant_gated, shell_gate());
+        assert_eq!(
+            metadata.tooling.shell,
+            ToolCategoryOverride::Inherit,
+            "the session records the caller's override, not the gate's mount"
+        );
+
+        // A live grant of the family opens it at the next boundary.
+        machine
+            .grant_tool(
+                ToolGrantRequest {
+                    subject: ToolGrantSubject::session(session_id),
+                    target: ToolGrantTarget::Family {
+                        family: "shell".to_string(),
+                        names: shell_names(),
+                    },
+                    issuer: ToolGrantIssuer::operator(),
+                    reason: None,
+                    window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
+                    run_scope: None,
+                },
+                None,
+            )
+            .await
+            .expect("grant");
+        boundary(&agent, &grants).await;
+        let (_, visible) = names(&agent);
+        assert!(visible.contains("shell"), "the grant opens it: {visible:?}");
+    }
+
+    /// A mob member's role entries never refuse its build. A role
+    /// family the build does not mount and a role name the build's tool
+    /// policy refuses are ignored outright; a role tool name nothing mounts
+    /// is installed all the same (it is gated from the moment it appears); a
+    /// role family the build mounts is installed closed. The session records
+    /// its own entries and the role entries the build installed.
+    #[tokio::test]
+    async fn role_entries_never_refuse_the_build_and_install_where_mounted() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let role = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy")
+            .with_tool("refused_by_policy");
+
+        // The shell family stays off (the factory's default), so the role's
+        // shell entry is ignored; `deploy` is installed though nothing mounts
+        // it; the policy refuses `refused_by_policy`, so it is ignored.
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default()),
+        )
+        .await;
+        build.grant_gated_tools_where_mounted = Some(role.clone());
+        build.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["refused_by_policy"].into_iter().collect(),
+        ));
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("role entries never refuse the build");
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(
+            metadata.tooling.grant_gated,
+            GrantGatedTools::default().with_tool("deploy"),
+            "only the installed role entry is recorded"
+        );
+        let (base, _) = names(&agent);
+        assert!(
+            !base.iter().any(|name| name == "shell"),
+            "a role entry never mounts a family: {base:?}"
+        );
+
+        // With its switch on, the role family is mounted, and gated closed.
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default()),
+        )
+        .await;
+        build.override_shell = ToolCategoryOverride::Enable;
+        build.grant_gated_tools_where_mounted = Some(role);
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a mounted role family installs closed");
+        let (base, visible) = names(&agent);
+        assert!(base.iter().any(|name| name == "shell"), "{base:?}");
+        assert!(!visible.contains("shell"), "closed: {visible:?}");
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(
+            metadata.tooling.grant_gated,
+            GrantGatedTools::default()
+                .with_family("shell")
+                .with_tool("deploy")
+                .with_tool("refused_by_policy"),
+        );
+    }
+
+    /// The session's grants, taken from a runtime-backed build's bindings
+    /// before the build consumes them.
+    struct RuntimeBuildModeGrants(Arc<dyn SessionToolGrants>);
+
+    impl RuntimeBuildModeGrants {
+        fn of(build: &AgentBuildConfig) -> Self {
+            match &build.runtime_build_mode {
+                meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => Self(Arc::clone(
+                    bindings
+                        .tool_grants()
+                        .expect("the runtime carries the session's grants"),
+                )),
+                meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
+                    panic!("a runtime-backed build")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_disable_and_grant_gate_conflict_fails_typed() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = temp_factory(&temp)
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    override_shell: ToolCategoryOverride::Disable,
+                    grant_gated_tools: Some(shell_gate()),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .err()
+            .expect("a disabled family cannot be gated");
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::FamilyDisabled { family })
+                    if family == "shell"
+            ),
+            "got: {err:?}"
+        );
+
+        let err = temp_factory(&temp)
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    grant_gated_tools: Some(GrantGatedTools::default().with_family("shel")),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .err()
+            .expect("an unknown family cannot be gated");
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::UnknownFamily { family })
+                    if family == "shel"
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// A gate that names a family or a tool the final dispatcher does not
+    /// mount could never open, so the build refuses it.
+    async fn standalone_gate_error(
+        factory: AgentFactory,
+        gate: GrantGatedTools,
+    ) -> BuildAgentError {
+        factory
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    grant_gated_tools: Some(gate),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .err()
+            .expect("the gate is refused")
+    }
+
+    #[tokio::test]
+    async fn a_gated_comms_family_without_a_comms_runtime_is_refused() {
+        // Comms tools mount only with a comms runtime, which this build has
+        // not: the gate does not mount the family itself.
+        let temp = tempfile::tempdir().unwrap();
+        let err = standalone_gate_error(
+            temp_factory(&temp),
+            GrantGatedTools::default().with_family("comms"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::FamilyNotMounted { family })
+                    if family == "comms"
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmounted_builtin_name_cannot_be_grant_gated() {
+        // The factory's own default leaves the shell family off, and a gated
+        // name (unlike a gated family) mounts nothing.
+        let temp = tempfile::tempdir().unwrap();
+        let err = standalone_gate_error(
+            temp_factory(&temp),
+            GrantGatedTools::default().with_tool("shell"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::ToolNotMounted { tool })
+                    if tool == "shell"
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gated_family_the_build_does_not_mount_is_refused() {
+        // The tasks family shares the builtins' category, so the gate does not
+        // mount it: with the builtins off it mounts nowhere.
+        let temp = tempfile::tempdir().unwrap();
+        let err = standalone_gate_error(
+            temp_factory(&temp),
+            GrantGatedTools::default().with_family("tasks"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::FamilyNotMounted { family })
+                    if family == "tasks"
+            ),
+            "got: {err:?}"
+        );
+
+        // With the builtins on the family is mounted, and only the missing
+        // grant service refuses this standalone build.
+        let err = standalone_gate_error(
+            temp_factory(&temp).builtins(true),
+            GrantGatedTools::default().with_family("tasks"),
+        )
+        .await;
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::NoGrantService)
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_statically_denied_or_read_only_refused_name_cannot_be_grant_gated() {
+        let temp = tempfile::tempdir().unwrap();
+        for policy in [
+            deny_list_policy(&["shell"]),
+            meerkat_core::ops::ToolAccessPolicy::ReadOnly,
+        ] {
+            let err = temp_factory(&temp)
+                .build_agent(
+                    AgentBuildConfig {
+                        llm_client_override: Some(Arc::new(MockLlmClient)),
+                        tool_access_policy: Some(policy.clone()),
+                        grant_gated_tools: Some(shell_gate()),
+                        ..AgentBuildConfig::new("claude-sonnet-4-5")
+                    },
+                    &Config::default(),
+                )
+                .await
+                .err()
+                .expect("a name no grant could open cannot be gated");
+            assert!(
+                matches!(
+                    &err,
+                    BuildAgentError::GrantGate(GrantGateBuildError::PolicyRefused { .. })
+                ),
+                "{policy:?}: got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gated_web_search_disables_provider_native_search() {
+        // gpt-5.4 serves web search natively, and the session's provider
+        // params ask for it. A gate that covers web search disables every
+        // provider-native tool for the build, so the session's (and every
+        // later turn's) native search is stripped from each request and the
+        // gated `web_search` tool is the only search path: mounted, and
+        // closed until a grant opens it.
+        let temp = tempfile::tempdir().unwrap();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default().with_family("web_search")),
+        )
+        .await;
+        build.model = "gpt-5.4".to_string();
+        build.web_search_executor_override = Some(Arc::new(NoopWebSearchExecutor));
+        build.provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                provider_tag: Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(
+                    meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
+                        web_search: Some(
+                            meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                                &serde_json::json!({"type": "web_search"}),
+                            ),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+        let agent = temp_factory(&temp)
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a gated web search builds on a native-search model");
+        let (base, visible) = names(&agent);
+        assert!(
+            base.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+            "the gated tool is the search path, so native search is off: {base:?}"
+        );
+        assert!(
+            !visible.contains(WEB_SEARCH_TOOL_NAME),
+            "and it starts closed: {visible:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_build_without_grant_service_refuses_a_grant_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = temp_factory(&temp)
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    grant_gated_tools: Some(shell_gate()),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .err()
+            .expect("a standalone build has no grant service");
+        assert!(
+            matches!(
+                &err,
+                BuildAgentError::GrantGate(GrantGateBuildError::NoGrantService)
+            ),
+            "got: {err:?}"
+        );
+
+        // An empty gate is no gate: the standalone build builds.
+        temp_factory(&temp)
+            .build_agent(
+                AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(MockLlmClient)),
+                    grant_gated_tools: Some(GrantGatedTools::default()),
+                    ..AgentBuildConfig::new("claude-sonnet-4-5")
+                },
+                &Config::default(),
+            )
+            .await
+            .expect("an empty gate needs no grant service");
+    }
+
+    #[tokio::test]
+    async fn resume_restores_the_session_grant_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = Arc::new(MeerkatMachine::ephemeral());
+        let build = gated_runtime_build(
+            &first,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(shell_gate()),
+        )
+        .await;
+        let agent = temp_factory(&temp)
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a gated build builds");
+        let session = agent.session().clone();
+        drop(agent);
+
+        // Another runtime resumes the session, naming no gate.
+        let second = Arc::new(MeerkatMachine::ephemeral());
+        let resume = gated_runtime_build(
+            &second,
+            session,
+            meerkat_core::SessionBuildIntent::Resume,
+            None,
+        )
+        .await;
+        let agent = temp_factory(&temp)
+            .build_agent(resume, &Config::default())
+            .await
+            .expect("the resume builds");
+        let (base, visible) = names(&agent);
+        assert!(
+            base.iter().any(|name| name == "shell"),
+            "the restored gate mounts its family: {base:?}"
+        );
+        assert!(
+            !visible.contains("shell"),
+            "and the resumed session starts closed: {visible:?}"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata")
+                .tooling
+                .grant_gated,
+            shell_gate()
+        );
+    }
+
+    /// `request_tool_grant` is mounted by every gated build, visible (the
+    /// tool itself is not gated), and by no ungated build.
+    #[tokio::test]
+    async fn request_tool_grant_is_mounted_only_by_a_gated_build() {
+        use meerkat_core::tool_grant::REQUEST_TOOL_GRANT_TOOL;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let on_machine = &machine;
+        let build = move |gate: Option<GrantGatedTools>| {
+            gated_runtime_build(
+                on_machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                gate,
+            )
+        };
+        let mounted = |agent: &meerkat::DynAgent| {
+            let (base, visible) = names(agent);
+            (
+                base.iter().any(|name| name == REQUEST_TOOL_GRANT_TOOL),
+                visible.contains(REQUEST_TOOL_GRANT_TOOL),
+            )
+        };
+
+        let agent = factory
+            .build_agent(build(Some(shell_gate())).await, &Config::default())
+            .await
+            .expect("a gated build builds");
+        assert_eq!(
+            mounted(&agent),
+            (true, true),
+            "a gated build mounts it open"
+        );
+
+        let agent = factory
+            .build_agent(build(None).await, &Config::default())
+            .await
+            .expect("an ungated build builds");
+        assert_eq!(mounted(&agent), (false, false), "nothing is gated");
+    }
+
+    /// A deny list may name a tool no vocabulary declares while the gate
+    /// names an MCP server the build does not configure, or gates every
+    /// server it does not configure: such a server may be attached later and
+    /// provide any name, so the name is enforced by name at call time instead
+    /// of failing the build. Without such a gate the build refuses it.
+    #[tokio::test]
+    async fn a_gated_unconfigured_server_defers_an_unknown_deny_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        for gate in [
+            GrantGatedTools::default().with_mcp_server("tickets"),
+            GrantGatedTools::default().with_unconfigured_mcp_servers(),
+        ] {
+            let mut build = gated_runtime_build(
+                &machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                Some(gate.clone()),
+            )
+            .await;
+            build.declared_tool_restriction = Some(declared_restriction(&["open_ticket"], false));
+            temp_factory(&temp)
+                .build_agent(build, &Config::default())
+                .await
+                .unwrap_or_else(|err| panic!("{gate:?} defers the name: {err:?}"));
+        }
+
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            None,
+        )
+        .await;
+        build.declared_tool_restriction = Some(declared_restriction(&["open_ticket"], false));
+        let err = temp_factory(&temp)
+            .build_agent(build, &Config::default())
+            .await
+            .err()
+            .expect("without a gated unconfigured server the name is unknown");
+        assert!(
+            matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "open_ticket"),
+            "got: {err:?}"
+        );
+    }
 }

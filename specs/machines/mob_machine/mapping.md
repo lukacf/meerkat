@@ -13,13 +13,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_owner_bridge_cleanup_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/lib.rs` — MobMachine owner bridge session cleanup authority for owner bridge cleanup requires owner and implicit delegation requires owner invariants
 - `mob_coordination_board_authority` (machine `MobMachine`): `crates/meerkat-mob/src/coordination.rs` — MobMachine coordination board authority: record work intent, record resource claim, update coordination work intent status planned active blocked completed cancelled, update coordination resource claim status active released expired cancelled, observe coordination resource claim overlap, and the recorded/status-changed/overlap-observed coordination effects
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
-- `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate or admitted from machine-owned binding and pending-spawn state; compute respawn generation successor; reconcile desired members to spawn retain or retire against current bindings emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
+- `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated or unseated with a typed cause, spared by the worker reconcile, and its custody belongs to an open spawn ladder, placed only for an entry hosted on its first use, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
+- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and refusing the seal while an unseated one remains, which the one-entry unlist ends first on the seal's own step (each end named by the identity ended effect), leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; take a Declared entry over for a host's adoption before the identity reconciler acts on its member, marking it while its member is seated so that the end of the member's retirement, whose start row records the cause HostAdopted for replay, ends the entry, ending an unseated one at once, and leaving it to the reconciler's next pass while a member step of it is in flight, and seal no entry whose identity a host's intent row names (it neither marks one nor refuses the seal for one); let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, a takeover mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, declared roster seal refused, identity entry unlisted, identity ended, identity entry taken over and archived session forgotten effects
+- `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody
+- `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
+- `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an owned edge is in force while both its ends are identity entries, and only an edge in force is realized by a seat, a spawn or a realization pass and refused a plain unwire, so a worker that takes an unlisted end's free name is no end of it; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat or a re-listing realizes it again; and the boot recovers each owned edge from its owner's row, as an import restores the edges of the rows it restores
+- `mob_identity_adoption_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/adoption.rs` — MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, spawned with no profile or model override, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason
+- `mob_identity_downgrade_cycle_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_set.rs` — MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, of a mob whose scan reads rows, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, a plain one only on the session the record names, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps
+- `mob_identity_preparation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_preparation.rs` — MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects
+- `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
+- `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
+- `mob_scoped_release_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/member_wake.rs` — MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing
 - `mob_flow_fault_topology_escalation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/flow.rs` — MobMachine flow-step fault, topology-edge, and supervisor-escalation classifiers owned by the flow engine: classify step output fault retry or terminal malformed json into a step fault disposition; evaluate topology edge rule allow deny or default into a policy decision verdict; and escalate to supervisor target found with a real supervisor identity or no eligible target, emitting the step output fault classified, topology edge verdict resolved, supervisor escalation requested, and supervisor escalation failed effects
 
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
-- `retire-recover-destroy` — member retires, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
+- `retire-recover-destroy` — member retires, the retire of an absent identity is answered in every phase, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
+- `member-custody-degraded` — a mob start that cannot restore a seated member's custody for a cause of the member's own records the member degraded (the restore and its cause) in every live phase, a later record replaces the cause, a re-attempt that restores it resolves the record, a record for an unseated identity or in a destroyed mob changes nothing, and an ended seat or a destroy takes the record (crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs)
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
@@ -1251,6 +1263,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ObserveRespawnTopologyAbandonedStaleSuccessor`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ObserveRespawnTopologyAbandonedStaleEndedSuccessor`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ObserveRespawnTopologyAbandonedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1785,6 +1800,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ProbeMemberAdmissionAdmittedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ComputeRespawnGenerationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -1984,6 +2035,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSubmitWorkRejectionIdentityMember`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveSubmitWorkRejectionNotExternallyAddressable`
@@ -3841,11 +3898,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireAbsentRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
 - `RetireAbsentStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
+- `RetireAbsentCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
+- `RetireAbsentDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
 - `RetireAllRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3900,6 +3963,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RespawnRunning`
   - anchors: (unclaimed)
   - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedRunning`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedStopped`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: `retire-recover-destroy`
+- `RespawnIdentityEntryRefusedCompleted`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: (unclaimed)
 - `CancelAllWorkRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4461,8 +4533,20 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberHostPreparationCompleted`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveMemberBuildPreparationRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberBuildPreparationStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberBuildPreparationCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BeginMemberRotationRunning`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginMemberRotationSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
   - scenarios: (unclaimed)
 - `CommitMemberRotationLiveRunning`
   - anchors: (unclaimed)
@@ -4480,6 +4564,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveMemberRevivalRetryableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberRevivalRetryableBuildPreparationRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AbandonMemberWakeDormantRunning`
@@ -4602,6 +4689,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeExplicitResumeMemberJoinRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeExplicitResumeMemberHeldRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeExplicitResumeMemberHeldStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyMemberReleaseRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4614,6 +4707,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyMemberReleaseDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleRunning`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleStopped`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleCompleted`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
+- `ClassifyMemberReleaseStaleDestroyed`
+  - anchors: `mob_scoped_release_authority`
+  - scenarios: (unclaimed)
 - `CommitMemberRotationLiveKickoffRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4625,6 +4730,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `CommitMemberRotationRetiredKickoffStopped`
   - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionStopped`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionKickoffRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `CommitMemberRotationSameSessionKickoffStopped`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentFreshSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentSameSessionRunning`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `RecoverMemberRotationIntentDestroyingRunning`
+  - anchors: `mob_rotation_target_authority`
   - scenarios: (unclaimed)
 - `ResolveRuntimeBindingRefusalStaleRunning`
   - anchors: (unclaimed)
@@ -4744,6 +4870,1284 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeSpawnProfileSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExemptMemberFromDefinitionWiringSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExemptMemberFromDefinitionWiringSeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntrySeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntrySeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryAdopted`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryAdoptedUnlisted`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNameHeldByWorker`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryRetireUnadopted`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNotAdoptable`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryStaleObservation`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNotSeated`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryAlreadyAnEntry`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryOtherCustody`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryNonAuthoritative`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedRunning`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionAdmittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberRunning`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameRunning`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryKept`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntrySeatOwed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryHostedOnFirstUse`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryAwaitHeldCreation`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryPreparationPending`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRecordOnly`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRuntimeModeRestamp`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRoleMigrate`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRoleRotate`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRoleMigrationHeld`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryLifecycleInFlight`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameHeldByWorker`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedHostAdopted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameOwnedByCreated`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameTombstoned`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameUnreadable`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryMobNotRunningStopped`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryMobNotRunningCompleted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryMobNotRunningDestroyed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterSealed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterRefused`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterMobNotRunningStopped`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterMobNotRunningCompleted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `SealDeclaredRosterMobNotRunningDestroyed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryRetiring`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryRemoved`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryDeferred`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryNotADeclaredEntry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnlistIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntryRetiringMarkedRunning`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntryRetiringStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ForgetArchivedSession`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyOpened`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyBusy`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OpenDeclaredApplyMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseDeclaredApplyDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitResetRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitResetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitResetCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntrySeatedRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntrySeatedStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryRetiredRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryRetiredStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryPendingRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryPendingStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryTombstoneRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryTombstoneStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryUnreadableRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryUnreadableStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryRemovingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryRemovingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryArchivingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryArchivingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryArchivedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryArchivedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeAdmitted`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeReplayed`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeOperationReused`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeNonAuthoritative`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeChangesHeld`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeDecisionUnbound`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeDecisionExpired`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeImportedNotHostOperator`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeGrantRevoked`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeStaleSpec`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryRecorded`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryNameHeldByIdentity`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryNameHeldByWorker`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryNameTombstoned`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryNameUnreadable`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryChangesHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordCreatedIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetIdentityChangesHeldRunning`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `SetIdentityChangesHeldStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetIdentityChangesHeldCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetIdentityChangesHeldDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryRetiring`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryRemoved`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryAlreadyRemoved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryUnknown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryInFlight`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryNameUnreadable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryChangesHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RemoveIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryArchiving`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryArchived`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryAlreadyArchived`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryOwnedByRoster`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryUnknown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryInFlight`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryNameUnreadable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryChangesHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryPreparationPending`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ArchiveIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryRestored`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryNotArchived`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryOwnedByRoster`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryUnknown`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryInFlight`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryNameUnreadable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryChangesHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `UnarchiveIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionHeld`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionNotPending`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionNotConstructed`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionConstructionOpen`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BeginPreparationConstructionMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleHostPreparationSeat`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationActivationAccepted`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationNotPending`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationConstructionRequired`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationConstructionOpen`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationStaleAttempt`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationExpired`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationMismatch`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationActivationPending`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `SettleHostPreparationNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleHostPreparationMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleHostPreparationMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleHostPreparationMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionEndedRunning`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionEndedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionEndedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionEndedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionNotOpenRunning`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionNotOpenStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionNotOpenCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionNotOpenDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionActivationPendingRunning`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionActivationPendingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionActivationPendingCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndPreparationConstructionActivationPendingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionBodyTooLargeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionBodyTooLargeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionSlotLimitExceededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionSlotLimitExceededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewOverBudgetRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewOverBudgetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionStaleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionDuplicateRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionDuplicateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionConflictStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceOverBudgetRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceOverBudgetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionTerminalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionTerminalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionUnknownSlotRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionUnknownSlotStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionStaleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionDuplicateRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionDuplicateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionConflictStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionAdvanceRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionAdvanceStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionTerminalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionTerminalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionAppliedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionAppliedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionAppliedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionStaleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionStaleCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionGenerationHighwaterRaised`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionGenerationHighwaterKept`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryNotOwedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryNotOwedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnbornRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnbornStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnboundRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnboundStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryRetiringRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryRetiringStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryDeliverRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryDeliverStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliverySpawningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliverySpawningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberCustodyUnrestoredSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredSeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredSeatedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredNotSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredNotSeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredNotSeatedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredRecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredRecordedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ObserveMemberRetirementArchivedLiveHostAdopted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ObserveMemberRetirementArchivedRetiredHostAdopted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryAdopting`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryEnded`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryDeferred`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryNotADeclaredEntry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `TakeOverIdentityEntryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntryAdoptingMarkedRunning`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `RecoverIdentityEntryAdoptingStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeDeclared`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeAlreadyOwned`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgePeerUnknown`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeOwnerInvalid`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclareOwnedIdentityEdgeMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeEnded`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeNotOwner`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeAbsent`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeNonAuthoritative`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeChangesHeld`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndOwnedIdentityEdgeMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireAdmittedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitMemberUnwireOwnedEdgeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeRecoveredRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeRecoveredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeSkippedRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `RecoverOwnedIdentityEdgeSkippedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationRealizeRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationRealizeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationRealizeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationRealizeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationNotOwnedRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationNotOwnedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationNotOwnedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationNotOwnedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationEndNotAnIdentityRunning`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationEndNotAnIdentityStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreOwnedIdentityEdgeRestored`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `RestoreOwnedIdentityEdgeSkipped`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `RestoreOwnedIdentityEdgeMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreOwnedIdentityEdgeMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RestoreOwnedIdentityEdgeMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreAdopted`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreNotAdoptable`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStorePredecessorMismatch`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreAdmissionUnsettled`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreDeclaredApplyOpen`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreNameUnreadable`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreNameTombstoned`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreNonAuthoritative`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreChangesHeld`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdoptIdentityIntoStoreMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AdmitIdentityChangeRowsPurged`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsPurged`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsNonAuthoritative`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsReplayed`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsOperationReused`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsRowsPurged`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsNotHostOperator`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsChangesNotHeld`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsNothingToPurge`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PurgeIdentityRowsMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRowlessCreatedEntryReservedRunning`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `RecoverRowlessCreatedEntryReservedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverRowlessCreatedEntryKeptRunning`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `RecoverRowlessCreatedEntryKeptStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRestoredInPlace`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRestoredOwedSeat`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRestoredPending`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRestoredArchived`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRestoredTombstone`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRestoredByAdoption`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordUnchanged`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordNameTakenMeanwhile`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordUnsettled`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordNonAuthoritative`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordChangesHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordRowsPurged`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordMobNotRunningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ImportIdentityRecordMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionAskHostDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionInheritDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionRefusedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberDispatchAdmissionNoneRequiredDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberDispatchAdmissionLineageRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberDispatchAdmissionLineageStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `EndIdentityLifeDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverIdentityLifeResetsDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
@@ -5252,6 +6656,117 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PersistMemberSeatSessionBorn`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `LegacyIdentityEntryAdoptionResolved`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AgentLaneMemberAdmissionResolved`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RespawnRefused`
+  - anchors: `mob_identity_entry_respawn_authority`
+  - scenarios: (unclaimed)
+- `IdentityEntryDeclared`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclaredRosterSealed`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `ArchivedSessionForgotten`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `ExplicitResumeMemberHeld`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `DeclaredApplyOpenResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OperatorInstructionCommitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OperatorInstructionDuplicate`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OperatorInstructionRefused`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionDeliveryPrepared`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionDeliveryDeferred`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionTargetRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionTargetBlocked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionReleaseAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionReleaseNotNeeded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `IdentityChangeAdmissionResolved`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `CreatedIdentityEntryRecorded`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `IdentityEntryChangeResolved`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `PreparationConstructionResolved`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `PreparationSettleResolved`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `PreparationConstructionEnded`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `IdentityEntryUnlisted`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `IdentityEntryTakenOver`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `MemberBuildPreparationRetryArmed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OwnedIdentityEdgeDeclared`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `OwnedIdentityEdgeEnded`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `MemberUnwireAdmissionResolved`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `IdentityAdoptionResolved`
+  - anchors: `mob_identity_adoption_authority`
+  - scenarios: (unclaimed)
+- `IdentityRowsPurgeResolved`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `IdentityRecordImportResolved`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `OwnedEdgeRealizationResolved`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `OwnedIdentityEdgeRestored`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `IdentityEnded`
+  - anchors: `mob_declared_apply_authority`, `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `DeclaredRosterSealRefused`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `MemberDispatchAdmissionResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -5464,6 +6979,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `rotation_intent_is_a_retiring_member`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `rotation_target_recorded_with_its_intent`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `same_session_rotation_keeps_its_binding`
+  - anchors: `mob_rotation_target_authority`
+  - scenarios: (unclaimed)
+- `rotation_started_role_is_a_same_session_rotations`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `archive_only_retirement_is_retiring`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -5479,10 +7003,97 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `spawn_profile_authority_is_a_pending_grant`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `definition_wiring_exempt_member_is_seated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `entry_is_seated_or_has_an_unseated_cause`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `unseated_entry_is_not_a_member`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `retiring_entry_is_a_declared_entry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `adopting_entry_is_a_seated_declared_entry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `marked_entry_has_no_spawn_in_flight`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `held_creation_entry_was_never_created`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `archived_session_record_is_unseated`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `build_preparation_retry_belongs_to_a_member`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `role_hold_belongs_to_an_entry`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `placed_entry_custody_is_hosted_on_first_use`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `worker_reconcile_spares_entries`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `archived_entry_is_store_owned`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `entry_ending_marks_are_seated_and_disjoint`
+  - anchors: `mob_identity_change_authority`
+  - scenarios: (unclaimed)
+- `tombstone_is_never_an_entry`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `owned_edge_owner_is_a_store_owned_end`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `owned_edge_joins_no_tombstone`
+  - anchors: `mob_owned_identity_edge_authority`
+  - scenarios: (unclaimed)
+- `created_origin_without_row_is_unreadable`
+  - anchors: `mob_identity_downgrade_cycle_authority`
+  - scenarios: (unclaimed)
+- `construction_is_held_or_activating`
+  - anchors: `mob_identity_preparation_authority`
+  - scenarios: (unclaimed)
+- `entry_custodies_are_disjoint`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `entry_custody_ladder_is_open`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
 - `owed_edge_repairs_join_seated_members`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `destroyed_mob_holds_no_member_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `custody_unrestored_members_are_seated`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `operator_instruction_records_lockstep`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_records_well_formed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_slot_count_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_active_bytes_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_instruction_facts_only_for_members`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_instruction_generations_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `destroyed_mob_holds_no_operator_instructions`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

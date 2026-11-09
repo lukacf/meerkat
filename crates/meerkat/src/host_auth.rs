@@ -905,6 +905,14 @@ fn credential_mutation_reason(
         CredentialMutationError::CredentialAccess { refusal, .. } => {
             credential_access_reason(*refusal)
         }
+        // The credential fence is held (retryable once the hold ends) or
+        // unavailable: the mutation did not start and wrote nothing.
+        CredentialMutationError::AdmissionInProgress => {
+            meerkat_contracts::WireAuthErrorReason::CredentialAccessPending
+        }
+        CredentialMutationError::AdmissionFenceUnavailable(_) => {
+            meerkat_contracts::WireAuthErrorReason::CredentialStoreUnavailable
+        }
         // A failed rollback or a lost owner leaves the commit's outcome
         // unknown: settle, then read the status.
         CredentialMutationError::RollbackFailed(_) | CredentialMutationError::Cancelled => {

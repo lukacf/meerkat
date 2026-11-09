@@ -267,6 +267,11 @@ pub struct PersistenceBundle {
     /// ([`crate::ApprovalIssuerSelection`]) before the bundle is shared.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     approval_issuer: meerkat_core::ApprovalService,
+    /// The persistence's durable decision owner, opened from the same
+    /// selection; narrowed for a candidate launch before the bundle is
+    /// shared, never widened.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    decision_owner: meerkat_runtime::decision::DurableDecisionService,
 }
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -406,6 +411,8 @@ impl PersistenceBundle {
             // ([`assemble_persistence_bundle`]).
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             approval_issuer: crate::ApprovalIssuerSelection::Ephemeral.open(),
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+            decision_owner: crate::ApprovalIssuerSelection::Ephemeral.open_decisions(),
         }
     }
 
@@ -631,6 +638,25 @@ impl PersistenceBundle {
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub fn approval_issuer(&self) -> meerkat_core::ApprovalService {
         self.approval_issuer.clone()
+    }
+
+    /// The persistence's durable decision owner, opened from the selection
+    /// of its approval issuer ([`crate::ApprovalIssuerSelection::open_decisions`]):
+    /// every surface over this bundle takes a clone of this one owner. A
+    /// bundle composed from stores alone keeps no durable decisions.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub fn decision_owner(&self) -> meerkat_runtime::decision::DurableDecisionService {
+        self.decision_owner.clone()
+    }
+
+    /// This bundle with its decision owner narrowed to a candidate launch:
+    /// the owner reads and refuses every write. Call it before the bundle is
+    /// shared; nothing widens the owner again.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn with_candidate_launch_decisions(mut self) -> Self {
+        self.decision_owner = self.decision_owner.for_candidate_launch();
+        self
     }
 
     /// Require the realm's declared hosting mode (#1813). `Multiprocess`
@@ -1656,6 +1682,7 @@ pub(crate) fn assemble_persistence_bundle(
     };
     bundle.artifact_store = set.artifact_store.clone();
     bundle.approval_issuer = approvals.open();
+    bundle.decision_owner = approvals.open_decisions();
 
     Ok((manifest, bundle))
 }

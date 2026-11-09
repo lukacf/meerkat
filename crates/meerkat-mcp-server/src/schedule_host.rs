@@ -320,6 +320,7 @@ impl McpScheduleContext {
                             None
                         }
                     },
+                    mcp_auth_resolver_override: None,
                     session_comms_runtime_override: None,
                     prepared_controller: None,
                     host_prompt_sections: Default::default(),
@@ -350,6 +351,7 @@ impl McpScheduleContext {
                     config_generation: current_generation,
                     auth_binding: None,
                     mob_member_binding: None,
+                    mob_incarnation: None,
                     keep_alive: create.keep_alive,
                     checkpointer: None,
                     silent_comms_intents: Vec::new(),
@@ -386,6 +388,8 @@ impl McpScheduleContext {
                     ),
                     initial_turn_metadata: None,
                     initial_work_authorization: None,
+                    grant_gated_tools: None,
+                    grant_gated_tools_where_mounted: None,
                 };
                 let request = CreateSessionRequest {
                     injected_context: Vec::new(),
@@ -725,6 +729,7 @@ async fn deliver_scheduled_prompt(
         system_prompts: dispatch.system_prompt.into_iter().collect(),
         transient_turn_context: dispatch.transient_turn_context,
         transient_turn_context_appends: Vec::new(),
+        request_only_context: Vec::new(),
         model: None,
         provider: None,
         self_hosted_server_id: None,
@@ -806,6 +811,7 @@ async fn deliver_scheduled_event(
             )),
             supersession_key: None,
             correlation_id: Some(schedule_runtime_correlation_id(identity)?),
+            requester: None,
         },
         event_type: dispatch.event_type,
         payload: dispatch.payload,

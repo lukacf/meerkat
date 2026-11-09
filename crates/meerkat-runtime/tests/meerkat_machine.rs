@@ -48,6 +48,7 @@ fn make_prompt(text: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),
@@ -2112,6 +2113,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: format!("req-{label}"),
@@ -3830,7 +3832,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     // 1s applied to reaching the proxy, which is fast and was never what
     // timed out. Poll the durable post-condition instead, so the test passes
     // as soon as the repair is real and fails only if it never becomes real.
-    tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_mins(1), async {
         loop {
             let state = adapter.input_state(&sid, &input_id).await.unwrap();
             let runtime_state = adapter.runtime_state(&sid).await.unwrap();
@@ -6502,6 +6504,7 @@ fn response_progress(label: &str) -> Input {
                 "same-window",
             )),
             correlation_id: None,
+            requester: None,
         },
         convention: Some(meerkat_runtime::input::PeerConvention::ResponseProgress {
             request_id: format!("request-{label}"),

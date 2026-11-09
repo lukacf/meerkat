@@ -2406,7 +2406,10 @@ pub enum PeerWakeRefusal {
     /// The member's host has preparation pending for it (a first-boot row, or
     /// its build preparation asked to be retried).
     HostPreparationPending,
-    /// The member's durable resume gate was unavailable at the wake.
+    /// The member's durable resume gate was unavailable at the wake, or its
+    /// session could not be built now for a cause that clears with no change
+    /// to the member (for example a provider credential whose source or
+    /// store cannot answer now or whose lookup is in flight).
     ResumeGateUnavailable,
     /// The member is placed on a member host, which owns its materialization.
     HostOwned,
@@ -2569,6 +2572,37 @@ pub enum SendAndStreamError {
         receipt: SendReceipt,
         error: StreamError,
     },
+}
+
+/// Where a session service's agent builds keep the durable comms identity
+/// (the key pair) of each session they build with session-scoped comms:
+/// in-process comms, the default transport, give every session a key pair of
+/// its own. On a network transport (Tcp or Uds) the key belongs to the
+/// realm's comms configuration instead, and this root is not consulted.
+///
+/// A session service reports it so a host that records a session's comms
+/// endpoint before the session's first build (a mob's dormant seat) reads
+/// the key that build loads, wherever the service's agent factory keeps it.
+///
+/// The reported root covers in-process (session-scoped) comms keys only,
+/// whatever transport the builds' comms configuration selects. A mob host
+/// whose members run on Tcp or Uds must still declare network member comms
+/// (`MobBuilder::with_network_member_comms` in `meerkat-mob`): without it, a
+/// dormant seat records an in-process endpoint, the member's first wake
+/// refuses it with the endpoint mismatch, and the member needs a rotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCommsIdentityRoot {
+    /// Each session's key pair lives in a directory of its own,
+    /// `<root>/<session id>`.
+    Durable(std::path::PathBuf),
+    /// The builds keep no durable session-scoped comms identity: they build
+    /// no comms of their own, or keep the identity in memory only (a browser
+    /// runtime).
+    NotKept,
+    /// The builds keep one, but its root could not be resolved (for example
+    /// no home directory is set): the reason. Their own comms construction
+    /// fails the same way.
+    Unresolved(String),
 }
 
 #[cfg(test)]

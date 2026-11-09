@@ -51,8 +51,10 @@ pub enum HelperChildIssuanceRefusal {
     /// their effects.
     Denied,
     /// The owners cannot say now (contention, a refusal to rebuild after an
-    /// owner change, clock or custody). No child was appended. On the
-    /// dispatch and entered paths,
+    /// owner change, clock or custody), or the admission fence of the
+    /// realm's grant log cannot be used (`meerkat_core::realm_admission`: it
+    /// could not be opened, created, locked or identity-checked). No child
+    /// was appended. On the dispatch and entered paths,
     /// [`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`]
     /// waits out contention and owner changes before it answers this. Once
     /// the dispatch path of an R2 or R3 operation spent the dispatch's
@@ -69,6 +71,13 @@ pub enum HelperChildIssuanceRefusal {
     /// appended. Neither says an append started. Recover with the same
     /// intent.
     Uncertain,
+    /// An admission, or another fenced write, holds the admission fence of
+    /// the realm's grant log (`meerkat_core::realm_admission`): nothing was
+    /// decided or appended. On the dispatch and entered paths,
+    /// [`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`]
+    /// waits it out, within its bounds, before it answers this. The hold may
+    /// last until the holding process restarts.
+    AdmissionInProgress,
 }
 
 /// One helper child issuance: for a setup operation the caller holds as a
@@ -213,6 +222,8 @@ impl GovernedHelperChildIssuance {
     /// Issue or recover the intended child now, without waiting. On every
     /// path, another actor's hold of the work owners' exclusion, or an owner
     /// change in progress, answers [`HelperChildIssuanceRefusal::Unavailable`]
+    /// at once, with nothing appended, and a held admission fence of the
+    /// grant log answers [`HelperChildIssuanceRefusal::AdmissionInProgress`]
     /// at once, with nothing appended. A caller that can await, or that runs
     /// on a blocking thread and can block on its async runtime, uses
     /// [`Self::issue_or_recover_after_owner_change`] instead, which waits
@@ -236,9 +247,21 @@ impl GovernedHelperChildIssuance {
                 );
             }
         };
+        // The grant log's admission fence, without waiting: this form never
+        // waits, and a holder refuses before anything is decided or appended.
+        let guard =
+            match meerkat_core::AdmissionGuard::try_acquire(prepared.grants.admission_fences()) {
+                Ok(guard) => guard,
+                Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                    return Err(HelperChildIssuanceRefusal::AdmissionInProgress);
+                }
+                Err(meerkat_core::AdmissionRefusal::Unavailable(_)) => {
+                    return Err(HelperChildIssuanceRefusal::Unavailable);
+                }
+            };
         prepared
             .grants
-            .issue_or_recover_child_under_exclusion(&self.intent, || {
+            .issue_or_recover_child_under_exclusion(&guard, &self.intent, || {
                 prepared.originating().map_err(|error| match error {
                     OperationAuthorizationError::Refused(refusal)
                         if super::effect_leaf_denies(refusal) =>
@@ -266,7 +289,9 @@ impl GovernedHelperChildIssuance {
     /// [`meerkat_core::GovernedDispatchOperation::issue_child_if_current_within_after_owner_change`]);
     /// the dispatch's review is spent once whatever it waits. Past those
     /// bounds the refusal to rebuild answers `Unavailable`, as without
-    /// waiting. The prepared path ([`Self::new`]) never waits: it answers as
+    /// waiting. A held admission fence of the grant log is waited out the
+    /// same way, and past those bounds answers `AdmissionInProgress`. The
+    /// prepared path ([`Self::new`]) never waits: it answers as
     /// [`Self::issue_or_recover`].
     ///
     /// # Errors
@@ -346,10 +371,14 @@ fn dispatch_outcome(
 
 /// The work owner's exact per-call outcome. Once the call ran, an outcome
 /// that is not the grant owner's typed result cannot promise that nothing
-/// was appended.
+/// was appended; the work owner's answer that the grant log's admission
+/// fence is held promises it.
 fn work_owner_outcome(
     boxed: Box<dyn std::any::Any + Send>,
 ) -> Result<ChildGrantOutcome, HelperChildIssuanceRefusal> {
+    if boxed.is::<meerkat_core::authorization::ChildIssuanceAdmissionInProgress>() {
+        return Err(HelperChildIssuanceRefusal::AdmissionInProgress);
+    }
     boxed
         .downcast::<Result<ChildGrantOutcome, ChildGrantRefusal>>()
         .map_or(Err(HelperChildIssuanceRefusal::Uncertain), |outcome| {

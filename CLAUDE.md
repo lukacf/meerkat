@@ -48,8 +48,9 @@ make test
 # Run fast tests through BuildBuddy/Bazel
 MEERKAT_BUILDBUDDY=1 make test
 
-# Run all tests including doc-tests (SLOW due to doc-test compilation)
-./scripts/repo-cargo test --workspace
+# Run all tests including doc-tests (SLOW due to doc-test compilation) over
+# Core's crates, with their test features (see Build Efficiency)
+./scripts/repo-cargo test $(node scripts/core-workspace-args.mjs --tests)
 
 # Run deterministic end-to-end lane
 make e2e-fast
@@ -107,13 +108,58 @@ This is a large workspace (50 members). Careless builds waste minutes. Follow th
 # Editing meerkat-mob? Check the mob subtree
 ./scripts/repo-cargo check -p meerkat-mob -p meerkat-mob-mcp
 
-# Running tests for one crate
-./scripts/repo-cargo nextest run -p meerkat-mob
+# Running tests for one crate, with its test features
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-mob)
 
-# Only use workspace-wide commands for final verification
-./scripts/repo-cargo clippy --workspace -- -D warnings
-./scripts/repo-cargo nextest run --workspace --status-level none --final-status-level fail
+# Only use workspace-wide commands for final verification (make lint, make
+# test-unit and the other whole-workspace targets select Core's members)
+./scripts/repo-cargo clippy $(node scripts/core-workspace-args.mjs) -- -D warnings
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests) --status-level none --final-status-level fail
 ```
+
+**Test commands pass the crates' test features.** A crate's own tests build
+with the features its `[package.metadata.meerkat.standalone-tests]` lists,
+plus `workspace-tests` when it declares that feature. No dev-dependency turns
+them on (a path-only self dev-dependency made the crate's lib test wait for
+its own library), so every test command passes them:
+`node scripts/core-workspace-args.mjs --tests -p NAME` prints one crate's
+selection with them (`-p meerkat-mob --features test-support`), and `--tests`
+alone prints Core's whole selection with every member's. Use that form, as
+above, for every test command. The Make targets, the CI planner's rows, the
+Cargo aliases and the Bazel generator pass them already. A test build of such
+a crate without them fails to compile in this repository: its `lib.rs`
+canary, armed by `.cargo/config.toml` [env], stops the build with the exact
+command to run (`cargo test -p NAME --features ...`). Only code generation
+trips it, so `cargo check`, clippy and an editor's check run are unaffected,
+and the published packages build without that configuration. The canary sits
+in the crate's lib test: a run narrowed to an integration target
+(`--test TARGET`) builds no lib test, so nothing stops it, and without the
+flags it compiles the tests they gate out without a word. Pass the same
+flags there, plus any feature the target's own `#![cfg(feature = ...)]`
+names (meerkat-core's `wholeblob_compaction_media_guard` needs
+`test-support`; a second `--features` adds it):
+`./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p NAME) --test TARGET`.
+
+**rust-analyzer: set `rust-analyzer.cargo.features` to `"all"`.** Without
+features its analysis treats the code the test features gate (the
+`workspace-tests` test modules, for one) as inactive: no completion and no
+diagnostics there, and its Run test lens builds without the flags and stops
+on the canary. A package-qualified list (`meerkat-mob/test-support`, ...)
+does not work: Cargo refuses a feature of a package the command does not
+select, and rust-analyzer's runnables select one package (`--package NAME`).
+`"all"` also turns on every other feature (the live, realtime and GPT Live
+ones, and the products'), so the editor's check compiles more than a
+default build does; it is still the one global value that works.
+
+**The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
+(`connect/`).** Cargo unifies features across the packages of one invocation,
+so a bare `--workspace` would compile Core's crates with the features the
+products request of them. Core's whole-workspace commands select Core's
+members only: `node scripts/core-workspace-args.mjs` prints `--workspace` and
+an `--exclude` for every product package (derived from `ci/products.json`;
+`--product NAME` prints a product's own `-p` list), and a command without a
+package flag builds the default members, which are exactly Core's (the CI
+planner refuses a drift).
 
 **Do not launch overlapping unisolated Cargo commands in one checkout.** Use
 the repository wrapper and a distinct `RUST_LANE_ID` for concurrent same-tree
@@ -415,11 +461,35 @@ and its CI must be green before a release tag (`require_ci_green`):
   whose merged branch head's message, carries the trailer `CI-Plan: workspace`
   is planned as the whole workspace (without looking for evidence): the
   explicit way to give a release's parent that evidence.
+- Products (`ci/products.json`, read through `scripts/ci-products.mjs`):
+  Core owns the root, Meta `meta/` and Connect `connect/`, and every
+  workspace package belongs to the product whose root holds its manifest.
+  No row the plan lists mixes products (Cargo unifies features across the
+  packages of one invocation, so a product's feature requests would change
+  what a Core row compiles; a test target name used by two products fails
+  the plan). A change inside a product's root selects that product's
+  packages only: a Rust path no package owns, or the product's own Clippy,
+  rustfmt, toolchain or Cargo configuration, selects all of that product's
+  packages, never the workspace. Core's whole-workspace push lanes (the
+  `main-unit` sweep beyond the changed rows, the feature suites, the guard
+  lanes, `wasm-check`, `sdk-host`, `example-web`, `wasm-timers`) run only
+  when the plan reaches Core (`core_changed`; `core_paths_changed` for the
+  lanes keyed by Core paths). A change whose reverse-dependency closure
+  reaches a product through no changed package of it adds one Clippy row
+  per such product, `downstream <product>` (all targets, all features);
+  when the change invalidates meerkat-mob's build those rows go to the push
+  with the chain heads. `published-floor` builds each product whose own
+  packages (or the root manifest, lock, toolchain or the floor script)
+  changed against the crates.io releases of its dependencies
+  (`scripts/published_crates_standalone.py floor --product <name>`):
+  advisory on pull requests and main pushes, required on the product's own
+  `release/<product>-*` branch and in its release workflow.
+  `connect-checks` runs Connect's packaging, docs and Console panel checks
+  on every change under `connect/`.
 - `fmt-governance` (always): fmt, docs-check, semver self-test, version
   parity, lock consistency, generated BUILD freshness
-  (`node scripts/generate-bazel-rust-builds.mjs --check`),
-  `make ci-lanes-selftest`,
-  `make path-classifier-selftest`, the ripgrep tombstone scans
+  (`node scripts/generate-bazel-rust-builds.mjs --check`), the ripgrep
+  tombstone scans
   (`legacy-surface-gate`, `session-control-gate`, `deprecated-backend-gate`;
   ripgrep is installed first, and each scan refuses to run without it), and
   the published crates' static standalone guard
@@ -429,20 +499,28 @@ and its CI must be green before a release tag (`require_ci_green`):
   test file is left out in both the crate's `[package] exclude` and
   `ci/standalone-workspace-only.toml`, and a crate whose tests need features
   or a stack prints the exact `cargo test` command in its README).
+- `ci-lanes-selftest` (`make ci-lanes-selftest`) and
+  `path-classifier-selftest` (`make path-classifier-selftest`) (always): the
+  planner self-tests, each in a job of its own beside `fmt-governance`; like
+  it they wait for no plan, and the `CI gate` requires both.
 - `ratchets`: generated-contract freshness when contract paths changed;
   `machine-check-drift`/`protocol-check-drift` when machine authority changed;
   `verify-machine-poster-coverage` when machine authority or a poster input
   (`scripts/machine-posters-changed`, a separate classifier so poster-only
-  changes never start the machine lanes) changed.
+  changes never start the machine lanes) changed; `make
+  runtime-authority-bypass` on every Rust change and every governance change
+  (the audit reads every production Rust source of the workspace).
 - `governance-gates`: the typed governance gates (`make rmat-audit
-  seam-inventory runtime-authority-bypass machine-authority-docs-gate`) in a
-  job of their own, on the agent gate's governance paths: a machine-authority
-  change or a dogma document (`governance_gates` in the plan,
-  `GOVERNANCE_DOC_PATTERNS` in `scripts/ci-cargo-lanes.mjs`); the `CI gate`
-  requires them on such a change.
-- `tlc-audits`: on a machine-authority change, the eight hand-written TLC
+  seam-inventory`; `rmat-audit` runs its three audits concurrently once
+  xtask is built) in a job of their own, and
+  `governance-docs-gate` (`make machine-authority-docs-gate`, which compiles
+  a test of its own) beside it, on the agent gate's governance paths: a
+  machine-authority change or a dogma document (`governance_gates` in the
+  plan, `GOVERNANCE_DOC_PATTERNS` in `scripts/ci-cargo-lanes.mjs`); the `CI
+  gate` requires both on such a change.
+- `tlc-audits`: on a machine-authority change, the twenty-four hand-written TLC
   audit shards of the canonical TLC lane
-  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-h`) in parallel,
+  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-o`, and `audits-q` through `audits-y`) in parallel,
   needing only a JDK and the TLC jar (`.github/actions/setup-tlc-ci`, the one
   TLC install for every lane: an immutable repository mirror of the tlaplus
   v1.8.0 jar pinned by sha256); the `CI gate` requires them on such a change. The `machine-verify --all` sweep is not in PR CI.
@@ -482,6 +560,13 @@ and its CI must be green before a release tag (`require_ci_green`):
   Live suites). A new test behind a non-default feature needs a suite, or no
   lane runs it. A push runs no `unit` lane: the unit rows it would run (the
   same shards and suites) run verbatim in `main-unit` (`unit_rows_on_main`).
+  A suite can build `with` other packages (toolkit-mobkit's `native-host`
+  suite builds with meerkat-connect and runs toolkit-mobkit's tests only)
+  and carry known reds: each excluded by name and filed under its class in
+  the crate's test-debt page, which the plan checks against the list. The
+  row then runs the known reds that fail every time (nextest profile
+  `ci-known-reds`) and fails unless every one still fails, so a fixed test
+  leaves the list and the page in the same change.
 - `integration`: the `tests/*.rs` binaries (`nextest -p <package> --test
   '*'`) of each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs`
   whose trigger packages or paths changed (meerkat-runtime;
@@ -516,13 +601,17 @@ and its CI must be green before a release tag (`require_ci_green`):
   changed non-Rust input (`scripts/ci-non-rust-readers.json`, kept complete
   by `scripts/ci-non-rust-readers-guard.mjs` in `make ci-lanes-selftest`,
   which also fails a reader whose named test its features compile out).
-  Rows (`closure_test_rows` in `scripts/ci-cargo-lanes.mjs`) select the whole
-  workspace and name only their targets, so they compile the hook's own
-  units: every `tests/*.rs` target the hook builds (by name, `ci-integration`
-  profile, the fast selection), `e2e-fast`, and HeadCanonical with the
-  hook's own package-scoped command, all on the hook's 8 MiB test-thread
-  stack (the workspace floor of `.cargo/config.toml`). The lib tests get no
-  row: one
+  Core's rows (`closure_test_rows` in `scripts/ci-cargo-lanes.mjs`) select
+  Core's whole workspace (`--workspace` and an `--exclude` for every other
+  product's package, the hook's own selection) and name only their targets,
+  so they compile the hook's own units: every `tests/*.rs` target the hook
+  builds (by name, `ci-integration` profile, the fast selection),
+  `e2e-fast`, and HeadCanonical with the hook's own package-scoped command,
+  all on the hook's 8 MiB test-thread stack (the workspace floor of
+  `.cargo/config.toml`). A product's test binaries in scope run in rows of
+  its own that select exactly its packages (`-p` each: the product's own
+  workspace resolution), on its test stack. The lib tests get no
+  row: one Core
   `--workspace --lib` row (filtered to the scope's packages) is planned only
   with `--lib-row-runner LABEL`, for a runner that builds it in time (a
   hosted 4-vCPU runner needs about 64 min), and the plan otherwise records
@@ -534,21 +623,45 @@ and its CI must be green before a release tag (`require_ci_green`):
   group in `.config/nextest.toml`) has rows of its own, one
   `--partition count:K/N` per canary, so the canaries run on separate
   runners; the coverage check credits it only when every partition is
-  planned. The plan
+  planned. A test no hosted runner can run, in a binary whose other tests
+  do run (it needs an environment no CI lane provides: Connect's PTY
+  tests of `cli_paired_host` need an assembled synthetic resource prefix
+  that no workflow builds, so no lane runs them), is
+  listed by exact name with its reason in `HOSTED_RUNNER_EXCLUDED_TESTS` and
+  named in `hosted_runner_excluded_tests`: the row that holds its binary
+  leaves it out with the row's `filter`, and
+  `scripts/ci-verify-row-binaries.mjs` fails the row when a listed test is
+  still selected or its binary no longer has it. The planner refuses an
+  unknown package or target, an empty or repeated list, and a binary listed
+  both whole and by test. Such an exclusion routes a test away from a hosted
+  runner; it does not pass it, and the test's acceptance stays owed. The plan
   fails when `scripts/ci-hook-coverage.mjs` finds a hook binary in scope
   without a row (other than a lib binary the plan leaves to those unit
-  lanes; a pull-request plan is checked against its push's rows): it
+  lanes, and a binary no hosted runner can judge,
+  `HOSTED_RUNNER_EXCLUDED_BINARIES`, which the plan names with its reason in
+  `hosted_runner_excluded`: Meta's idle CPU gate, whose budget is calibrated
+  on real hardware; a pull-request plan is checked against its push's rows): it
   reads the hook's lanes from `scripts/pre-push-unit.sh`, binds every line
   of the executing step that names a row input, the exported test-thread
   stack, the selection, nextest or the binary check (so none can reassign
-  an input or the stack), and credits only whole-workspace rows.
+  an input or the stack), and credits a hook binary only to a row with
+  Core's selection and a product's test binary only to a row with that
+  product's selection; a bare `--workspace` row is refused.
 - `closure-check` (push only): `cargo check --all-features` (lib and bin
-  targets) over the reverse-dependency closure of the changed packages.
-- `rustdoc` (push only): `cargo doc --workspace --no-deps --keep-going`
-  with `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features
-  and `--all-features`), so a broken or private intra-doc link anywhere in
-  the workspace fails the push. It documents the whole workspace, so an
-  error that only `cargo doc -p <crate>` shows is outside it.
+  targets) over the reverse-dependency closure of the changed packages, one
+  job per product's part of it (`closure_check_rows`), the parts in parallel
+  and with the first wave.
+- `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
+  `RUSTDOCFLAGS=-Dwarnings` for each row of the plan's `rustdoc_rows`:
+  Core's members (`--workspace` excluding the products' packages) when the
+  plan reaches Core, in two parallel legs (default features and
+  `--all-features`), and each product's packages in the reverse-dependency
+  closure, `-p` each, with `--all-features` only, in rows of that product
+  (as few as hold no bin name twice: Cargo refuses to document two bins of
+  one name at once), so a Core change that breaks a product's link into a
+  Core item fails the push that makes it, and a broken or private
+  intra-doc link fails the push. Each row documents its packages together,
+  so an error that only `cargo doc -p <crate>` shows is outside it.
 - `governed-jsonl` and `mcp-confinement-positive` (push; a pull request
   runs a lane when it touches the lane's inputs, `GUARD_LANE_INPUTS` in
   `scripts/ci-cargo-lanes.mjs` (the files that define its selected cases,
@@ -578,9 +691,12 @@ and its CI must be green before a release tag (`require_ci_green`):
   `test-support` and surface variants) and the `$(CARGO) check` rows of
   `make test-minimal` and `make test-feature-matrix-lib`. Feature names are
   read from `BUILD.bazel` and the Makefile and validated against cargo
-  metadata, so a renamed feature fails the plan.
-- `wasm-check` (`make wasm-check`: wasm32 check and clippy of the web
-  runtime and the crates it links): every Rust-relevant push, and pull
+  metadata, so a renamed feature fails the plan. The widest Bazel
+  library/binary set of each Clippy chain head (`MOB_CHAIN_CLIPPY_HEADS`)
+  runs as a job of its own (`<head> widest set`) beside its shard's two.
+- `wasm-check` (`make wasm-check`: wasm32 Clippy of the web runtime and the
+  crates it links, which type-checks them too, so no separate `cargo check`
+  runs): every Rust-relevant push that reaches Core, and pull
   requests that change the web runtime or a workspace crate it compiles
   (its dependency closure in the cargo graph, the provider crates
   included), plan the whole workspace, or change the CLI web template.
@@ -593,16 +709,18 @@ and its CI must be green before a release tag (`require_ci_green`):
   runs only that `npm test` and leaves the wasm build, the browser suites
   and `wasm-timers` to the push (`example_web_wasm` false, named in
   `deferred_to_push`): the cold wasm build of the runtime's closure alone
-  took about 20 minutes. On a push or dispatch `example-web` gets 35 minutes,
-  `integration` and `mcp-confinement-positive` 50 (a pull request keeps 25,
-  30 and 40), and `feature-check` 60: caps sized from cold runs after a
-  meerkat-core change.
+  took about 20 minutes. On a push or dispatch `example-web` gets 50 minutes,
+  `integration` 70 and `mcp-confinement-positive` 50 (a pull request keeps
+  25, 30 and 40), `feature-check` 60, `closure-check` 90, `clippy` and
+  `closure-tests` 120 (a pull request's Clippy 60) and `main-unit` 150:
+  caps sized from cold runs after a meerkat-core change or a release
+  version bump, which recompiles every workspace crate.
 - `push: main` only (no budget): `main-unit` over the whole workspace (the
   unit lane's rows verbatim, then the rest of the workspace in packed
   shards), `sdk-host`, and the push-only lanes above.
 - Long rows first: `clippy`, `main-unit`, `closure-tests` and
   `feature-check` run in two waves (`<lane>` and `<lane>-rest`, a copy the
-  lanes self-test checks); rows measured at 8 minutes or more
+  lanes self-test checks); rows measured at 15 minutes or more
   (`scripts/ci-row-durations.json`, keyed by a row's name without a packed
   row's member count, so a repack keeps the measurement while the bin's
   heaviest member stays the same), or never measured, start first, and the
@@ -691,11 +809,11 @@ names per target must equal the workspace's minus the files and tests
 `ci/standalone-workspace-only.toml` declares workspace-only. A unit test that
 needs a crate the package cannot depend on (a cyclic or unpublished
 dev-dependency) is gated on its crate's internal `workspace-tests` feature,
-which only the crate's path-only self dev-dependency enables (`cargo package`
-strips it), and the Bazel generator fails a crate that declares the feature
-without that edge. Publication does not wait for the census yet: the release
-gate on a passing run at the release commit returns once a nightly run has
-passed and its duration is measured.
+which only the workspace's own test builds pass (the package's README command
+leaves it off), and the Bazel generator fails a crate that declares the
+feature when its test targets would build without it. Publication does not
+wait for the census yet: the release gate on a passing run at the release
+commit returns once a nightly run has passed and its duration is measured.
 
 The release tag path requires successful exact-main CI (schema-4 attestation;
 for a maintenance release, the same push CI on `release/<version>`, the
@@ -749,7 +867,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 | `publish_github_release` | Tags or manual asset recovery | The trailing publisher: after exact-commit CI (`require_ci_green`) and the full gate, downloads artifacts (a prebuild's once that run's full binary build gate passed, verified exactly like an `assets_run_id` recovery), adds the archives not yet on the release (never replacing one), then writes the complete `checksums.sha256` + `index.json` once (refusing to change a published one) |
 | `update_homebrew` | After the trailing publisher | Updates the Homebrew tap formula from the complete release's published checksums |
 | `publish_semver_baseline` / `attach_semver_baseline` | Tags or asset recovery, alongside publication | `publish_semver_baseline` generates rustdoc JSON for every publishable library crate on the release tag as soon as `require_ci_green` passes; `attach_semver_baseline` attaches it as `semver-rustdoc-<version>.tar.zst` once the GitHub release is published (add-only: a baseline already attached stays). It is the baseline the next release's semver gate compares against; no job waits for either |
-| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 46 Rust crates → crates.io by dependency level (concurrently within a level), Python SDK → PyPI, TypeScript SDK → npm; before the SDK packages build, it waits for the release's complete manifest (`scripts/release-await-binary-manifest`), verifies each `rkat-rpc` archive's build attestation and stamps the archive and binary digests into both (`scripts/release-stamp-sdk-binary-digests`), and each publish step refuses a package that does not pin them for its version |
+| `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 47 Rust crates → crates.io by dependency level (concurrently within a level), Python SDK → PyPI, TypeScript SDK → npm; before the SDK packages build, it waits for the release's complete manifest (`scripts/release-await-binary-manifest`), verifies each `rkat-rpc` archive's build attestation and stamps the archive and binary digests into both (`scripts/release-stamp-sdk-binary-digests`), and each publish step refuses a package that does not pin them for its version |
 | `publish_web_sdk` | Tags or manual package/Web recovery | After `require_ci_green`, `release_validate_gate` and `release_semver_gate` (both skipped only on Web-only recovery), the registry credential preflight and the build (or a found prebuild), checks the artifact's stamp against the release commit (and a reused artifact's source run), verifies a prebuild's package attestation and version, then publishes `@rkat/web` → npm |
 
 **Build matrix:**
@@ -815,7 +933,7 @@ duplicated is the authority; heavy lanes are CI's, below):
 - `scripts/test_release_stamp_sdk_binary_digests.py` (synthetic releases and a stubbed `gh`, no network; runs when the stamp, wait or SDK client files change: the SDK binary digest stamp writes nothing unless the release manifest is complete for the tag, every `rkat-rpc` archive is within the SDKs' 256 MiB cap, re-hashes to its entry, carries a build attestation from the release workflow and holds exactly one root binary, and both SDK packages carry the tag's version; `verify`, the publish steps' gate, refuses an unstamped, wrong-version, incomplete or different table; the committed digest modules are the unstamped rendering; `scripts/release-await-binary-manifest` fails at once on a failed publisher and counts a failed API call as not yet)
 - `scripts/test-gcp-buildbuddy-workflow-gate.sh` (plans nightly, release and `buildbuddy.yml` jobs with `MEERKAT_GCP_BUILDBUDDY_ENABLED` unset and `true`: unset starts nothing in GCP and tags validate on an exact-tree CI attestation that covers the Cargo validation lanes, with Cargo otherwise; `true` keeps the full-graph route)
 - `scripts/test-gcp-buildbuddy-hardening.sh` (stubbed `gcloud`/`bb`, no network: the self-hosted control plane renders authenticated, TLS-only, executor-authorized config and installs exactly it; `ensure` creates only IAP/executor allows behind an explicit deny, never edits or re-enables a firewall rule, and refuses open, legacy, disabled or drifted rules, VMs, disks and digest-less images; executors get per-secret IAM and gRPCS only; the wrapper never sends an API key to a non-TLS endpoint, and the self-hosted path never uses the BuildBuddy Cloud key)
-- The hook harness contracts: `scripts/test-pre-push-lane-retention.sh`, `scripts/test-pre-push-machines.sh`, `scripts/test-release-packaging-isolation.sh`, `scripts/test-ci-nextest-archive.sh` on every push, and the two slow ones only when a push changes what they exercise: `scripts/test-pre-push-dispatch.sh` (the dispatcher and the hook config) and `scripts/test-pre-push-unit-status.sh` (the deterministic gate, the release-projection and harness-only classifiers, and `scripts/test-pre-push-ratchets.sh`, which reads the CI planner, `ci.yml` and the agent gate)
+- The hook harness contracts: `scripts/test-pre-push-lane-retention.sh`, `scripts/test-pre-push-machines.sh`, `scripts/test-release-packaging-isolation.sh`, `scripts/test-ci-nextest-archive.sh` on every push, and the two slow ones only when a push changes what they exercise: `scripts/test-pre-push-dispatch.sh` (the dispatcher and the hook config) and `scripts/test-pre-push-unit-status.sh` (the deterministic gate, the release-projection and harness-only classifiers, and the CI planner's path collection and hook coverage for fixture commits)
 - `scripts/pre-push-prune-lanes.sh` (runs from the dispatcher only after a PASSED gate: keeps at most `MEERKAT_PRE_PUSH_KEEP_LANES` (default 2) `pre-push-<hash>` hook worktrees and Cargo target lanes per repo, never touching the current lane, a lane whose dispatcher lock is live, a lane referenced by any live process, a lane with any file activity inside `MEERKAT_PRE_PUSH_LANE_IDLE_SECS` (default 21600), or any non-lane name; logs one `kept:`/`pruned:` line per lane with its reason; `MEERKAT_PRE_PUSH_KEEP_LANES=all` disables it)
 
 **Manual** (`pre-commit run --hook-stage manual <id> --from-ref <base> --to-ref HEAD`):
@@ -823,7 +941,6 @@ the push stage ran these before 0.9.3, 68-116 minutes of every push on 2026-10-1
 and CI runs each of them before merge or on the push a release tag requires
 green, except the deterministic gate's lib tests under the workspace's unified
 features, which only nightly's workspace unit lane runs:
-- `changed-path-ratchets`: `scripts/pre-push-ratchets.sh` (the agent gate's changed-path ratchets: formal/governance targets, generated contract freshness, Web SDK tests, wasm check; no Clippy). CI: the `ratchets` job (generated contracts; drift on a machine-authority change), the `governance-gates` job (the typed governance gates on a machine-authority or dogma change), `example-web` and `wasm-check`, selected by the same paths; `scripts/test-pre-push-ratchets.sh` pins it (each ratchet's CI step and trigger included) and runs in `make ci-lanes-selftest`
 - `machine-codegen-drift` / `machine-codegen-verify`: `scripts/pre-push-machines.sh --codegen-only|--verify-only` (machine and protocol codegen under the clean-tree contract; the canonical TLC lane). CI: the `ratchets` job's `machine-check-drift`/`protocol-check-drift` and the `tlc-audits` shards on a machine-authority change; the `machine-verify --all` sweep nightly and on the release gate
 - `cargo-test`: `scripts/pre-push-unit.sh` (deterministic Cargo/nextest gate: when fresh execution is needed, runs workspace unit, integration-fast, HeadCanonical cold-restart, and `e2e-fast` lanes; serializes identical source evidence and retries a timed-out lane once. `MEERKAT_BUILDBUDDY` does not switch this hook's backend). CI: the pull request's unit lanes for the changed packages, the push's `main-unit` and `closure-tests` rows, nightly's workspace unit lane
 - `release-test-code-guards-contract`, `release-doctor-workflow-contract`, `release-find-prebuild-contract`, `release-standalone-gate-contract`, `macos-x86-release-binary-check-contract`, `release-sqlite-profile-check-contract`, `release-asset-provenance-contract`: CI's `Format + governance` job runs these on every pull request
@@ -845,8 +962,7 @@ After the gate, passed or failed, the dispatcher prints each hook's wall time
 and appends it to `.git/meerkat-hook-cache/timings.tsv`.
 
 **Manual local preflight**:
-- `pre-commit run --hook-stage manual agent-check-changed` (runs `scripts/agent-gate --staged`)
-- `scripts/test-changed-crates.sh`
+- `node scripts/affected-tests.mjs --run` (the tests the change affects, selected by the CI planner; without `--run` it prints the commands; see `docs/internal/onboarding.md`)
 
 **Avoid duplicate final qualification**:
 
@@ -854,7 +970,7 @@ Run the change-specific regression and required stress checks during development
 For a candidate proceeding through normal commit hooks, one normal push and its
 pull request, use that pull request's CI for overlapping final lint, governance
 and deterministic tests instead of prepending another standalone `make test` or
-`make agent-gate`. If no pull request will run, retain an appropriate standalone
+`node scripts/affected-tests.mjs --run`. If no pull request will run, retain an appropriate standalone
 gate before declaring the work qualified. This changes scheduling, not required
 coverage or hook behavior.
 
@@ -862,11 +978,10 @@ Only deduplicate an inventory actually covered by the selected push backend,
 paths, test targets and features. The push hook runs no Clippy, no ratchets
 and no tests: CI runs them before merge (the pull request's Clippy, unit,
 integration, ratchet and TLC lanes) or on the push to `main` (the
-`closure-tests` rows, `main-unit`, the closure and feature checks). The manual
-`changed-path-ratchets` hook runs
-`agent-gate --committed --ratchets-only --machine-drift-by-hook`; its path base is
-`CARGO_AGENT_BASE` or `origin/main` (then `main`/HEAD), which can differ from the
-dispatcher's remote-ref range. The manual deterministic lane covers workspace
+`closure-tests` rows, `main-unit`, the closure and feature checks).
+`scripts/affected-tests.mjs` diffs from `merge-base(origin/main, HEAD)` and adds
+uncommitted changes, which can differ from the dispatcher's remote-ref range.
+The manual deterministic lane covers workspace
 default-feature `kind(lib)` and `kind(test)` inventories,
 plus HeadCanonical `test-support` and `e2e-fast`. It does not prove package-only
 feature isolation, binary-target unit tests, required-feature targets absent
@@ -874,10 +989,10 @@ from that inventory, doctests, ignored/live/system lanes, platform checks or the
 feature matrix. Retain each distinct requirement; all-feature Clippy is not an
 all-feature test result. BuildBuddy-specific test requirements also stay distinct.
 
-`make agent-gate` additionally runs `docs-check` and the selected lane doctor;
-the push does not call that Make wrapper. Keep `docs-check` for changed docs or
-validator inputs and whenever applicable docs evidence is missing. Run the
-selected doctor for new or changed environments/lanes, or uncertain setup. Keep
+Run `make docs-check` for changed docs or validator inputs and whenever
+applicable docs evidence is missing. Run the lane doctor (`make rust-lane-doctor`,
+or `make buildbuddy-doctor` for BuildBuddy) for new or changed
+environments/lanes, or uncertain setup. Keep
 explicit task, CI and release validation requirements unchanged.
 
 Use the repository-installed hook and push one named destination branch from
@@ -1007,7 +1122,7 @@ After publication merge the tag into `main` by pull request; never set
 ### Dry-run Publishing
 
 ```bash
-make publish-dry-run              # Parallel dry-run for all 46 publishable Rust crates
+make publish-dry-run              # Parallel dry-run for all 47 publishable Rust crates
 make publish-dry-run-python       # Build + twine check (no upload)
 make publish-dry-run-typescript   # npm publish --dry-run
 make release-dry-run              # Full preflight + all registry dry-runs
@@ -1023,8 +1138,8 @@ Required GitHub Actions secrets for full release:
 
 ### Crate Publish Order
 
-The canonical publish order lives in `scripts/release-rust-crates.sh` (46 crates, dependency order):
-`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-sandbox` → `meerkat-authorization-contracts` → `meerkat-atif` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-authorization` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-copilot` → `meerkat-anthropic` → `meerkat-openai` → `meerkat-gemini` → `meerkat-providers` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
+The canonical publish order lives in `scripts/release-rust-crates.sh` (47 crates, dependency order):
+`meerkat-sqlite` → `meerkat-machine-derive` → `meerkat-machine-dsl-core` → `meerkat-agent-build-authority` → `meerkat-core` → `meerkat-sandbox` → `meerkat-authorization-contracts` → `meerkat-atif` → `meerkat-store-conformance` → `meerkat-models` → `meerkat-capabilities` → `meerkat-machine-dsl` → `meerkat-machine-schema` → `meerkat-machine-codegen` → `meerkat-authorization` → `meerkat-machine-kernels` → `meerkat-skills` → `meerkat-schedule` → `meerkat-jobs` → `meerkat-workgraph` → `meerkat-contracts` → `meerkat-store` → `meerkat-llm-core` → `meerkat-live` → `meerkat-auth-core` → `meerkat-memory` → `meerkat-mcp` → `meerkat-hooks` → `meerkat-comms` → `meerkat-runtime` → `meerkat-copilot` → `meerkat-anthropic` → `meerkat-openai` → `meerkat-gemini` → `meerkat-providers` → `meerkat-tools` → `meerkat-session` → `meerkat-client` → `meerkat` → `meerkat-mob` → `meerkat-mob-adaptive` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `meerkat-mcp-server` → `meerkat-rpc` → `meerkat-rest` → `rkat`
 
 Publication walks the dependency levels derived from this order and
 `cargo metadata` (`scripts/release-rust-crates.sh --levels`, computed by

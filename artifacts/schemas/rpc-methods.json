@@ -179,6 +179,24 @@
       "result_type": "InstructionActivationReadPage"
     },
     {
+      "description": "Record one session-owned operator instruction, applied at the session's next fresh run start",
+      "name": "session/set_instruction",
+      "params_type": "SetSessionInstructionParams",
+      "result_type": "SessionInstructionWriteResult"
+    },
+    {
+      "description": "Revoke one session-owned operator instruction at a higher revision",
+      "name": "session/revoke_instruction",
+      "params_type": "RevokeSessionInstructionParams",
+      "result_type": "SessionInstructionWriteResult"
+    },
+    {
+      "description": "Read a session's committed operator-instruction state without materializing it",
+      "name": "session/instruction_status",
+      "params_type": "SessionInstructionStatusParams",
+      "result_type": "SessionInstructionStatusResult"
+    },
+    {
       "description": "Read a retained immutable transcript revision body",
       "name": "session/transcript_revision",
       "params_type": "ReadSessionTranscriptRevisionParams",
@@ -219,6 +237,12 @@
       "name": "turn/stop_run",
       "params_type": "StopRunParams",
       "result_type": "StopRunResult"
+    },
+    {
+      "description": "Ask a live session's next compaction check to compact, without a rebuild",
+      "name": "session/compact",
+      "params_type": "CompactSessionParams",
+      "result_type": "CompactSessionResult"
     },
     {
       "description": "Read config",
@@ -374,6 +398,66 @@
       "name": "help/ask",
       "params_type": "HelpRequest",
       "result_type": "HelpResponse"
+    },
+    {
+      "description": "Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window",
+      "name": "tool_grants/grant",
+      "params_type": "GrantToolParams",
+      "result_type": "GrantToolResult"
+    },
+    {
+      "description": "Ask for a grant of a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server, which a person approves through a durable decision",
+      "name": "tool_grants/request",
+      "params_type": "RequestToolGrantParams",
+      "result_type": "RequestToolGrantResult"
+    },
+    {
+      "description": "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
+      "name": "tool_grants/revoke",
+      "params_type": "RevokeToolGrantParams",
+      "result_type": "RevokeToolGrantResult"
+    },
+    {
+      "description": "List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first",
+      "name": "tool_grants/list",
+      "params_type": "ListToolGrantsParams",
+      "result_type": "ListToolGrantsResult"
+    },
+    {
+      "description": "Read a page of the audit log of a session's or a mob member identity's scoped tool grants",
+      "name": "tool_grants/audit",
+      "params_type": "ToolGrantAuditParams",
+      "result_type": "ToolGrantAuditResult"
+    },
+    {
+      "description": "List a page of durable decisions, filtered by kind, phase, approver id or requester",
+      "name": "decision/list",
+      "params_type": "DecisionListParams",
+      "result_type": "DecisionListResult"
+    },
+    {
+      "description": "Get one durable decision, its expiry recorded when its deadline passed",
+      "name": "decision/get",
+      "params_type": "DecisionGetParams",
+      "result_type": "DecisionResult"
+    },
+    {
+      "description": "Get a durable decision's rendering and its canonical parts for a part size",
+      "name": "decision/rendering",
+      "params_type": "DecisionRenderingParams",
+      "result_type": "DecisionRenderingResult"
+    },
+    {
+      "description": "Record a host presenter's presentation of a durable decision's rendering",
+      "name": "decision/present",
+      "params_type": "DecisionPresentParams",
+      "result_type": "DecisionResult"
+    },
+    {
+      "description": "Withdraw an open durable decision as the host",
+      "name": "decision/withdraw",
+      "params_type": "DecisionWithdrawParams",
+      "result_type": "DecisionResult"
     },
     {
       "description": "Fetch raw blob payload metadata and bytes by blob id",
@@ -632,7 +716,7 @@
       "result_type": "MobCreateResult"
     },
     {
-      "description": "List active mobs",
+      "description": "List active mobs and the quarantined persisted mobs",
       "name": "mob/list",
       "result_type": "MobListResult"
     },
@@ -763,6 +847,24 @@
       "result_type": "MobAppendSystemContextResult"
     },
     {
+      "description": "Write one operator instruction for the members a target selects",
+      "name": "mob/set_instruction",
+      "params_type": "MobSetInstructionParams",
+      "result_type": "MobInstructionWriteResult"
+    },
+    {
+      "description": "Revoke one operator instruction of a mob at a higher revision",
+      "name": "mob/revoke_instruction",
+      "params_type": "MobRevokeInstructionParams",
+      "result_type": "MobInstructionWriteResult"
+    },
+    {
+      "description": "Read a mob's operator-instruction records and each member's delivery and slot state",
+      "name": "mob/instruction_status",
+      "params_type": "MobInstructionStatusParams",
+      "result_type": "MobInstructionStatusResult"
+    },
+    {
       "description": "List flows defined for a mob",
       "name": "mob/flows",
       "params_type": "MobIdParams",
@@ -811,6 +913,12 @@
       "result_type": "MobHelperResult"
     },
     {
+      "description": "Fork a member's session at a message boundary into a new member",
+      "name": "mob/fork_member",
+      "params_type": "MobForkMemberParams",
+      "result_type": "MobForkMemberResult"
+    },
+    {
       "description": "Force-cancel a mob member",
       "name": "mob/force_cancel",
       "params_type": "MobMemberParams",
@@ -845,6 +953,12 @@
       "name": "mob/rotate_supervisor",
       "params_type": "MobIdParams",
       "result_type": "MobRotateSupervisorResult"
+    },
+    {
+      "description": "Re-attempt the restore of a quarantined persisted mob, for example after a repair",
+      "name": "mob/restore_retry",
+      "params_type": "MobIdParams",
+      "result_type": "MobRestoreRetryResult"
     },
     {
       "description": "Bind a mob's member callback route to this connection with the mob's claim token",
@@ -990,6 +1104,12 @@
       "result_type": "MobStopMemberRunResult"
     },
     {
+      "description": "Ask a live mob member's next compaction check to compact, without a respawn",
+      "name": "mob/compact_member",
+      "params_type": "MobCompactMemberParams",
+      "result_type": "MobCompactMemberResult"
+    },
+    {
       "description": "Open a live realtime channel on a mob member by identity",
       "name": "mob/member_live_open",
       "params_type": "MobMemberLiveOpenParams",
@@ -1076,6 +1196,10 @@
     {
       "description": "One recorded R3 human consent transition (requested, approved, denied, used, withdrawn) of an approval this connection's approver decides",
       "name": "approval/consent_notice"
+    },
+    {
+      "description": "One durable decision this stdio connection presented to its operator, with the whole rendering: when the decision opened while the connection was open, or before the decision/list answer that caused it",
+      "name": "decision/notice"
     },
     {
       "description": "Opaque playback handle for one admitted assistant output (measured playback)",

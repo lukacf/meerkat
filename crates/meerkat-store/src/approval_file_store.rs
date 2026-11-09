@@ -44,6 +44,14 @@ struct ApprovalStoreFile {
 /// without a directory barrier the store refuses to open rather than claim
 /// durability. A failed first create can leave an empty store file, which
 /// holds no approval.
+///
+/// Privacy (Unix): the store creates every file owner-only (0600), which no
+/// process umask widens, for consumers that require private files. A commit
+/// creates its temporary file and its marker new, never reusing a leftover,
+/// so the store file its rename publishes is private, and a store file an
+/// older version left readable by others is replaced by a private one on
+/// the next commit. An existing lock file is tightened on its own inode,
+/// never replaced, since its holders lock that inode.
 #[derive(Debug)]
 pub struct FileApprovalStore {
     path: PathBuf,
@@ -97,6 +105,88 @@ impl Drop for StoreLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
+}
+
+/// Owner-only permission bits of every file the store creates (Unix).
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
+
+/// Open the lock sidecar, created owner-only on Unix whatever the umask.
+/// An existing lock file keeps the mode it was created with (an older
+/// version took the umask's), so it is tightened on the same inode: owners
+/// already holding the lock hold that inode, and a replacement would end
+/// their mutual exclusion with this store. The lock carries no data and
+/// its mutual exclusion does not depend on its mode, so a tightening the
+/// filesystem refuses (another user's lock file) fails open: the lock is
+/// used as it is and the store stays available.
+#[cfg(unix)]
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(PRIVATE_MODE)
+        .open(path)?;
+    if let Err(error) = make_private_in_place(&lock) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "approval file store lock file keeps group or other permissions"
+        );
+    }
+    Ok(lock)
+}
+
+/// Open the lock sidecar, as the platform creates files.
+#[cfg(not(unix))]
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
+/// Make an open file owner-only, on its own inode, when it grants group or
+/// other any permission.
+#[cfg(unix)]
+fn make_private_in_place(file: &File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if file.metadata()?.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_MODE))?;
+    }
+    Ok(())
+}
+
+/// Create a file of one commit (its temporary file or its marker) new and
+/// owner-only on Unix whatever the umask. A leftover of an earlier commit
+/// (a crash, a failed commit, or an older version) would keep its own mode
+/// and links if it were reopened, so it is removed first and the file is
+/// created exclusively: what the rename publishes is always this commit's
+/// own private file. Callers hold the exclusive store lock, so no reader
+/// observes the name in between.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_MODE)
+        .open(path)
+}
+
+/// Create a file of one commit, as the platform creates files.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<File> {
+    File::create(path)
 }
 
 impl FileApprovalStore {
@@ -259,13 +349,7 @@ impl FileApprovalStore {
     }
 
     fn lock_file(&self) -> Result<File, ApprovalStoreError> {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock_path)
-            .map_err(io_error)
+        open_lock_file(&self.lock_path).map_err(io_error)
     }
 
     /// Take the commit lock without waiting: another owner holding it is
@@ -323,14 +407,14 @@ impl FileApprovalStore {
         let tmp = self.path.with_extension("json.tmp");
         // Before the rename nothing is committed: a failed write or fsync of
         // the temporary file leaves the store unchanged.
-        let mut written = File::create(&tmp).map_err(io_error)?;
+        let mut written = create_private(&tmp).map_err(io_error)?;
         written.write_all(&bytes).map_err(io_error)?;
         self.sync.sync_file(&written).map_err(io_error)?;
         drop(written);
         // Mark the window in which the replacement may be visible but not
         // durable. Other instances and processes honour the marker; a crash
         // in the window is covered by the barrier every open runs.
-        File::create(&self.marker_path).map_err(io_error)?;
+        create_private(&self.marker_path).map_err(io_error)?;
         std::fs::rename(&tmp, &self.path).map_err(|error| {
             ApprovalStoreError::CommitUnknown(format!("approval file store rename: {error}"))
         })?;
@@ -625,6 +709,10 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         impl WorkAuthorization for SharedWork {
@@ -764,7 +852,7 @@ mod tests {
                         approvals.clone(),
                         std::time::Duration::from_secs(30),
                     )
-                    .with_human_consent(route.clone(), std::time::Duration::from_secs(4 * 60 * 60)),
+                    .with_human_consent(route.clone(), std::time::Duration::from_hours(4)),
                 );
                 let context = ToolDispatchContext::default()
                     .with_work_authorization(Some(WorkAuthorizationContext::new(
@@ -801,7 +889,7 @@ mod tests {
                         meerkat_core::ToolDeadlineChain::new(vec![
                             meerkat_core::ToolDeadlineContributor::finite(
                                 meerkat_core::ToolDeadlineOwner::DirectCaller,
-                                std::time::Duration::from_secs(600),
+                                std::time::Duration::from_mins(10),
                             ),
                         ])
                         .expect("finite caller deadline"),
@@ -1586,5 +1674,345 @@ mod tests {
             Some(record.clone())
         );
         assert_eq!(reader.load_all().expect("locked read"), vec![record]);
+    }
+
+    /// The store's files are owner-only on Unix whatever the process umask,
+    /// as a consumer that requires private files checks them.
+    #[cfg(unix)]
+    mod private_modes {
+        use super::*;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        /// The umasks every scenario runs under: the common default, a
+        /// shared-group default, and the private one.
+        const UMASKS: [&str; 3] = ["022", "002", "077"];
+        /// Set to its umask in the child process a scenario runs in.
+        const UMASK_CHILD: &str = "MEERKAT_STORE_TEST_UMASK_CHILD";
+        /// Printed by that child, with its umask, once the scenario passed.
+        const UMASK_CHILD_DONE: &str = "approval file store scenario passed under umask";
+
+        /// Run `scenario`, the body of this module's test `test`, under each
+        /// of `UMASKS`. The umask is process-wide, so the shared test process
+        /// never changes it: each run is a child process of this test binary,
+        /// started by a shell that sets the umask before exec, that runs
+        /// `test` alone.
+        fn under_each_umask(test: &str, scenario: impl FnOnce()) {
+            if let Some(umask) = std::env::var_os(UMASK_CHILD) {
+                scenario();
+                println!("\n{UMASK_CHILD_DONE} {}", umask.to_string_lossy());
+                return;
+            }
+            let binary = std::env::current_exe().expect("the test binary");
+            let (_, module) = module_path!()
+                .split_once("::")
+                .expect("a module path within the crate");
+            let test_path = format!("{module}::{test}");
+            for umask in UMASKS {
+                #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+                let output = std::process::Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "umask \"$1\" && shift && exec \"$@\"",
+                        "approval-store-umask",
+                        umask,
+                    ])
+                    .arg(binary.as_os_str())
+                    .args([
+                        "--exact",
+                        test_path.as_str(),
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(UMASK_CHILD, umask)
+                    .output()
+                    .expect("start the test under a umask");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let done = format!("{UMASK_CHILD_DONE} {umask}");
+                assert!(
+                    output.status.success() && stdout.contains(done.as_str()),
+                    "{test} failed under umask {umask} ({}):\n{stdout}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        /// The check of a consumer that requires private files: a regular
+        /// file with one link, owned by the user the test runs as (the owner
+        /// of the directory it created), with no group or other permission
+        /// bits.
+        fn assert_private(path: &Path) {
+            let metadata = std::fs::symlink_metadata(path).expect("file metadata");
+            assert_eq!(
+                metadata.permissions().mode() & 0o077,
+                0,
+                "{} is private (mode {:o})",
+                path.display(),
+                metadata.permissions().mode() & 0o777
+            );
+            let directory = path.parent().expect("the file's directory");
+            let owner = std::fs::metadata(directory)
+                .expect("directory metadata")
+                .uid();
+            assert!(
+                metadata.is_file() && metadata.nlink() == 1 && metadata.uid() == owner,
+                "{} is a regular file with one link, owned by the test's user: {metadata:?}",
+                path.display()
+            );
+        }
+
+        /// The permission bits of `path`.
+        fn mode_bits(path: &Path) -> u32 {
+            std::fs::metadata(path)
+                .expect("file metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        /// Give `path` the permission bits `mode`, as an older version under
+        /// a permissive umask left them.
+        fn set_mode(path: &Path, mode: u32) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .expect("set the file's mode");
+        }
+
+        /// The inode `path` names.
+        fn inode(path: &Path) -> (u64, u64) {
+            let metadata = std::fs::metadata(path).expect("file metadata");
+            (metadata.dev(), metadata.ino())
+        }
+
+        /// The sidecar `suffix` of the store at `path`, named as the store
+        /// names it.
+        fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        }
+
+        /// Barriers whose directory sync of `dir` fails: a commit there
+        /// ends unknown after its rename and keeps its marker.
+        fn failing_dir_sync(dir: &Path) -> Arc<CountedSync> {
+            let sync = Arc::new(CountedSync::default());
+            *sync.fail_dir_path.lock().expect("failing directory") = Some(dir.to_path_buf());
+            sync
+        }
+
+        /// A new store is private under any umask: the store file and the
+        /// lock file it creates, and the marker of a creation whose commit
+        /// ends unknown.
+        #[test]
+        fn a_new_store_is_private_under_any_umask() {
+            under_each_umask("a_new_store_is_private_under_any_umask", || {
+                let temp = tempfile::tempdir().expect("tempdir");
+                let path = temp.path().join("approvals.json");
+                FileApprovalStore::open(&path).expect("open approval store");
+                assert_private(&path);
+                assert_private(&sidecar(&path, ".lock"));
+
+                let unknown = temp.path().join("unknown.json");
+                assert!(matches!(
+                    FileApprovalStore::open_with_sync(
+                        unknown.clone(),
+                        failing_dir_sync(temp.path())
+                    ),
+                    Err(ApprovalStoreError::CommitUnknown(_))
+                ));
+                assert_private(&unknown);
+                assert_private(&sidecar(&unknown, ".unsynced"));
+                assert_private(&sidecar(&unknown, ".lock"));
+            });
+        }
+
+        /// A commit makes the store file private under any umask, also over
+        /// a store file an older version left readable by others: the rename
+        /// publishes the commit's own private temporary file.
+        #[test]
+        fn a_commit_makes_the_store_file_private_under_any_umask() {
+            under_each_umask(
+                "a_commit_makes_the_store_file_private_under_any_umask",
+                || {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let path = temp.path().join("approvals.json");
+                    // A store file an older version wrote under the common umask.
+                    let older = serde_json::to_vec_pretty(&ApprovalStoreFile::default())
+                        .expect("serialize approvals");
+                    std::fs::write(&path, older).expect("older store file");
+                    set_mode(&path, 0o644);
+                    let store = FileApprovalStore::open(&path).expect("open approval store");
+                    let service = ApprovalService::new();
+                    let first = service.request(request()).expect("request approval");
+                    store
+                        .put_if_current(None, &first)
+                        .expect("commit over the older file");
+                    assert_private(&path);
+                    let second = service.request(request()).expect("request approval");
+                    store
+                        .put_if_current(None, &second)
+                        .expect("commit over the private file");
+                    assert_private(&path);
+                    assert_eq!(store.load_all().expect("rows").len(), 2);
+                },
+            );
+        }
+
+        /// A reopened store stays private under any umask, and its commits
+        /// keep the lock file the first open created.
+        #[test]
+        fn a_reopened_store_stays_private_under_any_umask() {
+            under_each_umask("a_reopened_store_stays_private_under_any_umask", || {
+                let temp = tempfile::tempdir().expect("tempdir");
+                let path = temp.path().join("approvals.json");
+                let lock = sidecar(&path, ".lock");
+                let pending = ApprovalService::new()
+                    .request(request())
+                    .expect("request approval");
+                FileApprovalStore::open(&path)
+                    .expect("first open")
+                    .put_if_current(None, &pending)
+                    .expect("commit");
+                let lock_inode = inode(&lock);
+
+                let reopened = FileApprovalStore::open(&path).expect("reopen");
+                assert_private(&path);
+                assert_private(&lock);
+                let mut decided = pending.clone();
+                decided.status = meerkat_core::ApprovalStatus::Denied;
+                reopened
+                    .put_if_current(Some(&pending), &decided)
+                    .expect("commit after the reopen");
+                assert_private(&path);
+                assert_eq!(inode(&lock), lock_inode, "the lock file is never replaced");
+                assert_eq!(reopened.load_all().expect("rows"), vec![decided]);
+            });
+        }
+
+        /// Leftovers readable and writable by everyone never make the store
+        /// permissive, under any umask: the temporary file, marker and lock
+        /// file of a crashed creation before the store opens, and before a
+        /// commit a marker and a temporary file linked to another file. A
+        /// commit publishes a temporary file it created new, never a
+        /// leftover, and the lock file is tightened on its own inode.
+        #[test]
+        fn leftover_files_never_make_the_store_permissive_under_any_umask() {
+            under_each_umask(
+                "leftover_files_never_make_the_store_permissive_under_any_umask",
+                || {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let path = temp.path().join("approvals.json");
+                    let tmp = path.with_extension("json.tmp");
+                    let marker = sidecar(&path, ".unsynced");
+                    let lock = sidecar(&path, ".lock");
+                    for leftover in [&tmp, &marker, &lock] {
+                        std::fs::write(leftover, b"leftover").expect("leftover file");
+                        set_mode(leftover, 0o666);
+                    }
+                    let lock_inode = inode(&lock);
+
+                    // The creation commit ends unknown, so its marker stays.
+                    assert!(matches!(
+                        FileApprovalStore::open_with_sync(
+                            path.clone(),
+                            failing_dir_sync(temp.path())
+                        ),
+                        Err(ApprovalStoreError::CommitUnknown(_))
+                    ));
+                    assert_private(&path);
+                    assert_private(&marker);
+                    assert_private(&lock);
+                    assert_eq!(
+                        inode(&lock),
+                        lock_inode,
+                        "tightened in place, never replaced"
+                    );
+
+                    // The next open's barrier settles the creation. A commit
+                    // then finds a marker, and a temporary file that is a link
+                    // to another file.
+                    let store = FileApprovalStore::open(&path).expect("open approval store");
+                    let other = temp.path().join("other");
+                    std::fs::write(&other, b"other").expect("other file");
+                    set_mode(&other, 0o666);
+                    std::fs::hard_link(&other, &tmp).expect("leftover linked to the other file");
+                    std::fs::write(&marker, b"leftover").expect("leftover marker");
+                    set_mode(&marker, 0o666);
+                    let record = ApprovalService::new()
+                        .request(request())
+                        .expect("request approval");
+                    store.put_if_current(None, &record).expect("commit");
+                    assert_private(&path);
+                    assert_eq!(
+                        (
+                            std::fs::read(&other).expect("other file"),
+                            mode_bits(&other)
+                        ),
+                        (b"other".to_vec(), 0o666),
+                        "the other file is untouched"
+                    );
+                    assert_eq!(inode(&lock), lock_inode);
+                    assert_eq!(store.load_all().expect("rows"), vec![record]);
+                },
+            );
+        }
+
+        /// A lock file another owner holds is tightened on its own inode,
+        /// never replaced, under any umask: the holder and the store share
+        /// one commit domain across an open, a commit and a reopen.
+        #[test]
+        fn a_held_lock_file_is_tightened_in_place_under_any_umask() {
+            under_each_umask(
+                "a_held_lock_file_is_tightened_in_place_under_any_umask",
+                || {
+                    let temp = tempfile::tempdir().expect("tempdir");
+                    let path = temp.path().join("approvals.json");
+                    let lock = sidecar(&path, ".lock");
+                    // An older version's owner created the lock file readable and
+                    // writable by everyone, and holds it open.
+                    let holder = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(&lock)
+                        .expect("the other owner's lock file");
+                    set_mode(&lock, 0o666);
+                    let lock_inode = inode(&lock);
+
+                    let store = FileApprovalStore::open(&path).expect("open approval store");
+                    assert_private(&lock);
+                    assert_eq!(inode(&lock), lock_inode, "the held inode, never replaced");
+                    assert_eq!(
+                        holder
+                            .metadata()
+                            .expect("held lock metadata")
+                            .permissions()
+                            .mode()
+                            & 0o077,
+                        0,
+                        "the holder's own inode is the tightened one"
+                    );
+
+                    let record = ApprovalService::new()
+                        .request(request())
+                        .expect("request approval");
+                    holder
+                        .try_lock()
+                        .expect("the other owner takes the commit lock");
+                    assert_eq!(
+                        store.put_if_current(None, &record),
+                        Err(ApprovalStoreError::Contended),
+                        "the holder's lock still excludes the store's commit"
+                    );
+                    holder.unlock().expect("release");
+                    store.put_if_current(None, &record).expect("commit");
+                    drop(store);
+                    FileApprovalStore::open(&path).expect("reopen");
+                    assert_eq!(inode(&lock), lock_inode, "a reopen keeps the inode");
+                    assert_private(&lock);
+                    assert_private(&path);
+                },
+            );
+        }
     }
 }

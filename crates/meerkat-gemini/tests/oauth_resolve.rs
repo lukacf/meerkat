@@ -100,6 +100,7 @@ fn code_assist_realm_no_refresh() -> RealmConnectionSet {
             default_binding: Some("default_code_assist".into()),
             parent: None,
             connector_client: Default::default(),
+            copilot: None,
         },
     )
     .unwrap()
@@ -152,6 +153,7 @@ fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectio
             default_binding: Some("default_code_assist".into()),
             parent: None,
             connector_client: Default::default(),
+            copilot: None,
         },
     )
     .unwrap()
@@ -236,7 +238,7 @@ impl RefreshCoordinator for StaticRefreshCoordinator {
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
-        mutation_fn().await
+        mutation_fn(meerkat_core::AdmissionGuard::none()).await
     }
 
     async fn with_refresh(
@@ -259,7 +261,7 @@ impl RefreshCoordinator for FailingRefreshCoordinator {
         _key: TokenKey,
         mutation_fn: CredentialMutationFn,
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
-        mutation_fn().await
+        mutation_fn(meerkat_core::AdmissionGuard::none()).await
     }
 
     async fn with_refresh(
@@ -295,6 +297,7 @@ async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
     let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&persisted);
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
             &marked,
         )
@@ -319,6 +322,7 @@ async fn google_oauth_rejects_token_without_auth_lifecycle() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
             &persisted_google_oauth("stale-google-access"),
         )
@@ -352,6 +356,7 @@ async fn google_oauth_reauth_required_is_typed() {
     let (marked, _) = marked_tokens_with_valid_auth_lease_handle(&persisted);
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
             &marked,
         )
@@ -384,6 +389,7 @@ async fn google_oauth_rejects_wrong_persisted_mode() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
             &PersistedTokens {
                 auth_mode: PersistedAuthMode::ApiKey,
@@ -428,6 +434,7 @@ async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
             &persisted_google_oauth("fresh-google-access"),
         )
@@ -472,7 +479,10 @@ async fn google_oauth_expired_authmachine_lease_refreshes_through_provider_runti
     expired.expires_at = Some(old_expiry);
     expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
     let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&expired);
-    store.save(&key, &marked).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .unwrap();
     let mut refreshed = persisted_google_oauth("refreshed-google-access");
     refreshed.refresh_token = Some("rotated-google-refresh".into());
 
@@ -511,7 +521,10 @@ async fn google_oauth_refresh_failure_is_typed() {
     expired.expires_at = Some(old_expiry);
     expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
     let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&expired);
-    store.save(&key, &marked).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .unwrap();
 
     let env = ResolverEnvironment::testing()
         .with_provider_auth_persistence(ProviderAuthPersistence::new(
@@ -539,13 +552,89 @@ async fn google_oauth_refresh_failure_is_typed() {
     }
 }
 
+/// Resolve the Code Assist OAuth binding over an expired token whose
+/// refresh fails with `error`.
+async fn resolve_after_refresh_failure(
+    error: RefreshError,
+) -> meerkat_llm_core::provider_runtime::ProviderAuthError {
+    let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
+    let store = Arc::new(EphemeralTokenStore::new());
+    let mut expired = persisted_google_oauth("expired-google-access");
+    expired.expires_at = Some(Utc::now() - ChronoDuration::minutes(5));
+    expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
+    let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&expired);
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .unwrap();
+    let env = ResolverEnvironment::testing()
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store,
+            Arc::new(FailingRefreshCoordinator { error }),
+        ))
+        .with_auth_lease_handle(auth_lease_handle);
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    registry
+        .resolve(&code_assist_realm(), &default_auth_binding(), &env)
+        .await
+        .unwrap_err()
+}
+
+/// AuthMachine's verdict on a refresh failure reaches the resolution: a
+/// failure that clears on its own (the token endpoint is down or busy)
+/// answers `source_unavailable`, one that needs a new sign-in
+/// `user_reauth_required`. The runtime reads the verdict and never
+/// classifies the provider's answer itself: an unclassified failure stays
+/// `refresh_failed` (above).
+#[tokio::test]
+async fn google_oauth_refresh_verdict_reaches_the_resolution() {
+    let transient = resolve_after_refresh_failure(RefreshError::Classified {
+        message: "token endpoint answered 503".into(),
+        observation: meerkat_core::RefreshFailureObservation::http_status(503),
+        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+    })
+    .await;
+    match transient {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::SourceUnavailable { reason },
+        ) => assert!(
+            reason.contains("token endpoint answered 503"),
+            "got {reason}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+
+    let permanent = resolve_after_refresh_failure(RefreshError::Classified {
+        message: "token endpoint refused the refresh token".into(),
+        observation: meerkat_core::RefreshFailureObservation::oauth_token_endpoint(
+            400,
+            Some("invalid_grant".into()),
+        ),
+        disposition: meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
+    })
+    .await;
+    assert!(
+        matches!(
+            permanent,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::UserReauthRequired
+            )
+        ),
+        "got {permanent:?}"
+    );
+}
+
 #[tokio::test]
 async fn google_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() {
     let key = TokenKey::parse("dev", "default_code_assist").expect("valid slugs");
     let store = Arc::new(EphemeralTokenStore::new());
     let fresh = persisted_google_oauth("fresh-google-access");
     let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&fresh);
-    store.save(&key, &marked).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .unwrap();
     let mut refreshed = persisted_google_oauth("forced-google-access");
     refreshed.refresh_token = Some("forced-google-refresh".into());
 
@@ -584,7 +673,10 @@ async fn google_oauth_force_refresh_with_refresh_disallowed_errors_refresh_requi
     let store = Arc::new(EphemeralTokenStore::new());
     let fresh = persisted_google_oauth("fresh-google-access");
     let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&fresh);
-    store.save(&key, &marked).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .unwrap();
 
     let env = ResolverEnvironment::testing()
         .with_provider_auth_persistence(in_memory_persistence(store))

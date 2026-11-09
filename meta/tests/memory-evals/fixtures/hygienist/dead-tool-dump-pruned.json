@@ -1,0 +1,26 @@
+{
+  "name": "dead-tool-dump-pruned",
+  "transcript": [
+    {"role": "user", "text": "check whether the release workflow passed"},
+    {"role": "assistant_tool_call", "tool_use_id": "call-1"},
+    {"role": "tool_results", "tool_use_id": "call-1", "text": "run 4123: 3400 lines of raw workflow log output, all steps green, artifact uploads listed one per line, timing tables, runner diagnostics"},
+    {"role": "assistant", "text": "The release workflow passed. Decision: we ship 0.7.19 as-is; rationale: all gates green including publish dry-run."},
+    {"role": "user", "text": "great, proceed"}
+  ],
+  "span_references": [],
+  "sequenced_after_harvest": true,
+  "scripted_reply": {
+    "ops": [
+      {"op": "prune_tool_results", "range": [2, 3], "rationale": "raw workflow log already summarized and acted on"}
+    ]
+  },
+  "expected": {
+    "validator": "ok",
+    "ops": {"prune_tool_results": 1},
+    "live": {
+      "must_not_touch": [3],
+      "may_prune": [2]
+    }
+  },
+  "notes": "The §8.6 primary target: a dead tool dump prunes while the assistant's decision message [3] (ship 0.7.19 + rationale) must survive. Live mode checks the model prunes [2] and never touches [3]."
+}

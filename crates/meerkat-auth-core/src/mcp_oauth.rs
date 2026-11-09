@@ -75,18 +75,18 @@ pub const MCP_OAUTH_STAGE_BOUND: Duration = Duration::from_secs(20);
 
 /// Default bound of a start's network stages together (resource and
 /// authorization-server discovery, account preflight, client registration).
-pub const MCP_OAUTH_START_BOUND: Duration = Duration::from_secs(60);
+pub const MCP_OAUTH_START_BOUND: Duration = Duration::from_mins(1);
 
 /// Default bound of a completion's network stages together (issuer metadata,
 /// token exchange, account evidence). It never extends past the attempt's own
 /// validity: a result after that would be refused anyway.
-pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_secs(60);
+pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_mins(1);
 
 /// Default time a completion observes its credential commit before the flow
 /// owner decides which side of the attempt's consume the commit is on. Longer
 /// than a refresh holds the credential (two stages), so a login queued behind
 /// a stalled refresh lands once that refresh has failed.
-pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_secs(60);
+pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_mins(1);
 
 /// One network stage of an MCP OAuth start or completion, as named by
 /// [`McpOAuthError::NetworkTimedOut`].
@@ -137,7 +137,7 @@ impl std::fmt::Display for McpOAuthNetworkStage {
 /// `Duration::MAX` to mean "no bound") saturates to a deadline about 30 years
 /// out instead of panicking, as `tokio::time::timeout` does.
 fn deadline_after(bound: Duration) -> tokio::time::Instant {
-    const FAR_FUTURE: Duration = Duration::from_secs(86_400 * 365 * 30);
+    const FAR_FUTURE: Duration = Duration::from_hours(262800);
     let now = tokio::time::Instant::now();
     now.checked_add(bound).unwrap_or_else(|| now + FAR_FUTURE)
 }
@@ -2082,6 +2082,19 @@ impl McpOAuthAuthority {
         target.scoped_to(self.realm.as_ref())
     }
 
+    /// The publication of the credential this authority's lease for
+    /// `target` holds now, read from the lease alone: no credential is
+    /// loaded, resolved or refreshed and nothing is sent. `None` when the
+    /// lease holds none, or `target` has no lease here.
+    pub fn credential_publication(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        let lease = self.scoped(target).ok()?.lease_key().ok()?;
+        let snapshot = self.auth_lease.snapshot(&lease);
+        meerkat_core::handles::CredentialLeasePublication::of(lease, &snapshot)
+    }
+
     /// The default HTTP client follows no redirects: metadata, client
     /// registration and token requests go only to validated endpoints.
     pub fn new(
@@ -2325,10 +2338,11 @@ impl McpOAuthAuthority {
                     .refresh_coordinator()
                     .with_refresh(
                         key,
-                        Box::new(move || {
+                        Box::new(move |admission| {
                             Box::pin(async move {
                                 authority
                                     .refresh_stored_credential_under_coordinator(
+                                        &admission,
                                         &refresh_target,
                                         &refresh_key,
                                     )
@@ -3761,6 +3775,7 @@ impl McpOAuthAuthority {
     /// instead of issuing a second refresh or overwriting that result.
     async fn refresh_stored_credential_under_coordinator(
         &self,
+        admission: &meerkat_core::AdmissionGuard,
         target: &McpServerIdentity,
         key: &TokenKey,
     ) -> Result<PersistedTokens, RefreshError> {
@@ -3786,6 +3801,7 @@ impl McpOAuthAuthority {
                 )
             })?;
         if crate::resolver::normalize_interrupted_refresh_under_coordinator(
+            admission,
             self.token_store().as_ref(),
             &self.auth_lease,
             key,
@@ -3855,7 +3871,7 @@ impl McpOAuthAuthority {
         let Some(refresh_token) = admitted.tokens.refresh_token.clone() else {
             let observation = meerkat_core::RefreshFailureObservation::local_credential_unusable();
             let disposition = self
-                .close_refresh_failure(key, &lease_key, &observation)
+                .close_refresh_failure(admission, key, &lease_key, &observation)
                 .await?;
             return Err(RefreshError::Classified {
                 message: "stored MCP OAuth credential has no refresh token".to_string(),
@@ -3891,7 +3907,7 @@ impl McpOAuthAuthority {
                     let observation =
                         meerkat_core::RefreshFailureObservation::local_credential_unusable();
                     let disposition = self
-                        .close_refresh_failure(key, &lease_key, &observation)
+                        .close_refresh_failure(admission, key, &lease_key, &observation)
                         .await?;
                     return Err(RefreshError::Classified {
                         message: "the client profile the stored MCP OAuth credential was minted under is not installed; log in again".to_string(),
@@ -3901,7 +3917,7 @@ impl McpOAuthAuthority {
                 }
                 Err(error) => {
                     let observation = meerkat_core::RefreshFailureObservation::transient();
-                    self.close_refresh_failure(key, &lease_key, &observation)
+                    self.close_refresh_failure(admission, key, &lease_key, &observation)
                         .await?;
                     return Err(refresh_error_from_mcp(error));
                 }
@@ -3921,7 +3937,7 @@ impl McpOAuthAuthority {
         {
             let observation = meerkat_core::RefreshFailureObservation::local_credential_unusable();
             let disposition = self
-                .close_refresh_failure(key, &lease_key, &observation)
+                .close_refresh_failure(admission, key, &lease_key, &observation)
                 .await?;
             return Err(RefreshError::Classified {
                 message: "the stored MCP OAuth token endpoint does not use https under the client's https issuer; log in again".to_string(),
@@ -4032,7 +4048,7 @@ impl McpOAuthAuthority {
                 }
                 let observation = oauth_refresh_observation(&error);
                 let disposition = self
-                    .close_refresh_failure(key, &lease_key, &observation)
+                    .close_refresh_failure(admission, key, &lease_key, &observation)
                     .await?;
                 // A local egress refusal closes as a transient failure (it
                 // never invalidates the credential) and stays typed for every
@@ -4159,6 +4175,7 @@ impl McpOAuthAuthority {
             Err(error) => {
                 return Err(self
                     .rollback_refresh_publication(
+                        admission,
                         key,
                         &lease_key,
                         &admitted.tokens,
@@ -4172,7 +4189,7 @@ impl McpOAuthAuthority {
         };
         if let Err(error) = self
             .token_store()
-            .save_for(key, &published, TokenStoreAccess::Unattended)
+            .save_for(admission, key, &published, TokenStoreAccess::Unattended)
             .await
         {
             let cause = match error.credential_access() {
@@ -4183,6 +4200,7 @@ impl McpOAuthAuthority {
             };
             return Err(self
                 .rollback_refresh_publication(
+                    admission,
                     key,
                     &lease_key,
                     &admitted.tokens,
@@ -4271,6 +4289,7 @@ impl McpOAuthAuthority {
     /// cannot resurrect and retry bytes that the token endpoint rejected.
     async fn close_refresh_failure(
         &self,
+        admission: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         lease_key: &LeaseKey,
         observation: &meerkat_core::RefreshFailureObservation,
@@ -4286,7 +4305,7 @@ impl McpOAuthAuthority {
             // closes the in-memory Refreshing phase without a cancellation gap.
             if let Err(error) = self
                 .token_store()
-                .clear_for(key, TokenStoreAccess::Unattended)
+                .clear_for(admission, key, TokenStoreAccess::Unattended)
                 .await
             {
                 let closure = self
@@ -4331,6 +4350,7 @@ impl McpOAuthAuthority {
 
     async fn rollback_refresh_publication(
         &self,
+        admission: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         lease_key: &LeaseKey,
         previous_tokens: &PersistedTokens,
@@ -4358,7 +4378,12 @@ impl McpOAuthAuthority {
         }
         if let Err(error) = self
             .token_store()
-            .save_for(key, &restored_tokens, TokenStoreAccess::Unattended)
+            .save_for(
+                admission,
+                key,
+                &restored_tokens,
+                TokenStoreAccess::Unattended,
+            )
             .await
         {
             rollback_errors.push(format!("TokenStore restore failed: {error}"));
@@ -5495,6 +5520,19 @@ fn map_coordinated_login_error(
         CredentialMutationError::CredentialAccess { refusal, detail } => {
             McpOAuthError::CredentialAccess { refusal, detail }
         }
+        // The credential fence is held, or could not be taken: the commit
+        // did not start and wrote nothing. A typed refusal, retryable once
+        // the hold ends.
+        CredentialMutationError::AdmissionInProgress => McpOAuthError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Pending,
+            detail: CredentialMutationError::AdmissionInProgress.to_string(),
+        },
+        CredentialMutationError::AdmissionFenceUnavailable(detail) => {
+            McpOAuthError::CredentialAccess {
+                refusal: meerkat_core::auth::TokenStoreRefusal::Unavailable,
+                detail,
+            }
+        }
         // The commit failed after it consumed the attempt and could not
         // restore the previous credential and lifecycle: what is stored is
         // known only from a read of the stored credential.
@@ -5665,6 +5703,16 @@ fn map_coordinated_refresh_error(target: &McpServerIdentity, error: RefreshError
         // The credential store refused access: not a refresh failure.
         RefreshError::CredentialAccess { refusal, detail } => McpOAuthError::CredentialAccess {
             refusal: *refusal,
+            detail: detail.clone(),
+        },
+        // The credential fence is held, or could not be taken: the refresh
+        // did not start, sent no token request and wrote nothing.
+        RefreshError::AdmissionInProgress => McpOAuthError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Pending,
+            detail: error.to_string(),
+        },
+        RefreshError::AdmissionFenceUnavailable(detail) => McpOAuthError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Unavailable,
             detail: detail.clone(),
         },
     }
@@ -6590,6 +6638,7 @@ mod tests {
 
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
@@ -6602,11 +6651,15 @@ mod tests {
                         "post-exchange save needs credential interaction",
                     ));
                 }
-                self.inner.save(key, tokens).await
+                self.inner.save(fence, key, tokens).await
             }
 
-            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-                self.inner.clear(key).await
+            async fn clear(
+                &self,
+                fence: &meerkat_core::AdmissionGuard,
+                key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
+                self.inner.clear(fence, key).await
             }
 
             async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
@@ -6731,14 +6784,19 @@ mod tests {
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
             tokens: &PersistedTokens,
         ) -> Result<(), crate::auth_store::TokenStoreError> {
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
-        async fn clear(&self, key: &TokenKey) -> Result<(), crate::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+        async fn clear(
+            &self,
+            fence: &meerkat_core::AdmissionGuard,
+            key: &TokenKey,
+        ) -> Result<(), crate::auth_store::TokenStoreError> {
+            self.inner.clear(fence, key).await
         }
 
         async fn list(&self) -> Result<Vec<TokenKey>, crate::auth_store::TokenStoreError> {
@@ -6960,7 +7018,10 @@ mod tests {
                     )
                     .unwrap()
                 };
-                store.save(&key, &replacement).await.unwrap();
+                store
+                    .save(&meerkat_core::AdmissionGuard::none(), &key, &replacement)
+                    .await
+                    .unwrap();
                 if !token_only {
                     auth.begin_refresh(&lease).unwrap();
                 }
@@ -7101,7 +7162,7 @@ mod tests {
         .unwrap();
         authority
             .token_store()
-            .save(&key, &published)
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &published)
             .await
             .unwrap();
         published
@@ -7161,10 +7222,11 @@ mod tests {
                         Duration::from_secs(10),
                         authority.refresh_coordinator().with_refresh(
                             key.clone(),
-                            Box::new(move || {
+                            Box::new(move |admission| {
                                 Box::pin(async move {
                                     child
                                         .refresh_stored_credential_under_coordinator(
+                                            &admission,
                                             &child_target,
                                             &child_key,
                                         )

@@ -141,7 +141,7 @@ async fn assert_operator_spawn_records_parent_as_source(
         )
         .await
         .expect("probe turn admitted");
-    tokio::time::timeout(Duration::from_secs(60), turn.wait())
+    tokio::time::timeout(Duration::from_mins(1), turn.wait())
         .await
         .expect("the probe turn completes")
         .expect("the probe turn succeeds");

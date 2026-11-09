@@ -1,0 +1,332 @@
+[package]
+name = "meerkat-meta"
+description = "Companion orchestration platform for the Meerkat multi-agent runtime"
+version = "0.9.11"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository = "https://github.com/lukacf/meerkat"
+homepage = "https://docs.rkat.ai/meta/introduction"
+documentation = "https://docs.rkat.ai/meta/introduction"
+keywords = ["agent", "llm", "ai", "meerkat", "orchestration"]
+categories.workspace = true
+rust-version.workspace = true
+# Large recorded corpora used only by in-repo tests stay out of the published
+# package. Their readers are `#[cfg(test)]` modules and integration tests,
+# which a dependent's build never compiles.
+exclude = [
+    "tests/fixtures/meta_093_gateway_states/",
+    "tests/fixtures/released_0_8_26_store/",
+    "tests/fixtures/released_0_9_3_h_app/",
+    "tests/fixtures/released_0_9_3_h_local/",
+    "tests/fixtures/security_idempotency/",
+    "tests/fixtures/v0_8_10_zero_rewrite_supervisor_session.json",
+    "tests/fixtures/v0_8_10_released_session.json",
+    "tests/fixtures/released_0_9_3_started_0_9_2_adopted_store/",
+]
+
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
+[package.metadata.cargo-machete]
+# `meerkat-openai` is an OPTIONAL dependency that exists solely as a feature
+# forwarding edge - see `openai-live = [... "meerkat-openai?/live"]` and
+# `experimental-gpt-live = [... "meerkat-openai?/experimental-gpt-live"]`.
+# The `?` forwards the feature WITHOUT enabling the dependency, so there is no
+# `use meerkat_openai` anywhere and machete cannot see the reference. Removing
+# it would silently break the forward rather than fail loudly.
+ignored = ["meerkat-openai"]
+
+[lints.rust]
+# deny, not forbid: each host binary's first statement calls the unsafe
+# meerkat_sqlite::disable_memory_statistics_at_process_start under
+# #[allow(unsafe_code)], which forbid would refuse. sqlite_lock_profile_tests
+# keep those calls the only allowances.
+unsafe_code = "deny"
+
+[lints.clippy]
+# Lint groups
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Hard denies
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+redundant_clone = "deny"
+implicit_clone = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "allow"
+print_stderr = "allow"
+
+# Pedantic allows (noisy or inapplicable)
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
+return_self_not_must_use = "allow"
+manual_string_new = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+missing_fields_in_debug = "allow"
+unreadable_literal = "allow"
+float_cmp = "allow"
+single_match_else = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
+match_bool = "allow"
+items_after_statements = "allow"
+too_many_lines = "allow"
+# Large async orchestration futures are expected here (meerkat allows this too);
+# boxing every one is noise. meerkat 0.7.4 nudged an rpc dispatch future over the limit.
+large_futures = "allow"
+wildcard_imports = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+needless_pass_by_value = "allow"
+needless_continue = "allow"
+trivially_copy_pass_by_ref = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+used_underscore_binding = "allow"
+struct_field_names = "allow"
+doc_link_with_quotes = "allow"
+missing_const_for_fn = "allow"
+default_trait_access = "allow"
+let_underscore_untyped = "allow"
+allow_attributes_without_reason = "allow"
+ignore_without_reason = "allow"
+manual_let_else = "allow"
+unused_async = "allow"
+assigning_clones = "allow"
+format_push_string = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+map_unwrap_or = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+ref_option = "allow"
+# Cargo
+multiple_crate_versions = "allow"
+# Clippy's Cargo lints read every workspace member's manifest, so in the
+# combined workspace Core's `test-support` features reach Meta's lint run.
+redundant_feature_names = "allow"
+cargo_common_metadata = "allow"
+
+[dependencies]
+meta-extension-state = { workspace = true, optional = true }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+# YAML: pure Rust, no `unsafe`. A caret requirement: Cargo unifies it with
+# Meerkat Core's exact pin, and Cargo.lock holds the version.
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v5"] }
+schemars = "1.2.1"
+toml = "0.8"
+base64 = "0.22"
+flate2 = "1"
+tar = "0.4"
+bytes = "1"
+hmac = "0.12"
+sha2 = "0.10"
+ring = "0.17"
+# Ed25519 keypair for cross-process gateway peering. Pulled in transitively
+# via meerkat-comms; declared directly here so meta's `auth::peer_keys`
+# can mint and persist gateway signing keys without crossing the meerkat
+# crate seam. Keep features minimal — `std` for `OsRng`, `rand_core` so
+# we can call `SigningKey::generate`.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+chrono = "0.4"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "process", "io-util", "io-std", "signal", "macros", "net", "time"] }
+axum = { version = "0.8", features = ["json", "multipart"] }
+tower = { version = "0.5", features = ["limit"] }
+async-stream = "0.3"
+form_urlencoded = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+futures = "0.3"
+fs2 = "0.4"
+object_store = { version = "0.13", features = ["fs"] }
+meerkat-core = { workspace = true }
+meerkat-client = { workspace = true, default-features = true }
+# The raw client wrappers carry the wrapped client's controller surface and
+# prepared (governed) dispatch, whose types meerkat-client does not re-export.
+meerkat-llm-core = { workspace = true }
+meerkat-comms = { workspace = true, default-features = true }
+meerkat-contracts = { workspace = true, default-features = true }
+meerkat-mob = { workspace = true }
+meerkat-mob-mcp = { workspace = true }
+meerkat-mcp = { workspace = true }
+meerkat-models = { workspace = true }
+# Meerkat split session memory out of `memory-store` (which now only maps
+# to meerkat-store/memory); explicit `memory` enables need `memory-store-session`.
+# `local-authorization`: the realm-scoped MCP credential source the gateway's
+# member factories install and the realm owner's service-secret writes
+# (`GatewayRealmMcpInstallation`).
+meerkat = { workspace = true, default-features = true, features = ["comms", "skills", "mcp", "memory-store", "memory-store-session", "jsonl-store", "session-store", "sqlite-store", "live", "openai-realtime", "local-authorization"] }
+meerkat-openai = { workspace = true, default-features = true, optional = true }
+# READ-ONLY host-side access to meerkat's OWN session semantic memory for the
+# Distiller's post-compaction harvest (§8.4: `MemoryStore::search` over the
+# discard range). This reads meerkat's store; the §12 bright line governs the
+# bundled agent-memory store, which stays plain B-tree SQLite.
+meerkat-memory = { workspace = true, default-features = true }
+# Live (realtime) member sessions: `live_wiring` hosts the projection sink,
+# the WS transport state, and the meta/live/* handlers on top of this crate.
+meerkat-live = { workspace = true }
+# `local-authorization`: the native grant work configuration an embedder
+# installs through UnifiedRuntimeBuilder::native_grant_work_configuration
+# (D50 S1).
+meerkat-runtime = { workspace = true, default-features = true, features = ["sqlite-store", "live", "local-authorization"] }
+# The local authorization publication the Console access facts join, so a
+# native consent eligibility observed from them is invalidated by their
+# changes (and the host-side grant owner for the native grant tests).
+meerkat-authorization = { workspace = true }
+meerkat-session = { workspace = true, default-features = true, features = ["session-store"] }
+# Shared SQLite mechanics (storage-unification): named connection profiles,
+# the per-file migration ledger, per-operation maintenance fence guards
+# (every in-crate opener, M3), and the doctor's read-only ledger reads (M1).
+meerkat-sqlite = { workspace = true }
+# `memory` is the parked-delta backend for pre-registration incremental
+# writes in the continuity adapter (nothing parked is ever durable).
+meerkat-store = { workspace = true, default-features = true, features = ["sqlite", "memory"] }
+# The skills catalog judges each SKILL.md with meerkat's own skill parser.
+meerkat-skills = { workspace = true }
+meerkat-tools = { workspace = true, default-features = true }
+tempfile = "3"
+async-trait = "0.1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Safe nonblocking pipe readiness and non-reaping child-exit observation.
+rustix = { version = "1.1.4", features = ["fs", "event", "process"] }
+
+[features]
+extension-state = ["dep:meta-extension-state"]
+# Non-shipping deterministic fault points for the mob announcement process
+# tests.
+announcement-test-faults = []
+integration-real-tests = []
+# Public OpenAI Live (`gpt-live-1`) execution path: the neutral GPT Live
+# runtime machinery (WebRTC answer transport, mob live bridge, Mob MCP live
+# delegation coordinator, strict pending/active channel custody) plus the
+# `runtime_options.openai_live` host registration. Admission is the released
+# catalog row, the host's configured OpenAI API-key binding, and this feature.
+openai-live = [
+    "meerkat/openai-live",
+    "meerkat-mob/openai-live",
+    "meerkat-mob-mcp/openai-live",
+    # Optional dependency: `?` forwards the feature WITHOUT enabling the
+    # dependency itself, so a live build does not silently pull in the OpenAI
+    # provider for consumers that never asked for it.
+    "meerkat-openai?/live",
+]
+# DEPRECATED private ChatGPT-brokered GPT Live path. Adds the experimental
+# broker plus its operator, Gate0, and realm admission
+# (`runtime_options.experimental_live`) on top of `openai-live`.
+experimental-gpt-live = [
+    "openai-live",
+    "meerkat/experimental-gpt-live",
+    "meerkat-mob/experimental-gpt-live",
+    "meerkat-mob-mcp/experimental-gpt-live",
+    "meerkat-openai?/experimental-gpt-live",
+]
+# Non-shipping cross-crate lifecycle tests may mint only the upstream test
+# profile selection. Production live builds do not enable this.
+openai-live-test = [
+    "openai-live",
+    "meerkat-runtime/test-support",
+]
+experimental-gpt-live-test = [
+    "experimental-gpt-live",
+    "openai-live-test",
+]
+# Test-only outer-boundary mechanics for offline realtime integration fixtures.
+# This never supplies admission, binding, lease, or provider authority.
+test-realtime-fixtures = [
+    "openai-live",
+]
+# Non-shipping deterministic fault points for the console send process tests.
+console-test-faults = []
+# Calibration-harness seam for the memory Distiller (§8.4/§11); same contract
+# as the other calibration bins, fixture in / structured ops out.
+# `scripts/memory-evals --mode live` drives these binaries per fixture. Each is
+# named explicitly so the CLI name is hyphenated.
+[[bin]]
+name = "distiller-eval"
+path = "src/bin/distiller_eval.rs"
+
+# Calibration-harness seam for the memory Steward's consolidate phase
+# (§8.5/§11): fixture in / mapped ops + staged-validator verdict out.
+[[bin]]
+name = "steward-eval"
+path = "src/bin/steward_eval.rs"
+
+# Calibration-harness seam for the memory Hygienist (§8.6/§11): fixture in /
+# parsed ops + §8.6 revision-validator verdict out.
+[[bin]]
+name = "hygienist-eval"
+path = "src/bin/hygienist_eval.rs"
+
+[[example]]
+name = "incident_command_center"
+path = "../../examples/001-incident-command-center-pack/server.rs"
+
+[[example]]
+name = "mdm_mob_target"
+path = "../../examples/004-mdm-console-pack/target.rs"
+
+[[example]]
+name = "access_control_console"
+path = "../../examples/005-access-control-pack/server.rs"
+
+[dev-dependencies]
+serde_json = "1"
+# Process CPU-time deltas (never wall clock) for the idle-CPU regression
+# gate (tests/idle_cpu_gate.rs); safe wrapper because unsafe_code is forbidden.
+cpu-time = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
+jsonwebtoken = "9"
+async-trait = "0.1"
+meerkat-schedule = { workspace = true }
+# `schema` feature (test-only) exposes `meerkat_mob::adaptive::layer_decision_schema()`
+# so a parity guard can assert the bundled adaptive layer-decision schema stays
+# Value-equal to meerkat's canonical one. Dev-dependency: not enabled in release
+# builds, so the production binary keeps the lean (no-schemars) meerkat-mob.
+# `test-support` (test-only) exposes the deterministic member-session rebind
+# the delivery-scope gates use to move a session under unchanged continuity.
+meerkat-mob = { workspace = true, features = ["schema", "test-support"] }
+# `test-realtime-fixtures` (test-only) exposes meerkat's shared
+# ScriptedRealtimeSessionFactory so the live-open cross-provider regression
+# tests (tests/gateway_live.rs) can observe the exact channel identity handed
+# to the provider lane without a provider socket or credential.
+meerkat = { workspace = true, default-features = true, features = ["test-realtime-fixtures"] }
+# `test-support` (test-only) exposes meerkat-core's per-session WholeBlob
+# decode counter, so decode assertions attribute decodes to the test's own
+# session instead of the process-wide count every parallel test moves.
+meerkat-core = { workspace = true, features = ["test-support"] }
+# The host-side contract types for the native grant configuration tests
+# (D50 S1).
+meerkat-authorization-contracts = { workspace = true }
+# `test-support` (test-only) exposes meerkat-runtime's run-start hold read, so
+# the restart test can assert a restored member without its customizer tools
+# is held, and released once they publish.
+meerkat-runtime = { workspace = true, default-features = true, features = ["sqlite-store", "live", "test-support"] }
+# The reference in-memory host store and its manual clock, for the host
+# store realm's tests.
+meerkat-store-conformance = { workspace = true }

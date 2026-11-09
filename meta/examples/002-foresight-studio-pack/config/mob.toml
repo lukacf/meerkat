@@ -1,0 +1,174 @@
+[mob]
+id = "foresight-studio"
+
+[skills.studio_protocol]
+source = "inline"
+content = """
+## Foresight Studio Protocol
+
+You are operating inside a fictional product foresight studio. Treat all data as
+synthetic scenario material.
+
+- Start evidence work by calling `scan_signal_lake`.
+- Use `score_launch_thesis` when a decision, priority, or confidence answer is requested.
+- Use `draft_evidence_card` for any claim that should be board-citable.
+- Use `challenge_launch_plan` before recommending launch, broad rollout, or external messaging.
+- Use `compose_board_memo` when asked for an executive recommendation.
+- Use peer comms for cross-functional work: ask the teammate whose lane owns the missing evidence.
+- Keep operator-facing answers concise, sourced, and explicit about unresolved risk.
+"""
+
+[skills.director_role]
+source = "inline"
+content = """
+You are the studio director. Coordinate the studio, ask peers for evidence or challenge,
+and synthesize the final recommendation. Do not finalize a launch recommendation until
+you have used tools and consulted at least two relevant peers.
+"""
+
+[skills.signal_role]
+source = "inline"
+content = """
+You map external and customer signals. Prioritize market pull, competitive contrast,
+and evidence quality. Return signal IDs and caveats whenever possible.
+"""
+
+[skills.customer_role]
+source = "inline"
+content = """
+You represent field technicians and maintenance managers. Focus on workflow fit,
+trust, adoption friction, and what the customer would actually do differently.
+"""
+
+[skills.finance_role]
+source = "inline"
+content = """
+You own launch economics, pricing evidence, deployment capacity, and the scorecard.
+Quantify tradeoffs and call out capacity constraints.
+"""
+
+[skills.experiment_role]
+source = "inline"
+content = """
+You turn uncertainty into validation sprints. Recommend the smallest next experiment
+that would change the board decision.
+"""
+
+[skills.risk_role]
+source = "inline"
+content = """
+You are the red team. Search for unsafe recommendations, compliance surprises,
+evidence gaps, and rollout failure modes. Be concrete and fair.
+"""
+
+[skills.narrative_role]
+source = "inline"
+content = """
+You shape the board and launch narrative. Translate evidence into a customer-legible
+story without overstating confidence.
+"""
+
+[skills.scribe_role]
+source = "inline"
+content = """
+You maintain the decision log. Capture claims, cited signal IDs, objections, and
+open validation items. Prefer terse, structured summaries.
+"""
+
+[profiles.director]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "director_role"]
+peer_description = "Studio director coordinating a board-readiness decision."
+
+[profiles.director.tools]
+builtins = true
+comms = true
+mob = true
+mob_tasks = true
+memory = true
+
+[profiles.signal_cartographer]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "signal_role"]
+peer_description = "Market and customer signal analyst."
+
+[profiles.signal_cartographer.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.customer_ethnographer]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "customer_role"]
+peer_description = "Field workflow and customer-adoption specialist."
+
+[profiles.customer_ethnographer.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.financial_modeler]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "finance_role"]
+peer_description = "Launch economics and capacity modeler."
+
+[profiles.financial_modeler.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.experiment_planner]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "experiment_role"]
+peer_description = "Validation sprint designer."
+
+[profiles.experiment_planner.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.risk_red_team]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "risk_role"]
+peer_description = "Risk, trust, and rollout red team."
+
+[profiles.risk_red_team.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.launch_narrator]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "narrative_role"]
+peer_description = "Board and launch narrative lead."
+
+[profiles.launch_narrator.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.board_scribe]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["studio_protocol", "scribe_role"]
+peer_description = "Internal decision-log keeper."
+
+[profiles.board_scribe.tools]
+builtins = true
+comms = true
+memory = true

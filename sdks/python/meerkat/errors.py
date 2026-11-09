@@ -28,10 +28,12 @@ from .generated.errors import (  # noqa: F401
 )
 
 
+from dataclasses import dataclass as _dataclass
 from typing import Any as _Any, get_args as _get_args, get_type_hints as _get_type_hints
 
 from .generated.types import (
     CommsSendErrorData as CommsSendErrorData,
+    InstructionSetErrorCode as InstructionSetErrorCode,
     WireAuthErrorDetail as WireAuthErrorDetail,
     WireAuthErrorReason as WireAuthErrorReason,
     WireMemberReloadRefusal as WireMemberReloadRefusal,
@@ -39,6 +41,7 @@ from .generated.types import (
     WireMemberReloadRefusalUnknown as WireMemberReloadRefusalUnknown,
     WireMobDestroyMemberRefusal as WireMobDestroyMemberRefusal,
     WireMobDestroyReport as WireMobDestroyReport,
+    WireMobQuarantineClass as WireMobQuarantineClass,
 )
 
 
@@ -170,6 +173,29 @@ def comms_send_error(error: BaseException) -> CommsSendErrorData | None:
     return None
 
 
+INSTRUCTION_SET_ERROR_CODES: frozenset[str] = _literal_strings(InstructionSetErrorCode)
+
+
+def instruction_set_code(error: BaseException) -> InstructionSetErrorCode | None:
+    """The closed code of a refused operator-instruction write or read.
+
+    The operator-instruction methods (``session/set_instruction``,
+    ``mob/set_instruction`` and their siblings) carry it in
+    ``error.data.instruction_set_code``, which the SDK keeps as
+    ``MeerkatError.details``: for example ``"stale_revision"``,
+    ``"owned_by_mob"`` or ``"prepared_authorization_required"`` (a governed
+    runtime, which refuses every such write). Branch on it, never on the
+    error text. ``None`` for any other error.
+    """
+    details = getattr(error, "details", None)
+    if not isinstance(details, dict):
+        return None
+    code = details.get("instruction_set_code")
+    if isinstance(code, str) and code in INSTRUCTION_SET_ERROR_CODES:
+        return code  # type: ignore[return-value]
+    return None
+
+
 def mob_destroy_incomplete_report(error: BaseException) -> WireMobDestroyReport | None:
     """The destroy report of a mob destroy that did not finish.
 
@@ -253,6 +279,72 @@ def _parse_member_reload_refusal(value: _Any) -> WireMemberReloadRefusal | None:
     if digest is not None:
         refusal["evidence_digest"] = digest
     return refusal
+
+
+MOB_QUARANTINED_KIND = "mob_quarantined"
+"""``error.data.kind`` of the refusal a call that addresses a quarantined
+persisted mob gets (see :func:`mob_quarantined`)."""
+
+MOB_QUARANTINE_CLASSES: frozenset[str] = _literal_strings(WireMobQuarantineClass)
+"""The quarantine classes this SDK knows; a server may send others."""
+
+
+@_dataclass(frozen=True)
+class MobQuarantinedRefusal:
+    """A call addressed a quarantined persisted mob.
+
+    Its store did not restore and is kept exactly as found; no actor runs
+    for it. ``quarantine_class`` (the wire ``class``) says why:
+    ``"store_unavailable"`` (a store could not serve now: ``retryable`` is
+    true, and the next call that addresses the mob re-attempts its restore
+    once), ``"store_unreadable"`` (the store or the state its restore needs
+    cannot be read or decoded) or ``"resume_refused"`` (another typed
+    refusal of its restore). Those two need a repair, then
+    ``MeerkatClient.mob_restore_retry``. A class this SDK does not know is
+    kept as sent (see :data:`MOB_QUARANTINE_CLASSES`). ``cause`` is the
+    failure the last restore attempt met, and ``code`` the error code the
+    refusal carries.
+    """
+
+    mob_id: str
+    quarantine_class: str
+    retryable: bool
+    cause: str
+    code: str | None = None
+
+
+def mob_quarantined(error: BaseException) -> MobQuarantinedRefusal | None:
+    """The typed refusal of a call that addressed a quarantined mob.
+
+    Every mob call that addresses a quarantined mob by id (a create of that
+    id included) fails with ``error.data`` ``{"kind": "mob_quarantined",
+    "mob_id", "class", "retryable", "cause", "code", ...}``, which the SDK
+    keeps as ``MeerkatError.details``. Branch on it, never on the error
+    text. ``None`` for any other error, or when the data does not parse.
+    """
+    details = getattr(error, "details", None)
+    if not isinstance(details, dict) or details.get("kind") != MOB_QUARANTINED_KIND:
+        return None
+    mob_id = details.get("mob_id")
+    quarantine_class = details.get("class")
+    retryable = details.get("retryable")
+    cause = details.get("cause")
+    code = details.get("code")
+    if (
+        not isinstance(mob_id, str)
+        or not isinstance(quarantine_class, str)
+        or not isinstance(retryable, bool)
+        or not isinstance(cause, str)
+        or (code is not None and not isinstance(code, str))
+    ):
+        return None
+    return MobQuarantinedRefusal(
+        mob_id=mob_id,
+        quarantine_class=quarantine_class,
+        retryable=retryable,
+        cause=cause,
+        code=code,
+    )
 
 
 class BinaryIntegrityError(MeerkatError):

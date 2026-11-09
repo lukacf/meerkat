@@ -1436,4 +1436,104 @@ if ! grep -Fq "$CACHES_FAIL" "${TEST_ROOT}/doctor-caches.log"; then
     "$(cat "${TEST_ROOT}/doctor-caches.log")"
 fi
 
+# 5. The crate level-plan check follows the product-aware publisher (0.9.9:
+#    scripts/release-publish-rust-crates.sh walks the levels of the list
+#    MEERKAT_RELEASE_CRATE_LIST names, Core's by default, Meta's in
+#    meta-release.yml) and every product's list. Its pre-0.9.9 form grepped
+#    for Core's list hard-coded in the publisher, so `make release-doctor` was
+#    red on a healthy tree. A stub cargo answers `cargo metadata` from the two
+#    real crate lists (no dependencies, so one level each): nothing compiles
+#    or fetches. Stub gh and npm fail at once; their lines are not asserted.
+LEVELS_PASS="PASS Rust crates publish by dependency level per product (core 1 level, meta 1 level), each level visible in the index before the next"
+LEVELS_PUBLISHER_FAIL="FAIL Rust crate publishing must walk the dependency levels of the product's crate list (MEERKAT_RELEASE_CRATE_LIST, Core's scripts/release-rust-crates.sh by default) and wait for each level in the index"
+LEVELS_LIST_FAIL="FAIL Every product's crate list must answer its dependency level plan: meta (scripts/release-meta-crates.sh): "
+level_bin="${TEST_ROOT}/level-plan-bin"
+mkdir -p "${level_bin}"
+cat >"${level_bin}/cargo" <<'STUB'
+#!/usr/bin/env bash
+# `cargo metadata --no-deps ...`: every crate of both release lists, without
+# dependencies, except those STUB_CARGO_OMIT names. Nothing else is answered.
+set -euo pipefail
+if [[ "${1:-}" != metadata ]]; then
+  echo "stub cargo answers only metadata, got: $*" >&2
+  exit 2
+fi
+{
+  "${STUB_REPO_ROOT}/scripts/release-rust-crates.sh"
+  "${STUB_REPO_ROOT}/scripts/release-meta-crates.sh"
+} | "${STUB_PYTHON}" -I -c '
+import json, os, sys
+omit = set(os.environ.get("STUB_CARGO_OMIT", "").split())
+names = [line.strip() for line in sys.stdin if line.strip() and line.strip() not in omit]
+print(json.dumps({"packages": [{"name": name, "version": "0.0.0", "dependencies": []} for name in names]}))
+'
+STUB
+for tool in gh npm; do
+  printf '#!/usr/bin/env bash\nexit 1\n' >"${level_bin}/${tool}"
+done
+chmod +x "${level_bin}/cargo" "${level_bin}/gh" "${level_bin}/npm"
+
+# mutate_publisher <name> <destination>: a mutated copy of the publisher.
+mutate_publisher() {
+  "$PYTHON" - "${REPO_ROOT}/scripts/release-publish-rust-crates.sh" "$2" "$1" <<'PYEOF'
+import pathlib
+import sys
+
+source, destination, name = sys.argv[1:4]
+text = pathlib.Path(source).read_text()
+
+
+def replace_once(needle: str, replacement: str) -> None:
+    global text
+    count = text.count(needle)
+    if count != 1:
+        raise SystemExit(
+            f"publisher fixture `{name}` expects exactly one occurrence of {needle!r} "
+            f"in the committed publisher, found {count}; update the fixture"
+        )
+    text = text.replace(needle, replacement)
+
+
+if name == "core-list-only":
+    # The pre-0.9.9 publisher: Core's levels whatever list the product names.
+    replace_once('levels="$("$CRATE_LIST" --levels', 'levels="$("$ROOT/scripts/release-rust-crates.sh" --levels')
+elif name == "no-index-wait":
+    replace_once('  wait_for_index "$level" "${entries[@]}"\n', "")
+else:
+    raise SystemExit(f"unknown publisher fixture {name}")
+pathlib.Path(destination).write_text(text)
+PYEOF
+}
+
+# run_level_doctor <log> [VAR=value...]: the doctor on the committed workflow.
+run_level_doctor() {
+  local log="$1"
+  shift
+  set +e
+  env PATH="${level_bin}:${PATH}" STUB_REPO_ROOT="${REPO_ROOT}" STUB_PYTHON="${PYTHON}" "$@" \
+    RELEASE_WORKFLOW_FILE="$WORKFLOW" "$DOCTOR" >"$log" 2>&1
+  set -e
+}
+
+run_level_doctor "${TEST_ROOT}/doctor-levels.log"
+if ! grep -Fxq "$LEVELS_PASS" "${TEST_ROOT}/doctor-levels.log"; then
+  fail "doctor does not report \`${LEVELS_PASS}\` for the committed publisher and crate lists" \
+    "$(cat "${TEST_ROOT}/doctor-levels.log")"
+fi
+for fixture in core-list-only no-index-wait; do
+  mutate_publisher "$fixture" "${TEST_ROOT}/publisher-${fixture}.sh"
+  run_level_doctor "${TEST_ROOT}/doctor-levels-${fixture}.log" \
+    RELEASE_CRATE_PUBLISHER_FILE="${TEST_ROOT}/publisher-${fixture}.sh"
+  if ! grep -Fq "$LEVELS_PUBLISHER_FAIL" "${TEST_ROOT}/doctor-levels-${fixture}.log"; then
+    fail "doctor does not report \`${LEVELS_PUBLISHER_FAIL}\` for the \`${fixture}\` publisher" \
+      "$(cat "${TEST_ROOT}/doctor-levels-${fixture}.log")"
+  fi
+done
+run_level_doctor "${TEST_ROOT}/doctor-levels-meta.log" STUB_CARGO_OMIT=meerkat-meta
+if ! grep -Fq "$LEVELS_LIST_FAIL" "${TEST_ROOT}/doctor-levels-meta.log" ||
+  ! grep -Fq "no workspace package for meerkat-meta" "${TEST_ROOT}/doctor-levels-meta.log"; then
+  fail "doctor does not report \`${LEVELS_LIST_FAIL}\` naming the crate when Meta's list has no level plan" \
+    "$(cat "${TEST_ROOT}/doctor-levels-meta.log")"
+fi
+
 echo "release doctor workflow contract holds"

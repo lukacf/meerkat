@@ -490,6 +490,7 @@ async fn exercise(server: &Server) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -499,6 +500,7 @@ async fn exercise(server: &Server) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("increment-only"),
             principal("executor"),
@@ -533,6 +535,7 @@ async fn exercise(server: &Server) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -665,8 +668,11 @@ async fn exercise(server: &Server) {
     for record in &audit {
         assert_eq!(record.contributors.len(), 1);
         assert_eq!(record.contributors[0].input_id, input_id);
-        assert!(record.contributors[0].requester == principal("requester"));
-        assert!(record.contributors[0].logical_executor == principal("executor"));
+        assert_eq!(record.contributors[0].requester, principal("requester"));
+        assert_eq!(
+            record.contributors[0].logical_executor,
+            principal("executor")
+        );
         assert!(record.contributors[0].represented_subject.is_none());
         assert_eq!(record.observation.run_id.as_ref(), Some(&run_id));
         assert!(
@@ -681,7 +687,10 @@ async fn exercise(server: &Server) {
     let allowed = audit.iter().find(|record| matches!(&record.observation.observation,
         AuditObservation::Prepared { target, .. }
         if matches!(target.as_ref(), AuditTarget::Tool { call_id, tool_name, .. } if call_id == PERMITTED_CALL && tool_name == "increment_record"))).unwrap();
-    assert!(refused.observation.operation_id != allowed.observation.operation_id);
+    assert_ne!(
+        refused.observation.operation_id,
+        allowed.observation.operation_id
+    );
     assert!(!audit.iter().any(|record| record.observation.operation_id
         == refused.observation.operation_id
         && matches!(
@@ -871,7 +880,7 @@ async fn exercise(server: &Server) {
 async fn adr_e3_completed_tool_settlement_failure_preserves_effect() {
     let mut server = Server::start().await;
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise(&server),
     ))
     .catch_unwind()

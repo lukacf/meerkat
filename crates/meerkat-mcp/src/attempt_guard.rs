@@ -403,7 +403,7 @@ pub enum McpAttemptGuardBoundsError {
 
 impl McpAttemptGuardBounds {
     /// The largest bound accepted.
-    pub const MAX: Duration = Duration::from_secs(60);
+    pub const MAX: Duration = Duration::from_mins(1);
     /// 10 s to begin, 5 s to cancel, 5 s to settle.
     pub const DEFAULT: Self = Self {
         begin: Duration::from_secs(10),

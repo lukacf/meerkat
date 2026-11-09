@@ -1,0 +1,94 @@
+name: Connect checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Packaging, host adapters, SDK, Console panel and docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Check build receipts and qualification cleanup without native builds
+        run: >-
+          python3 -B -m unittest -v
+          scripts.test_verify_local
+          scripts.test_qualify_connect_cli
+          scripts.test_repo_cargo
+      - name: Check historical artifact bindings without native builds
+        run: >-
+          python3 -B -m unittest discover -s scripts/fixtures
+          -p 'test_historical_g_current_binding.py' -v
+      - name: Check inert package construction and validation
+        run: |
+          python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
+          python3 -B -m unittest -v scripts.test_assemble_connect_product
+          python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+      - name: Install candidate, preparation and native-host test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0 meerkat-meta==0.9.7
+      - name: Check candidate producer and publication contracts without native builds
+        run: >-
+          python3 -B -m pytest -q -p no:cacheprovider
+          scripts/test_connect_candidate_cli.py
+          scripts/test_connect_candidate_publication.py
+      - name: Check documentation
+        run: python3 scripts/check-docs.py
+      - name: Check installed acceptance contracts without accounts or native builds
+        env:
+          PYTHONPATH: scripts:sdk/python/src
+        run: >-
+          python3 -B -m unittest -v
+          scripts.test_verify_installed_github
+          scripts.test_native_fixture_stack
+          scripts.test_console_reopen_status
+          scripts.test_verify_supplied_shared_workflow.HelperlessRestoreControls
+          scripts.test_verify_supplied_shared_workflow.ColdSharedRestoreControls
+          scripts.test_verify_supplied_shared_workflow.BothSelectedSuccessControls
+      - name: Check product and starter preparation
+        run: |
+          python3 -B -m unittest discover -s sdk/consumer-setup/tests -p 'test_start.py'
+          python3 -B -m unittest discover -s scripts/tests -p 'test_export_setup_starter.py'
+      - name: Check immutable preparation and product readback
+        env:
+          PYTHONPATH: sdk/consumer-setup/tests
+        run: >-
+          python3 -B -m unittest -v
+          test_product_local_session test_product_official_readback test_immutable_release
+      - name: Check hosted MCP callback transport and lifecycle
+        env:
+          PYTHONPATH: sdk/python/src:sdk/python/tests
+        run: >-
+          python3 -m unittest -v
+          test_mcp_auth_https test_mcp_auth_custody
+          test_mcp_auth_host test_hosted_mcp_endpoint_adversarial
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install locked SDK and panel test dependencies
+        working-directory: sdk/typescript
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test the TypeScript SDK and embedded Console panel
+        working-directory: sdk/typescript
+        run: npm test

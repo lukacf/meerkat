@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "target": "linux-x86_64",
+  "scope": "installed_gateway_schema4_resource_startup_and_shutdown_preview",
+  "not_qualified": [
+    "model_execution",
+    "account_sign_in",
+    "acquisition",
+    "component_install",
+    "installed_integration_realm_persistence",
+    "frontend_activation",
+    "other_targets"
+  ],
+  "archive": "meerkat-connect-gateway-0.9.10-linux-x86_64.tar.gz",
+  "archive_sha256": "23cc203ef19ff753258c77d6455f25750791b3dfd2500b5fbf2544adef9ebeef",
+  "archive_bytes": 472578881,
+  "binary_sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+  "binary_bytes": 508941776,
+  "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
+  "resource_component_sha256": "cac03d3ea9adb717c8fc52d8f267a1aeae39b2000a1acca4dabdff88db2d91f7",
+  "build_record_sha256": "07ee4385c49606e49a4c939b43e2ffb880199162c624e4dec016c72f2f7c6548",
+  "qualification": {
+    "candidate": {
+      "target": "linux-x86_64",
+      "source_manifest_sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095",
+      "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
+      "binary_kind": "toolkit_gateway",
+      "binary": {
+        "sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+        "size": 508941776
+      },
+      "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4"
+    },
+    "installed_gateway_verification_sha256": "f0751e07e494f2c8866cc8d2de43d7a8c357096bea362f915d9bd3e3bc0c5d71",
+    "cli_tty_qualified": false
+  },
+  "assembler_sha256": "70e9e6dc12cb067d8f9821e3fd1809c0d47b8ccb14e5b24d2ba4c407d5aebc78",
+  "licenses": {
+    "LICENSE-MIT": "b45d1f632f83aeb359da8e2b8716ad72591ec7267a489fdda39989c618d65a0f",
+    "LICENSE-APACHE": "3a0ffd02ca79c2a687921b0f5d8094f2f6a7058a4c01775d1351ea6514fcd180"
+  },
+  "readme_sha256": "849b985a38ec7fececf9b8295f3c15f9e367a77caa06f3633f940f561a62a1b4",
+  "resource_closure_unchanged": true,
+  "package_envelope": {
+    "members": 18603,
+    "member_bytes": 1253261806,
+    "largest_member": {
+      "name": "meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+      "bytes": 508941776
+    },
+    "member_limit": 1073741824,
+    "embedded_archives": [
+      {
+        "name": "meerkat-connect-linux-x86_64/libexec/meerkat-connect/archives/toolkit-library-20261107-connect-3fb4cfbb-linux-x86_64.tar.gz",
+        "bytes": 120454583,
+        "members": 4617,
+        "largest_member_bytes": 29311136
+      },
+      {
+        "name": "meerkat-connect-linux-x86_64/libexec/meerkat-connect/runtime/npm-acquisition.tgz",
+        "bytes": 3054025,
+        "members": 1942,
+        "largest_member_bytes": 151278
+      }
+    ],
+    "raw_tar_bytes": 1281761280,
+    "raw_tar_limit": 4294967296,
+    "archive_bytes": 472578881,
+    "archive_limit": 2147483647,
+    "archive_host_member_limit": 1073741824,
+    "archive_within_host_member_limit": true
+  },
+  "tooling": {
+    "source_root": "/srv/connect-0910-rpub/src/connect",
+    "assembler_sha256": "70e9e6dc12cb067d8f9821e3fd1809c0d47b8ccb14e5b24d2ba4c407d5aebc78",
+    "prepare_sha256": "2786ee87dbbe2680503d2a52307b787e9e6950c2b9a899def38725e34742691b",
+    "resource_packager_sha256": "699880cb777ef36b945dc46ed688054307e3b526f98e0fab385c9102895d7b7a",
+    "gateway_verifier": {
+      "path": "/srv/connect-0910-rpub/src/connect/scripts/verify_native_gateway_subprocess.py",
+      "sha256": "fe69479d219ccb45eae7ae85db398ede24a70b35ecb51c2c3a11049ddedeadc1"
+    }
+  },
+  "binary_kind": "toolkit_gateway",
+  "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4",
+  "release_version": "0.9.10",
+  "source": {
+    "repository": "lukacf/meerkat",
+    "revision": "3fb4cfbbc54c3f8b4d0bfd13cdb1dee7ef76eeef",
+    "tree": "340642add88de0247ed81fbac6cab68b77476cf6",
+    "source_manifest_sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095"
+  }
+}

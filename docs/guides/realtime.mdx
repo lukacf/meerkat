@@ -722,6 +722,25 @@ acknowledge a concurrent historical summary, gets the same notice. While the
 model is speaking, that notice waits until the response ends or the user takes
 the floor, and it is dropped if the result arrives first.
 
+A delegation outlives its channel. When the channel closes, or its transport
+drops, a delegation already running finishes, and one Meerkat admitted that
+has not started yet (still waiting behind the channel's worker limit, or
+admitted as the channel closed) starts after the close: its request is
+committed to the session and it runs on its closed channel's own delegation
+authority, with the reasoning preference the channel sealed. Words the user
+spoke to continue the request while it waited join its task, as on an open
+channel, also when its start meets a busy member and is retried; a request
+whose held words cannot join it is not run without them, and ends as failed.
+Its result reaches the session instead of the closed
+channel: a durable fork's result merges into the member as a new turn, and
+an existing member's own turn already holds it. Until a durable fork's result
+has merged, a channel reopened on the session is told that work from the
+earlier call is still finishing. Only blocked work (a worker handed its item
+back to wait for another item) is cancelled: at the close, or when its worker
+hands it back after the close. Requests that reach Meerkat while the close
+runs are the exception (see
+[Limitations and known gaps](#limitations-and-known-gaps)).
+
 On open and reopen, the selected canonical dialogue is supplied in native
 `session.input` at provider session creation. User text and visible assistant
 text retain their order and roles; executor System rows, SystemNotice rows, tool
@@ -872,12 +891,26 @@ let coordinator = compose_experimental_live_delegation_coordinator_with_policy(
 The coordinator resolves the source member from the channel's authoritative
 session binding; the browser does not select a worker or supply an execution
 session. Voice work uses the member's ordinary text model and generated input
-admission. Concurrent ordinary text remains independent work. Close and
-supersession cancel the exact voice operation, never retire the existing member
-or interrupt whichever unrelated user turn happens to be running. Operation
-ownership is retained with recovery evidence rather than reconstructed from the
-host's current policy. Compose the returned coordinator into the same shared
-context-mirror/activation host as the default coordinator.
+admission. Concurrent ordinary text remains independent work. Supersession
+cancels the exact voice operation; a close lets it finish, and a request
+admitted before the close starts after it. Neither retires the existing
+member or interrupts whichever unrelated user turn happens to be running.
+Operation ownership is retained with recovery evidence rather than
+reconstructed from the host's current policy. Compose the returned coordinator
+into the same shared context-mirror/activation host as the default
+coordinator.
+
+After a restart, the coordinator reconciles each voice delegation the previous
+process left, once, without resubmitting it, and it never wakes a member to do
+so. Work a worker had handed back to wait for another item is cancelled, with
+its work item, as a close cancels it; a delegation whose work item failed or
+was cancelled keeps that outcome. A member that is not materialized at start
+(the default under lazy restore,
+`member_restore: on_demand`) has its delegations reconciled when it is woken, or
+before the first voice channel opened on it, whichever comes first. A voice
+channel open waits for the start-up pass over the materialized members only; if
+that pass cannot complete (for example, a mob restore that keeps failing), the
+open is refused after 30 seconds instead of waiting.
 
 ### Transcript rows while the member's turn runs
 
@@ -1307,6 +1340,8 @@ least one release.
 - **Live rows wait for a running member turn.** Transcript rows commit in arrival order behind a running turn of the member, so the persisted transcript can lag the conversation by that turn's length (on a WebSocket or WebRTC channel, by each member turn queued behind it while turns run back to back; that channel's voice and events keep flowing meanwhile); rows handed to a channel close are held in memory until they commit and are lost if the process exits first, and a row released mid-close can commit ahead of an earlier held row (see [Transcript rows while the member's turn runs](#transcript-rows-while-the-members-turn-runs)).
 - **Ordinary Realtime refresh is not instruction/history replay.** Supported mutable settings such as visible tools can refresh; canonical `System`-sequence changes, model/provider swaps, and canonical transcript or user-content-registry rewrites require `live/close` + `live/open`. The adapter remains fixed to PCM 24 kHz mono, including after reopen.
 - **GPT Live may delegate a question asked over its own playback.** Public `gpt-live-1` sessions use client delegation for the whole session, and the provider's delegation events carry no typed reason, so Meerkat cannot keep a single turn native. A question that starts while the assistant is still speaking, before the cue for a delegated result has been sent, can be routed to the executor even when it asks about the conversation itself. The user then hears the answer late, in the same voice, once the executor's turn has finished and its result has been spoken after at least 1.6 s of output silence; occasionally the voice instead resumes its earlier readout and never answers, and the question has to be asked again.
+- **A delegated request can be cancelled or refused when a retirement closes the channel.** A GPT Live request admitted in the roughly 1 ms before the channel's control loop claims it is cancelled, and recorded as cancelled, when a retirement of the channel cancels that loop before the provider stream ends: the request's control payload never reached the loop, so it cannot run after the close. A close that lets the provider stream end first runs it after the close. A request that reaches Meerkat after the close began is refused admission and does not run.
+- **A delegated request whose worker could not start can end without a word.** When the machine refuses the report that a GPT Live delegation's worker did not start, the request is retired without a narration. The machine refuses that report only when the session or the channel is gone or its binding is stale.
 
 ## See also
 

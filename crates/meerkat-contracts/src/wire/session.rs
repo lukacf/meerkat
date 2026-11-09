@@ -1296,6 +1296,8 @@ impl TranscriptRewriteMessage {
                 identity: None,
                 prompt_version,
                 instruction_activation: None,
+                instruction_entry: None,
+                retired_instruction_body: None,
             })),
             Self::SystemNotice {
                 kind,
@@ -1517,6 +1519,21 @@ pub enum WireSessionMessage {
         /// envelope in `content` is validated against this fact on ingress.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instruction_activation: Option<meerkat_core::InstructionActivationIdentity>,
+        /// Typed operator-instruction entry identity (a delta appended at a
+        /// run start, or a compaction snapshot). Read-only: the session
+        /// mints it and validates the rendered entry in `content` against
+        /// it; no write accepts it. An identity whose form this reader does
+        /// not know reads raw instead of failing the read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_entry: Option<WireInstructionEntryIdentity>,
+        /// The marker of an instruction activation row whose body a
+        /// compaction retired, because a later activation row of its key
+        /// superseded it: `content` is then the retired header, which names
+        /// the key, the revision and the body's length. Read-only: no write
+        /// accepts it. A marker whose form this reader does not know reads
+        /// raw instead of failing the read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retired_instruction_body: Option<WireRetiredInstructionBody>,
     },
     SystemNotice {
         kind: SystemNoticeKind,
@@ -1607,6 +1624,54 @@ impl From<SystemMessageIdentity> for WireSystemMessageIdentity {
     }
 }
 
+/// Public wire form of an operator-instruction entry's typed identity.
+///
+/// Reads are tolerant: an identity whose form this version does not know (a
+/// newer entry kind, change kind or field) reads as [`Self::Raw`], the value
+/// as it was sent, and is written back the same. It never fails the history
+/// page or bridge message that carries it. The session document keeps the
+/// closed core type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum WireInstructionEntryIdentity {
+    /// An identity this version knows.
+    Known(meerkat_core::InstructionEntryIdentity),
+    /// An identity this version does not know, as it was sent.
+    Raw(serde_json::Value),
+}
+
+impl From<meerkat_core::InstructionEntryIdentity> for WireInstructionEntryIdentity {
+    fn from(identity: meerkat_core::InstructionEntryIdentity) -> Self {
+        Self::Known(identity)
+    }
+}
+
+/// Public wire form of the marker of an instruction activation row whose
+/// body a compaction retired.
+///
+/// Reads are tolerant: a marker reads as [`Self::Known`] whenever its fields
+/// decode (a later render version with the same two fields included), and
+/// one with a field this version does not know reads as [`Self::Raw`], the
+/// value as it was sent, and is written back the same. It never fails the
+/// history page or bridge message that carries it; either form marks the
+/// row's body as retired. The session document keeps the closed core type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum WireRetiredInstructionBody {
+    /// A marker this version knows.
+    Known(meerkat_core::RetiredInstructionBody),
+    /// A marker this version does not know, as it was sent.
+    Raw(serde_json::Value),
+}
+
+impl From<meerkat_core::RetiredInstructionBody> for WireRetiredInstructionBody {
+    fn from(marker: meerkat_core::RetiredInstructionBody) -> Self {
+        Self::Known(marker)
+    }
+}
+
 impl From<Message> for WireSessionMessage {
     fn from(value: Message) -> Self {
         match value {
@@ -1616,6 +1681,8 @@ impl From<Message> for WireSessionMessage {
                 identity: message.identity.map(Into::into),
                 prompt_version: message.prompt_version,
                 instruction_activation: message.instruction_activation,
+                instruction_entry: message.instruction_entry.map(Into::into),
+                retired_instruction_body: message.retired_instruction_body.map(Into::into),
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
@@ -2579,6 +2646,8 @@ mod tests {
                     identity: None,
                     prompt_version: None,
                     instruction_activation: None,
+                    instruction_entry: None,
+                    retired_instruction_body: None,
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),
@@ -2827,6 +2896,7 @@ mod tests {
             run_id: None,
             objective_id: None,
             turn_input: None,
+            requester: None,
         };
         let mut assistant = BlockAssistantMessage::new(
             vec![AssistantBlock::Text {
@@ -2841,6 +2911,7 @@ mod tests {
             run_id: Some(run_id.clone()),
             objective_id: None,
             turn_input: None,
+            requester: None,
         };
         let page = SessionHistoryPage {
             session_id: SessionId::new(),
@@ -2904,6 +2975,402 @@ mod tests {
                 assert_eq!(idempotency_key.as_deref(), Some("instruction-17"));
             }
             other => panic!("expected System identity, got {other:?}"),
+        }
+    }
+
+    /// A wire history read carries an operator-instruction entry's typed
+    /// identity, as it carries the other System identities. Rewrite input
+    /// cannot express it.
+    #[test]
+    fn test_wire_session_history_exposes_operator_instruction_entry_identity() {
+        let origin = SessionId::new();
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-operator-instructions-v1]\n",
+            "created_at": "2026-10-30T00:00:00Z",
+            "instruction_entry": {
+                "render_version": 1,
+                "origin_session_id": origin.to_string(),
+                "entry_sequence": 3,
+                "kind": "delta",
+                "target_generation": 7,
+                "active": [{
+                    "namespace": "app.example",
+                    "key": "tone",
+                    "revision": 2,
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("casual"),
+                    "body_bytes": 6,
+                }],
+                "changes": [{
+                    "change": "activate",
+                    "namespace": "app.example",
+                    "key": "tone",
+                    "revision": 2,
+                    "supersedes": 1,
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("casual"),
+                    "body_bytes": 6,
+                }],
+            },
+        }))
+        .expect("a System row with an entry identity decodes");
+        let page = SessionHistoryPage {
+            session_id: origin.clone(),
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![message],
+        };
+
+        let wire: WireSessionHistory = page.into();
+        match &wire.messages[0] {
+            WireSessionMessage::System {
+                instruction_entry: Some(WireInstructionEntryIdentity::Known(identity)),
+                instruction_activation: None,
+                prompt_version: None,
+                identity: None,
+                ..
+            } => {
+                assert_eq!(identity.entry_sequence(), 3);
+                assert_eq!(identity.origin_session_id(), &origin);
+                assert_eq!(identity.kind(), meerkat_core::InstructionEntryKind::Delta);
+            }
+            other => panic!("expected System entry identity, got {other:?}"),
+        }
+        let json = serde_json::to_value(&wire.messages[0]).unwrap();
+        assert_eq!(json["instruction_entry"]["entry_sequence"], 3);
+        assert_eq!(
+            json["instruction_entry"]["changes"][0]["change"],
+            "activate"
+        );
+
+        let rewrite: TranscriptRewriteMessage = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "forged",
+        }))
+        .unwrap();
+        assert!(matches!(
+            rewrite.into_core().unwrap(),
+            Message::System(SystemMessage {
+                instruction_entry: None,
+                ..
+            })
+        ));
+        // Rewrite input has no entry identity field: one sent anyway is
+        // ignored, like any field rewrite input does not define.
+        let forged = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+            "role": "system",
+            "content": "forged",
+            "instruction_entry": json["instruction_entry"].clone(),
+        }))
+        .expect("rewrite input ignores a field it does not define");
+        assert!(
+            matches!(
+                forged.into_core(),
+                Ok(Message::System(SystemMessage {
+                    instruction_entry: None,
+                    ..
+                }))
+            ),
+            "rewrite input never mints an entry identity"
+        );
+    }
+
+    /// A wire history read carries the typed marker of an instruction
+    /// activation row whose body a compaction retired, beside the row's
+    /// activation identity and its retired header. Rewrite input cannot
+    /// express the marker.
+    #[test]
+    fn wire_history_carries_the_retired_marker() {
+        let origin = SessionId::new();
+        let marker = serde_json::json!({ "render_version": 1, "body_bytes": 13 });
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-retired-instruction-v1]\nnamespace=\"app.skills\"\nkey=\"calendar\"\nstatus=superseded\nbody_bytes=13",
+            "created_at": "2026-10-29T08:00:00Z",
+            "instruction_activation": {
+                "activation_id": "act-0003",
+                "revision": {
+                    "namespace": "app.skills",
+                    "key": "calendar",
+                    "revision_id": "calendar-r3",
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("calendar body"),
+                },
+                "supersedes": "act-0002",
+                "origin_session_id": origin.to_string(),
+                "render_version": 1,
+            },
+            "retired_instruction_body": marker,
+        }))
+        .expect("a retired activation row decodes");
+        let page = SessionHistoryPage {
+            session_id: origin,
+            message_count: 1,
+            offset: 0,
+            limit: None,
+            has_more: false,
+            messages: vec![message],
+        };
+
+        let wire: WireSessionHistory = page.into();
+        assert!(
+            matches!(
+                &wire.messages[0],
+                WireSessionMessage::System {
+                    retired_instruction_body: Some(WireRetiredInstructionBody::Known(_)),
+                    ..
+                }
+            ),
+            "the history read carries the marker as a form it knows"
+        );
+        let json = serde_json::to_value(&wire.messages[0]).unwrap();
+        assert_eq!(
+            json["retired_instruction_body"], marker,
+            "the history read carries the retired-body marker"
+        );
+        assert_eq!(json["instruction_activation"]["activation_id"], "act-0003");
+        // The marker a compaction writes decodes as Known from its JSON:
+        // were the core type to gain a field the wire cannot decode, every
+        // real marker would read raw, and this fails first.
+        assert_eq!(
+            serde_json::from_value::<WireRetiredInstructionBody>(marker.clone()).unwrap(),
+            WireRetiredInstructionBody::Known(meerkat_core::RetiredInstructionBody {
+                render_version: meerkat_core::RETIRED_INSTRUCTION_RENDER_VERSION_V1,
+                body_bytes: 13,
+            })
+        );
+
+        // Rewrite input has no marker field: one sent anyway is ignored.
+        let forged = serde_json::from_value::<TranscriptRewriteMessage>(serde_json::json!({
+            "role": "system",
+            "content": "forged",
+            "retired_instruction_body": marker,
+        }))
+        .expect("rewrite input ignores a field it does not define");
+        let Ok(Message::System(system)) = forged.into_core() else {
+            panic!("rewrite input decodes to a System row");
+        };
+        assert!(
+            serde_json::to_value(&system)
+                .unwrap()
+                .get("retired_instruction_body")
+                .is_none(),
+            "rewrite input never mints a retired-body marker"
+        );
+    }
+
+    /// A reader never fails a history page or a bridge message on a
+    /// retired-body marker whose form it does not know (a later render
+    /// version with a field this reader does not know): the marker reads as
+    /// it was sent.
+    #[test]
+    fn wire_history_tolerates_a_newer_retired_marker() {
+        use crate::wire::supervisor_bridge::BridgeReply;
+
+        let marker = serde_json::json!({
+            "render_version": 2,
+            "body_bytes": 13,
+            "retired_by": "a field this reader does not know",
+        });
+        let row = serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-retired-instruction-v2]\nnamespace=\"app.skills\"\nkey=\"calendar\"\nstatus=superseded\nbody_bytes=13",
+            "created_at": "2026-10-31T00:00:00Z",
+            "instruction_activation": {
+                "activation_id": "act-0003",
+                "revision": {
+                    "namespace": "app.skills",
+                    "key": "calendar",
+                    "revision_id": "calendar-r3",
+                    "content_sha256": meerkat_core::InstructionContentDigest::for_body("calendar body"),
+                },
+                "supersedes": "act-0002",
+                "origin_session_id": SessionId::new().to_string(),
+                "render_version": 1,
+            },
+            "retired_instruction_body": marker,
+        });
+
+        let history: WireSessionHistory = serde_json::from_value(serde_json::json!({
+            "session_id": SessionId::new().to_string(),
+            "message_count": 1,
+            "offset": 0,
+            "has_more": false,
+            "messages": [row],
+        }))
+        .expect("a history page with a newer retired marker decodes");
+        let reply: BridgeReply = serde_json::from_value(serde_json::json!({
+            "result": "member_history_page",
+            "generation": 1,
+            "page": {
+                "from_index": 0,
+                "messages": [row],
+                "message_count": 1,
+                "complete": true,
+            },
+        }))
+        .expect("a bridge history page with a newer retired marker decodes");
+        let BridgeReply::MemberHistoryPage(bridge_page) = reply else {
+            panic!("expected a member history page");
+        };
+
+        for message in [&history.messages[0], &bridge_page.page.messages[0].0] {
+            assert!(
+                matches!(
+                    message,
+                    WireSessionMessage::System {
+                        retired_instruction_body: Some(WireRetiredInstructionBody::Raw(_)),
+                        ..
+                    }
+                ),
+                "the marker reads raw: {message:?}"
+            );
+            let json = serde_json::to_value(message).expect("the row serializes");
+            assert_eq!(
+                json["retired_instruction_body"], marker,
+                "the marker reads as it was sent"
+            );
+        }
+    }
+
+    /// A reader never fails a history page or a bridge message on an
+    /// operator-instruction entry identity whose form it does not know (a
+    /// newer entry kind, change kind or field): the identity reads raw, as
+    /// it was sent.
+    #[test]
+    fn wire_history_tolerates_an_unknown_entry_kind_change_and_field() {
+        use crate::wire::supervisor_bridge::BridgeReply;
+
+        let identity = serde_json::json!({
+            "render_version": 1,
+            "origin_session_id": SessionId::new().to_string(),
+            "entry_sequence": 4,
+            "kind": "checkpoint",
+            "target_generation": 9,
+            "changes": [{
+                "change": "suspend",
+                "namespace": "app.example",
+                "key": "tone",
+                "revision": 3,
+            }],
+            "issuer_note": "a field this reader does not know",
+        });
+        let row = serde_json::json!({
+            "role": "system",
+            "content": "[meerkat-operator-instructions-v1]\n",
+            "created_at": "2026-10-30T00:00:00Z",
+            "instruction_entry": identity,
+        });
+
+        let history: WireSessionHistory = serde_json::from_value(serde_json::json!({
+            "session_id": SessionId::new().to_string(),
+            "message_count": 1,
+            "offset": 0,
+            "has_more": false,
+            "messages": [row],
+        }))
+        .expect("a history page with a newer entry identity decodes");
+        let reply: BridgeReply = serde_json::from_value(serde_json::json!({
+            "result": "member_history_page",
+            "generation": 1,
+            "page": {
+                "from_index": 0,
+                "messages": [row],
+                "message_count": 1,
+                "complete": true,
+            },
+        }))
+        .expect("a bridge history page with a newer entry identity decodes");
+        let BridgeReply::MemberHistoryPage(bridge_page) = reply else {
+            panic!("expected a member history page");
+        };
+
+        for message in [&history.messages[0], &bridge_page.page.messages[0].0] {
+            assert!(
+                matches!(
+                    message,
+                    WireSessionMessage::System {
+                        instruction_entry: Some(WireInstructionEntryIdentity::Raw(_)),
+                        ..
+                    }
+                ),
+                "the identity reads raw: {message:?}"
+            );
+            let json = serde_json::to_value(message).expect("the row serializes");
+            assert_eq!(
+                json["instruction_entry"], identity,
+                "the identity reads raw, as it was sent"
+            );
+        }
+    }
+
+    /// An identity a run start minted reads `Known` from its JSON, with every
+    /// field it carries. Were the core type to gain a field the wire cannot
+    /// decode, every real entry would read raw; this row fails first.
+    #[test]
+    fn a_minted_entry_identity_decodes_from_json_as_known() {
+        use meerkat_core::types::{InstructionKey, InstructionNamespace};
+
+        let write = meerkat_core::SessionInstructionWrite {
+            slot: meerkat_core::InstructionSlot {
+                namespace: InstructionNamespace::new("app.example").unwrap(),
+                key: InstructionKey::new("tone").unwrap(),
+            },
+            revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+            change: meerkat_core::SessionInstructionChange::Activate {
+                body: "Answer formally.".to_string(),
+                content_sha256: None,
+            },
+        };
+        let mut session = meerkat_core::Session::new();
+        session
+            .set_session_instruction(write)
+            .expect("the write records");
+        let run_id = RunId::new();
+        let outcome = session
+            .apply_run_start_instructions(
+                meerkat_core::InstructionRunStart::FreshRun,
+                meerkat_core::InstructionLowering::MidConversation,
+                Some(run_id.clone()),
+            )
+            .expect("the run start resolves");
+        assert!(
+            matches!(
+                outcome,
+                meerkat_core::RunStartInstructionOutcome::Applied { .. }
+            ),
+            "{outcome:?}"
+        );
+        let minted = session
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::System(system) => system.instruction_entry.clone(),
+                _ => None,
+            })
+            .expect("the run start appended its entry");
+        assert_eq!(minted.run_id(), Some(&run_id));
+        assert!(!minted.active().is_empty() && !minted.changes().is_empty());
+
+        let json = serde_json::to_value(&minted).expect("the identity serializes");
+        let decoded: WireInstructionEntryIdentity =
+            serde_json::from_value(json.clone()).expect("the identity decodes");
+        assert_eq!(
+            decoded,
+            WireInstructionEntryIdentity::Known(minted.clone()),
+            "a minted identity reads as known: {json}"
+        );
+
+        // The same through a history row, as a reader of the wire decodes it.
+        let wire = WireSessionMessage::from(session.messages()[0].clone());
+        let encoded = serde_json::to_value(&wire).expect("the row serializes");
+        let read: WireSessionMessage = serde_json::from_value(encoded).expect("the row decodes");
+        match read {
+            WireSessionMessage::System {
+                instruction_entry: Some(WireInstructionEntryIdentity::Known(identity)),
+                ..
+            } => assert_eq!(identity, minted),
+            other => panic!("expected a known entry identity, got {other:?}"),
         }
     }
 

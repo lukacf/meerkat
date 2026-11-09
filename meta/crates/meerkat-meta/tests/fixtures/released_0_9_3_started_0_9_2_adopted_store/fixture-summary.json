@@ -1,0 +1,358 @@
+{
+ "fixture_id": "meta-0.9.3-started-0.9.2-adopted-mobkit-0.8.26-store-predecessor-manifest-synthetic",
+ "data_classification": "synthetic_non_production",
+ "lineage": [
+  {
+   "step": "mint",
+   "product": "MobKit rpc_gateway 0.8.26 (published)",
+   "binary_sha256": "35a596bc2beaf508e85663234ff2295c5c1088794daea47c5df270d556bd97da",
+   "driver": "mint_released_0_8_26_store.py",
+   "release_asset": "mobkit-rpc-gateway-0.8.26-x86_64-unknown-linux-gnu.tar.gz",
+   "release_asset_sha256": "fdac071b0a1b3983c67e6a75fc279135aa9bff9dcae56d8caaaaa8bb9dfbafb1"
+  },
+  {
+   "step": "adopt",
+   "product": "Meta meta_gateway 0.9.2 (published)",
+   "command": "meta_gateway storage-adopt-predecessor --state-dir <state> --json --apply",
+   "binary_sha256": "ffdd4bd17c9865403e00a215fe22e552e97495ddcdfcd15a21e2defa87c9073f",
+   "release_asset": "meta-gateway-0.9.2-x86_64-unknown-linux-gnu.tar.gz",
+   "release_asset_sha256": "d589e75690205d765a7eca7b2290340cf2210e5cd932eb2d3430068bb50f548a"
+  },
+  {
+   "step": "run",
+   "product": "Meta rpc_gateway 0.9.2 (published)",
+   "boots": [
+    {
+     "boot": 1,
+     "turns": [
+      "boot 1 turn 0 for learner:fixture-0001",
+      "boot 1 turn 1 for learner:fixture-0001"
+     ]
+    },
+    {
+     "boot": 2,
+     "turns": [
+      "boot 2 turn 0 for learner:fixture-0001"
+     ]
+    }
+   ],
+   "clean_shutdown": true,
+   "binary_sha256": "623d1270c53c267f20ecfb620c5da60b20d4b0c561efd4135c384f0358f8d5e0",
+   "release_asset": "meta-rpc-gateway-0.9.2-x86_64-unknown-linux-gnu.tar.gz",
+   "release_asset_sha256": "f0390076fb765410f20fd5115c87d3d09693f68c5cc95f8103d5cc638b45dc9f"
+  },
+  {
+   "step": "manifest",
+   "creator_field": "created_by_mobkit"
+  },
+  {
+   "step": "start",
+   "product": "Meta rpc_gateway 0.9.3 (published)",
+   "turns": 0,
+   "clean_shutdown": true,
+   "shutdown": {
+    "runtime_cleanup_completed": true,
+    "shutdown": true
+   },
+   "binary_sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335",
+   "release_asset": "meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
+   "release_asset_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0"
+  }
+ ],
+ "mob_id": "adoption-fixture-planners",
+ "mob_config": "[mob]\nid = \"adoption-fixture-planners\"\n\n[profiles.planner]\nmodel = \"gpt-5.5\"\nexternal_addressable = true\nruntime_mode = \"turn_driven\"\n\n[profiles.planner.tools]\ncomms = true\nmob_tasks = true\n",
+ "identity": "learner:fixture-0001",
+ "member_id": "mk--learner_cfixture-0001",
+ "session_id": "01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36",
+ "session_id_at_0_8_26_mint": "01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36",
+ "memory_ids": [
+  "mem-1792448836736361251-1382c4-0-18395066da7f0be3",
+  "mem-1792448836738719869-1382c4-1-6e92bf82a622ec38"
+ ],
+ "ledger_assertion": {
+  "assertion_id": "memory-assert-000000",
+  "conflict_active": false,
+  "entity": "fixture-curriculum",
+  "store": "knowledge_graph",
+  "topic": "unit-one"
+ },
+ "turn_token": "FIXTURE-0826-TOKEN-ALPHA (the 0.8.26 mint's one turn)",
+ "roster": [
+  {
+   "identity": "learner:fixture-0001",
+   "profile": "planner",
+   "addressability": "addressable",
+   "labels": {
+    "cohort": "fixture"
+   },
+   "additional_instructions": [
+    "Answer in one sentence."
+   ]
+  }
+ ],
+ "init_params": {
+  "mob_config": "[mob]\nid = \"adoption-fixture-planners\"\n\n[profiles.planner]\nmodel = \"gpt-5.5\"\nexternal_addressable = true\nruntime_mode = \"turn_driven\"\n\n[profiles.planner.tools]\ncomms = true\nmob_tasks = true\n",
+  "has_roster_provider": true,
+  "runtime_options": {
+   "demo_llm": true,
+   "identity_bootstrap_mode": {
+    "mode": "eager_materialize"
+   },
+   "agent_memory": {
+    "selection": "contextual",
+    "max_entries": 4
+   },
+   "memory_config": {
+    "backend": "local_json"
+   }
+  }
+ },
+ "init_0_9_3": {
+  "identity_bootstrap": {
+   "complete": true,
+   "counts": {
+    "active": 1,
+    "broken": 0,
+    "dormant": 0,
+    "warming": 0
+   },
+   "identities": {
+    "learner:fixture-0001": {
+     "restore": {
+      "stage": "resumed"
+     },
+     "state": "active"
+    }
+   },
+   "mode": {
+    "mode": "eager_materialize"
+   },
+   "ready": true
+  },
+  "contract_version": "0.5.0"
+ },
+ "status_identity_0_9_3": {
+  "addressability": "addressable",
+  "agent_runtime_id": "rt:learner:fixture-0001:0",
+  "checkpoint_version": 12,
+  "continuity_health": {
+   "durability_policy": {
+    "kind": "sync_write_through"
+   },
+   "last_checkpoint_version": 12,
+   "store_reachable": true
+  },
+  "delivery_scope": {
+   "agent_runtime_id": "rt:learner:fixture-0001:0",
+   "generation": 0,
+   "identity": "learner:fixture-0001",
+   "lease_fencing_token": 4,
+   "member": {
+    "fence_token": 1,
+    "runtime_id": {
+     "generation": 0,
+     "identity": "mk--learner_cfixture-0001"
+    },
+    "session_id": "01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36",
+    "version": 1
+   },
+   "version": 1
+  },
+  "display_name": null,
+  "generation": 0,
+  "identity": "learner:fixture-0001",
+  "labels": {
+   "cohort": "fixture"
+  },
+  "lease": {
+   "fencing_token": 4,
+   "healthy": true,
+   "ttl_remaining_ms": 86399992
+  },
+  "lease_healthy": true,
+  "profile": "planner",
+  "session_id": "01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36",
+  "state": "active"
+ },
+ "ledgers_before_0_9_3_start": {
+  "continuity.sqlite3": [
+   [
+    "meta-continuity",
+    2
+   ]
+  ],
+  "council.sqlite3": [
+   [
+    "mob",
+    10
+   ]
+  ],
+  "event_log.sqlite3": [
+   [
+    "mob",
+    10
+   ]
+  ],
+  "meta_console.sqlite3": [
+   [
+    "meta-console",
+    3
+   ]
+  ],
+  "meta_metadata.sqlite3": [
+   [
+    "meta-metadata",
+    1
+   ]
+  ],
+  "runtime.sqlite": [
+   [
+    "runtime-store",
+    3
+   ]
+  ],
+  "schedule.sqlite": [
+   [
+    "schedule-store",
+    3
+   ]
+  ],
+  "workgraph.sqlite3": [
+   [
+    "workgraph",
+    4
+   ]
+  ],
+  "agent-memory/default.sqlite3": [
+   [
+    "meta-memory",
+    3
+   ]
+  ],
+  "mobkit/jobs.sqlite3": [
+   [
+    "jobs",
+    4
+   ]
+  ],
+  "mobs/realm_profiles.db": [
+   [
+    "mob",
+    10
+   ]
+  ]
+ },
+ "ledgers_after_0_9_3_start": {
+  "continuity.sqlite3": [
+   [
+    "meta-continuity",
+    2
+   ]
+  ],
+  "council.sqlite3": [
+   [
+    "mob",
+    11
+   ]
+  ],
+  "event_log.sqlite3": [
+   [
+    "mob",
+    11
+   ]
+  ],
+  "meta_console.sqlite3": [
+   [
+    "meta-console",
+    3
+   ]
+  ],
+  "meta_metadata.sqlite3": [
+   [
+    "meta-metadata",
+    1
+   ]
+  ],
+  "runtime.sqlite": [
+   [
+    "runtime-store",
+    3
+   ]
+  ],
+  "schedule.sqlite": [
+   [
+    "schedule-store",
+    3
+   ]
+  ],
+  "workgraph.sqlite3": [
+   [
+    "workgraph",
+    4
+   ]
+  ],
+  "agent-memory/default.sqlite3": [
+   [
+    "meta-memory",
+    3
+   ]
+  ],
+  "mobkit/jobs.sqlite3": [
+   [
+    "jobs",
+    4
+   ]
+  ],
+  "mobs/realm_profiles.db": [
+   [
+    "mob",
+    11
+   ]
+  ]
+ },
+ "manifest_rewritten_by_0_9_3_start": false,
+ "keyless_0_9_3_start": {
+  "home": "empty (no session comms identity keys)",
+  "identity_bootstrap": {
+   "complete": true,
+   "counts": {
+    "active": 1,
+    "broken": 0,
+    "dormant": 0,
+    "warming": 0
+   },
+   "identities": {
+    "learner:fixture-0001": {
+     "restore": {
+      "stage": "resumed"
+     },
+     "state": "active"
+    }
+   },
+   "mode": {
+    "mode": "eager_materialize"
+   },
+   "ready": true
+  },
+  "status_identity": {
+   "state": "active",
+   "session_id": "01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36",
+   "addressability": "addressable",
+   "lease_healthy": true
+  },
+  "shutdown": {
+   "runtime_cleanup_completed": true,
+   "shutdown": true
+  }
+ },
+ "not_committed": [
+  "state/peer_key.ed25519 (gateway peer key, key material)",
+  "state/blobs/ (empty directory; recreate it when staging)",
+  "$XDG_STATE_HOME/meerkat/session_comms_identity/<session>/identity.{key,pub} (outside the state dir)"
+ ],
+ "comms_keys": {
+  "committed": false,
+  "location": "$XDG_STATE_HOME/meerkat/session_comms_identity/01a15646-b33f-7ee2-b9d9-b4a5b2d1ad36/identity.{key,pub} (Linux; macOS $HOME/Library/Application Support/meerkat/session_comms_identity/...)",
+  "without_them": "keyless_0_9_3_start: published 0.9.3 started on a copy under an empty HOME still reports the identity active (restore stage resumed) with a healthy lease; no send was attempted"
+ }
+}

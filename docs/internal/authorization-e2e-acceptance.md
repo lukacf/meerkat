@@ -93,7 +93,9 @@ workspace I/O and a denied outside write followed by a permitted sibling
 operation on the same shell owner.
 
 Bind durable `ProcessCustody` and have the target read its own record as its
-first effect. The recorded PID must match the target, with custody committed
+first effect. The recorded PID must match the target (on Linux, the launch's
+init, pid 1 of the launch's pid namespace, whose start time the target, pid 2
+there, reads from its own `/proc/1/stat`), with custody committed
 before the gate opens. A successful kill dispatch must not remove the record
 while a real descendant remains alive; only observed group exit permits
 release. Exercise this on the production foreground owner, including timeout,
@@ -225,10 +227,14 @@ When the GCP lead schedules this completed slice, its focused existing-target
 command is:
 
 ```bash
-./scripts/repo-cargo test --locked -p meerkat-authorization --lib \
+./scripts/repo-cargo test --locked $(node scripts/core-workspace-args.mjs --tests -p meerkat-authorization) --lib \
   work::tests::tool_dispatch::operation_review::factory_review_denial_and_escalation_preserve_goal_sibling_and_model_continuation \
   -- --exact --nocapture --test-threads=1
 ```
+
+The selection carries the crate's test features (`--features
+workspace-tests`): the test is gated on them, and the crate's lib test does
+not build without them.
 
 The neighboring controls remain in the same `operation_review` module; select
 that module through the same `--lib` target for its complete critical suite.

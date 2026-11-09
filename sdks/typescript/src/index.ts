@@ -22,7 +22,12 @@
  */
 
 export { MeerkatClient } from "./client.js";
-export type { ConnectOptions, MobMemberLiveOpenOptions } from "./client.js";
+export type {
+  ConnectOptions,
+  MobMemberEventsOptions,
+  MobMemberLiveOpenOptions,
+  ToolGrantMemberSubject,
+} from "./client.js";
 export type { WireMemberProgressSnapshot } from "./generated/types.js";
 export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
@@ -35,12 +40,14 @@ export type {
   MobBoundedHelperResult,
   MobBoundedHelperResultStatus,
   MobForkHelperOptions,
+  MobForkMemberOptions,
   MobHelperResult,
   MobHelperOptions,
   MobKickoffMemberSnapshot,
   MobKickoffWaitOptions,
   MobMemberCustodyDeferral,
   MobMemberCustodyUnknown,
+  MobMemberPreviewUnavailableUnknown,
   MobMemberSnapshot,
   MobPeerConnectivity,
   MobPeerConnectivitySnapshot,
@@ -180,6 +187,9 @@ export type {
   MobHardCancelResult,
   MobStopMemberRunResult,
   StopRunResult,
+  CompactSessionResult,
+  MobCompactMemberResult,
+  WireCompactionRequestOutcome,
   WireRunStopReceipt,
   WireRunStopContributor,
   MobLifecycleAction,
@@ -194,6 +204,7 @@ export type {
   MobLifecycleFailure,
   MobStatus,
   MobSummary,
+  QuarantinedMobSummary,
   MobTurnStartOptions,
   MobWireMembersBatchEdge,
   MobWireMembersBatchEdgeInput,
@@ -262,7 +273,9 @@ export type {
   TranscriptRewriteSelection,
   TranscriptToolResultContentBlockReplacement,
   TranscriptUserContentBlockReplacement,
+  RequesterPrincipal,
   ToolCallDedupeKey,
+  ToolCallRequester,
   TurnAuthBindingOverride,
   TurnOptions,
   TurnToolOverlay,
@@ -374,6 +387,12 @@ export type {
 } from "./generated/types.js";
 export { COMMS_SEND_ERROR_CODES, commsSendError } from "./comms-errors.js";
 export { mobDestroyIncompleteReport } from "./mob-destroy-report.js";
+export {
+  MOB_QUARANTINED_KIND,
+  MOB_QUARANTINE_CLASSES,
+  mobQuarantined,
+  type MobQuarantinedRefusal,
+} from "./mob-errors.js";
 export { BinaryIntegrityError } from "./binary-errors.js";
 export type { BinaryIntegrityFailure } from "./binary-errors.js";
 
@@ -385,6 +404,33 @@ export {
   authErrorReason,
 } from "./auth-errors.js";
 export type { WireAuthErrorDetail, WireAuthErrorReason } from "./generated/types.js";
+export { INSTRUCTION_SET_ERROR_CODES, instructionSetCode } from "./instructions.js";
+export type {
+  InstructionAdvisoryUnknown,
+  InstructionBlockReason,
+  InstructionEffectiveRead,
+  InstructionEffectiveSlot,
+  InstructionLowering,
+  InstructionPendingReason,
+  InstructionRecord,
+  InstructionResidency,
+  InstructionSlotState,
+  InstructionSlotView,
+  InstructionTarget,
+  InstructionTargetOwner,
+  InstructionWriteOptions,
+  MemberInstructionDelivery,
+  MemberInstructionDeliveryState,
+  MemberInstructionSlot,
+  MemberInstructionStatus,
+  MobInstructionStatus,
+  MobInstructionStatusOptions,
+  MobInstructionWriteResult,
+  SessionInstructionSlot,
+  SessionInstructionStatus,
+  SessionInstructionWriteResult,
+} from "./instructions.js";
+export type { InstructionSetErrorCode } from "./generated/types.js";
 export type {
   AttentionBindingRequest,
   AttentionBindingResult,
@@ -466,6 +512,9 @@ export type {
   MobSpawnPolicyInput,
   MobSpawnReceiptWire,
   MobSpawnSpecParams,
+  MobStreamCursor,
+  MobForkMemberParams,
+  MobForkMemberResult,
   MobRotateSupervisorResult,
   MobClaimCallbackRouteParams,
   MobClaimCallbackRouteResult,

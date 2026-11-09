@@ -1,0 +1,631 @@
+//! Recovery of console sends a process accepted but did not see settle.
+//!
+//! A console send is durably accepted (its `user_input` frame) before it is
+//! submitted for native admission, and settled (`delivered` or
+//! `delivery_failed`) after. A process that stops in between leaves the
+//! frame unsettled. Native admission is keyed, so the runtime is the
+//! evidence of what happened: the input a send's delivery identity names is
+//! either in the session the send recorded, or it is not.
+//!
+//! - [`SendDispatchClaims`] names the one owner of a frame's dispatch in this
+//!   process; evidence reconciliation never touches a frame with a live
+//!   owner.
+//! - [`SendAdmissionReader`] reads the runtime's durable admission evidence
+//!   under the two delivery keys a console send can carry.
+//! - The typed transitions live on [`super::SendState`].
+
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde::Serialize;
+
+use super::types::{ConsoleFrame, ConsoleInteractionAccepted};
+
+/// How many of the newest console frames a boot reconciliation examines.
+pub(crate) const SEND_SWEEP_WINDOW: usize = 4096;
+/// How many unsettled sends one boot reconciliation settles at most.
+pub(crate) const SEND_SWEEP_LIMIT: usize = 256;
+/// Bound of the whole boot reconciliation.
+pub(crate) const SEND_SWEEP_DEADLINE: Duration = Duration::from_secs(10);
+/// Bound of one send's native admission evidence (both of its delivery
+/// keys) in the boot reconciliation. The pass runs before the gateway
+/// serves, so evidence slower than this (on a remote store, the read loads
+/// the runtime body of the session the send recorded) leaves the send
+/// unsettled for its sender's recovery instead of holding startup.
+pub(crate) const BOOT_SEND_READ_BOUND: Duration = Duration::from_secs(2);
+/// Bound of one send's native admission evidence (both of its delivery
+/// keys) for a sender: a replay of the send, or a request for its recovery.
+/// The sender waits for the answer, and a read cut short is discarded, so
+/// the bound sits well above a whole load on a remote store. It also sits
+/// below the default request timeout of the console and of the SDKs' stdio
+/// clients (60 s), so such a client gets the observation's answer, `unknown`
+/// included, before it gives up on the request.
+pub(crate) const INTERACTIVE_SEND_READ_BOUND: Duration = Duration::from_secs(45);
+
+/// Console send frames whose dispatch has a live owner in this process,
+/// and those whose governed submission answered unresolved in this process.
+#[derive(Debug, Default)]
+pub(crate) struct SendDispatchClaims {
+    live: Mutex<BTreeSet<String>>,
+    /// Sends whose submission's native admission answered unresolved in
+    /// this process: their input may still be admitted here, so an absent
+    /// read of it is not final here (the absence rule). A later process
+    /// starts with none.
+    unresolved: Mutex<BTreeSet<String>>,
+}
+
+impl SendDispatchClaims {
+    /// Claim a frame's dispatch. `None` when another owner holds it.
+    pub(crate) fn claim(self: &Arc<Self>, frame_id: &str) -> Option<SendDispatchClaim> {
+        let inserted = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(frame_id.to_string());
+        inserted.then(|| SendDispatchClaim {
+            claims: Arc::clone(self),
+            frame_id: frame_id.to_string(),
+        })
+    }
+
+    /// Record that this process saw `frame_id`'s submission answer
+    /// unresolved.
+    pub(crate) fn mark_unresolved(&self, frame_id: &str) {
+        self.unresolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(frame_id.to_string());
+    }
+
+    /// Whether this process saw `frame_id`'s submission answer unresolved.
+    pub(crate) fn unresolved_here(&self, frame_id: &str) -> bool {
+        self.unresolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(frame_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_claimed(&self, frame_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(frame_id)
+    }
+}
+
+/// The dispatch ownership of one console send frame, released on drop.
+#[derive(Debug)]
+pub(crate) struct SendDispatchClaim {
+    claims: Arc<SendDispatchClaims>,
+    frame_id: String,
+}
+
+impl SendDispatchClaim {
+    pub(crate) fn frame_id(&self) -> &str {
+        &self.frame_id
+    }
+}
+
+impl Drop for SendDispatchClaim {
+    fn drop(&mut self) {
+        self.claims
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.frame_id);
+    }
+}
+
+/// The outcome of reserving a scoped console send.
+#[derive(Debug)]
+pub(crate) enum ScopedReservation {
+    /// A new interaction the caller must dispatch. Scoped callers hold its
+    /// dispatch claim; the unscoped API never claims.
+    Fresh(ConsoleInteractionAccepted, Option<SendDispatchClaim>),
+    /// An idempotent replay: the send settled, or its dispatch has a live
+    /// owner. Nothing is dispatched.
+    Replay(ConsoleInteractionAccepted),
+    /// An idempotent replay of a send that has not settled and has no live
+    /// owner: the caller now owns it and reconciles it from native evidence.
+    Unsettled(
+        ConsoleInteractionAccepted,
+        SendDispatchClaim,
+        Box<ConsoleFrame>,
+    ),
+}
+
+/// The governed delivery key of a console send: its prompt's idempotency key.
+pub(crate) fn governed_delivery_key(interaction_id: &str, input_frame_id: &str) -> String {
+    format!("console:{interaction_id}:{input_frame_id}")
+}
+
+/// The namespace of the governed Console input ids, derived from each send's
+/// `console:{interaction}:{frame}` key: a fixed random value that names
+/// nothing. A shipped id is permanent, so it never changes.
+const CONSOLE_GOVERNED_INPUT_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x1dcf_20b2_1a1a_4913_b604_566d_e053_47ef);
+
+/// The payload field of a submitted send's frame naming the session its
+/// bind bound: its evidence is read there.
+pub(crate) const BOUND_SESSION_FIELD: &str = "bound_session_id";
+
+/// A governed console send's own input id, derived from its interaction and
+/// frame: every dispatch of the send submits this input, and a replay reads
+/// the runtime's evidence of it by this id (Core indexes a governed input
+/// under its key as qualified by its association, never under the raw key).
+pub(crate) fn governed_input_id(
+    interaction_id: &str,
+    input_frame_id: &str,
+) -> meerkat_core::lifecycle::InputId {
+    meerkat_core::lifecycle::InputId::from_uuid(uuid::Uuid::new_v5(
+        &CONSOLE_GOVERNED_INPUT_NAMESPACE,
+        governed_delivery_key(interaction_id, input_frame_id).as_bytes(),
+    ))
+}
+
+/// What the runtime holding a send's recorded session holds as the send's
+/// own input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum NativeSendObservation {
+    /// An input was admitted as the send's own.
+    Admitted {
+        input_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    },
+    /// The recorded session holds no input as the send's own (under its
+    /// host-human key, nor by its governed input id). A send to an
+    /// externally bound member carries no delivery identity, so for it this
+    /// is not evidence that nothing was delivered.
+    Absent,
+    /// The evidence could not be read.
+    Unknown { cause: String },
+}
+
+/// One stored input the runtime admitted as a send's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdmittedInput {
+    pub(crate) input_id: String,
+    pub(crate) phase: Option<String>,
+}
+
+/// Durable admission evidence in one session: by raw idempotency key (a
+/// host-human send's input is admitted unqualified under its frame id) and
+/// by input id (a governed send's input id derives from its frame).
+#[async_trait::async_trait]
+pub(crate) trait SendAdmissionReader: Send + Sync {
+    async fn admitted_input(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<AdmittedInput>, String>;
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<AdmittedInput>, String>;
+}
+
+#[async_trait::async_trait]
+impl SendAdmissionReader for meerkat_runtime::MeerkatMachine {
+    async fn admitted_input(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<AdmittedInput>, String> {
+        use meerkat_runtime::SessionServiceRuntimeExt;
+        // The store-owned index only: what a previous process admitted is
+        // read without reviving or registering the session.
+        let state = self
+            .durable_input_state_by_idempotency_key(session_id, idempotency_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(state.map(|state| AdmittedInput {
+            input_id: state.state.input_id.to_string(),
+            phase: serde_json::to_value(state.seed.phase)
+                .ok()
+                .and_then(|phase| phase.as_str().map(ToString::to_string)),
+        }))
+    }
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<AdmittedInput>, String> {
+        use meerkat_runtime::terminal_status::{
+            InputTerminalReceiptObservation, InteractionSelector,
+        };
+        // Live or from the store, without reviving the session. A session
+        // that never admitted anything holds none of this input either.
+        let observed = match self
+            .input_terminal_receipt_observation(
+                session_id,
+                InteractionSelector::InputId(input_id.clone()),
+            )
+            .await
+        {
+            Ok(observed) => observed,
+            Err(meerkat_runtime::RuntimeDriverError::NotFound { .. }) => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(observed.map(|observed| {
+            let phase = match &observed.report {
+                InputTerminalReceiptObservation::Pending { phase, .. } => {
+                    serde_json::to_value(phase)
+                        .ok()
+                        .and_then(|phase| phase.as_str().map(ToString::to_string))
+                }
+                _ => None,
+            };
+            AdmittedInput {
+                input_id: observed.report.input_id().to_string(),
+                phase,
+            }
+        }))
+    }
+}
+
+/// Read a send's admission evidence in its session: the one its bind bound
+/// when its submission recorded one ([`BOUND_SESSION_FIELD`]), else the one
+/// it recorded at acceptance. Under its host-human key (the input frame id),
+/// then by its governed input id ([`governed_input_id`]), all within one
+/// deadline `bound` from now: evidence the store has not given by then
+/// answers `unknown`, without reading on.
+pub(crate) async fn observe_native_send(
+    reader: &dyn SendAdmissionReader,
+    frame: &ConsoleFrame,
+    bound: Duration,
+) -> NativeSendObservation {
+    let deadline = tokio::time::Instant::now() + bound;
+    let session = frame
+        .payload
+        .get(BOUND_SESSION_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .or(frame.session_id.as_deref());
+    let Some(session_id) = session else {
+        return NativeSendObservation::Unknown {
+            cause: "the send recorded no session".to_string(),
+        };
+    };
+    let Ok(session_id) = meerkat_core::types::SessionId::parse(session_id) else {
+        return NativeSendObservation::Unknown {
+            cause: "the send's recorded session id does not parse".to_string(),
+        };
+    };
+    let late = || NativeSendObservation::Unknown {
+        cause: "the admission read did not answer in time".to_string(),
+    };
+    match tokio::time::timeout_at(deadline, reader.admitted_input(&session_id, &frame.id)).await {
+        Ok(Ok(Some(input))) => {
+            return NativeSendObservation::Admitted {
+                input_id: input.input_id,
+                phase: input.phase,
+            };
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => return NativeSendObservation::Unknown { cause: error },
+        Err(_) => return late(),
+    }
+    if let Some(interaction_id) = frame.interaction_id.as_deref() {
+        let input_id = governed_input_id(interaction_id, &frame.id);
+        match tokio::time::timeout_at(
+            deadline,
+            reader.admitted_input_by_id(&session_id, &input_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(input))) => {
+                return NativeSendObservation::Admitted {
+                    input_id: input.input_id,
+                    phase: input.phase,
+                };
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => return NativeSendObservation::Unknown { cause: error },
+            Err(_) => return late(),
+        }
+    }
+    NativeSendObservation::Absent
+}
+
+/// A console send as its sender recovers it: the acceptance as it is now,
+/// and what the runtime holds for it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ConsoleSendRecovery {
+    #[serde(flatten)]
+    pub(crate) accepted: ConsoleInteractionAccepted,
+    pub(crate) native: NativeSendObservation,
+}
+
+/// What one boot reconciliation did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SendSweepOutcome {
+    pub(crate) examined: usize,
+    pub(crate) delivered: usize,
+    /// Submitted sends whose input the runtime did not hold: failed, their
+    /// outcome unknown.
+    pub(crate) lost: usize,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::console_aggregator::types::{
+        ConsoleCursor, ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    struct FakeReader {
+        admitted: BTreeMap<String, AdmittedInput>,
+        error: Option<String>,
+        reads: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SendAdmissionReader for FakeReader {
+        async fn admitted_input(
+            &self,
+            _session_id: &meerkat_core::types::SessionId,
+            idempotency_key: &str,
+        ) -> Result<Option<AdmittedInput>, String> {
+            self.reads.lock().unwrap().push(idempotency_key.to_string());
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            Ok(self.admitted.get(idempotency_key).cloned())
+        }
+
+        async fn admitted_input_by_id(
+            &self,
+            _session_id: &meerkat_core::types::SessionId,
+            input_id: &meerkat_core::lifecycle::InputId,
+        ) -> Result<Option<AdmittedInput>, String> {
+            self.reads.lock().unwrap().push(format!("id:{input_id}"));
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            Ok(self.admitted.get(&input_id.to_string()).cloned())
+        }
+    }
+
+    fn reader(admitted: &[(&str, &str)]) -> FakeReader {
+        FakeReader {
+            admitted: admitted
+                .iter()
+                .map(|(key, input)| {
+                    (
+                        (*key).to_string(),
+                        AdmittedInput {
+                            input_id: (*input).to_string(),
+                            phase: Some("queued".to_string()),
+                        },
+                    )
+                })
+                .collect(),
+            error: None,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn frame(session_id: Option<&str>) -> ConsoleFrame {
+        ConsoleFrame {
+            id: "console-frame-1".to_string(),
+            cursor: ConsoleCursor::from_seq(1),
+            dedupe_key: "send-scoped:x".to_string(),
+            timestamp_ms: 1,
+            runtime_key: "default".to_string(),
+            identity: "agent".to_string(),
+            conversation_id: None,
+            session_id: session_id.map(ToString::to_string),
+            kind: "user_input".to_string(),
+            status: ConsoleFrameStatus::Accepted,
+            frame_version: 1,
+            updated_at_ms: None,
+            payload: json!({}),
+            source: ConsoleFrameSource {
+                member_provenance: None,
+                kind: ConsoleFrameSourceKind::Send,
+                source_cursor: Some("fp".to_string()),
+            },
+            source_event_id: None,
+            interaction_id: Some("6d6f626b-6974-5263-8f6e-736f6c652d69".to_string()),
+            turn_id: None,
+            run_id: None,
+            parent_frame_id: None,
+            caused_by_frame_id: None,
+        }
+    }
+
+    const SESSION: &str = "0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6b";
+
+    /// The frame's host-human key first, then the governed send's input id,
+    /// derived from its frame: Core indexes a governed input under its key
+    /// as qualified by its association, never under the raw key.
+    #[tokio::test]
+    async fn observation_reads_the_frame_key_then_the_governed_input_id() {
+        let frame = frame(Some(SESSION));
+        let governed =
+            governed_input_id(frame.interaction_id.as_deref().unwrap(), &frame.id).to_string();
+        let host_human = reader(&[("console-frame-1", "input-a")]);
+        assert_eq!(
+            observe_native_send(&host_human, &frame, INTERACTIVE_SEND_READ_BOUND).await,
+            NativeSendObservation::Admitted {
+                input_id: "input-a".to_string(),
+                phase: Some("queued".to_string())
+            }
+        );
+        let governed_reader = reader(&[(governed.as_str(), "input-b")]);
+        assert_eq!(
+            observe_native_send(&governed_reader, &frame, INTERACTIVE_SEND_READ_BOUND).await,
+            NativeSendObservation::Admitted {
+                input_id: "input-b".to_string(),
+                phase: Some("queued".to_string())
+            }
+        );
+        assert_eq!(
+            *governed_reader.reads.lock().unwrap(),
+            vec!["console-frame-1".to_string(), format!("id:{governed}")]
+        );
+        assert_eq!(
+            observe_native_send(&reader(&[]), &frame, INTERACTIVE_SEND_READ_BOUND).await,
+            NativeSendObservation::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_without_a_readable_session_or_answer_is_unknown() {
+        let none = reader(&[("console-frame-1", "input-a")]);
+        assert!(matches!(
+            observe_native_send(&none, &frame(None), INTERACTIVE_SEND_READ_BOUND).await,
+            NativeSendObservation::Unknown { .. }
+        ));
+        assert!(matches!(
+            observe_native_send(
+                &none,
+                &frame(Some("not-a-session")),
+                INTERACTIVE_SEND_READ_BOUND
+            )
+            .await,
+            NativeSendObservation::Unknown { .. }
+        ));
+        assert!(none.reads.lock().unwrap().is_empty());
+        let failing = FakeReader {
+            error: Some("store unavailable".to_string()),
+            ..reader(&[])
+        };
+        assert_eq!(
+            observe_native_send(&failing, &frame(Some(SESSION)), INTERACTIVE_SEND_READ_BOUND).await,
+            NativeSendObservation::Unknown {
+                cause: "store unavailable".to_string()
+            }
+        );
+    }
+
+    /// A reader whose every answer takes `delay`, as a slow store's does.
+    struct DelayedReader {
+        evidence: FakeReader,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl SendAdmissionReader for DelayedReader {
+        async fn admitted_input(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+            idempotency_key: &str,
+        ) -> Result<Option<AdmittedInput>, String> {
+            tokio::time::sleep(self.delay).await;
+            self.evidence
+                .admitted_input(session_id, idempotency_key)
+                .await
+        }
+
+        async fn admitted_input_by_id(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+            input_id: &meerkat_core::lifecycle::InputId,
+        ) -> Result<Option<AdmittedInput>, String> {
+            tokio::time::sleep(self.delay).await;
+            self.evidence
+                .admitted_input_by_id(session_id, input_id)
+                .await
+        }
+    }
+
+    /// One deadline bounds the whole observation, not each read: the
+    /// governed input id is read with what is left of the bound after the
+    /// host-human key, and an observation past its deadline answers unknown
+    /// without reading on. Each read here takes 6 s and the admission is
+    /// the governed input, so the second read answers at 12 s: past a
+    /// 10 s bound, within a 13 s one.
+    #[tokio::test(start_paused = true)]
+    async fn one_deadline_bounds_both_reads() {
+        let frame = frame(Some(SESSION));
+        let governed =
+            governed_input_id(frame.interaction_id.as_deref().unwrap(), &frame.id).to_string();
+        let slow = DelayedReader {
+            evidence: reader(&[(governed.as_str(), "input-b")]),
+            delay: Duration::from_secs(6),
+        };
+        assert!(matches!(
+            observe_native_send(&slow, &frame, Duration::from_secs(10)).await,
+            NativeSendObservation::Unknown { .. }
+        ));
+        assert_eq!(
+            observe_native_send(&slow, &frame, Duration::from_secs(13)).await,
+            NativeSendObservation::Admitted {
+                input_id: "input-b".to_string(),
+                phase: Some("queued".to_string())
+            }
+        );
+    }
+
+    /// A governed Console input's id is permanent once shipped (a replay reads
+    /// the runtime's evidence by it), so its derivation is pinned: the
+    /// namespace, a fixed random value that names nothing, and the
+    /// `console:{interaction}:{frame}` key it hashes.
+    #[test]
+    fn the_governed_input_id_derivation_is_pinned() {
+        assert_eq!(
+            governed_input_id("0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6c", "console-frame-1")
+                .to_string(),
+            "05170309-1079-5e5f-b678-d1e8a35af2b2"
+        );
+    }
+
+    #[test]
+    fn a_frame_has_one_dispatch_owner_until_its_claim_drops() {
+        let claims = Arc::new(SendDispatchClaims::default());
+        let claim = claims.claim("frame-a").expect("first claim");
+        assert_eq!(claim.frame_id(), "frame-a");
+        assert!(claims.claim("frame-a").is_none());
+        let other = claims.claim("frame-b").expect("other frame");
+        drop(claim);
+        assert!(!claims.is_claimed("frame-a"));
+        assert!(claims.is_claimed("frame-b"));
+        assert!(claims.claim("frame-a").is_some());
+        drop(other);
+    }
+
+    #[test]
+    fn recovery_serializes_the_acceptance_and_the_native_state() {
+        let recovery = ConsoleSendRecovery {
+            accepted: ConsoleInteractionAccepted {
+                interaction_id: "i".to_string(),
+                identity: "agent".to_string(),
+                conversation_id: None,
+                session_id: Some(SESSION.to_string()),
+                input_frame_id: "f".to_string(),
+                cursor: ConsoleCursor::from_seq(3),
+                status: ConsoleFrameStatus::Delivered,
+            },
+            native: NativeSendObservation::Admitted {
+                input_id: "input-a".to_string(),
+                phase: Some("consumed".to_string()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&recovery).unwrap(),
+            json!({
+                "interaction_id": "i",
+                "identity": "agent",
+                "session_id": SESSION,
+                "input_frame_id": "f",
+                "cursor": "console:3",
+                "status": "delivered",
+                "native": {"state": "admitted", "input_id": "input-a", "phase": "consumed"}
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(NativeSendObservation::Absent).unwrap(),
+            json!({"state": "absent"})
+        );
+    }
+}

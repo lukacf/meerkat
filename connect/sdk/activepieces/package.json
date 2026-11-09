@@ -1,0 +1,80 @@
+{
+  "name": "@rkat/toolkit-activepieces",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Experimental configured MCP server and explicit host readers/writers using pinned Activepieces actions",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js"
+    }
+  },
+  "files": [
+    "dist",
+    "vendor",
+    "licenses",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "package-lock.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT OR Apache-2.0",
+  "devDependencies": {
+    "@aws-sdk/client-s3": "3.974.0",
+    "@googleapis/docs": "9.3.0",
+    "@googleapis/drive": "20.2.0",
+    "@googleapis/sheets": "13.0.2",
+    "@hubspot/api-client": "12.0.1",
+    "@mailchimp/mailchimp_marketing": "3.0.80",
+    "@microsoft/microsoft-graph-client": "3.0.7",
+    "@notionhq/client": "2.2.14",
+    "@supabase/supabase-js": "2.49.9",
+    "@types/node": "22.20.5",
+    "airtable": "0.11.6",
+    "contentful-management": "11.48.1",
+    "dayjs": "1.11.9",
+    "deepmerge-ts": "8.0.2",
+    "encoding": "0.1.13",
+    "esbuild": "0.28.2",
+    "form-data": "4.0.6",
+    "google-auth-library": "10.5.0",
+    "intercom-client": "6.2.0",
+    "ipaddr.js": "2.3.0",
+    "jsonwebtoken": "9.0.1",
+    "monday-sdk-js": "0.5.2",
+    "nanoid": "3.3.18",
+    "stripe": "18.2.1",
+    "supports-color": "7.2.0",
+    "typescript": "5.8.3",
+    "zod": "4.3.6",
+    "@slack/web-api": "7.9.0",
+    "@datadog/datadog-api-client": "1.43.0",
+    "@linear/sdk": "7.0.1",
+    "@googleapis/oauth2": "5.0.1",
+    "mailparser": "3.9.20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/core": "2.3.0",
+    "@modelcontextprotocol/server": "2.3.0",
+    "undici": "8.11.2"
+  },
+  "bin": {
+    "meerkat-toolkit-activepieces-mcp": "./dist/mcp-cli.js"
+  }
+}

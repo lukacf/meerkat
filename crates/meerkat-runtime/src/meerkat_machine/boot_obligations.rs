@@ -4,9 +4,11 @@
 use std::collections::HashSet;
 
 use super::MeerkatMachine;
-use crate::delivery_inbox::{RuntimeDeliveryError, runtimes_with_pending_deliveries_in};
+use crate::delivery_inbox::{
+    RuntimeDeliveryError, runtime_delivery_backlog_in, runtime_delivery_pending_in,
+};
 use crate::identifiers::LogicalRuntimeId;
-use crate::store::RuntimeStoreError;
+use crate::store::{RefusedScope, RuntimeStoreError};
 
 /// What a mob boot reads to plan which members it materializes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,7 +16,8 @@ pub struct RuntimeBootObligations {
     /// Runtimes whose durable state holds recovery work, as far as the store
     /// can tell.
     pub recovery_work: RuntimeRecoveryWork,
-    /// Runtimes holding committed-but-unapplied deliveries.
+    /// Runtimes holding committed-but-unapplied deliveries, and runtimes the
+    /// store cannot answer for until it is reopened, which may hold them.
     pub pending_deliveries: HashSet<LogicalRuntimeId>,
 }
 
@@ -39,13 +42,57 @@ pub enum RuntimeRecoveryWorkUnobserved {
     DeliveryListingUnsupported,
 }
 
+/// What one session's runtime holds durably, read cold
+/// ([`MeerkatMachine::session_work_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionWorkState {
+    /// A registration of the session lives in this process. Its live
+    /// authority is what counts (a run it marked resumable, the holds on its
+    /// run starts and its queues live only there): read it live.
+    Registered,
+    /// The store holds no work a start wakes the session's runtime for: no
+    /// recovery work and no pending delivery.
+    Idle,
+    /// The store holds durable work for the session's runtime.
+    HoldsWork(SessionDurableWork),
+    /// The store cannot tell, for the typed cause. Never read it as idle.
+    Unobserved(RuntimeRecoveryWorkUnobserved),
+}
+
+/// The durable work [`SessionWorkState::HoldsWork`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionDurableWork {
+    /// The runtime holds recovery work, by the predicate a mob boot asks
+    /// ([`RuntimeStore::list_runtimes_with_recovery_work`](crate::store::RuntimeStore::list_runtimes_with_recovery_work)):
+    /// nonterminal inputs or owed operation work, pending terminal owners,
+    /// a provisional tail (an open run), a lifecycle record that names a
+    /// current run or does not decode, or input rows with no lifecycle
+    /// record.
+    pub recovery_work: bool,
+    /// The runtime holds committed deliveries it has not applied, or the
+    /// store cannot answer for it until it is reopened.
+    pub pending_deliveries: bool,
+}
+
 impl MeerkatMachine {
     /// The runtimes of this machine's store that hold durable work: the
     /// runtimes with recovery work
     /// ([`RuntimeStore::list_runtimes_with_recovery_work`](crate::store::RuntimeStore::list_runtimes_with_recovery_work))
     /// and the runtimes with pending deliveries (the population
-    /// [`RuntimeDeliveryInbox::runtimes_with_pending_deliveries`](crate::RuntimeDeliveryInbox::runtimes_with_pending_deliveries)
+    /// [`RuntimeDeliveryInbox::runtime_delivery_backlog`](crate::RuntimeDeliveryInbox::runtime_delivery_backlog)
     /// reads). Two store-wide reads, neither of which loads a runtime body.
+    ///
+    /// A runtime the store refuses (a host store whose scope of that
+    /// runtime is poisoned or quarantined) is an obligation: the recovery
+    /// scan lists it as holding work, and it counts as holding pending
+    /// deliveries. The answer stays observed for every other runtime, so one
+    /// such runtime never makes a boot wake every member. A refused runtime
+    /// scope the store cannot name by runtime id is in neither set: the
+    /// store reports it ([`Self::unnamed_refused_runtimes`]), and a boot
+    /// attributes it to the members it plans
+    /// ([`Self::store_refuses_runtime`]).
     ///
     /// A store that cannot list either answers
     /// [`RuntimeRecoveryWork::Unobserved`] with the read it could not make:
@@ -72,8 +119,17 @@ impl MeerkatMachine {
             ),
             Err(error) => return Err(error),
         };
-        let pending_deliveries = match runtimes_with_pending_deliveries_in(store.as_ref()).await {
-            Ok(runtimes) => runtimes.into_iter().collect(),
+        let pending_deliveries = match runtime_delivery_backlog_in(store.as_ref()).await {
+            Ok(backlog) => backlog
+                .pending
+                .into_iter()
+                .chain(
+                    backlog
+                        .unavailable
+                        .into_iter()
+                        .map(|unavailable| unavailable.runtime_id),
+                )
+                .collect(),
             // Deliveries the store cannot list may be pending for any member.
             Err(RuntimeDeliveryError::Store(RuntimeStoreError::Unsupported(_))) => {
                 return Ok(RuntimeBootObligations {
@@ -91,6 +147,114 @@ impl MeerkatMachine {
             pending_deliveries,
         })
     }
+
+    /// The runtime scopes this machine's store refuses that it cannot name
+    /// by runtime id ([`RuntimeStore::unnamed_refused_runtimes`](crate::store::RuntimeStore::unnamed_refused_runtimes)):
+    /// a host store's quarantined scope of a runtime whose id its scope
+    /// names hash, before any call named the runtime. The store-wide reads
+    /// of [`Self::boot_recovery_obligations`] answer without them; a boot
+    /// attributes each to the members it plans with
+    /// [`Self::store_refuses_runtime`], which names the runtime. No store
+    /// read. A machine without a store has none.
+    #[must_use]
+    pub fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+        self.store
+            .as_ref()
+            .map_or_else(Vec::new, |store| store.unnamed_refused_runtimes())
+    }
+
+    /// Whether this machine's store refuses every call that needs
+    /// `runtime_id`'s state
+    /// ([`RuntimeStore::refuses_runtime_until_reopen`](crate::store::RuntimeStore::refuses_runtime_until_reopen)):
+    /// a host store realm that lost its fence, or whose scope of that runtime
+    /// is poisoned or quarantined, whether or not the store can name the
+    /// runtime in its listings. No store read. A machine without a store
+    /// refuses nothing.
+    #[must_use]
+    pub fn store_refuses_runtime(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|store| store.refuses_runtime_until_reopen(runtime_id))
+    }
+
+    /// What `session_id`'s runtime holds durably, read cold: whether a
+    /// session nothing in this process has registered (a mob member a host
+    /// holds dormant, say) holds the work a start wakes a member for
+    /// (recovery work or pending deliveries), read without registering it.
+    /// A compaction projection the session still owes is not reported: a
+    /// start does not wake a member for it, and the member's next wake
+    /// finalizes it before its binding.
+    ///
+    /// A session registered in this process answers
+    /// [`SessionWorkState::Registered`]: its live authority is what counts
+    /// (the run it marked resumable, the holds on its run starts and its
+    /// queues live only there), so read it live. For any other session, two
+    /// reads of its one runtime, neither of which loads its body: the
+    /// predicate a mob boot asks of the whole store
+    /// ([`RuntimeStore::runtime_holds_recovery_work`](crate::store::RuntimeStore::runtime_holds_recovery_work)),
+    /// and the backlog of its delivery authority. The read registers
+    /// nothing and wakes nothing: a dormant member stays dormant.
+    ///
+    /// A store that cannot answer either read answers
+    /// [`SessionWorkState::Unobserved`] with the read it could not make,
+    /// never a guessed idle. A runtime the store refuses (a host store whose
+    /// scope of that runtime is poisoned or quarantined, named in its
+    /// listings or not) holds work, as the boot read lists it. A machine
+    /// without a store holds nothing durable: [`SessionWorkState::Idle`].
+    ///
+    /// The answer is a snapshot, not a fence: a registration, a delivery or
+    /// a wake that lands after the read is not in it.
+    ///
+    /// # Errors
+    /// Any other store failure, and a delivery authority that does not
+    /// decode.
+    pub async fn session_work_state(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<SessionWorkState, RuntimeStoreError> {
+        if self
+            .current_session_registration_witness(session_id)
+            .await
+            .is_some()
+        {
+            return Ok(SessionWorkState::Registered);
+        }
+        let Some(store) = self.store.as_ref() else {
+            return Ok(SessionWorkState::Idle);
+        };
+        let runtime_id = LogicalRuntimeId::for_session(session_id);
+        let recovery_work = match store.runtime_holds_recovery_work(&runtime_id).await {
+            Ok(holds) => holds,
+            Err(RuntimeStoreError::Unsupported(_)) => {
+                return Ok(SessionWorkState::Unobserved(
+                    RuntimeRecoveryWorkUnobserved::RecoveryScanUnsupported,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let pending_deliveries =
+            match runtime_delivery_pending_in(store.as_ref(), &runtime_id).await {
+                Ok(pending) => pending,
+                Err(RuntimeDeliveryError::Store(RuntimeStoreError::Unsupported(_))) => {
+                    return Ok(SessionWorkState::Unobserved(
+                        RuntimeRecoveryWorkUnobserved::DeliveryListingUnsupported,
+                    ));
+                }
+                // The store cannot answer for the runtime until it is
+                // reopened: it may hold pending deliveries.
+                Err(RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })) => true,
+                Err(RuntimeDeliveryError::Store(error)) => return Err(error),
+                Err(error) => return Err(RuntimeStoreError::ReadFailed(error.to_string())),
+            };
+        Ok(if recovery_work || pending_deliveries {
+            SessionWorkState::HoldsWork(SessionDurableWork {
+                recovery_work,
+                pending_deliveries,
+            })
+        } else {
+            SessionWorkState::Idle
+        })
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +262,7 @@ mod tests {
     use std::sync::Arc;
 
     use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
+    use meerkat_core::types::SessionId;
 
     use super::*;
     use crate::delivery_inbox::{
@@ -169,6 +334,19 @@ mod tests {
             {
                 Some(refusal) => Err(refusal),
                 None => self.inner.list_runtime_delivery_authorities().await,
+            }
+        }
+
+        async fn load_runtime_delivery_authority(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeDeliveryAuthorityRecord>, RuntimeStoreError> {
+            match self
+                .delivery_listing
+                .refusal("load_runtime_delivery_authority")
+            {
+                Some(refusal) => Err(refusal),
+                None => self.inner.load_runtime_delivery_authority(runtime_id).await,
             }
         }
 
@@ -441,6 +619,81 @@ mod tests {
         );
     }
 
+    /// A host store realm with one poisoned runtime scope still answers the
+    /// boot's scan, observed: the poisoned runtime is an obligation (its
+    /// facts cannot be trusted, so it holds recovery work and may hold a
+    /// pending delivery), and every healthy runtime answers as its memory
+    /// holds it. Before, both reads refused, and every mob boot over the
+    /// realm planned every member as holding work.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_poisoned_runtime_is_an_obligation_and_the_scan_stays_observed() {
+        use crate::store::spi::test_host::TestHost;
+        use crate::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+
+        let host = Arc::new(TestHost::new());
+        let realm = SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default())
+            .await
+            .expect("the realm opens");
+        let store: Arc<dyn RuntimeStore> =
+            Arc::new(SpiRuntimeStore::open(realm).await.expect("the store opens"));
+        let input = |state| {
+            InputStatePersistenceRecord::from_machine_snapshot(state).expect("a machine snapshot")
+        };
+        let working = LogicalRuntimeId::new("boot-obligations-working");
+        store
+            .persist_input_state(
+                &working,
+                &input(StoredInputState::new_accepted(InputId::new())),
+            )
+            .await
+            .expect("a nonterminal input lands");
+        let delivered = LogicalRuntimeId::new("boot-obligations-delivered");
+        RuntimeDeliveryInbox::new(Arc::clone(&store))
+            .submit(
+                &delivered,
+                RuntimeDeliverySubmission::new(
+                    RuntimeDeliveryId::new("boot-obligations-delivery").unwrap(),
+                    RuntimeDeliveryKind::JobTerminal,
+                    "boot-obligations-job",
+                    1,
+                    "boot-obligations-interaction",
+                    b"payload".to_vec(),
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("a delivery lands");
+        let doomed = LogicalRuntimeId::new("boot-obligations-doomed");
+        host.faults.lock().unwrap().conflict = 1;
+        assert!(
+            store
+                .persist_input_state(
+                    &doomed,
+                    &input(StoredInputState::new_accepted(InputId::new()))
+                )
+                .await
+                .is_err(),
+            "the store refuses the batch, and the runtime's scope is poisoned"
+        );
+
+        let obligations = MeerkatMachine::persistent_without_blobs(store)
+            .unwrap()
+            .boot_recovery_obligations()
+            .await
+            .expect("the scan answers");
+        assert_eq!(
+            obligations,
+            RuntimeBootObligations {
+                recovery_work: RuntimeRecoveryWork::Observed(HashSet::from([
+                    working,
+                    doomed.clone(),
+                ])),
+                pending_deliveries: HashSet::from([delivered, doomed]),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn boot_obligation_scan_machine_returns_a_failed_read() {
         let store = Arc::new(InMemoryRuntimeStore::new());
@@ -457,5 +710,242 @@ mod tests {
                 "{read:?}"
             );
         }
+    }
+
+    /// The sessions [`seed_sessions`] wrote, keyed by session.
+    struct SeededSessions {
+        /// A nonterminal input.
+        working: SessionId,
+        /// A pending delivery.
+        delivered: SessionId,
+        /// A lifecycle with no run and nothing else.
+        idle: SessionId,
+    }
+
+    /// [`seed`], with each runtime the runtime of a session.
+    async fn seed_sessions(store: &Arc<InMemoryRuntimeStore>) -> SeededSessions {
+        let working = SessionId::new();
+        store
+            .persist_input_state(
+                &LogicalRuntimeId::for_session(&working),
+                &InputStatePersistenceRecord::from_machine_snapshot(
+                    StoredInputState::new_accepted(InputId::new()),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let delivered = SessionId::new();
+        RuntimeDeliveryInbox::new(Arc::clone(store) as Arc<dyn RuntimeStore>)
+            .submit(
+                &LogicalRuntimeId::for_session(&delivered),
+                RuntimeDeliverySubmission::new(
+                    RuntimeDeliveryId::new("session-work-delivery").unwrap(),
+                    RuntimeDeliveryKind::JobTerminal,
+                    "session-work-job",
+                    1,
+                    "session-work-interaction",
+                    b"payload".to_vec(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let idle = SessionId::new();
+        let idle_runtime = LogicalRuntimeId::for_session(&idle);
+        store
+            .commit_machine_lifecycle(
+                &idle_runtime,
+                MachineLifecycleCommit::new_with_binding(
+                    RuntimeState::Idle,
+                    MachineLifecycleBindingFacts::new(
+                        Some(idle_runtime.0.clone()),
+                        Some(1),
+                        Some(1),
+                        Some("epoch-1".to_string()),
+                    ),
+                    SupervisorAuthoritySnapshot::UnboundNoReceipt,
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        SeededSessions {
+            working,
+            delivered,
+            idle,
+        }
+    }
+
+    /// One session's durable work, read cold, with the predicates the boot
+    /// read applies to the whole store: recovery work and pending
+    /// deliveries are told apart, an idle runtime and a session the store
+    /// never held hold nothing, and nothing is registered by the read. RED
+    /// before: no per-session read.
+    #[tokio::test]
+    async fn session_work_state_reads_one_runtime_cold() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let seeded = seed_sessions(&store).await;
+        let machine =
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store) as Arc<dyn RuntimeStore>)
+                .unwrap();
+        for (session, expected) in [
+            (
+                &seeded.working,
+                SessionWorkState::HoldsWork(SessionDurableWork {
+                    recovery_work: true,
+                    pending_deliveries: false,
+                }),
+            ),
+            (
+                &seeded.delivered,
+                SessionWorkState::HoldsWork(SessionDurableWork {
+                    recovery_work: false,
+                    pending_deliveries: true,
+                }),
+            ),
+            (&seeded.idle, SessionWorkState::Idle),
+            (&SessionId::new(), SessionWorkState::Idle),
+        ] {
+            assert_eq!(
+                machine.session_work_state(session).await.unwrap(),
+                expected,
+                "{session}"
+            );
+            assert!(
+                machine
+                    .current_session_registration_witness(session)
+                    .await
+                    .is_none(),
+                "{session}: the read registers nothing"
+            );
+        }
+    }
+
+    /// A store that cannot answer one of the two reads answers the typed
+    /// cause for every session, never a guessed idle. RED before: no
+    /// per-session read.
+    #[tokio::test]
+    async fn session_work_state_without_a_store_read_answers_unobserved() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let seeded = seed_sessions(&store).await;
+        for (recovery_scan, delivery_listing, cause) in [
+            (
+                Answer::Unsupported,
+                Answer::Forward,
+                RuntimeRecoveryWorkUnobserved::RecoveryScanUnsupported,
+            ),
+            (
+                Answer::Forward,
+                Answer::Unsupported,
+                RuntimeRecoveryWorkUnobserved::DeliveryListingUnsupported,
+            ),
+        ] {
+            let machine = scripted(&store, recovery_scan, delivery_listing);
+            for session in [&seeded.working, &seeded.delivered, &seeded.idle] {
+                assert_eq!(
+                    machine.session_work_state(session).await.unwrap(),
+                    SessionWorkState::Unobserved(cause),
+                    "{session}: the store cannot tell, and says why"
+                );
+            }
+        }
+    }
+
+    /// A session registered in this process answers `Registered`: its live
+    /// authority is what counts. RED before: no per-session read.
+    #[tokio::test]
+    async fn session_work_state_of_a_registered_session_answers_registered() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let machine =
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store) as Arc<dyn RuntimeStore>)
+                .unwrap();
+        let session = SessionId::new();
+        machine
+            .register_session(session.clone())
+            .await
+            .expect("the session registers");
+        assert_eq!(
+            machine.session_work_state(&session).await.unwrap(),
+            SessionWorkState::Registered
+        );
+    }
+
+    /// A machine without a store holds nothing durable. RED before: no
+    /// per-session read.
+    #[tokio::test]
+    async fn session_work_state_machine_without_a_store_answers_idle() {
+        assert_eq!(
+            MeerkatMachine::ephemeral()
+                .session_work_state(&SessionId::new())
+                .await
+                .unwrap(),
+            SessionWorkState::Idle
+        );
+    }
+
+    /// A failed store read is an error, never an answer. RED before: no
+    /// per-session read.
+    #[tokio::test]
+    async fn session_work_state_returns_a_failed_read() {
+        let store = Arc::new(InMemoryRuntimeStore::new());
+        let seeded = seed_sessions(&store).await;
+        for (recovery_scan, delivery_listing) in [
+            (Answer::Fail, Answer::Forward),
+            (Answer::Forward, Answer::Fail),
+        ] {
+            let read = scripted(&store, recovery_scan, delivery_listing)
+                .session_work_state(&seeded.idle)
+                .await;
+            assert!(
+                matches!(read, Err(RuntimeStoreError::ReadFailed(_))),
+                "{read:?}"
+            );
+        }
+    }
+
+    /// A host store runtime whose scope is poisoned holds work, as the boot
+    /// read lists it: its facts cannot be trusted either way, so it is never
+    /// read as idle. RED before: no per-session read.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn session_work_state_of_a_poisoned_runtime_holds_work() {
+        use crate::store::spi::test_host::TestHost;
+        use crate::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+
+        let host = Arc::new(TestHost::new());
+        let realm = SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default())
+            .await
+            .expect("the realm opens");
+        let store: Arc<dyn RuntimeStore> =
+            Arc::new(SpiRuntimeStore::open(realm).await.expect("the store opens"));
+        let doomed = SessionId::new();
+        host.faults.lock().unwrap().conflict = 1;
+        assert!(
+            store
+                .persist_input_state(
+                    &LogicalRuntimeId::for_session(&doomed),
+                    &InputStatePersistenceRecord::from_machine_snapshot(
+                        StoredInputState::new_accepted(InputId::new())
+                    )
+                    .expect("a machine snapshot"),
+                )
+                .await
+                .is_err(),
+            "the store refuses the batch, and the runtime's scope is poisoned"
+        );
+        let machine = MeerkatMachine::persistent_without_blobs(store).unwrap();
+        assert_eq!(
+            machine.session_work_state(&doomed).await.unwrap(),
+            SessionWorkState::HoldsWork(SessionDurableWork {
+                recovery_work: true,
+                pending_deliveries: true,
+            })
+        );
+        assert_eq!(
+            machine.session_work_state(&SessionId::new()).await.unwrap(),
+            SessionWorkState::Idle,
+            "a healthy runtime answers as its memory holds it"
+        );
     }
 }

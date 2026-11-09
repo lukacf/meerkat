@@ -1,0 +1,46 @@
+[package]
+name = "meerkat-toolkit"
+version = "0.9.11"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror.workspace = true
+sha2.workspace = true
+hex = "0.4"
+uuid.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+toolkit-package.workspace = true
+toolkit-store.workspace = true
+toolkit-catalog.workspace = true
+meerkat-workgraph.workspace = true
+meerkat-core.workspace = true
+meerkat-authorization-contracts.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-authorization.workspace = true
+meerkat-runtime.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+chrono = "0.4"
+tempfile.workspace = true
+rusqlite.workspace = true

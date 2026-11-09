@@ -1,0 +1,6 @@
+{
+  "application_tool_policies": [
+    "{\"schema_version\":1,\"provider_id\":\"example-provider\",\"policy_id\":\"team-tools\",\"revision\":1,\"policy_digest\":\"sha256:58dd9eb56e5201ca240cb008ee3ea26ced084e74fea907b4a287299e7d37bd45\",\"source\":{\"source_id\":\"meta-test-source\",\"source_digest\":\"sha256:d2e1c7cb51a138a7069ee194534852c7c42d48eb1e7fff131f48b833586c78b1\"},\"default_deny\":true,\"members\":[{\"member_identity\":\"member-a\",\"grants\":[{\"tool_name\":\"shell\",\"action\":\"invoke\",\"consequence\":\"r2\"}]}]}\n"
+  ],
+  "has_roster_provider": true
+}

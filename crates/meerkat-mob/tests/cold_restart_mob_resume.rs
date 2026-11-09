@@ -172,6 +172,7 @@ fn mob_definition(lead_mode: MobRuntimeMode) -> MobDefinition {
             model: "gpt-5.4".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -197,6 +198,7 @@ fn mob_definition(lead_mode: MobRuntimeMode) -> MobDefinition {
             model: "gpt-5.4".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -2156,7 +2158,7 @@ fn mob_destroy_session_children_within_production_stack_budget() {
                 .expect("production-sized destroy runtime");
             runtime.block_on(async {
                 tokio::time::timeout(
-                    Duration::from_secs(60),
+                    Duration::from_mins(1),
                     Box::pin(mob_destroy_session_children_stack_budget_scenario()),
                 )
                 .await
@@ -2720,6 +2722,17 @@ struct PowerCutRuntimeStore {
     /// store-owned durable-tail recovery holds every tail intact
     /// (`DurableTailRecoveryOutcome::Held`).
     hold_tail_recovery: std::sync::atomic::AtomicBool,
+    /// While set, every read of this runtime's machine lifecycle record
+    /// answers that the store cannot serve it now.
+    unavailable_lifecycle_reads: std::sync::Mutex<Option<meerkat_runtime::LogicalRuntimeId>>,
+    /// While set (the default), the store answers the reads of delivery
+    /// authorities (the listing and the per-runtime load) from its inner
+    /// store, as the store itself does, so a mob start over it plans its
+    /// members lazily. Cleared ([`Self::refuse_delivery_reads`]), it cannot
+    /// list them: a start cannot tell which members hold pending deliveries
+    /// and materializes every member, the eager fallback of a store without
+    /// that read.
+    delivery_reads_forwarded: std::sync::atomic::AtomicBool,
 }
 
 /// Where a held boundary commit is.
@@ -2784,7 +2797,29 @@ impl PowerCutRuntimeStore {
             boundary_hold: tokio::sync::watch::channel(BoundaryHold::Idle).0,
             forward_hosting: std::sync::atomic::AtomicBool::new(false),
             hold_tail_recovery: std::sync::atomic::AtomicBool::new(false),
+            unavailable_lifecycle_reads: std::sync::Mutex::new(None),
+            delivery_reads_forwarded: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// Answer every read of `runtime_id`'s machine lifecycle record with the
+    /// typed failure of a store that cannot serve it now, until
+    /// [`Self::serve_lifecycle_reads`].
+    #[cfg(feature = "test-support")]
+    fn fail_lifecycle_reads_of(&self, runtime_id: meerkat_runtime::LogicalRuntimeId) {
+        *self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime_id);
+    }
+
+    /// Serve every machine lifecycle read again.
+    #[cfg(feature = "test-support")]
+    fn serve_lifecycle_reads(&self) {
+        *self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Report the inner store's hosting capability from now on (see
@@ -2793,6 +2828,15 @@ impl PowerCutRuntimeStore {
     fn forward_hosting_capability(&self) {
         self.forward_hosting
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The eager fallback from now on: the store cannot list its delivery
+    /// authorities, as a store without that read, so a start over it
+    /// materializes every member.
+    #[cfg(feature = "test-support")]
+    fn refuse_delivery_reads(&self) {
+        self.delivery_reads_forwarded
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// While `hold` is set, every store-owned durable-tail recovery over this
@@ -2889,6 +2933,50 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
     ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError>
     {
         meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(&self.inner).await
+    }
+
+    // Forwarded (the default; `Self::refuse_delivery_reads` clears it), the
+    // delivery reads a mob start and a cold work-state read make answer from
+    // the wrapped store.
+    async fn list_runtime_delivery_authorities(
+        &self,
+    ) -> Result<
+        Vec<(
+            meerkat_runtime::LogicalRuntimeId,
+            meerkat_runtime::RuntimeDeliveryAuthorityRecord,
+        )>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        if self
+            .delivery_reads_forwarded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            meerkat_runtime::RuntimeStore::list_runtime_delivery_authorities(&self.inner).await
+        } else {
+            Err(meerkat_runtime::RuntimeStoreError::Unsupported(
+                "list_runtime_delivery_authorities".into(),
+            ))
+        }
+    }
+
+    async fn load_runtime_delivery_authority(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        Option<meerkat_runtime::RuntimeDeliveryAuthorityRecord>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        if self
+            .delivery_reads_forwarded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            meerkat_runtime::RuntimeStore::load_runtime_delivery_authority(&self.inner, runtime_id)
+                .await
+        } else {
+            Err(meerkat_runtime::RuntimeStoreError::Unsupported(
+                "load_runtime_delivery_authority".into(),
+            ))
+        }
     }
 
     fn hosting_capability(&self) -> meerkat_runtime::HostingCapability {
@@ -3520,6 +3608,17 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+        if self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(runtime_id)
+        {
+            return Err(meerkat_runtime::RuntimeStoreError::Unavailable(format!(
+                "injected: the store cannot serve the lifecycle of {runtime_id} now"
+            )));
+        }
         self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
@@ -5653,6 +5752,8 @@ struct ActiveMemberTail {
     /// The mob, for faults a row arms before the next start.
     mob_id: MobId,
     runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    /// The same store, for the switches a row sets before the next start.
+    power_store: Arc<PowerCutRuntimeStore>,
     session_id: meerkat_core::types::SessionId,
     /// The committed head token the runtime authority retained.
     committed_token: String,
@@ -5766,6 +5867,14 @@ impl ActiveMemberTail {
         .grant(&self.session_id)
         .expect("another runtime owner takes the member session's hosting claim")
     }
+
+    /// From now on the realm store cannot list its delivery authorities, as a
+    /// store without that read: the next start cannot tell which members
+    /// hold pending deliveries and materializes every member (the eager
+    /// fallback).
+    fn store_cannot_list_deliveries(&self) {
+        self.power_store.refuse_delivery_reads();
+    }
 }
 
 /// What member `w-1` is doing when the process dies over its durable tail.
@@ -5774,6 +5883,9 @@ impl ActiveMemberTail {
 enum MemberAtCrash {
     /// Active, its turn cut by the power loss.
     Active,
+    /// Active, with an input it accepted and had not started (its host held
+    /// its run starts): recovery work that is not a durable tail.
+    ActiveWithAQueuedInput,
     /// Retiring: its retirement started with the tail in place (as a
     /// reconciler's retirement of a member mid-turn does) and the process
     /// died before it finished.
@@ -5891,6 +6003,34 @@ async fn crash_with_a_member(
         adopt_at_baseline(&handle_1, &identity, &w1_sid).await;
         await_identity_converged(&handle_1, &identity, 1).await;
     }
+    if at_crash == MemberAtCrash::ActiveWithAQueuedInput {
+        // The host holds the member's run starts; the member accepts an input
+        // and does not start it, so the input stays nonterminal.
+        service_1
+            .canonical_runtime_adapter()
+            .expect("the session service's runtime owner")
+            .hold_run_starts(&w1_sid, meerkat_runtime::RunStartHoldReason::HostRecovery)
+            .await
+            .expect("the host holds the member's run starts");
+        handle_1
+            .member(&identity)
+            .await
+            .expect("member handle")
+            .send(
+                "QUEUED_AT_CRASH token-queued".to_string(),
+                HandlingMode::Queue,
+            )
+            .await
+            .expect("the member accepts the input");
+        assert!(
+            runtime_store
+                .list_runtimes_with_recovery_work()
+                .await
+                .expect("the recovery-work scan answers")
+                .contains(&meerkat_runtime::LogicalRuntimeId::for_session(&w1_sid)),
+            "the accepted input is recovery work"
+        );
+    }
 
     // The next turn's durable row lands; its runtime boundary commit does not.
     if durable_tail {
@@ -5964,6 +6104,7 @@ async fn crash_with_a_member(
     ActiveMemberTail {
         mob_id,
         runtime_store,
+        power_store,
         session_id: w1_sid,
         committed_token,
         ahead_token,
@@ -6165,7 +6306,7 @@ async fn a_resume_spawn_of_a_session_another_owner_hosts_refuses_typed() {
     let physical_before = physical_head_token(&store, &session_id).await;
 
     let refused = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", worker.clone())
                 .with_resume_bridge_session_id(session_id.clone()),
@@ -6316,7 +6457,7 @@ async fn a_mob_start_settles_the_durable_tail_of_a_member_whose_restore_failed()
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(AgentIdentity::from("w-1"), None),
     )
     .await
@@ -6612,6 +6753,371 @@ async fn a_mob_start_defers_a_retiring_members_unprovable_durable_tail() {
     let _ = handle.shutdown().await;
 }
 
+/// A retiring member whose durable tail the start cannot settle because the
+/// session store fails still stops the start. The settle is a write: only a
+/// read of the member's state, a hosting refusal or an unprovable tail fails
+/// the cleanup restore before it had any effect, and only those defer the
+/// member. The tail stays as the crash left it.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_start_still_stops_when_a_retiring_members_tail_settle_fails_in_the_store() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let w1_sid =
+        retiring_member_after_a_crash(&paths, &power_store, true, "retiring-settle-fails").await;
+
+    let (service_2, store_2) = persistent_head_canonical_service(&paths, runtime_store.clone());
+    let head_before = store_2
+        .load_head(&w1_sid)
+        .await
+        .expect("load the physical head")
+        .expect("the physical head exists");
+    let persistent_owner: Arc<dyn MobSessionService> = service_2.clone();
+    let failing_settles = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    failing_settles.fail_durable_tail_settles_in_the_store();
+    let started = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(failing_settles.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await;
+    let status = match &started {
+        Ok(handle) => Some(handle.status().await),
+        Err(_) => None,
+    };
+    assert!(
+        failing_settles.durable_tail_settle_failed(),
+        "the start reached the retiring member's tail settle"
+    );
+    assert!(
+        !matches!(status, Some(Ok(meerkat_mob::MobState::Running))),
+        "a store failure while settling a retiring member's tail must still stop the start: \
+         {status:?}"
+    );
+    let head_after = store_2
+        .load_head(&w1_sid)
+        .await
+        .expect("load the physical head after the stopped start")
+        .expect("the physical head still exists");
+    assert_eq!(
+        meerkat_core::session_store::session_head_cas_token(&head_after).unwrap(),
+        meerkat_core::session_store::session_head_cas_token(&head_before).unwrap(),
+        "the stopped start leaves the tail as the crash left it"
+    );
+    if let Ok(handle) = started {
+        let _ = handle.shutdown().await;
+    }
+}
+
+/// A mob restarted over [`retiring_member_after_a_crash`] (no durable tail)
+/// whose session service answers every persisted read of the retiring
+/// member's session with `fault`.
+#[cfg(feature = "test-support")]
+struct RetiringMemberUnreadAtStart {
+    handle: MobHandle,
+    faulting: Arc<FailingOnceSessionService>,
+    session_id: meerkat_core::types::SessionId,
+    identity: AgentIdentity,
+}
+
+/// Start the mob while every read of its retiring member `w-1`'s session
+/// fails with `fault`. The start must run: the member's own failure defers
+/// its cleanup delivery custody instead of stopping the mob.
+#[cfg(feature = "test-support")]
+async fn start_with_a_retiring_members_session_unread(
+    temp: &Path,
+    paths: &Paths,
+    fault: support::SessionLoadFault,
+    label: &str,
+) -> RetiringMemberUnreadAtStart {
+    let _ = temp;
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service;
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    faulting.fail_session_loads(session_id.clone(), fault);
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| {
+        panic!("[{label}] a retiring member whose session cannot be read does not stop the mob: {error}")
+    });
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs instead of fail-stopping before admission: {status:?}"
+    );
+    RetiringMemberUnreadAtStart {
+        handle,
+        faulting,
+        session_id,
+        identity: AgentIdentity::from("w-1"),
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl RetiringMemberUnreadAtStart {
+    /// The member stays rostered as Retiring next to the healthy lead, its
+    /// status shows its cleanup delivery deferred with `cause` (a wire token),
+    /// and the start read its session.
+    async fn assert_degraded(&self, cause: &str, label: &str) {
+        let members = self.handle.list_members_including_retiring().await;
+        assert!(
+            members
+                .iter()
+                .any(|entry| entry.agent_identity == self.identity
+                    && entry.status == MobMemberStatus::Retiring),
+            "[{label}] the degraded member stays Retiring: {members:?}"
+        );
+        assert!(
+            members.iter().any(|entry| entry.agent_identity == "lead-1"),
+            "[{label}] the healthy lead is still listed: {members:?}"
+        );
+        let status = self
+            .handle
+            .member_status(&self.identity)
+            .await
+            .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+        let deferral = status.custody_deferred.unwrap_or_else(|| {
+            panic!("[{label}] the member's status shows its deferred custody restore")
+        });
+        assert_eq!(
+            deferral.restore,
+            meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+            "[{label}] the deferred restore"
+        );
+        assert_eq!(
+            deferral.cause.as_str(),
+            cause,
+            "[{label}] the deferral's cause"
+        );
+        assert!(
+            self.faulting.session_loads(&self.session_id) >= 1,
+            "[{label}] the start read the member's session"
+        );
+    }
+
+    /// A retire while the session still cannot be read refuses with the
+    /// typed deferral, whose cause is the store failure the read met.
+    async fn assert_retire_refused_typed(&self, label: &str) {
+        let error = self
+            .handle
+            .retire(self.identity.clone())
+            .await
+            .expect_err("a retire while the member's session still cannot be read refuses");
+        let deferral = match &error {
+            meerkat_mob::MobError::SharedRetirementFailure(shared) => shared.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(
+                deferral,
+                meerkat_mob::MobError::MemberCustodyDeferred {
+                    member_id,
+                    session_id,
+                    restore: meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+                    cause,
+                } if member_id == &self.identity
+                    && session_id == &self.session_id
+                    && matches!(
+                        cause.as_ref(),
+                        meerkat_mob::MobError::SessionError(
+                            meerkat_core::service::SessionError::Store(_)
+                        )
+                    )
+            ),
+            "[{label}] the retire refuses with the deferral carrying the store failure: {error:?}"
+        );
+    }
+
+    /// Once the store serves the session again, a retire restores the
+    /// member's custody and the retirement completes.
+    async fn assert_retire_completes_once_the_store_serves(&self, label: &str) {
+        self.faulting.serve_session_loads();
+        self.handle
+            .retire(self.identity.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("[{label}] once the store serves, the retire restores the custody and completes: {error}")
+            });
+        let members = self.handle.list_members_including_retiring().await;
+        assert!(
+            !members
+                .iter()
+                .any(|entry| entry.agent_identity == self.identity),
+            "[{label}] the member's retirement completed: {members:?}"
+        );
+    }
+}
+
+/// A retiring member whose session the start cannot read because the store
+/// could not serve now no longer stops the mob. The start defers the member's
+/// cleanup delivery custody (`store_unavailable`): the mob runs, the member
+/// stays Retiring next to the healthy lead and its status shows the deferral,
+/// and a retire while the store still cannot serve refuses with the typed
+/// deferral. Once the store serves again, the retire restores the custody and
+/// the retirement completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_session_store_cannot_serve_degrades_and_recovers() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "store-unavailable";
+    let started = start_with_a_retiring_members_session_unread(
+        temp.path(),
+        &paths,
+        support::SessionLoadFault::Unavailable,
+        label,
+    )
+    .await;
+    started.assert_degraded("store_unavailable", label).await;
+    started.assert_retire_refused_typed(label).await;
+    started
+        .assert_retire_completes_once_the_store_serves(label)
+        .await;
+    let _ = started.handle.shutdown().await;
+}
+
+/// A retiring member whose stored session does not decode stays degraded,
+/// typed and visible (`store_unreadable`): the mob runs, the deferral survives
+/// the backoff wakes that re-attempt it, and every retire refuses typed until
+/// the state is repaired; after the repair the retire completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_session_does_not_decode_stays_degraded_and_visible() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "store-unreadable";
+    let started = start_with_a_retiring_members_session_unread(
+        temp.path(),
+        &paths,
+        support::SessionLoadFault::Unreadable,
+        label,
+    )
+    .await;
+    started.assert_degraded("store_unreadable", label).await;
+    // Several backoff periods (250 ms, doubling) pass with the state still
+    // unreadable: the member stays degraded with the same cause.
+    sleep(Duration::from_millis(1_800)).await;
+    started.assert_degraded("store_unreadable", label).await;
+    started.assert_retire_refused_typed(label).await;
+    started
+        .assert_retire_completes_once_the_store_serves(label)
+        .await;
+    let _ = started.handle.shutdown().await;
+}
+
+/// A retiring member whose session the start finds gone (its archive ran)
+/// and whose runtime residue the store cannot read now no longer stops the
+/// mob: the residue read keeps its typed store failure, so the start defers
+/// the member's cleanup delivery custody (`store_unavailable`) as it defers
+/// a failed read of the member's session. The mob runs, and another member
+/// runs a turn. Once the stores serve the reads again, a retire of the member
+/// completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_runtime_residue_cannot_be_read_degrades_and_the_mob_runs() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "residue-unavailable";
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(&paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(&paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service.clone();
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    // The member's archive ran: its session reads as gone...
+    faulting.fail_session_loads(session_id.clone(), support::SessionLoadFault::Absent);
+    // ...and the store cannot serve the read of its runtime residue now.
+    power_store
+        .fail_lifecycle_reads_of(meerkat_runtime::LogicalRuntimeId::for_session(&session_id));
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "[{label}] a member whose runtime residue cannot be read does not stop the mob: {error}"
+        )
+    });
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs instead of fail-stopping before admission: {status:?}"
+    );
+    let identity = AgentIdentity::from("w-1");
+    let member = handle
+        .member_status(&identity)
+        .await
+        .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+    let deferral = member
+        .custody_deferred
+        .unwrap_or_else(|| panic!("[{label}] the member's status shows its deferred custody"));
+    assert_eq!(
+        deferral.restore,
+        meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+        "[{label}] the deferred restore"
+    );
+    assert_eq!(
+        deferral.cause.as_str(),
+        "store_unavailable",
+        "[{label}] the residue read's typed store failure classes the deferral"
+    );
+    // Another member serves: the lead runs a turn.
+    send_and_wait(
+        &handle,
+        service.as_ref(),
+        "lead-1",
+        "AFTER_DEGRADED_START token-beta",
+        label,
+    )
+    .await;
+
+    // Once the stores serve the reads again, a retire of the member restores
+    // its custody and completes.
+    power_store.serve_lifecycle_reads();
+    faulting.serve_session_loads();
+    handle
+        .retire(identity.clone())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("[{label}] once the store serves, the retire restores the custody and completes: {error}")
+        });
+    let members = handle.list_members_including_retiring().await;
+    assert!(
+        !members.iter().any(|entry| entry.agent_identity == identity),
+        "[{label}] the member's retirement completed: {members:?}"
+    );
+    let _ = handle.shutdown().await;
+}
+
 /// A retiring member whose durable tail its recovery withholds from resume
 /// (held for recovery, or refused by recovery) meets the settle's typed
 /// refusal at start, before any read of its session. That is the member's
@@ -6880,7 +7386,7 @@ async fn a_mob_start_defers_a_restore_failed_members_binding_restore_another_own
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6896,7 +7402,7 @@ async fn a_mob_start_defers_a_restore_failed_members_binding_restore_another_own
 
     drop(other_owner_claim);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -6991,7 +7497,7 @@ async fn a_mob_start_defers_a_broken_members_binding_restore_while_its_tail_is_u
         .refusing
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7003,7 +7509,7 @@ async fn a_mob_start_defers_a_broken_members_binding_restore_while_its_tail_is_u
         unprovable,
         "respawn",
     );
-    let retired = tokio::time::timeout(Duration::from_secs(60), handle.retire(identity.clone()))
+    let retired = tokio::time::timeout(Duration::from_mins(1), handle.retire(identity.clone()))
         .await
         .expect("the retire settles");
     assert_binding_restore_deferred(
@@ -7153,7 +7659,7 @@ async fn an_explicit_resume_keeps_a_deferred_binding_restore_open_while_it_canno
     .await;
     let identity = AgentIdentity::from("w-1");
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -7176,35 +7682,74 @@ async fn an_explicit_resume_keeps_a_deferred_binding_restore_open_while_it_canno
     let _ = handle.shutdown().await;
 }
 
-/// A Broken member with no durable tail whose session another runtime owner
-/// hosts: the settle has nothing to do, and the binding preparation refuses
-/// with the typed hosting refusal. That refusal is deferred like the settle's,
-/// so the start runs; a respawn refuses, typed, until the owner lets go, and
-/// then rebuilds the member.
+/// The eager fallback, a shipped path: over a store that cannot list its
+/// delivery authorities, a start cannot tell which members hold pending
+/// deliveries and materializes every member. A Broken member with no durable
+/// tail and no other work, whose session another runtime owner hosts: the
+/// settle has nothing to do, and the binding preparation refuses with the
+/// typed hosting refusal. That refusal is deferred like the settle's, so the
+/// start runs; a respawn refuses, typed, until the owner lets go, and then
+/// rebuilds the member.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broken_member() {
+async fn an_eager_start_defers_the_binding_preparations_hosting_refusal_for_a_broken_member() {
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
     let member = crash_with_an_active_member(temp.path(), &paths, false).await;
+    member.store_cannot_list_deliveries();
+    the_start_defers_the_binding_preparations_hosting_refusal(&paths, &member, "eager").await;
+}
+
+/// The same member under the lazy start of a store that lists its delivery
+/// authorities, as production stores do: `w-1` holds recovery work and no
+/// durable tail (an input it accepted and had not started), so the start
+/// materializes it, and its binding preparation's hosting refusal is
+/// deferred as in the eager start.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lazy_start_defers_the_binding_preparations_hosting_refusal_for_a_broken_member_with_work()
+ {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let member = crash_with_a_member(
+        temp.path(),
+        &paths,
+        MemberAtCrash::ActiveWithAQueuedInput,
+        false,
+    )
+    .await;
+    the_start_defers_the_binding_preparations_hosting_refusal(&paths, &member, "lazy").await;
+}
+
+/// The two rows above, after the crash: the start with `w-1`'s restore
+/// refused runs, `w-1`'s status shows its deferred custody restore, a respawn
+/// refuses typed while the other owner hosts the session, and rebuilds the
+/// member once it lets go.
+#[cfg(feature = "test-support")]
+async fn the_start_defers_the_binding_preparations_hosting_refusal(
+    paths: &Paths,
+    member: &ActiveMemberTail,
+    context: &str,
+) {
     assert_eq!(
         member.committed_token, member.ahead_token,
-        "the member has no durable tail"
+        "[{context}] the member has no durable tail"
     );
     let other_owner_claim = member.another_owner_hosts_the_session();
     let (started, service, _store, customizer) =
-        resume_with_the_tailed_member_restore_refused(&paths, &member).await;
+        resume_with_the_tailed_member_restore_refused(paths, member).await;
     let handle = started.expect("the start runs with the member's custody restore deferred");
     let status = handle.status().await;
     assert!(
         matches!(status, Ok(meerkat_mob::MobState::Running)),
-        "a hosting refusal at the binding preparation must not stop the mob: {status:?}"
+        "[{context}] a hosting refusal at the binding preparation must not stop the mob: \
+         {status:?}"
     );
     assert_status_custody_deferred(
         &handle,
         "w-1",
         Some(meerkat_mob::MemberCustodyDeferralCause::ServedElsewhere),
-        "after the start",
+        &format!("{context}, after the start"),
     )
     .await;
     customizer
@@ -7212,13 +7757,14 @@ async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broke
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let identity = AgentIdentity::from("w-1");
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
     .expect("the respawn settles");
+    let while_hosted = format!("{context}, respawn while hosted elsewhere");
     assert_binding_restore_deferred(
-        &respawn_refusal(respawned, "respawn while hosted elsewhere"),
+        &respawn_refusal(respawned, &while_hosted),
         &identity,
         &member.session_id,
         |cause| {
@@ -7229,24 +7775,25 @@ async fn a_mob_start_defers_the_binding_preparations_hosting_refusal_for_a_broke
                 ) if id == &member.session_id
             )
         },
-        "respawn while hosted elsewhere",
+        &while_hosted,
     );
     drop(other_owner_claim);
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
     .expect("the respawn settles");
     respawned.expect("once the other owner lets go, the respawn rebuilds the member");
-    assert_member_active(&member_entry(&handle, "w-1").await, "after the respawn");
-    assert_status_custody_deferred(&handle, "w-1", None, "after the respawn").await;
+    let after_respawn = format!("{context}, after the respawn");
+    assert_member_active(&member_entry(&handle, "w-1").await, &after_respawn);
+    assert_status_custody_deferred(&handle, "w-1", None, &after_respawn).await;
     send_and_wait(
         &handle,
         service.as_ref(),
         "w-1",
         "AFTER_RESPAWN token-gamma",
-        "hosted-binding-preparation-after-respawn",
+        &format!("{context}, hosted-binding-preparation-after-respawn"),
     )
     .await;
     let _ = handle.shutdown().await;
@@ -7281,7 +7828,7 @@ async fn a_resume_spawn_onto_a_foreign_session_tail_refuses_typed() {
     let adopter = AgentIdentity::from("w-adopt");
     let tail_before = tail.durable_tail_snapshot(&store).await;
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(tail.session_id.clone()),
@@ -7554,7 +8101,7 @@ async fn a_resume_spawn_onto_a_foreign_whole_blob_session_tail_refuses_typed() {
         "the crash left the run's WholeBlob provisional tail"
     );
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(tail.session_id.clone()),
@@ -7757,7 +8304,7 @@ async fn a_member_whose_session_has_a_durable_tail_respawns() {
         ),
     }
     let respawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.respawn(identity.clone(), None),
     )
     .await
@@ -8035,7 +8582,7 @@ async fn a_mob_whose_member_retirement_cancelled_a_turn_at_its_boundary_restarts
     });
     sleep(Duration::from_millis(300)).await;
     client.release.notify_one();
-    let retired = tokio::time::timeout(Duration::from_secs(60), retire)
+    let retired = tokio::time::timeout(Duration::from_mins(1), retire)
         .await
         .expect("the retirement ends within its bound")
         .expect("the retirement task completes");
@@ -8188,7 +8735,7 @@ async fn a_member_retired_while_its_turn_reaches_the_boundary_retires() {
     // grace and reaches that boundary.
     sleep(Duration::from_millis(300)).await;
     client.release.notify_one();
-    let retired = tokio::time::timeout(Duration::from_secs(60), retire)
+    let retired = tokio::time::timeout(Duration::from_mins(1), retire)
         .await
         .expect("the retirement ends within its bound")
         .expect("the retirement task completes");
@@ -8681,7 +9228,8 @@ async fn a_member_whose_turn_stopped_before_its_boundary_commit(
 /// read of the session refuses as a transcript revision conflict. The store
 /// holds every durable-tail recovery from before the turn until the row
 /// decides otherwise, so nothing settles the tail before the row starts,
-/// the stopped run's own settle included.
+/// the stopped run's own settle included: the fixture returns only once the
+/// stopped run's lap has ended.
 #[cfg(feature = "test-support")]
 async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit(
     paths: &Paths,
@@ -8817,6 +9365,20 @@ async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit_served_by
         );
         sleep(Duration::from_millis(20)).await;
     }
+    // The machine drops the run before the run's lap ends: the lap still
+    // settles the run's tail (held here) and publishes the run's terminals,
+    // and it holds the session's turn boundary until it ends. Wait for the
+    // boundary, so the stopped run's own settle has run while the store held
+    // every recovery, and the row's next read does not meet a boundary the
+    // lap still holds (such a read defers its settle to a later read).
+    drop(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            service.acquire_runtime_turn_finalization_guard(&w1_sid),
+        )
+        .await
+        .expect("the stopped run's lap releases the session's turn boundary within its bound"),
+    );
 
     let committed_token = committed_head_token(runtime_store.as_ref(), &w1_sid).await;
     let ahead_token = physical_head_token(&store, &w1_sid).await;
@@ -8827,6 +9389,7 @@ async fn a_hosted_member_whose_turn_stopped_before_its_boundary_commit_served_by
     let tail = ActiveMemberTail {
         mob_id: handle.mob_id().clone(),
         runtime_store,
+        power_store: power_store.clone(),
         session_id: w1_sid,
         committed_token,
         ahead_token,
@@ -8884,7 +9447,7 @@ async fn a_member_retired_after_its_turn_stopped_before_its_boundary_commit_reti
     // The store-owned recovery may settle the tail from here on.
     stopped.power_store.hold_durable_tail_recovery(false);
     let retired = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         stopped.handle.retire(stopped.identity.clone()),
     )
     .await
@@ -9222,7 +9785,7 @@ async fn a_resume_spawn_onto_a_hosted_foreign_session_tail_refuses_typed() {
     stopped.power_store.hold_durable_tail_recovery(false);
     let tail_before = stopped.tail.durable_tail_snapshot(&stopped.store).await;
     let spawned = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         adopting.spawn_spec(
             SpawnMemberSpec::new("worker", adopter.clone())
                 .with_resume_bridge_session_id(session_id.clone()),
@@ -9382,7 +9945,7 @@ async fn a_sticky_fallback_after_a_deploy_stop_past_its_bound_acknowledges() {
     handle_1
         .shutdown_with_report(
             meerkat_mob::ShutdownOptions::default()
-                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_secs(60))
+                .with_deadline(meerkat_core::time_compat::Instant::now() + Duration::from_mins(1))
                 .with_queued_inputs(meerkat_mob::QueuedInputsOnShutdown::Requeue(
                     meerkat_mob::RequeueMaxAge::new(max_age).expect("an accepted requeue bound"),
                 )),
@@ -9408,7 +9971,7 @@ async fn a_sticky_fallback_after_a_deploy_stop_past_its_bound_acknowledges() {
     drop(service_1);
     drop(runtime_store_1);
 
-    // The bound passes, measured from the input's admission.
+    // The bound passes, measured from the stop that kept the run.
     sleep(max_age + Duration::from_secs(1)).await;
 
     // Lifetime 2: the kept run is settled as expired and its tail repaired;
@@ -9548,7 +10111,7 @@ async fn a_retire_over_a_held_durable_tail_ends_typed_and_keeps_the_tail() {
     let stopped =
         a_member_whose_turn_stopped_before_its_boundary_commit(&paths, "held-tail-retire").await;
     let error = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         stopped.handle.retire(stopped.identity.clone()),
     )
     .await
@@ -9599,7 +10162,7 @@ async fn a_destroy_with_a_member_whose_turn_stopped_before_its_boundary_commit_c
             .await;
     // The store-owned recovery may settle the tail from here on.
     stopped.power_store.hold_durable_tail_recovery(false);
-    let report = match tokio::time::timeout(Duration::from_secs(60), stopped.handle.destroy())
+    let report = match tokio::time::timeout(Duration::from_mins(1), stopped.handle.destroy())
         .await
         .expect("the destroy ends within its bound")
     {
@@ -9812,7 +10375,7 @@ async fn a_member_retired_after_its_runtime_stopped_over_a_cancelled_turns_tail_
 
     // The archive's recovery may settle the tail from here on.
     power_store.hold_durable_tail_recovery(false);
-    let retired = tokio::time::timeout(Duration::from_secs(60), handle.retire(identity.clone()))
+    let retired = tokio::time::timeout(Duration::from_mins(1), handle.retire(identity.clone()))
         .await
         .expect("the retirement ends within its bound");
     assert!(
@@ -10018,7 +10581,7 @@ async fn an_archive_before_a_kept_run_registers_again_ends_the_work_it_kept() {
     // archived.
     let (service_2, store_2) = persistent_head_canonical_service(&paths, runtime_store.clone());
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service_2.archive_with_mob_lifecycle_authority(&w1_sid),
     )
     .await
@@ -10143,7 +10706,7 @@ async fn an_archive_of_a_kept_run_with_nothing_queued_consumes_its_input() {
     let (service, store) = persistent_head_canonical_service(&paths, crash.runtime_store.clone());
 
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.archive_with_mob_lifecycle_authority(&crash.session_id),
     )
     .await
@@ -10265,7 +10828,7 @@ async fn an_archive_over_a_run_that_answered_before_its_boundary_consumes_its_in
     let (service, store) = persistent_head_canonical_service(&paths, tail.runtime_store.clone());
 
     let archived = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         service.archive_with_mob_lifecycle_authority(&tail.session_id),
     )
     .await
@@ -10689,7 +11252,7 @@ async fn settle_with_probe(lifetime: &FirstTurnLifetime, identity: &AgentIdentit
         .handle
         .wait_for_members_kickoff_complete(
             std::slice::from_ref(identity),
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
         )
         .await
         .expect("first turn settles");
@@ -11328,7 +11891,7 @@ async fn identity_convergence(
 /// `revision`.
 #[cfg(feature = "test-support")]
 async fn await_identity_converged(handle: &MobHandle, identity: &AgentIdentity, revision: u64) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let status = identity_convergence(handle, identity).await;
         if status.as_ref().is_some_and(|status| {
@@ -12179,13 +12742,10 @@ impl GatedRequestClient {
     /// Wait until the held request has been made, bounded.
     async fn wait_until_held(&self, context: &str) {
         let mut entered = self.entered.subscribe();
-        tokio::time::timeout(
-            Duration::from_secs(60),
-            entered.wait_for(|entered| *entered),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
-        .expect("entered signal");
+        tokio::time::timeout(Duration::from_mins(1), entered.wait_for(|entered| *entered))
+            .await
+            .unwrap_or_else(|_| panic!("[{context}] the gated model request was never made"))
+            .expect("entered signal");
     }
 
     fn release(&self) {
@@ -12200,7 +12760,7 @@ impl GatedRequestClient {
     async fn wait_until_answered(&self, context: &str) {
         let mut answered = self.answered.subscribe();
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             answered.wait_for(|answered| *answered),
         )
         .await
@@ -12466,11 +13026,11 @@ async fn a_lift_whose_resume_notification_turn_spawns_a_member_reaches_ready() {
     );
     client_2.arm(handle.clone());
 
-    let lifted = tokio::time::timeout(Duration::from_secs(120), handle.resume()).await;
+    let lifted = tokio::time::timeout(Duration::from_mins(2), handle.resume()).await;
     let spawns = match &lifted {
         // The notification turn runs under the mob's lifecycle owner, so it
         // may still be on its way when the lift answers.
-        Ok(Ok(())) => tokio::time::timeout(Duration::from_secs(60), async {
+        Ok(Ok(())) => tokio::time::timeout(Duration::from_mins(1), async {
             loop {
                 let spawns = client_2.spawns();
                 if !spawns.is_empty() {
@@ -12636,6 +13196,521 @@ async fn held_members_open_run_resumes_on_release(
     let _ = handle.shutdown().await;
 }
 
+/// A second process start over a graceful stop's kept run whose host holds
+/// member `w-1` for its recovery (`HostRecovery`, staged before the start, as
+/// a host's Recover flow stages it): the start materializes `w-1` (it holds
+/// recovery work), its runtime loop parks on the hold, and no model request
+/// is made. Before the start, the host reads `w-1`'s session cold
+/// (`cold_before_start`), and the read registers nothing.
+#[cfg(feature = "test-support")]
+struct HeldForRecovery {
+    handle: MobHandle,
+    runtime: Arc<meerkat_runtime::MeerkatMachine>,
+    client: Arc<HoldingToolLoopClient>,
+    worker: AgentIdentity,
+    cold_before_start: meerkat_runtime::SessionWorkState,
+}
+
+#[cfg(feature = "test-support")]
+async fn start_held_for_recovery(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    run: &RequeuedMemberRun,
+) -> HeldForRecovery {
+    let client = Arc::new(HoldingToolLoopClient::new(0));
+    let service = requeue_service(paths, runtime_store, true, client.clone());
+    let runtime = service
+        .canonical_runtime_adapter()
+        .expect("the session service's runtime owner");
+    // The host finds the member that holds work without waking anything: a
+    // cold read of its session, before any start registers it.
+    let cold_before_start = runtime
+        .session_work_state(&run.w1_sid)
+        .await
+        .expect("the cold read answers");
+    assert!(
+        runtime
+            .current_session_registration_witness(&run.w1_sid)
+            .await
+            .is_none(),
+        "the cold read registers nothing"
+    );
+    let mut parks = runtime.run_start_held_parks();
+    let worker = AgentIdentity::from("w-1");
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(service.clone())
+    .with_default_llm_client(client.clone())
+    .notify_orchestrator_on_resume(false)
+    .hold_restored_member_run_starts(
+        meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        [worker.clone()],
+    )
+    .resume()
+    .await
+    .unwrap_or_else(|error| panic!("the start restores the held member: {error}"));
+    handle.resume().await.expect("the mob resumes");
+    tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+        .await
+        .expect("the held member's runtime loop parks on the host's hold")
+        .expect("the park counter stays open");
+    assert_eq!(
+        client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request while the host holds the member"
+    );
+    HeldForRecovery {
+        handle,
+        runtime,
+        client,
+        worker,
+        cold_before_start,
+    }
+}
+
+/// A host's Recover flow over a member whose run a graceful stop kept. The
+/// host holds the restored member for its recovery, and settles the kept run
+/// with one call: the run is settled without resuming (its input ends
+/// cancelled, its provisional tail is closed), and no model request is made
+/// before the settle, at it, or after the host releases its hold. The
+/// host's recovery hold is the host's alone: the member is listed under
+/// `HostRecovery` and not under the tools hold. RED before: no host verb
+/// settled a member's kept run, and the host's only holds had other owners.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_recover_settles_a_held_members_kept_run_without_a_model_request() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+
+    assert_eq!(
+        held.handle
+            .members_holding_run_starts(meerkat_mob::HostRunStartHoldReason::HostRecovery)
+            .expect("the hold read answers"),
+        vec![held.worker.clone()],
+        "the host holds the member for its recovery"
+    );
+    assert!(
+        held.handle
+            .members_holding_run_starts(meerkat_mob::HostRunStartHoldReason::ToolsNotPublished)
+            .expect("the hold read answers")
+            .is_empty(),
+        "the host's recovery hold is not the tools hold"
+    );
+
+    let settled = tokio::time::timeout(
+        Duration::from_secs(30),
+        held.handle.settle_member_retained_run(&held.worker),
+    )
+    .await
+    .expect("the settle answers once the run's input has ended")
+    .expect("the settle is accepted");
+    let meerkat_runtime::RetainedRunSettlement::Settled { run_id, inputs } = settled else {
+        panic!("the member's kept run is settled, not {settled:?}");
+    };
+    assert_eq!(run_id, run.run_id, "the settle names the kept run");
+    assert_eq!(inputs.len(), 1, "the kept run's one input: {inputs:?}");
+    assert_eq!(
+        inputs[0].terminal,
+        meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+        },
+        "the kept run's input ends cancelled"
+    );
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        None,
+        "the kept run's provisional tail is closed"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request at the settle"
+    );
+
+    held.handle
+        .release_member_run_starts(
+            &held.worker,
+            meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        )
+        .await
+        .expect("the host releases its hold");
+    sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request after the host's release: the settled run never resumes"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// The settle's typed refusals, and the cold read of a dormant member. A
+/// member the mob does not hold is refused `MemberNotFound`. A member the
+/// start left dormant (the lead: it holds no work) is refused
+/// `MemberSessionNotLive`, and the settle wakes nothing: the lead stays
+/// unmaterialized, its session unregistered, and no model request is made.
+/// The cold read of the worker before the start found its kept run, and the
+/// cold read of the dormant lead reads idle; neither wakes anything.
+/// RED before: no such verb, and no per-session cold read.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_settle_of_a_dormant_member_is_refused_and_wakes_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+
+    let nobody = AgentIdentity::from("nobody");
+    let refused = held.handle.settle_member_retained_run(&nobody).await;
+    assert!(
+        matches!(&refused, Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &nobody),
+        "a member the mob does not hold is refused typed: {refused:?}"
+    );
+
+    let lead = AgentIdentity::from("lead-1");
+    let lead_sid = held
+        .handle
+        .resolve_bridge_session_id(&lead)
+        .await
+        .expect("the lead's session");
+    // The lead holds no work, so the lazy start left it dormant.
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "the start leaves the lead, which holds no work, dormant"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&lead_sid)
+            .await
+            .is_none(),
+        "the dormant lead's session is not registered"
+    );
+    let refused = held.handle.settle_member_retained_run(&lead).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(meerkat_mob::MobError::MemberSessionNotLive { agent_identity, session_id })
+                if agent_identity == &lead && session_id == &lead_sid
+        ),
+        "a dormant member is refused typed: {refused:?}"
+    );
+    assert!(
+        matches!(
+            held.cold_before_start,
+            meerkat_runtime::SessionWorkState::HoldsWork(work)
+                if work.recovery_work && !work.pending_deliveries
+        ),
+        "the cold read before the start finds the worker's kept run: {:?}",
+        held.cold_before_start
+    );
+    assert_eq!(
+        held.runtime
+            .session_work_state(&lead_sid)
+            .await
+            .expect("the cold read answers"),
+        meerkat_runtime::SessionWorkState::Idle,
+        "the dormant lead holds no durable work"
+    );
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "neither the settle nor the cold read wakes the lead"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&lead_sid)
+            .await
+            .is_none(),
+        "nothing registers the lead's session"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// A host's compaction request on mob members (`MobHandle::compact_member`).
+/// A member the mob does not hold is refused `MemberNotFound`. A member the
+/// start left dormant (the lead: it holds no work) is refused
+/// `MemberSessionNotLive`, and the request wakes nothing: the lead stays
+/// unmaterialized and its session unregistered. A live member (the worker,
+/// materialized and held by its host) records the request on its runtime
+/// registration, once, without a respawn and without a model request.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compaction_request_wakes_no_dormant_member_and_is_recorded_on_a_live_one() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let owner = || meerkat_mob::MobControlPrincipal::Owner;
+
+    let nobody = AgentIdentity::from("nobody");
+    let refused = held.handle.compact_member(owner(), nobody.clone()).await;
+    assert!(
+        matches!(&refused, Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &nobody),
+        "a member the mob does not hold is refused typed: {refused:?}"
+    );
+
+    let lead = AgentIdentity::from("lead-1");
+    let lead_sid = held
+        .handle
+        .resolve_bridge_session_id(&lead)
+        .await
+        .expect("the lead's session");
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "the start leaves the lead, which holds no work, dormant"
+    );
+    let refused = held.handle.compact_member(owner(), lead.clone()).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(meerkat_mob::MobError::MemberSessionNotLive { agent_identity, session_id })
+                if agent_identity == &lead && session_id == &lead_sid
+        ),
+        "a dormant member is refused typed: {refused:?}"
+    );
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "the request wakes no dormant member"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&lead_sid)
+            .await
+            .is_none(),
+        "the request registers no dormant member's session"
+    );
+
+    let worker_registration = held
+        .runtime
+        .current_session_registration_witness(&run.w1_sid)
+        .await
+        .expect("the held worker is live");
+    assert_eq!(
+        held.handle
+            .compact_member(owner(), held.worker.clone())
+            .await
+            .expect("a live member records the request"),
+        meerkat_runtime::CompactionRequestReceipt::Requested
+    );
+    assert_eq!(
+        held.handle
+            .compact_member(owner(), held.worker.clone())
+            .await
+            .expect("a live member answers a repeat"),
+        meerkat_runtime::CompactionRequestReceipt::AlreadyRequested,
+        "a held request is not recorded twice"
+    );
+    assert_eq!(
+        held.runtime
+            .current_session_registration_witness(&run.w1_sid)
+            .await,
+        Some(worker_registration),
+        "the request respawns nothing: the worker keeps its registration"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a request makes no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// A host's settle whose reply is lost, then a retry: the settle went
+/// through (the kept run's tail is closed), and the retry finds nothing
+/// retained. Its proof is the kept run's input, whose receipt reads
+/// cancelled through the existing receipt read. No model request is made.
+/// RED before: no such verb.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
+    use meerkat_runtime::terminal_status::{InputTerminalReceiptRead, InteractionSelector};
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let kept_input = held
+        .runtime
+        .session_input_states(&run.w1_sid)
+        .await
+        .expect("the member's inputs read")
+        .report
+        .into_iter()
+        .find(|row| row.seed.last_run_id.as_ref() == Some(&run.run_id))
+        .expect("the kept run's input")
+        .state
+        .input_id;
+
+    // The host's settle, whose reply the host never reads.
+    let pending = tokio::spawn({
+        let handle = held.handle.clone();
+        let worker = held.worker.clone();
+        async move { handle.settle_member_retained_run(&worker).await }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true)
+        .await
+        .is_some()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the settle closes the kept run's tail"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    pending.abort();
+    let _ = pending.await;
+
+    let retry = held
+        .handle
+        .settle_member_retained_run(&held.worker)
+        .await
+        .expect("the retry is decided");
+    assert_eq!(
+        retry,
+        meerkat_runtime::RetainedRunSettlement::NotRetained,
+        "a retry after the settle finds nothing retained"
+    );
+    let read = held
+        .runtime
+        .input_terminal_receipt(&run.w1_sid, InteractionSelector::InputId(kept_input))
+        .await
+        .expect("the kept input's receipt reads")
+        .expect("the kept input has a receipt");
+    let InputTerminalReceiptRead::Finalized(receipt) = read.report else {
+        panic!(
+            "the kept input's receipt is finalized, not {:?}",
+            read.report
+        );
+    };
+    assert_eq!(
+        receipt.terminal(),
+        &meerkat_runtime::input_state::InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::input_state::InputAbandonReason::Cancelled,
+        },
+        "the retry's proof: the kept run's input ended cancelled"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// A host that retires a member it holds for its recovery leaves no
+/// `HostRecovery` staged for the member's session: once the member left the
+/// roster, the host can no longer release the hold through the mob, so the
+/// retire drops it, as it drops a mob Stop's `MobStop`, and a later
+/// registration of that session id is not held for it. A settle and a
+/// release of the retired member then both answer `MemberNotFound`, the
+/// answer a host's Recover flow counts as that member's end. RED before: the
+/// retire dropped only `MobStop`.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retire_drops_the_departed_members_host_recovery_hold() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let settled = tokio::time::timeout(
+        Duration::from_secs(30),
+        held.handle.settle_member_retained_run(&held.worker),
+    )
+    .await
+    .expect("the settle answers once the run's input has ended")
+    .expect("the settle is accepted");
+    assert!(
+        matches!(
+            settled,
+            meerkat_runtime::RetainedRunSettlement::Settled { .. }
+        ),
+        "the member's kept run is settled, not {settled:?}"
+    );
+    assert!(
+        held.runtime.registration_run_start_hold_staged(
+            &run.w1_sid,
+            meerkat_runtime::RunStartHoldReason::HostRecovery
+        ),
+        "the host's hold stays staged until its release"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        held.handle.retire(held.worker.clone()),
+    )
+    .await
+    .expect("the retire settles")
+    .expect("the held member retires");
+    assert!(
+        !held.runtime.registration_run_start_hold_staged(
+            &run.w1_sid,
+            meerkat_runtime::RunStartHoldReason::HostRecovery
+        ),
+        "the retire drops the departed member's recovery hold"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no model request"
+    );
+    let settle = held.handle.settle_member_retained_run(&held.worker).await;
+    assert!(
+        matches!(
+            &settle,
+            Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &held.worker
+        ),
+        "a settle of the retired member answers MemberNotFound, not {settle:?}"
+    );
+    let release = held
+        .handle
+        .release_member_run_starts(
+            &held.worker,
+            meerkat_mob::HostRunStartHoldReason::HostRecovery,
+        )
+        .await;
+    assert!(
+        matches!(
+            &release,
+            Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &held.worker
+        ),
+        "a release of the retired member's hold answers MemberNotFound, not {release:?}"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
 /// A host's graceful shutdown with a requeue bound suspends a member's run
 /// at its last round commit, and the next start comes after the bound has
 /// passed. The start settles the kept run as expired instead of resuming it
@@ -12665,8 +13740,8 @@ async fn a_members_kept_run_settled_past_its_bound_ends_with_one_run_failed(
         ),
     )
     .await;
-    // The bound, measured from the input's admission, passes before the
-    // next start.
+    // The bound, measured from the stop that kept the run, passes before
+    // the next start.
     sleep(max_age + Duration::from_secs(1)).await;
 
     let client_2 = Arc::new(HoldingToolLoopClient::new(0));
@@ -12875,7 +13950,7 @@ async fn a_held_member_tail_is_refused_typed_at_the_members_wake() {
         "the start leaves the held tail as the shutdown left it"
     );
 
-    tokio::time::timeout(Duration::from_secs(60), handle.resume())
+    tokio::time::timeout(Duration::from_mins(1), handle.resume())
         .await
         .expect("the lift answers")
         .expect("the lift resumes the mob: the member's refused restore is its own outcome");
@@ -12951,6 +14026,7 @@ fn memory_compacting_service(
 /// What the first process start left: member `w-1`'s session, the open run
 /// its provisional tail belongs to, and that run's input.
 #[cfg(feature = "test-support")]
+#[derive(Clone)]
 struct CompactedMemberRun {
     w1_sid: meerkat_core::types::SessionId,
     run_id: meerkat_core::RunId,
@@ -12959,21 +14035,82 @@ struct CompactedMemberRun {
     intents: Vec<meerkat_core::CompactionProjectionId>,
 }
 
+/// Where a member run's compaction stands, as one read finds it: the run's
+/// provisional tail, the session's pending outbox rows, and the outbox rows
+/// and the memory stage of each of the run's compaction intents.
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct RunCompactionState {
+    tail: Option<meerkat_core::RunId>,
+    pending: usize,
+    intents: Vec<(Vec<String>, Option<String>)>,
+}
+
+#[cfg(feature = "test-support")]
+impl RunCompactionState {
+    async fn read(
+        paths: &Paths,
+        runtime_store: &dyn meerkat_runtime::RuntimeStore,
+        run: &CompactedMemberRun,
+    ) -> Self {
+        Self {
+            tail: provisional_tail_run(runtime_store, &run.w1_sid, true).await,
+            pending: runtime_store
+                .load_pending_compaction_projections(&run.runtime_id)
+                .await
+                .expect("read the compaction outbox")
+                .len(),
+            intents: run
+                .intents
+                .iter()
+                .map(|projection| {
+                    (
+                        compaction_outbox_states(paths, projection),
+                        compaction_stage_state(paths, projection),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The run's compaction is settled: no tail stands, nothing is owed,
+    /// and each of the run's intents has one outbox row, acknowledged, and
+    /// a finalized memory stage.
+    fn settled(&self) -> bool {
+        self.tail.is_none()
+            && self.pending == 0
+            && !self.intents.is_empty()
+            && self.intents.iter().all(|(rows, stage)| {
+                rows.as_slice() == ["finalized"] && stage.as_deref() == Some("finalized")
+            })
+    }
+}
+
+/// What the first process start holds while member `w-1`'s run is held
+/// after its compaction: the mob, its session service, the member's handle,
+/// weak handles on the process's session runtimes, and the run.
+#[cfg(feature = "test-support")]
+struct HeldCompactedRun {
+    handle: MobHandle,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    member: meerkat_mob::MemberHandle,
+    runtime_release_witnesses: Vec<std::sync::Weak<dyn meerkat_core::agent::CommsRuntime>>,
+    run: CompactedMemberRun,
+}
+
 /// The first process start: member `w-1`, with durable memory and a
 /// compaction threshold every boundary crosses, answers one ordinary turn,
 /// then runs a tool loop. The loop run's boundaries compact (a compaction
 /// stages its memory projection and the session carries its intent; the
 /// ordinary turn before the run gives its first boundary something to fold),
 /// and its tool rounds' commits carry the rewrite and the intent into the
-/// run's provisional tail; the loop's third model call is held. Nothing has committed the tail, so the compaction outbox holds
-/// no row for the intent. The host then stops the mob, leaving the run
-/// running, and shuts it down with `queued_inputs`.
+/// run's provisional tail; the loop's third model call is held. Nothing has
+/// committed the tail, so the compaction outbox holds no row for the intent.
 #[cfg(feature = "test-support")]
-async fn stop_over_a_member_run_that_compacted(
+async fn hold_a_member_run_that_compacted(
     paths: &Paths,
     runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
-    queued_inputs: meerkat_mob::QueuedInputsOnShutdown,
-) -> CompactedMemberRun {
+) -> HeldCompactedRun {
     let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
     match definition.profiles.get_mut(&ProfileName::from("worker")) {
         Some(ProfileBinding::Inline(profile)) => {
@@ -13062,26 +14199,49 @@ async fn stop_over_a_member_run_that_compacted(
             .is_empty(),
         "nothing committed the tail, so the outbox holds no row for the intent"
     );
+    HeldCompactedRun {
+        handle: handle_1,
+        service: service_1,
+        member,
+        runtime_release_witnesses,
+        run: CompactedMemberRun {
+            w1_sid,
+            run_id,
+            runtime_id,
+            intents,
+        },
+    }
+}
 
-    handle_1
+/// [`hold_a_member_run_that_compacted`]; the host then stops the mob,
+/// leaving the run running, and shuts it down with `queued_inputs`.
+#[cfg(feature = "test-support")]
+async fn stop_over_a_member_run_that_compacted(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    queued_inputs: meerkat_mob::QueuedInputsOnShutdown,
+) -> CompactedMemberRun {
+    let held = hold_a_member_run_that_compacted(paths, runtime_store).await;
+    held.handle
         .stop_with_options(meerkat_mob::StopOptions::default().leave_runs_running())
         .await
         .expect("the mob stops");
-    handle_1
+    held.handle
         .shutdown_with_report(
             meerkat_mob::ShutdownOptions::default().with_queued_inputs(queued_inputs),
         )
         .await
         .expect("the mob shuts down");
-    service_1
+    held.service
         .try_shutdown()
         .await
         .expect("shutdown first session service");
-    drop(member);
-    drop(handle_1);
-    drop(service_1);
+    drop(held.member);
+    drop(held.handle);
+    drop(held.service);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while runtime_release_witnesses
+        while held
+            .runtime_release_witnesses
             .iter()
             .any(|runtime| runtime.upgrade().is_some())
         {
@@ -13090,12 +14250,7 @@ async fn stop_over_a_member_run_that_compacted(
     })
     .await
     .expect("every old session runtime is released before the next start");
-    CompactedMemberRun {
-        w1_sid,
-        run_id,
-        runtime_id,
-        intents,
-    }
+    held.run
 }
 
 /// The states of the member's durable compaction memory stages, read from
@@ -13399,13 +14554,16 @@ async fn a_member_run_kept_after_a_compaction_resumes_and_finalizes_its_intent()
 /// the stop cancels the run, and the run's tail, which carries the
 /// compaction's intent, is committed as an interrupted run, so the outbox
 /// holds the intent. The intent's memory stage must still be there for that
-/// commit, and the next start finalizes the intent once, before the revived
-/// member's runtime is bound. RED before: the cancelled run's agent aborted
-/// its uncommitted compaction and deleted the stage, while the tail it had
-/// already written still carried the intent, so a finalization failed with
-/// "missing durable compaction stage for committed rewrite"; and the start's
-/// reconciliation refused the committed intent because the member had no
-/// runtime binding yet, so the member's startup failed at every start.
+/// commit. The next start is lazy: an owed compaction projection is not
+/// recovery work, so the start leaves the member dormant with its intent
+/// still owed, and wakes nothing. The member's next wake (a new input)
+/// finalizes the intent once, before the revived member's runtime is bound,
+/// and the member serves the input. RED before: the cancelled run's agent
+/// aborted its uncommitted compaction and deleted the stage, while the tail
+/// it had already written still carried the intent, so a finalization failed
+/// with "missing durable compaction stage for committed rewrite"; and the
+/// start's reconciliation refused the committed intent because the member had
+/// no runtime binding yet, so the member's startup failed at every start.
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_run_stopped_after_a_compaction_still_finalizes_its_intent() {
@@ -13424,6 +14582,15 @@ async fn a_member_run_stopped_after_a_compaction_still_finalizes_its_intent() {
         meerkat_mob::QueuedInputsOnShutdown::Stop,
     )
     .await;
+    let pending = || pending_compaction_projections(runtime_store.as_ref(), &run.runtime_id);
+    assert_eq!(
+        (
+            pending().await,
+            provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await
+        ),
+        (1, None),
+        "the stop committed the run's tail, and with it the intent"
+    );
 
     let client_2 = Arc::new(HoldingToolLoopClient::new(0));
     let (service_2, _store_2) =
@@ -13432,6 +14599,64 @@ async fn a_member_run_stopped_after_a_compaction_still_finalizes_its_intent() {
         .await
         .unwrap_or_else(|error| panic!("the start restores the member: {error}"));
     handle.resume().await.expect("the mob resumes");
+
+    // The lazy start leaves the member dormant, its intent still owed.
+    let worker = AgentIdentity::from("w-1");
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        handle.member_unmaterialized(&worker),
+        "the lazy start leaves the member dormant: an owed compaction projection does not \
+         wake it"
+    );
+    assert_eq!(
+        pending().await,
+        1,
+        "the dormant member's intent is still owed"
+    );
+    let carried = service_2
+        .load_authoritative_session(&run.w1_sid)
+        .await
+        .ok()
+        .flatten()
+        .map(|session| {
+            session
+                .validated_compaction_projection_intents()
+                .map(|intents| intents.len())
+                .unwrap_or(usize::MAX)
+        });
+    assert_eq!(
+        carried,
+        Some(1),
+        "the dormant member's session still carries the intent"
+    );
+    assert!(
+        compaction_stage_states(&paths, &run.w1_sid)
+            .iter()
+            .all(|state| state == "staged"),
+        "the intent's memory stage is still staged"
+    );
+    assert!(
+        handle.member_unmaterialized(&worker),
+        "the reads wake nothing"
+    );
+    assert_eq!(
+        client_2
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            + client_2.other_requests(),
+        0,
+        "no model request while the member is dormant"
+    );
+
+    // Its next wake finalizes the intent before the member's runtime is
+    // bound, and the revived member serves the input.
+    handle
+        .member(&worker)
+        .await
+        .expect("member handle")
+        .send("token-after-the-stop".to_string(), HandlingMode::Queue)
+        .await
+        .expect("the member admits a new input");
     wait_for_the_intents_to_finalize(
         &paths,
         service_2.as_ref(),
@@ -13440,16 +14665,103 @@ async fn a_member_run_stopped_after_a_compaction_still_finalizes_its_intent() {
         "stop",
     )
     .await;
+    for projection in &run.intents {
+        assert_eq!(
+            compaction_stage_state(&paths, projection).as_deref(),
+            Some("finalized"),
+            "the committed rewrite's memory stage is finalized"
+        );
+    }
+    wait_for_the_revived_member_to_serve(
+        &paths,
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        client_2.as_ref(),
+        &run,
+        "stop",
+    )
+    .await;
     let _ = handle.shutdown().await;
 }
 
+/// How many compaction projections the runtime's outbox still owes.
+#[cfg(feature = "test-support")]
+async fn pending_compaction_projections(
+    runtime_store: &dyn meerkat_runtime::RuntimeStore,
+    runtime_id: &meerkat_runtime::LogicalRuntimeId,
+) -> usize {
+    runtime_store
+        .load_pending_compaction_projections(runtime_id)
+        .await
+        .expect("read the compaction outbox")
+        .len()
+}
+
+/// Wait, bounded, until the revived member served its new input: the model
+/// was asked, and the input's run ended with its answer committed and with
+/// any compaction it made finalized.
+#[cfg(feature = "test-support")]
+async fn wait_for_the_revived_member_to_serve(
+    paths: &Paths,
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_store: &dyn meerkat_runtime::RuntimeStore,
+    client: &HoldingToolLoopClient,
+    run: &CompactedMemberRun,
+    context: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // The new input's request carries the compaction summary, which the
+        // client answers as a loop request.
+        let served = client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            + client.other_requests()
+            >= 1;
+        // The new input's run ends with its answer committed, and with any
+        // compaction it made finalized, before the host shuts down.
+        let answered = provisional_tail_run(runtime_store, &run.w1_sid, true)
+            .await
+            .is_none()
+            && runtime_store
+                .load_pending_compaction_projections(&run.runtime_id)
+                .await
+                .expect("read the compaction outbox")
+                .is_empty()
+            && service
+                .load_authoritative_session(&run.w1_sid)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|session| {
+                    matches!(
+                        session.messages().last(),
+                        Some(meerkat_core::Message::BlockAssistant(_))
+                    ) && session
+                        .validated_compaction_projection_intents()
+                        .is_ok_and(|intents| intents.is_empty())
+                });
+        if served && answered {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "[{context}] the revived member did not serve: served {served}, answered {answered}, \
+             runtime {:?}",
+            runtime_binding_facts(paths, &run.runtime_id)
+        );
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// The stopped run of the row above leaves a committed compaction intent the
-/// next start must finalize while the revived member has no runtime
-/// placement yet: the mob binds a member's runtime only after its revival,
-/// which waits for the startup's reconciliation. The reconciliation
-/// finalizes the committed intent under the member's live session and epoch,
-/// the revival succeeds, and the member serves a new input. The committed
-/// rewrite's memory stage is finalized. RED before: the startup refused with
+/// member's revival must finalize (at its next wake, the new input here)
+/// while the revived member has no runtime placement yet: the mob binds a
+/// member's runtime only after its revival, which waits for the startup's
+/// reconciliation. The reconciliation finalizes the committed intent under
+/// the member's live session and epoch, the revival succeeds, and the member
+/// serves a new input. The committed rewrite's memory stage is finalized. RED
+/// before: the startup refused with
 /// "compaction projection coordinator rejected the handoff: session has no
 /// authoritative runtime binding for compaction commit" at every start, and
 /// the member never served again.
@@ -13520,47 +14832,615 @@ async fn a_revived_member_finalizes_a_committed_intent_before_its_binding() {
             "the committed rewrite's memory stage is finalized"
         );
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        // The new input's request carries the compaction summary, which the
-        // client answers as a loop request.
-        let served = client_2
-            .loop_requests
-            .load(std::sync::atomic::Ordering::SeqCst)
-            + client_2.other_requests()
-            >= 1;
-        // The new input's run ends with its answer committed, and with any
-        // compaction it made finalized, before the host shuts down.
-        let answered = provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true)
-            .await
-            .is_none()
-            && runtime_store
-                .load_pending_compaction_projections(&run.runtime_id)
-                .await
-                .expect("read the compaction outbox")
-                .is_empty()
-            && service_2
-                .load_authoritative_session(&run.w1_sid)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|session| {
-                    matches!(
-                        session.messages().last(),
-                        Some(meerkat_core::Message::BlockAssistant(_))
-                    ) && session
-                        .validated_compaction_projection_intents()
-                        .is_ok_and(|intents| intents.is_empty())
-                });
-        if served && answered {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the revived member did not serve: served {served}, answered {answered}, runtime {:?}",
-            runtime_binding_facts(&paths, &run.runtime_id)
-        );
-        sleep(Duration::from_millis(100)).await;
-    }
+    wait_for_the_revived_member_to_serve(
+        &paths,
+        service_2.as_ref(),
+        runtime_store.as_ref(),
+        client_2.as_ref(),
+        &run,
+        "revival",
+    )
+    .await;
     let _ = handle.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// A dormant member's owed compaction projection, settled cold
+// ---------------------------------------------------------------------------
+
+/// The texts of the session's published memory records, in durable-id
+/// order, read from the memory store's database.
+#[cfg(feature = "test-support")]
+fn published_memory_texts(
+    paths: &Paths,
+    session_id: &meerkat_core::types::SessionId,
+) -> Vec<String> {
+    let db = paths
+        .runtime_root
+        .join("factory-store")
+        .join("memory")
+        .join("memory.sqlite3");
+    let connection =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open the memory store's database");
+    let mut statement = connection
+        .prepare(
+            "SELECT t.content FROM memory_text t \
+             JOIN memory_metadata m ON m.point_id = t.point_id \
+             WHERE m.session_id = ?1 ORDER BY m.point_id",
+        )
+        .expect("prepare the published texts query");
+    statement
+        .query_map([session_id.to_string()], |row| row.get::<_, Vec<u8>>(0))
+        .expect("query the published texts")
+        .map(|row| String::from_utf8(row.expect("read a published text")).expect("utf-8 text"))
+        .collect()
+}
+
+/// What the second process start holds: the member `w-1` dormant over the
+/// session whose stopped run committed a compaction's intent, the outbox
+/// owing that projection, and its memory stage staged.
+#[cfg(feature = "test-support")]
+struct DormantOwedProjection {
+    run: CompactedMemberRun,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    client: Arc<HoldingToolLoopClient>,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    handle: MobHandle,
+    /// The projections the outbox owes after the start.
+    owed: Vec<meerkat_core::CompactionProjectionId>,
+}
+
+#[cfg(feature = "test-support")]
+impl DormantOwedProjection {
+    /// No model request reached the second start's client.
+    fn assert_no_model_request(&self, context: &str) {
+        assert_eq!(
+            self.client
+                .loop_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                + self.client.other_requests(),
+            0,
+            "[{context}] no model request was made"
+        );
+    }
+
+    /// The member is still seated Dormant and no actor hosts its session.
+    async fn assert_still_dormant(&self, context: &str) {
+        use meerkat_mob::machines::mob_machine::MemberMaterializationPhase;
+        assert_eq!(
+            self.handle
+                .member_materialization_for_test(&AgentIdentity::from("w-1")),
+            Some(MemberMaterializationPhase::Dormant),
+            "[{context}] the member stays Dormant"
+        );
+        assert!(
+            !self
+                .service
+                .live_session_actor_registered(&self.run.w1_sid)
+                .await,
+            "[{context}] no actor hosts the member's session"
+        );
+    }
+}
+
+/// The first process start compacts inside a run of member `w-1` (durable
+/// memory, a compaction at every boundary) and its shutdown stops the run
+/// (`QueuedInputsOnShutdown::Stop`), which commits the run's tail as
+/// interrupted: the outbox then owes the compaction's memory projection and
+/// its stage stays staged. The second start runs over the SQLite runtime
+/// store, whose start is lazy: a pending projection is no recovery work, so
+/// the start (and the lift that resumes the mob) leaves the member dormant,
+/// and the projection waits for a wake.
+#[cfg(feature = "test-support")]
+async fn start_lazily_over_an_owed_projection(paths: &Paths) -> DormantOwedProjection {
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the durable runtime store"),
+    );
+    let run = stop_over_a_member_run_that_compacted(
+        paths,
+        runtime_store.clone(),
+        meerkat_mob::QueuedInputsOnShutdown::Stop,
+    )
+    .await;
+    assert_eq!(
+        provisional_tail_run(runtime_store.as_ref(), &run.w1_sid, true).await,
+        None,
+        "the stop committed the run's tail as interrupted"
+    );
+
+    let client = Arc::new(HoldingToolLoopClient::new(0));
+    let (service, _store) = memory_compacting_service(paths, runtime_store.clone(), client.clone());
+    let handle = start_again(paths, service.clone(), client.clone())
+        .await
+        .unwrap_or_else(|error| panic!("the lazy start: {error}"));
+    handle.resume().await.expect("the mob resumes");
+    // A start that woke the member would have finalized its projection by
+    // now; the lazy start leaves it owed.
+    sleep(Duration::from_millis(500)).await;
+    let owed = runtime_store
+        .load_pending_compaction_projections(&run.runtime_id)
+        .await
+        .expect("read the compaction outbox")
+        .into_iter()
+        .map(|intent| intent.projection)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owed.len(),
+        1,
+        "the stopped run's commit owes one projection: {owed:?}"
+    );
+    for projection in &owed {
+        assert_eq!(
+            compaction_stage_state(paths, projection).as_deref(),
+            Some("staged"),
+            "the owed projection's memory stage is staged"
+        );
+        assert_eq!(
+            compaction_outbox_states(paths, projection),
+            vec!["pending".to_string()],
+            "the outbox row is pending"
+        );
+    }
+    let start = DormantOwedProjection {
+        run,
+        runtime_store,
+        client,
+        service,
+        handle,
+        owed,
+    };
+    start.assert_still_dormant("lazy start").await;
+    start.assert_no_model_request("lazy start");
+    start
+}
+
+/// The owed projection of `start` is settled: its outbox row is finalized
+/// and nothing is pending, its stage is finalized, and the session's memory
+/// holds each finalized stage's entries exactly once.
+#[cfg(feature = "test-support")]
+async fn assert_the_owed_projection_settled(
+    paths: &Paths,
+    start: &DormantOwedProjection,
+    context: &str,
+) {
+    assert!(
+        start
+            .runtime_store
+            .load_pending_compaction_projections(&start.run.runtime_id)
+            .await
+            .expect("read the compaction outbox")
+            .is_empty(),
+        "[{context}] the outbox owes nothing"
+    );
+    for projection in &start.owed {
+        assert_eq!(
+            compaction_outbox_states(paths, projection),
+            vec!["finalized".to_string()],
+            "[{context}] the owed projection's outbox row is finalized"
+        );
+        assert_eq!(
+            compaction_stage_state(paths, projection).as_deref(),
+            Some("finalized"),
+            "[{context}] the owed projection's memory stage is finalized"
+        );
+    }
+    let (records, published) = published_compaction_entries(paths, &start.run.w1_sid);
+    assert!(
+        published > 0,
+        "[{context}] the finalized stage published entries"
+    );
+    assert_eq!(
+        records, published,
+        "[{context}] every finalized stage's entries are in the session's memory exactly once"
+    );
+}
+
+/// A dormant member's owed projection settles cold through the mob: the
+/// settle finalizes the batch and acknowledges the outbox row, and answers
+/// the batch, whose entries are the records the session's memory now holds
+/// for it. The member stays dormant and no model is asked. RED before: no
+/// verb finalized the projection; the outbox kept owing it.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dormant_members_owed_compaction_projection_settles_cold() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    let before = published_memory_texts(&paths, &start.run.w1_sid);
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&AgentIdentity::from("w-1"))
+        .await
+        .expect("the settle answers");
+    let projections = match settlement {
+        meerkat_session::OwedCompactionSettlement::Settled { projections } => projections,
+        other => panic!("the dormant member's owed projection settles: {other:?}"),
+    };
+    assert_eq!(
+        projections
+            .iter()
+            .map(|settled| settled.projection.clone())
+            .collect::<Vec<_>>(),
+        start.owed,
+        "the settle answers the owed projections, in outbox order"
+    );
+    for settled in &projections {
+        assert!(
+            settled.messages_before > settled.messages_after,
+            "the settled projection carries its compaction's summary facts"
+        );
+    }
+    assert_the_owed_projection_settled(&paths, &start, "settle").await;
+    let after = published_memory_texts(&paths, &start.run.w1_sid);
+    let mut published_now = after[before.len()..].to_vec();
+    let mut answered = projections
+        .iter()
+        .flat_map(|settled| settled.entries.iter().map(|entry| entry.content.clone()))
+        .collect::<Vec<_>>();
+    assert!(!answered.is_empty(), "the settled batch holds entries");
+    published_now.sort();
+    answered.sort();
+    assert_eq!(
+        answered, published_now,
+        "the answered batch is exactly the records the settle published"
+    );
+    start.assert_still_dormant("settle").await;
+    start.assert_no_model_request("settle");
+    let _ = start.handle.shutdown().await;
+}
+
+/// The design row: a rotation of the dormant member onto a fresh session
+/// settles the session it leaves, before the rotation's terminal step. The
+/// old session's outbox owes nothing, its stage is finalized, its entries
+/// are published once, the old session was never registered, and no model
+/// was asked. RED before: after the rotation the outbox still owed the
+/// projection and its stage stayed staged, forever.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_of_a_dormant_member_settles_its_owed_compaction_projection() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("w-1"));
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    let fresh = tokio::time::timeout(Duration::from_mins(1), start.handle.rotate_member(spec))
+        .await
+        .expect("the rotation answers")
+        .expect("the rotation of the dormant member succeeds");
+    assert_ne!(
+        fresh, start.run.w1_sid,
+        "the rotation seats a fresh session"
+    );
+
+    assert_the_owed_projection_settled(&paths, &start, "rotation").await;
+    assert!(
+        !start
+            .service
+            .live_session_actor_registered(&start.run.w1_sid)
+            .await,
+        "the old session was never registered"
+    );
+    start.assert_no_model_request("rotation");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A rotation of a live member onto a fresh session while the member's run
+/// is in flight after a compaction (the run's round commits carried the
+/// compaction's intent into its provisional tail): the rotation's
+/// retirement cancels the run, which closes the tail as an interrupted run
+/// and so commits the intent, and the agent never finalizes it; the
+/// rotation's settle of the session it leaves, after the archive, finalizes
+/// the compaction's memory stage into that session's memory and
+/// acknowledges its outbox row before the rotation's terminal step journals
+/// the retirement. A host that reads the retirement from the journal finds
+/// the batch published in the old session's memory, and nothing owed.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_of_a_live_member_settles_the_compaction_its_cancelled_run_carried() {
+    // A refused settle is logged, not returned: show it.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the durable runtime store"),
+    );
+    let held = hold_a_member_run_that_compacted(&paths, runtime_store.clone()).await;
+    let identity = AgentIdentity::from("w-1");
+    assert!(
+        held.service
+            .live_session_actor_registered(&held.run.w1_sid)
+            .await,
+        "an actor hosts the member's session while its run is held"
+    );
+
+    // Where the run's compaction stands when the retirement of the
+    // incarnation the rotation ends is first read from the journal.
+    let at_retirement = {
+        let handle = held.handle.clone();
+        let paths = paths.clone();
+        let runtime_store = runtime_store.clone();
+        let identity = identity.clone();
+        let run = held.run.clone();
+        tokio::spawn(async move {
+            let mut after = meerkat_mob::MobJournalCursor::START;
+            loop {
+                let page = handle
+                    .member_lifecycle_events(after, meerkat_mob::IDENTITY_ENTRY_PAGE_MAX)
+                    .await
+                    .expect("Core's member lifecycle journal reads");
+                let retired = page.records.iter().any(|record| {
+                    matches!(
+                        &record.event,
+                        meerkat_mob::MemberLifecycleEvent::Retired {
+                            agent_identity,
+                            session_id: Some(retired_session),
+                            ..
+                        } if *agent_identity == identity && *retired_session == run.w1_sid
+                    )
+                });
+                if retired {
+                    return RunCompactionState::read(&paths, runtime_store.as_ref(), &run).await;
+                }
+                after = page.next;
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+
+    let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    let fresh = tokio::time::timeout(Duration::from_mins(1), held.handle.rotate_member(spec))
+        .await
+        .expect("the rotation answers")
+        .expect("the rotation of the live member succeeds");
+    assert_ne!(fresh, held.run.w1_sid, "the rotation seats a fresh session");
+    let at_retirement = tokio::time::timeout(Duration::from_secs(30), at_retirement)
+        .await
+        .expect("the retirement is journaled")
+        .expect("the journal watch ends");
+    // Whatever the rotation's end did after the journal has landed by now.
+    sleep(Duration::from_secs(2)).await;
+    let after = RunCompactionState::read(&paths, runtime_store.as_ref(), &held.run).await;
+    assert!(
+        at_retirement.settled() && after.settled(),
+        "the run's compaction is finalized into the old session's memory, and its outbox row \
+         acknowledged, when Core journals the retirement: at the retirement {at_retirement:?}, \
+         after it {after:?}"
+    );
+    let (records, published) = published_compaction_entries(&paths, &held.run.w1_sid);
+    assert!(published > 0, "the finalized stages published entries");
+    assert_eq!(
+        records, published,
+        "every finalized stage's entries are in the old session's memory exactly once"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
+/// A second settle of a settled session owes nothing and changes nothing:
+/// the outbox row, the stage and the published records stay as the first
+/// settle left them.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_settle_of_an_owed_compaction_projection_owes_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    let identity = AgentIdentity::from("w-1");
+
+    let first = start
+        .handle
+        .settle_member_owed_compaction_projections(&identity)
+        .await
+        .expect("the first settle answers");
+    assert!(
+        matches!(
+            first,
+            meerkat_session::OwedCompactionSettlement::Settled { .. }
+        ),
+        "the first settle settles the owed projection: {first:?}"
+    );
+    let published = published_memory_texts(&paths, &start.run.w1_sid);
+    let entries = published_compaction_entries(&paths, &start.run.w1_sid);
+
+    let second = start
+        .handle
+        .settle_member_owed_compaction_projections(&identity)
+        .await
+        .expect("the second settle answers");
+    assert!(
+        matches!(
+            second,
+            meerkat_session::OwedCompactionSettlement::NothingOwed
+        ),
+        "the second settle owes nothing: {second:?}"
+    );
+    assert_the_owed_projection_settled(&paths, &start, "second settle").await;
+    assert_eq!(
+        published_memory_texts(&paths, &start.run.w1_sid),
+        published,
+        "the second settle published nothing"
+    );
+    assert_eq!(
+        published_compaction_entries(&paths, &start.run.w1_sid),
+        entries,
+        "the second settle changed no stage"
+    );
+    start.assert_still_dormant("second settle").await;
+    start.assert_no_model_request("second settle");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A session this process hosts answers `Live`: its live agent owns the
+/// finalization, and the settle writes nothing. Here the member's wake
+/// finalized the owed projection at its startup reconciliation; the settle
+/// of the live session then leaves the outbox, the stage and the published
+/// records exactly as the wake left them.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_session_answers_live_to_the_owed_compaction_settle() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    let identity = AgentIdentity::from("w-1");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        start.handle.ensure_member_live(&identity),
+    )
+    .await
+    .expect("the wake answers")
+    .expect("the wake materializes the member");
+    assert!(
+        start
+            .service
+            .live_session_actor_registered(&start.run.w1_sid)
+            .await,
+        "an actor hosts the member's session"
+    );
+    let outbox = start
+        .owed
+        .iter()
+        .map(|projection| compaction_outbox_states(&paths, projection))
+        .collect::<Vec<_>>();
+    let stages = compaction_stage_states(&paths, &start.run.w1_sid);
+    let published = published_memory_texts(&paths, &start.run.w1_sid);
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&identity)
+        .await
+        .expect("the settle answers");
+    assert!(
+        matches!(settlement, meerkat_session::OwedCompactionSettlement::Live),
+        "a registered session answers Live: {settlement:?}"
+    );
+    assert_eq!(
+        start
+            .owed
+            .iter()
+            .map(|projection| compaction_outbox_states(&paths, projection))
+            .collect::<Vec<_>>(),
+        outbox,
+        "the settle changed no outbox row"
+    );
+    assert_eq!(
+        compaction_stage_states(&paths, &start.run.w1_sid),
+        stages,
+        "the settle changed no stage"
+    );
+    assert_eq!(
+        published_memory_texts(&paths, &start.run.w1_sid),
+        published,
+        "the settle published nothing"
+    );
+    let _ = start.handle.shutdown().await;
+}
+
+/// A settle that meets a stage an earlier finalization already published,
+/// without reaching its acknowledgement (a crash between the two, a scope
+/// index rebuild that failed after the commit, a cancelled settle),
+/// acknowledges the owed row and answers the projection with no entries,
+/// though the session's memory holds the published discards: a host that
+/// harvests the answered batch reads them from the session's memory
+/// instead.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_after_an_unacknowledged_finalization_answers_no_entries() {
+    use meerkat_core::memory::MemoryStore as _;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    // An earlier finalization published the stage but never acknowledged
+    // its outbox row.
+    let memory_dir = paths.runtime_root.join("factory-store").join("memory");
+    let store = meerkat::HnswMemoryStore::open(&memory_dir).expect("open the memory store");
+    for projection in &start.owed {
+        store
+            .finalize_compaction_batch(projection)
+            .await
+            .expect("an earlier finalization publishes the stage");
+    }
+    drop(store);
+    let (published, _) = published_compaction_entries(&paths, &start.run.w1_sid);
+    assert!(
+        published > 0,
+        "the earlier finalization published the discards"
+    );
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&AgentIdentity::from("w-1"))
+        .await
+        .expect("the settle answers");
+    let projections = match settlement {
+        meerkat_session::OwedCompactionSettlement::Settled { projections } => projections,
+        other => panic!("the settle acknowledges the owed rows: {other:?}"),
+    };
+    assert_the_owed_projection_settled(
+        &paths,
+        &start,
+        "settle after an unacknowledged finalization",
+    )
+    .await;
+    assert_eq!(
+        projections
+            .iter()
+            .map(|settled| settled.projection.clone())
+            .collect::<Vec<_>>(),
+        start.owed,
+        "the settle answers the owed projections"
+    );
+    let answered: usize = projections
+        .iter()
+        .map(|settled| settled.entries.len())
+        .sum();
+    assert_eq!(
+        answered, 0,
+        "the settle answers none of the discards an earlier finalization published"
+    );
+    start.assert_no_model_request("settle after an unacknowledged finalization");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A plain retirement of the dormant member (no rotation) does not settle
+/// it cold: the session can be resumed, and the resumed member's wake owns
+/// the finalization and its harvest, which a cold settle would preempt by
+/// publishing the batch and dropping it. The outbox row stays pending and
+/// the stage staged.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_retire_of_a_dormant_member_leaves_its_owed_projection_owed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+
+    tokio::time::timeout(
+        Duration::from_mins(1),
+        start.handle.retire(AgentIdentity::from("w-1")),
+    )
+    .await
+    .expect("the retirement answers")
+    .expect("the retirement of the dormant member succeeds");
+
+    for projection in &start.owed {
+        assert_eq!(
+            compaction_outbox_states(&paths, projection),
+            vec!["pending".to_string()],
+            "the plain retirement leaves the outbox row pending"
+        );
+        assert_eq!(
+            compaction_stage_state(&paths, projection).as_deref(),
+            Some("staged"),
+            "the plain retirement leaves the stage staged"
+        );
+    }
+    start.assert_no_model_request("plain retire");
+    let _ = start.handle.shutdown().await;
 }

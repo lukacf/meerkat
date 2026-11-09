@@ -1,0 +1,380 @@
+/* MetaDock: workspace tabs, splits, panes and the pane menu.
+   Split from console-host.css (imported there, in this order). */
+
+/* Dock inside the new shell */
+.main .cc-dock-panel.is-solitary {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  margin: 6px;
+}
+
+/* ── Dock / Panels ───────────────────────────────────────────── */
+
+.cc-dock-panel.is-solitary {
+  background: var(--bg-elev-1);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.cc-dock.is-single-tab .cc-dock__tab-strip,
+.cc-dock.is-single-tab .cc-dock__tabs { display: flex; }
+
+.cc-dock__tab-strip {
+  padding: 6px 8px 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.cc-dock__tab-actions { margin-right: auto; }
+
+.cc-dock-tab,
+.cc-dock-tab.is-active {
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  border: 1px solid transparent;
+  box-shadow: none;
+  font-family: var(--disp);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.cc-dock-tab { background: transparent; }
+.cc-dock-tab.is-active {
+  background: var(--bg-elev-1);
+  border-color: var(--line);
+  border-bottom-color: transparent;
+  color: var(--ink);
+  font-weight: 500;
+}
+.cc-dock.is-single-panel { gap: 0; }
+
+.cc-dock.is-single-panel .cc-dock-panel__floating-actions {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.cc-dock.is-single-panel .cc-dock-panel:hover .cc-dock-panel__floating-actions {
+  opacity: 1;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Meta Dock (workspaces → splits → panes, Ghostty-style), spec B16
+   ══════════════════════════════════════════════════════════════ */
+
+.mkdock {
+  display: flex; flex-direction: column;
+  height: 100%; min-height: 0;
+  background: var(--_cc-surface-canvas);
+}
+
+/* Workspace tabs: the panel-tab underline, a pane count, close on hover. */
+.wstabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--_cc-surface-canvas);
+  border-bottom: 1px solid var(--_cc-border-soft);
+  overflow-x: auto;
+  flex-shrink: 0;
+  min-height: 36px;
+}
+.wstab {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 220px;
+  min-width: 0;
+  position: relative;
+  padding-right: 2px;
+}
+.wstab::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: -1px;
+  height: 2px;
+  background: transparent;
+  transition: background var(--_cc-dur-base) ease;
+}
+.wstab.is-active::after { background: var(--_cc-member-accent); }
+.wstab__select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 6px 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--_cc-dur-fast) ease;
+}
+.wstab__select:hover { color: var(--_cc-foreground); }
+.wstab__select:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; border-radius: var(--_cc-radius-sm); }
+.wstab.is-active .wstab__select { color: var(--_cc-foreground); }
+.wstab__mark {
+  width: 6px; height: 6px; border-radius: var(--_cc-radius-round);
+  background: var(--_cc-viz-mid);
+  flex-shrink: 0;
+}
+.wstab.is-active .wstab__mark { background: var(--_cc-member-accent); }
+[data-cc-variant="terminal"] .wstab__mark { border-radius: 0; }
+.wstab__name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 40px;
+  flex: 1 1 auto;
+}
+.wstab__count {
+  font-family: var(--_cc-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 0 5px;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-meta);
+  line-height: 16px;
+}
+.wstab__close.cc-btn--icon.cc-btn--sm { width: 20px; height: 20px; flex: none; color: var(--_cc-foreground-meta); }
+.wstab__close .cc-btn__icon .cc-glyph { width: 12px; height: 12px; }
+.wstab__close:hover:not(:disabled) { color: var(--_cc-negative-ink); }
+.wstab__add { align-self: center; margin-left: 2px; color: var(--_cc-foreground-meta); }
+
+/* Dock / splits */
+.dock {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 6px;
+  background: var(--_cc-surface-canvas);
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}
+.dock > * { flex: 1; min-width: 0; min-height: 0; }
+
+.split {
+  display: grid;
+  width: 100%; height: 100%;
+  min-width: 0; min-height: 0;
+}
+.split--h { grid-template-rows: 1fr; }
+.split--v { grid-template-columns: 1fr; }
+
+.split__handle {
+  background: transparent;
+  position: relative;
+  z-index: 2;
+}
+.split__handle--h { cursor: col-resize; }
+.split__handle--v { cursor: row-resize; }
+.split__handle::after {
+  content: "";
+  position: absolute;
+  background: transparent;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.split__handle--h::after { top: 0; bottom: 0; left: 2px; right: 2px; }
+.split__handle--v::after { left: 0; right: 0; top: 2px; bottom: 2px; }
+.split__handle:hover::after,
+.split__handle:active::after { background: var(--_cc-border-strong); }
+
+/* Panes: one quiet border for all; the focused pane wears a 2 px accent
+   top edge, never an outline that reads as an error. */
+.pane {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--_cc-surface-card);
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  margin: 2px;
+  overflow: hidden;
+  position: relative;
+}
+[data-cc-variant="terminal"] .pane { border-radius: 0; }
+.pane::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 3;
+  height: 2px;
+  background: transparent;
+  pointer-events: none;
+  transition: background var(--_cc-dur-base) ease;
+}
+.pane.is-focused::before { background: var(--_cc-member-accent); }
+
+.pane__bar {
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 6px 0 6px;
+  min-height: 32px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-canvas);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  flex-shrink: 0;
+}
+.pane__title {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  cursor: pointer;
+}
+.pane__title:hover,
+.pane__title[aria-expanded="true"] { background: var(--_cc-surface-hover); }
+.pane__title:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.pane__title-text {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 220px;
+}
+.pane__title-icon,
+.pane__caret {
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--_cc-foreground-meta);
+}
+.pane__title-icon { width: 14px; height: 14px; }
+.pane__caret { width: 12px; height: 12px; }
+.pane.is-focused .pane__title-icon { color: var(--_cc-foreground-muted); }
+.pane__spacer { flex: 1; }
+.pane__btn { color: var(--_cc-foreground-meta); }
+.pane__btn .cc-btn__icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.pane__close:hover:not(:disabled) { color: var(--_cc-negative-ink); }
+
+.pane__body {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  background: var(--_cc-surface-card);
+}
+
+/* The pane menu (B16): a kit popover with a search field and one list of
+   views and agents; a long roster renders only the rows in sight. Row
+   heights match PANE_MENU_ROW_HEIGHT and PANE_MENU_LABEL_HEIGHT. */
+.cc-popover.pane-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.pane-menu__search {
+  flex: none;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.pane-menu__search .cc-search,
+.pane-menu__search .cc-search__box { display: flex; width: 100%; }
+.pane-menu__search .cc-search__input { width: 100%; height: 28px; font-size: var(--_cc-fs-control); }
+.pane-menu__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(56vh, 440px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 4px;
+  outline: none;
+}
+.pane-menu__space { position: relative; margin: 4px 0; }
+.pane-menu__label,
+.pane-menu__item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+}
+.pane-menu__label {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 6px;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.pane-menu__count {
+  font-family: var(--_cc-font-mono);
+  font-weight: 400;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.pane-menu__item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--_cc-radius-sm);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  cursor: pointer;
+}
+.pane-menu__item.is-active { background: var(--_cc-surface-hover); }
+.pane-menu__item.is-active:focus-within,
+.pane-menu:focus-within .pane-menu__item.is-active { box-shadow: inset 0 0 0 1px var(--_cc-border-strong); }
+.pane-menu__icon {
+  justify-self: center;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--_cc-foreground-meta);
+}
+.pane-menu__mark { justify-self: center; }
+.pane-menu__name {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+/* An identity is demoted detail: muted, smaller monospace, lighter than the
+   name, and middle-truncated so its distinguishing tail stays visible. */
+.pane-menu__id {
+  display: inline-flex;
+  justify-self: end;
+  min-width: 0; max-width: 140px;
+  overflow: hidden; white-space: nowrap;
+  font-family: var(--_cc-font-mono); font-size: 10.5px; font-weight: 400;
+  color: var(--_cc-foreground-meta);
+}
+.pane-menu__id-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-menu__id-tail { flex: none; white-space: nowrap; }
+.pane-menu__empty {
+  padding: 14px 10px;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}

@@ -985,6 +985,7 @@ pub fn render_machine_contract_markdown(
             |name| runtime_internal_inputs.contains(name),
         );
     }
+    render_ci_samples_markdown(&mut out, schema);
     render_enum_markdown(&mut out, "Signals", &schema.signals);
     render_enum_markdown(&mut out, "Effects", &schema.effects);
 
@@ -1425,9 +1426,12 @@ pub fn render_machine_ci_cfg(
         &named_samples,
         &named_bindings,
     );
+    let input_samples = machine_input_sample_constants(schema);
+    let typed_samples = machine_input_typed_sample_constants(schema);
 
     pushln!(&mut out, "SPECIFICATION Spec");
-    if !domains.is_empty() || uses_u64_max {
+    if !domains.is_empty() || uses_u64_max || !input_samples.is_empty() || !typed_samples.is_empty()
+    {
         pushln!(&mut out, "CONSTANTS");
         if uses_u64_max {
             push_u64_max_cfg_assignment(&mut out);
@@ -1480,6 +1484,29 @@ pub fn render_machine_ci_cfg(
                 )
                 .expect("write to string");
             }
+        }
+        // A `CiValues` input field: the CI profile explores exactly its
+        // declared values, the Deep profile those and the default `0..2`.
+        for (constant, ci_values) in &input_samples {
+            let values: BTreeSet<u64> = if deep {
+                broad_input_samples(ci_values)
+            } else {
+                ci_values.iter().copied().collect()
+            };
+            writeln!(&mut out, "  {} = {}", constant, render_u64_set(&values))
+                .expect("write to string");
+        }
+        // A `CiSamples` input field: the CI profile explores exactly its
+        // declared values, the Deep profile the field type's whole domain,
+        // through the operators the generated model defines.
+        for (constant, _, _) in &typed_samples {
+            writeln!(
+                &mut out,
+                "  {} <- {}",
+                constant,
+                cfg_assignment_operator_name(constant, operator_suffix)
+            )
+            .expect("write to string");
         }
     }
     if !schema.invariants.is_empty() {
@@ -3199,6 +3226,42 @@ fn render_enum_markdown(out: &mut String, label: &str, schema: &EnumSchema) {
     pushln!(out);
 }
 
+/// The input fields a machine's CI profile samples (`CiSamples`), in
+/// declaration order, as one sentence of the generated contract; nothing for
+/// a machine that declares none.
+fn render_ci_samples_markdown(out: &mut String, schema: &MachineSchema) {
+    let samples = schema
+        .input_field_domains
+        .iter()
+        .filter_map(|declaration| match &declaration.domain {
+            meerkat_machine_schema::InputFieldDomainKind::CiSamples(values) => Some(format!(
+                "`{}`.`{}` as `{}`",
+                declaration.input,
+                declaration.field,
+                render_explicit_values(values)
+            )),
+            meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_)
+            | meerkat_machine_schema::InputFieldDomainKind::CiValues(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((last, rest)) = samples.split_last() else {
+        return;
+    };
+    let listed = if rest.is_empty() {
+        last.clone()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    pushln!(out, "## CI Profile Samples");
+    writeln!(
+        out,
+        "The CI profile samples {listed}; the Deep profile and every composition explore each field's whole domain."
+    )
+    .expect("write to string");
+    pushln!(out);
+}
+
 /// Render a labelled subset of an input enum's variants, keeping only those whose
 /// name satisfies `keep`. Used to split the public command surface from the
 /// runtime-internal inputs in the generated machine contract.
@@ -4432,6 +4495,25 @@ fn infer_expr_type(
                 .ok()
                 .map(TypeRef::Enum)
         }
+        Expr::Call { helper, args } if helper == "session_document_instruction_slot_after_set" => {
+            args.first().and_then(|current| {
+                infer_expr_type(current, field_types, helper_returns, binding_types)
+            })
+        }
+        Expr::Call { helper, .. } if helper == "session_document_instruction_active_bytes" => {
+            Some(TypeRef::U64)
+        }
+        // The Active entries of a slot map: the type of the map it filters.
+        Expr::Call { helper, args } if helper == "session_document_instruction_active_slots" => {
+            args.get(1).and_then(|values| {
+                infer_expr_type(values, field_types, helper_returns, binding_types)
+            })
+        }
+        // The retired count per activation key: the type of the row counts.
+        Expr::Call { helper, args } if helper == "session_document_activation_retired_after" => {
+            args.first()
+                .and_then(|rows| infer_expr_type(rows, field_types, helper_returns, binding_types))
+        }
         Expr::Call { helper, .. } if helper == "runtime_delivery_recipient_outcomes_after_set" => {
             Some(TypeRef::Map(
                 Box::new(TypeRef::String),
@@ -5634,6 +5716,202 @@ mod tests {
         );
     }
 
+    /// A `CiValues` declaration ranges the field over a model constant: the
+    /// CI config assigns it exactly the declared values, the Deep config those
+    /// and the default unsigned domain.
+    #[test]
+    fn ci_values_narrow_the_ci_profile_alone() {
+        use meerkat_machine_schema::catalog::dsl::dsl_workgraph_lifecycle_machine;
+        use meerkat_machine_schema::identity::{FieldId, InputVariantId};
+        use meerkat_machine_schema::{InputFieldDomain, InputFieldDomainKind};
+
+        let mut sampled = dsl_workgraph_lifecycle_machine();
+        sampled.input_field_domains.push(InputFieldDomain {
+            input: InputVariantId::parse("CreateOpen").expect("input slug"),
+            field: FieldId::parse("unresolved_blocker_count").expect("field slug"),
+            domain: InputFieldDomainKind::CiValues([0, 5].into_iter().collect()),
+        });
+        let constant = "InputSamples_CreateOpen_unresolved_blocker_count";
+        let model = render_machine_semantic_model(&sampled).expect("render sampled model");
+        assert!(
+            next_disjunct_for(&model, "CreateOpen").contains(&format!(
+                "\\E arg_unresolved_blocker_count \\in {constant} : "
+            )),
+            "the field ranges over its samples constant"
+        );
+        let constants_line = model
+            .lines()
+            .find(|line| line.starts_with("CONSTANTS "))
+            .expect("model constants");
+        assert!(
+            constants_line.contains(constant),
+            "the model declares the samples constant: {constants_line}"
+        );
+        assert!(
+            next_disjunct_for(&model, "UpdateOpen")
+                .contains("\\E expected_revision \\in {revision} : "),
+            "the machine's other declarations are unchanged"
+        );
+
+        let ci = render_machine_ci_cfg(&sampled, false).expect("valid CI CFG");
+        assert!(
+            ci.contains(&format!("\n  {constant} = {{0, 5}}\n")),
+            "the CI config assigns exactly the declared values:\n{ci}"
+        );
+        let deep = render_machine_ci_cfg(&sampled, true).expect("valid Deep CFG");
+        assert!(
+            deep.contains(&format!("\n  {constant} = {{0, 1, 2, 5}}\n")),
+            "the Deep config keeps the default domain beside the declared values:\n{deep}"
+        );
+        assert_eq!(
+            broad_input_samples(&[0, 5].into_iter().collect::<BTreeSet<u64>>()),
+            [0, 1, 2, 5].into_iter().collect::<BTreeSet<u64>>(),
+            "outside the CI profile the field keeps the default domain beside its values"
+        );
+    }
+
+    /// A `CiSamples` declaration ranges a field of any type over a model
+    /// constant that each profile's config assigns through an operator of
+    /// the model: the CI profile the declared values, the Deep profile the
+    /// field type's whole domain. DurableDecisionMachine's carried
+    /// presentation is the shipped case; Present declares nothing, so it
+    /// keeps every link a presentation's link can serve.
+    #[test]
+    fn ci_samples_narrow_the_ci_profile_alone_for_a_field_of_any_type() {
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_durable_decision_machine();
+        let model = render_machine_semantic_model(&schema).expect("render DurableDecisionMachine");
+        let ci = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
+        let deep = render_machine_ci_cfg(&schema, true).expect("valid Deep CFG");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        let constants_line = model
+            .lines()
+            .find(|line| line.starts_with("CONSTANTS "))
+            .expect("model constants");
+        let decide = next
+            .lines()
+            .filter(|line| line.contains(": Decide"))
+            .collect::<Vec<_>>();
+        assert!(!decide.is_empty(), "Decide has Next disjuncts");
+        for (field, ci_values, deep_domain) in [
+            (
+                "carried_audience",
+                "{Some(\"alpha\")}",
+                "OptionDecisionPartyValues",
+            ),
+            (
+                "carried_digest",
+                "{Some(\"alpha\")}",
+                "OptionDecisionDigestValues",
+            ),
+            ("carried_complete", "{FALSE}", "BOOLEAN"),
+            (
+                "carried_link_served_digest",
+                "{Some(\"alpha\")}",
+                "OptionDecisionDigestValues",
+            ),
+        ] {
+            let constant = format!("InputSamples_Decide_{field}");
+            for line in &decide {
+                assert!(
+                    line.contains(&format!("\\E {field} \\in {constant} : ")),
+                    "Decide.{field} ranges over {constant}: {line}"
+                );
+            }
+            assert!(
+                constants_line.contains(&constant),
+                "the model declares {constant}: {constants_line}"
+            );
+            assert!(
+                model.contains(&format!("\n{constant}Ci == {ci_values}\n")),
+                "the model defines the CI samples of Decide.{field}"
+            );
+            assert!(
+                model.contains(&format!("\n{constant}Deep == {deep_domain}\n")),
+                "the model defines the Deep domain of Decide.{field}"
+            );
+            assert!(
+                ci.contains(&format!("\n  {constant} <- {constant}Ci\n")),
+                "the CI config samples Decide.{field}:\n{ci}"
+            );
+            assert!(
+                deep.contains(&format!("\n  {constant} <- {constant}Deep\n")),
+                "the Deep config keeps the whole domain of Decide.{field}:\n{deep}"
+            );
+        }
+        let present = next
+            .lines()
+            .filter(|line| line.contains(": Present"))
+            .collect::<Vec<_>>();
+        assert!(!present.is_empty(), "Present has Next disjuncts");
+        for line in present {
+            assert!(
+                line.contains("\\E link_served_digest \\in OptionDecisionDigestValues : "),
+                "Present keeps every served link: {line}"
+            );
+        }
+    }
+
+    /// SessionDocumentMachine's CI bound: under a step bound of 5 the CI
+    /// profile explores the samples it declares, in every Next disjunct of
+    /// the input's transitions; the Deep profile keeps `0..2` for each of
+    /// them and its step bound of 8.
+    #[test]
+    fn session_document_narrows_its_ci_samples_only() {
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+        let model = render_machine_semantic_model(&schema).expect("render SessionDocumentMachine");
+        let ci = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
+        let deep = render_machine_ci_cfg(&schema, true).expect("valid Deep CFG");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        for (input, field, ci_values) in [
+            ("ClassifyDurableTail", "dangling_tool_use_count", "{0}"),
+            ("ClassifyDurableTail", "orphan_tool_result_count", "{0}"),
+            ("RecoverSessionInstructionState", "target_generation", "{2}"),
+            ("RecoverSessionInstructionState", "entry_sequence", "{0}"),
+            ("RecoverSessionInstructionEffective", "generation", "{0}"),
+            (
+                "RecoverSessionInstructionEffective",
+                "last_entry_sequence",
+                "{0, 1}",
+            ),
+            ("SetSessionInstruction", "body_bytes", "{1}"),
+        ] {
+            let constant = format!("InputSamples_{input}_{field}");
+            let disjuncts = next
+                .lines()
+                .filter(|line| line.contains(&format!(": {input}")))
+                .collect::<Vec<_>>();
+            assert!(!disjuncts.is_empty(), "{input} has Next disjuncts");
+            for line in disjuncts {
+                assert!(
+                    line.contains(&format!("\\E {field} \\in {constant} : ")),
+                    "{input}.{field} ranges over {constant}: {line}"
+                );
+            }
+            assert!(
+                ci.contains(&format!("\n  {constant} = {ci_values}\n")),
+                "the CI config samples {input}.{field} as {ci_values}:\n{ci}"
+            );
+            assert!(
+                deep.contains(&format!("\n  {constant} = {{0, 1, 2}}\n")),
+                "the Deep config keeps 0..2 for {input}.{field}:\n{deep}"
+            );
+        }
+        assert!(
+            model.contains("\nCiStateConstraint == /\\ model_step_count <= 5 "),
+            "the CI step bound is 5"
+        );
+        assert!(
+            model.contains("\nDeepStateConstraint == /\\ model_step_count <= 8 "),
+            "the Deep step bound stays 8"
+        );
+    }
+
     #[test]
     fn substituted_compound_values_are_delimited_and_atoms_are_not() {
         for atom in [
@@ -6233,6 +6511,60 @@ mod tests {
             composition.contains(&format!("runtime_delivery__{definition}")),
             "embedded delivery machines require their scoped helper definition too"
         );
+    }
+
+    #[test]
+    fn session_document_instruction_natives_have_the_rust_semantics_in_tla() {
+        // The DSL authority, the kernel oracle and the Core mirror give these
+        // natives one meaning, pinned here as the generated TLA renders it:
+        // a slot map with one slot set (insert or replace), the body bytes of
+        // a slot set's Active slots (a slot the bytes map does not name
+        // counts nothing), and the entries of a slot map whose slot is
+        // Active.
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+        let model = render_machine_semantic_model(&schema).expect("render model");
+        let slot_after_set = r"session_document_instruction_slot_after_set(current, slot, value) ==
+    MapSet(current, slot, value)
+";
+        let active_bytes = r#"session_document_instruction_active_bytes(slot_effect, slot_bytes) ==
+    LET RECURSIVE SessionDocumentInstructionActiveBytesOver(_)
+        SessionDocumentInstructionActiveBytesOver(instruction_slots) ==
+            IF instruction_slots = {} THEN 0
+            ELSE LET instruction_slot == CHOOSE candidate_slot \in instruction_slots : TRUE
+                 IN (IF slot_effect[instruction_slot] = "Active" /\ instruction_slot \in DOMAIN slot_bytes
+                     THEN slot_bytes[instruction_slot] ELSE 0)
+                    + SessionDocumentInstructionActiveBytesOver(instruction_slots \ {instruction_slot})
+    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)
+"#;
+        let active_slots = r#"session_document_instruction_active_slots(slot_effect, slot_values) ==
+    [instruction_slot \in {candidate_slot \in DOMAIN slot_values :
+            candidate_slot \in DOMAIN slot_effect /\ slot_effect[candidate_slot] = "Active"}
+        |-> slot_values[instruction_slot]]
+"#;
+        let retired_after = r"session_document_activation_retired_after(activation_rows, activation_retired) ==
+    [activation_key \in DOMAIN activation_rows |->
+        LET retired_count == IF activation_key \in DOMAIN activation_retired THEN activation_retired[activation_key] ELSE 0
+            superseded_count == IF activation_rows[activation_key] > 0 THEN activation_rows[activation_key] - 1 ELSE 0
+        IN IF retired_count >= superseded_count THEN retired_count ELSE superseded_count]
+";
+        for (native, definition) in [
+            (
+                "session_document_instruction_slot_after_set",
+                slot_after_set,
+            ),
+            ("session_document_instruction_active_bytes", active_bytes),
+            ("session_document_instruction_active_slots", active_slots),
+            ("session_document_activation_retired_after", retired_after),
+        ] {
+            assert!(
+                model.contains(definition),
+                "the generated model must define {native} with its Rust semantics"
+            );
+            assert!(
+                model.matches(&format!("{native}(")).count() > 1,
+                "the generated arms must call the formally defined {native}"
+            );
+        }
     }
 
     #[test]
@@ -7531,6 +7863,10 @@ impl<'a> CompositionTlaCompiler<'a> {
                 compiler.render_runtime_delivery_native_helpers(&mut out);
                 pushln!(&mut out);
             }
+            if machine.machine.as_str() == "SessionDocumentMachine" {
+                compiler.render_session_document_native_helpers(&mut out);
+                pushln!(&mut out);
+            }
 
             let mut rendered_actions = Vec::new();
             for transition in &machine.transitions {
@@ -7979,7 +8315,15 @@ impl<'a> CompositionTlaCompiler<'a> {
             Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
                 additional_values_domain(&self.binding_domain_for_type(ty), values)
             }
-            None => self.binding_domain_for_type(ty),
+            // A composition has no machine CI profile: it explores the
+            // field's Deep samples, the declared values and `0..2`.
+            Some(meerkat_machine_schema::InputFieldDomainKind::CiValues(values)) => {
+                render_u64_set(&broad_input_samples(values))
+            }
+            // ... and the whole type domain of a `CiSamples` field.
+            Some(meerkat_machine_schema::InputFieldDomainKind::CiSamples(_)) | None => {
+                self.binding_domain_for_type(ty)
+            }
         }
     }
 
@@ -8839,6 +9183,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             if machine.machine.as_str() == "RuntimeDeliveryMachine" {
                 compiler.render_runtime_delivery_native_helpers(out);
+                pushln!(out);
+            }
+            if machine.machine.as_str() == "SessionDocumentMachine" {
+                compiler.render_session_document_native_helpers(out);
                 pushln!(out);
             }
 
@@ -9848,7 +10196,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                         tla_string(instance_id),
                         tla_string(&effect.variant),
                         self.payload_record_expr(&payload_fields),
-                        &effect_id_expr,
+                        effect_id_expr,
                         tla_string(&transition.name)
                     ),
                     payload_fields,
@@ -10334,6 +10682,16 @@ impl<'a> MachineTlaCompiler<'a> {
             .map(|(name, _)| name)
             .cloned()
             .collect::<Vec<_>>();
+        model_constants.extend(
+            machine_input_sample_constants(self.schema)
+                .into_iter()
+                .map(|(constant, _)| constant),
+        );
+        model_constants.extend(
+            machine_input_typed_sample_constants(self.schema)
+                .into_iter()
+                .map(|(constant, _, _)| constant),
+        );
         if machine_uses_u64_max(self.schema) {
             model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
         }
@@ -10399,6 +10757,29 @@ impl<'a> MachineTlaCompiler<'a> {
                 TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
             )
         }) {
+            pushln!(&mut out);
+        }
+        // What each profile's config assigns a `CiSamples` input field's
+        // constant: the CI profile the declared values, the Deep profile the
+        // field type's whole domain (defined above).
+        let typed_samples = machine_input_typed_sample_constants(self.schema);
+        for (constant, samples, ty) in &typed_samples {
+            writeln!(
+                &mut out,
+                "{} == {}",
+                cfg_assignment_operator_name(constant, "Ci"),
+                render_explicit_values(samples)
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "{} == {}",
+                cfg_assignment_operator_name(constant, "Deep"),
+                self.binding_domain_for_type(ty)
+            )
+            .expect("write to string");
+        }
+        if !typed_samples.is_empty() {
             pushln!(&mut out);
         }
         writeln!(
@@ -10497,6 +10878,9 @@ impl<'a> MachineTlaCompiler<'a> {
         }
         if self.schema.machine.as_str() == "RuntimeDeliveryMachine" {
             self.render_runtime_delivery_native_helpers(&mut out);
+        }
+        if self.schema.machine.as_str() == "SessionDocumentMachine" {
+            self.render_session_document_native_helpers(&mut out);
         }
         if !self.schema.helpers.is_empty() || !self.schema.derived.is_empty() {
             pushln!(&mut out);
@@ -10769,6 +11153,93 @@ impl<'a> MachineTlaCompiler<'a> {
         )
         .expect("write to string");
         pushln!(out, "    MapSet(current, recipient, outcome)");
+    }
+
+    fn render_session_document_native_helpers(&self, out: &mut String) {
+        writeln!(
+            out,
+            "{}(current, slot, value) ==",
+            self.scoped_helper_name("session_document_instruction_slot_after_set")
+        )
+        .expect("write to string");
+        pushln!(out, "    MapSet(current, slot, value)");
+        // The body bytes of the Active slots; a slot the bytes map does not
+        // name counts nothing (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(slot_effect, slot_bytes) ==",
+            self.scoped_helper_name("session_document_instruction_active_bytes")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    LET RECURSIVE SessionDocumentInstructionActiveBytesOver(_)"
+        );
+        pushln!(
+            out,
+            "        SessionDocumentInstructionActiveBytesOver(instruction_slots) =="
+        );
+        pushln!(out, "            IF instruction_slots = {{}} THEN 0");
+        pushln!(
+            out,
+            "            ELSE LET instruction_slot == CHOOSE candidate_slot \\in instruction_slots : TRUE"
+        );
+        pushln!(
+            out,
+            "                 IN (IF slot_effect[instruction_slot] = \"Active\" /\\ instruction_slot \\in DOMAIN slot_bytes"
+        );
+        pushln!(
+            out,
+            "                     THEN slot_bytes[instruction_slot] ELSE 0)"
+        );
+        pushln!(
+            out,
+            "                    + SessionDocumentInstructionActiveBytesOver(instruction_slots \\ {{instruction_slot}})"
+        );
+        pushln!(
+            out,
+            "    IN SessionDocumentInstructionActiveBytesOver(DOMAIN slot_effect)"
+        );
+        // The entries of a slot map whose slot is Active: what an
+        // application puts in effect (the Rust authorities agree).
+        writeln!(
+            out,
+            "{}(slot_effect, slot_values) ==",
+            self.scoped_helper_name("session_document_instruction_active_slots")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [instruction_slot \\in {{candidate_slot \\in DOMAIN slot_values :"
+        );
+        pushln!(
+            out,
+            "            candidate_slot \\in DOMAIN slot_effect /\\ slot_effect[candidate_slot] = \"Active\"}}"
+        );
+        pushln!(out, "        |-> slot_values[instruction_slot]]");
+        // Per activation key, the rows a retirement leaves retired: every
+        // row but the newest, or the recovered count when that is more; a
+        // key the retired map does not name counts none (the Rust
+        // authorities agree).
+        writeln!(
+            out,
+            "{}(activation_rows, activation_retired) ==",
+            self.scoped_helper_name("session_document_activation_retired_after")
+        )
+        .expect("write to string");
+        pushln!(out, "    [activation_key \\in DOMAIN activation_rows |->");
+        pushln!(
+            out,
+            "        LET retired_count == IF activation_key \\in DOMAIN activation_retired THEN activation_retired[activation_key] ELSE 0"
+        );
+        pushln!(
+            out,
+            "            superseded_count == IF activation_rows[activation_key] > 0 THEN activation_rows[activation_key] - 1 ELSE 0"
+        );
+        pushln!(
+            out,
+            "        IN IF retired_count >= superseded_count THEN retired_count ELSE superseded_count]"
+        );
     }
 
     fn render_meerkat_machine_native_helpers(&self, out: &mut String) {
@@ -11219,6 +11690,29 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    {{ edge \\in arg_wiring_edges : /\\ edge.a # arg_agent_identity /\\ edge.b # arg_agent_identity }}"
         );
+        // An edge's other end, and the owned edges a removal leaves (every
+        // owned edge of the removed identity ends, whichever end owns it):
+        // the catalog-native Rust helpers' mirrors.
+        writeln!(
+            out,
+            "{}(arg_edge, arg_agent_identity) ==",
+            prefix("mob_machine_wiring_edge_other")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_edge.a = arg_agent_identity THEN arg_edge.b ELSE arg_edge.a"
+        );
+        writeln!(
+            out,
+            "{}(arg_identity_edge_owners, arg_agent_identity) ==",
+            prefix("mob_machine_owned_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [edge \\in {{ e \\in DOMAIN arg_identity_edge_owners : /\\ e.a # arg_agent_identity /\\ e.b # arg_agent_identity }} |-> arg_identity_edge_owners[edge]]"
+        );
         writeln!(
             out,
             "{}(arg_external_peer_edges, arg_agent_identity) ==",
@@ -11239,6 +11733,20 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    [key \\in {{ key \\in DOMAIN arg_external_peer_edges_by_key : key.local # arg_agent_identity }} |-> arg_external_peer_edges_by_key[key]]"
         );
+        // The next sessions of the pending FreshSession rotations, which a
+        // destroy's admission abandons. A SameSession rotation names its
+        // member's own session, which the destroy's retirement of that member
+        // disposes of. Mirror of the catalog-native Rust helper.
+        writeln!(
+            out,
+            "{}(arg_member_rotation_session_ids, arg_member_rotation_targets) ==",
+            prefix("mob_machine_fresh_rotation_sessions")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [id \\in {{ id \\in DOMAIN arg_member_rotation_session_ids : ~(id \\in DOMAIN arg_member_rotation_targets /\\ arg_member_rotation_targets[id] = \"SameSession\") }} |-> arg_member_rotation_session_ids[id]]"
+        );
         // Row #351: reconcile-membership spawn/retire set helpers. The DSL
         // ReconcileMembership effect emits calls to these, but they had no TLA+
         // operator definitions, so TLC reported "Unknown operator" for
@@ -11248,26 +11756,31 @@ impl<'a> MachineTlaCompiler<'a> {
         // no longer desired, gated on `retire_stale` (empty set otherwise).
         // `identity_to_runtime` is the bound-identity function (DOMAIN = the
         // currently-bound identities); `desired` is the target identity set.
+        // Both range over workers only: an identity entry (DOMAIN of
+        // `identity_entry_origins`) is never spawned or retired by them, and
+        // neither is a reserved name (`identity_entry_tombstones`, never
+        // seated, is never spawned; `identity_entry_unreadable` is neither
+        // spawned nor retired).
         writeln!(
             out,
-            "{}(arg_identity_to_runtime, arg_desired) ==",
+            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_identity_entry_tombstones, arg_identity_entry_unreadable, arg_desired) ==",
             prefix("mob_machine_members_to_spawn")
         )
         .expect("write to string");
         pushln!(
             out,
-            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime }}"
+            "    {{ member \\in arg_desired : member \\notin DOMAIN arg_identity_to_runtime /\\ member \\notin DOMAIN arg_identity_entry_origins /\\ member \\notin arg_identity_entry_tombstones /\\ member \\notin arg_identity_entry_unreadable }}"
         );
         writeln!(
             out,
-            "{}(arg_identity_to_runtime, arg_desired, arg_retire_stale) ==",
+            "{}(arg_identity_to_runtime, arg_identity_entry_origins, arg_identity_entry_unreadable, arg_desired, arg_retire_stale) ==",
             prefix("mob_machine_members_to_retire")
         )
         .expect("write to string");
         pushln!(out, "    IF arg_retire_stale");
         pushln!(
             out,
-            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired }}"
+            "    THEN {{ member \\in DOMAIN arg_identity_to_runtime : member \\notin arg_desired /\\ member \\notin DOMAIN arg_identity_entry_origins /\\ member \\notin arg_identity_entry_unreadable }}"
         );
         pushln!(out, "    ELSE {{}}");
         // Placed-carrier cleanup is identity-exclusive and carries the exact
@@ -12094,6 +12607,10 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    IN MapSet(all_statuses, frame_id, after_dependencies)"
         );
+        // Operator instructions: the machine's records reuse the session
+        // document's slot-set natives (one slot set, and the body bytes of
+        // the Active slots).
+        self.render_session_document_native_helpers(out);
     }
 
     fn render_transition(&mut self, out: &mut String, transition: &TransitionSchema) {
@@ -12270,13 +12787,26 @@ impl<'a> MachineTlaCompiler<'a> {
         binding: &str,
         ty: &TypeRef,
     ) -> String {
-        match input.and_then(|input| self.schema.input_field_domain(input, binding)) {
-            Some(meerkat_machine_schema::InputFieldDomainKind::StateField(state_field)) => {
+        let declared = input.and_then(|input| {
+            self.schema
+                .input_field_domain(input, binding)
+                .map(|domain| (input, domain))
+        });
+        match declared {
+            Some((_, meerkat_machine_schema::InputFieldDomainKind::StateField(state_field))) => {
                 format!("{{{}}}", state_field.as_str())
             }
-            Some(meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values)) => {
+            Some((_, meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(values))) => {
                 additional_values_domain(&self.binding_domain_for_type(ty), values)
             }
+            // A model constant that each profile's config assigns: the CI
+            // profile the declared values, the Deep profile those and `0..2`
+            // for `CiValues`, the field type's whole domain for `CiSamples`.
+            Some((
+                input,
+                meerkat_machine_schema::InputFieldDomainKind::CiValues(_)
+                | meerkat_machine_schema::InputFieldDomainKind::CiSamples(_),
+            )) => input_samples_constant_name(input, binding),
             None => self.binding_domain_for_type(ty),
         }
     }
@@ -14285,4 +14815,79 @@ fn additional_values_domain(default: &str, values: &BTreeSet<u64>) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("({default} \\cup {{{values}}})")
+}
+
+/// The model constant that a `CiValues` or `CiSamples` input field ranges
+/// over in the generated model; each profile's config assigns it.
+fn input_samples_constant_name(input: &str, field: &str) -> String {
+    format!("InputSamples_{}_{}", tla_ident(input), tla_ident(field))
+}
+
+/// The samples a `CiValues` input field keeps outside the CI profile (the
+/// Deep profile and every composition): the declared values together with the
+/// default unsigned domain (`0..2`).
+fn broad_input_samples(ci_values: &BTreeSet<u64>) -> BTreeSet<u64> {
+    (0..=2).chain(ci_values.iter().copied()).collect()
+}
+
+fn render_u64_set(values: &BTreeSet<u64>) -> String {
+    let values = values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{values}}}")
+}
+
+/// Every `CiValues` input field of a machine, in declaration order: the model
+/// constant the field ranges over and the values the CI profile assigns it.
+fn machine_input_sample_constants(schema: &MachineSchema) -> Vec<(String, &BTreeSet<u64>)> {
+    schema
+        .input_field_domains
+        .iter()
+        .filter_map(|declaration| match &declaration.domain {
+            meerkat_machine_schema::InputFieldDomainKind::CiValues(values) => Some((
+                input_samples_constant_name(declaration.input.as_str(), declaration.field.as_str()),
+                values,
+            )),
+            meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_)
+            | meerkat_machine_schema::InputFieldDomainKind::CiSamples(_) => None,
+        })
+        .collect()
+}
+
+/// Every `CiSamples` input field of a machine, in declaration order: the
+/// model constant the field ranges over, the values the CI profile assigns
+/// it, and the field's type, whose whole domain the Deep profile assigns it.
+/// The schema's validation resolves every declared field.
+fn machine_input_typed_sample_constants(
+    schema: &MachineSchema,
+) -> Vec<(String, &[meerkat_machine_schema::TlcValue], TypeRef)> {
+    schema
+        .input_field_domains
+        .iter()
+        .filter_map(|declaration| match &declaration.domain {
+            meerkat_machine_schema::InputFieldDomainKind::CiSamples(samples) => {
+                let field = schema
+                    .inputs
+                    .variant_named(declaration.input.as_str())
+                    .ok()?
+                    .fields
+                    .iter()
+                    .find(|field| field.name == declaration.field)?;
+                Some((
+                    input_samples_constant_name(
+                        declaration.input.as_str(),
+                        declaration.field.as_str(),
+                    ),
+                    samples.as_slice(),
+                    field.ty.clone(),
+                ))
+            }
+            meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_)
+            | meerkat_machine_schema::InputFieldDomainKind::CiValues(_) => None,
+        })
+        .collect()
 }

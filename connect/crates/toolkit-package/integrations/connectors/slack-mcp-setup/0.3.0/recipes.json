@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790926361980,
+  "sources": [
+    {
+      "id": "slack-mcp",
+      "url": "https://docs.slack.dev/ai/slack-mcp-server/",
+      "observed_sha256": "41ddbf9df58e7d74d9ce3710259754868a0c55df7be61433bd99c59a95f6c45f",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-mcp-harness",
+      "url": "https://docs.slack.dev/ai/slack-mcp-server/connect-to-harnesses/",
+      "observed_sha256": "d35923cf92749bef789dde46318ddadeb069d30b5de7f4c70501821c1591a70f",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-history",
+      "url": "https://docs.slack.dev/reference/methods/conversations.history/",
+      "observed_sha256": "ec35862f8bcbac0ecd83774818fb70e01722155198d2d7b10c4864004143f187",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-replies",
+      "url": "https://docs.slack.dev/reference/methods/conversations.replies/",
+      "observed_sha256": "7680fa89e8d568972b0eeca52ec3737684f5f9a1e3097ccbee216010119a92ad",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-oauth",
+      "url": "https://docs.slack.dev/authentication/installing-with-oauth/",
+      "observed_sha256": "3a627782b404ceca9472b50fa445e6aa3598dcd7411bfa8ffea2c4fcc4a46cc6",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-pagination",
+      "url": "https://docs.slack.dev/apis/web-api/pagination/",
+      "observed_sha256": "134444c44c71921b6b85777d4c8bbdec1cc91959ce0274fc7326a42f01fe55b3",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-rate-limits",
+      "url": "https://docs.slack.dev/apis/web-api/rate-limits/",
+      "observed_sha256": "dc19afc198afb353ba3b3bd3b61978cc1beba4bb39fde14f9f9a38f927136b08",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-tokens",
+      "url": "https://docs.slack.dev/authentication/tokens/",
+      "observed_sha256": "e6fc1fbfe713c2b2f0f39cce18d0b5a81e11b6b0db18355674f5f3482e35bc92",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-auth-test",
+      "url": "https://docs.slack.dev/reference/methods/auth.test/",
+      "observed_sha256": "cd4842e3295eb63fe3d2f25080e415bd86cbd076f6a94c4cadde78057ff1d2b7",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-conversations-list",
+      "url": "https://docs.slack.dev/reference/methods/conversations.list/",
+      "observed_sha256": "762f4b7c68cff7124c6f790c9c9684964ea51d1283e2c25c890749c9ba441ea3",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    },
+    {
+      "id": "slack-conversations-info",
+      "url": "https://docs.slack.dev/reference/methods/conversations.info/",
+      "observed_sha256": "1d025fbdc840ea8f6f67a15d0cbf9832f285754aa1bbe77a22412b635ca9b93c",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Slack documentation and hosted services retain their own terms. No implementation is copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "provider-mcp-setup",
+      "export": "slack-mcp-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "developer_registration",
+          "instruction": "Use this host's eligible Marketplace or internal app, fixed client ID, protected client secret and registered redirect URI. Unlisted distributed apps are not eligible; do not borrow another client registration."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Obtain any workspace installation approval and confirm app eligibility and network restrictions with its administrator."
+        },
+        {
+          "kind": "account",
+          "instruction": "Select the intended Slack user and workspace explicitly; observe the actual authenticated account before use."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Let the existing credential owner complete provider user OAuth. For channel/thread reads choose the applicable channels:history, groups:history, im:history or mpim:history scopes; search/send have different scopes and are not implicitly granted. No token, client secret or callback secret belongs in metadata."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Bind freshly observed tool schemas, selected operations, account, policy and lifecycle through the existing host owners; an endpoint string is not readiness."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "No host registration, OAuth callback or selected account binding is retained.",
+          "Current schema, operation, authorization, lifecycle and readiness receipts are still needed; there is intentionally no executable mcp.json in this version."
+        ]
+      }
+    },
+    {
+      "strategy": "toolkit-rest-guidance",
+      "export": "slack-mcp-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "artifact_preparation",
+          "instruction": "Choose the host language and exact artifact. Local Python source is sdk/python/src/meerkat_toolkit/connectors/slack.py with sdk/python/SLACK.md; Python >=3.11 uses the slack extra and a prepared HTTPX client. Its verified private wheel SHA-256 is 0b3a80aa4ae1ae2ae01e459cb3cd4acce4c7a69bdd7241f02bda3dfcc111180e; root evidence is docs/coordination/20260930-upstream-review/slack-service-discovery-root-review/installed-acceptance.json. Local TypeScript source is sdk/typescript/src/connectors/slack.ts with sdk/typescript/SLACK.md, import @rkat/toolkit/connectors/slack, Node >=22. Its verified private npm archive SHA-256 is 2cc66fba9db02c5c96f6e35d519faf43b672f6d32a154b70f77bbc574cfdbec4; root evidence is docs/coordination/20260930-upstream-review/slack-typescript-discovery-root-review/installed-acceptance.json. Both packages are unpublished; version 0.1.0 alone does not identify these bytes. These references are retained evidence, not public download URLs."
+        },
+        {
+          "kind": "developer_registration",
+          "instruction": "Use the host's Slack Web API app registration and approved OAuth redirect handling. Choose the required user_scope or bot scope for this installation; MCP eligibility is a separate route requirement."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Confirm app approval, conversation access and the applicable installation rate-limit class with the workspace owner."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "The existing credential owner supplies a dedicated prepared authenticated Python AsyncClient or a captured TypeScript Fetch binding and exact API base, normally https://slack.com/. If human authorization is required, request that owner's secure user-action handoff and await its authoritative completion; the agent receives opaque references and outcomes, never tokens, passwords or client secrets. Select conversation :read and :history permissions separately, with token type, membership and resource access verified for this installation."
+        },
+        {
+          "kind": "account",
+          "instruction": "Start from independently selected host workspace/principal IDs, then compare auth_test/authTest observations. Mismatch or an unsupported identity response stops this binding attempt without switching accounts. If conversation discovery is needed, the agent selects types and each page, then verifies one exact conversation with get_conversation/getConversation. A team_id/teamId request is not proof of the credential workspace."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Bind only the selected subset of the five operations through existing service/auth/lifecycle owners. Within current policy, make one selected-resource read and report its exact outcome to the readiness owner. Conversation metadata and auth.test do not grant access or prove audience membership. The original agent owns the user time interval, further pages/threads, coverage reporting and any later email send."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "The private operation artifacts and identity observations are not agent registration, current authorization or activated service exports.",
+          "Host registration, credential lifecycle, selected account/resource authority and actual operation/lifecycle bindings are still required.",
+          "The agent must choose pages and thread coverage and surface retention/access/rate limits. No automatic traversal, semantic resolver, search/send or complete weekly retrieval is supplied."
+        ]
+      }
+    }
+  ]
+}

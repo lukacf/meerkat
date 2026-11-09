@@ -319,6 +319,8 @@ struct WorkspaceFile {
 }
 
 fn workspace_files(root: &Path) -> Result<Vec<WorkspaceFile>> {
+    // Core's tree: the other products' roots keep their own conventions.
+    let products = crate::public_contracts::product_roots(root);
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -336,7 +338,7 @@ fn workspace_files(root: &Path) -> Result<Vec<WorkspaceFile>> {
                 .file_type()
                 .with_context(|| format!("read file type {}", path.display()))?;
             if file_type.is_dir() {
-                if name == "target" || name == "node_modules" {
+                if name == "target" || name == "node_modules" || products.contains(&path) {
                     continue;
                 }
                 stack.push(path);
@@ -556,8 +558,9 @@ fn audit_rust_file(rel: &str, mut parsed: syn::File, findings: &mut Vec<String>)
                 ("MeerkatMachineEffect", "RuntimeEffectFact"),
                 ("RuntimeEffectKind", "CancelAfterBoundary"),
                 ("RuntimeEffectKind", "StopRuntimeExecutor"),
+                ("MeerkatMachineEffect", "ExactRunBoundaryCancel"),
             ],
-            label: "runtime shell files must not construct RuntimeEffectFact literals",
+            label: "runtime shell files must not construct runtime effect literals",
             findings,
         };
         visitor.visit_file(&parsed);

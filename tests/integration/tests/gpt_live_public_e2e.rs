@@ -67,7 +67,7 @@ use tokio::time::{Duration, Instant, sleep, timeout};
 
 use support::evidence::{self, Journal, Record as EvidenceRecord, Stage as EvidenceStage};
 use support::{
-    Anchor, AssistantQuiet, BrowserPeer, BrowserPeerProtocol, DisconnectMode,
+    Anchor, AssistantQuiet, BrowserPeer, BrowserPeerProtocol, DelegatedWorker, DisconnectMode,
     ExplicitScenarioBindingAuthority, FixedConfigSource, JsonlRpcClient, PlayAt,
     PlaybackAudioPolicy, PlaybackHintRelay, QuestionOnset, QuietObservation, QuietPoll,
     QuietReport, TimelineEntry, TimelineKind, delegated_executor_diagnostic, execution_identity,
@@ -513,6 +513,7 @@ fn scenario_config() -> Config {
         default_binding: Some(BINDING.to_string()),
         parent: None,
         connector_client: BTreeMap::new(),
+        copilot: None,
     };
     section.backend.insert(
         "openai_api".to_string(),
@@ -6408,8 +6409,90 @@ struct DelegatedRequest {
     barge_in: Option<u64>,
 }
 
+/// The member that executes the harness channel's delegated turns.
+fn delegated_worker(policy: LiveDelegationExecutionPolicy) -> DelegatedWorker<'static> {
+    match policy {
+        LiveDelegationExecutionPolicy::ExistingMember => {
+            DelegatedWorker::ExistingMember("voice-executor")
+        }
+        LiveDelegationExecutionPolicy::DurableFork => DelegatedWorker::Fork,
+    }
+}
+
+/// The session's live delegations with no worker bound that ended (Cancelled
+/// or Failed) and are not in `seen`, as `(operation, state)`: work that ended
+/// without a worker ever starting it.
+async fn ended_without_worker(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+    seen: &std::collections::BTreeSet<String>,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState;
+    Ok(runtime
+        .__test_live_delegation_schedule_states(session_id)
+        .await?
+        .into_iter()
+        .filter(|(operation_id, state, worker_bound)| {
+            !worker_bound
+                && !seen.contains(&operation_id.to_string())
+                && matches!(
+                    state,
+                    LiveDelegationScheduleState::Cancelled | LiveDelegationScheduleState::Failed
+                )
+        })
+        .map(|(operation_id, state, _)| (operation_id.to_string(), format!("{state:?}")))
+        .collect())
+}
+
+/// Wait until the host has started the worker of a delegation not yet in
+/// `seen` (its start is authorized, or it already runs or ended), and return
+/// that operation and its phase. A delegation that ends without a worker
+/// fails the wait at once.
+async fn wait_delegated_worker_started(
+    live: &mut PublicLiveHarness,
+    seen: &std::collections::BTreeSet<String>,
+    bound: Duration,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let runtime = live.shared()?.0.runtime.clone();
+    let deadline = Instant::now() + bound;
+    loop {
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&live.session_id)
+            .await?;
+        if let Some(snapshot) = snapshots
+            .iter()
+            .find(|snapshot| !seen.contains(&snapshot.operation_id().to_string()))
+        {
+            return Ok((
+                snapshot.operation_id().to_string(),
+                format!("{:?}", snapshot.phase()),
+            ));
+        }
+        let ended = ended_without_worker(runtime.as_ref(), &live.session_id, seen).await?;
+        if !ended.is_empty() || Instant::now() >= deadline {
+            let timeline = live.peer.timeline().await?;
+            return Err(format!(
+                "no delegated worker started within {} s; ended without a worker: {ended:?}; {}; timeline:\n{}",
+                bound.as_secs(),
+                delegated_executor_diagnostic(
+                    &mut live.rpc,
+                    &live.mob_id,
+                    delegated_worker(live.execution_policy)
+                )
+                .await,
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Wait until a delegated executor turn not yet in `seen` reaches realized
-/// terminality on the existing member, and record it.
+/// terminality on the existing member, and record it. A delegation that ended
+/// without a worker (cancelled or failed before any worker started) fails the
+/// wait at once instead of waiting out the bound for a worker that cannot
+/// exist.
 async fn wait_executor_turn(
     live: &mut PublicLiveHarness,
     seen: &mut std::collections::BTreeSet<String>,
@@ -6464,11 +6547,22 @@ async fn wait_executor_turn(
             }
             return Ok(started.elapsed().as_millis());
         }
-        if Instant::now() >= deadline {
+        let ended = ended_without_worker(runtime.as_ref(), &live.session_id, seen).await?;
+        if !ended.is_empty() || Instant::now() >= deadline {
             let timeline = live.peer.timeline().await?;
+            let reason = if ended.is_empty() {
+                "delegated executor did not reach terminality within 180 s".to_string()
+            } else {
+                format!("delegation ended without a worker: {ended:?}")
+            };
             return Err(format!(
-                "delegated executor did not reach terminality within 180 s; {}; timeline:\n{}",
-                delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await,
+                "{reason}; {}; timeline:\n{}",
+                delegated_executor_diagnostic(
+                    &mut live.rpc,
+                    &live.mob_id,
+                    delegated_worker(live.execution_policy)
+                )
+                .await,
                 format_timeline(&timeline)
             )
             .into());
@@ -9300,15 +9394,17 @@ const S107_REOPEN_BOUND: Duration = Duration::from_secs(10);
 
 /// Scenario 107: the user starts a job, then the peer's transport is cut
 /// hard while the client delegation is running and the host closes the
-/// channel at once.
+/// channel at once. The cut waits until the host has started the job's
+/// worker, so it lands while the job runs.
 ///
 /// Deterministic: the single host close returns Closed (or custody is
 /// Closed) within the 20 s retirement bound; the job still reaches realized
 /// terminality and its executor input and answer are committed to the
-/// canonical session; a subsequent open on the same session connects within
-/// 10 s and answers a spoken question natively; the second channel closes
-/// gracefully. Measured (never judged): the committed answer; open request
-/// -> connected on both channels.
+/// canonical session (a delegation that ends without a worker fails at once,
+/// naming its schedule state); a subsequent open on the same session connects
+/// within 10 s and answers a spoken question natively; the second channel
+/// closes gracefully. Measured (never judged): the committed answer; open
+/// request -> connected on both channels.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
@@ -9403,6 +9499,19 @@ async fn run_s107_stuck_close_convergence(
         println!(
             "GPT_LIVE_S107_JOB fixture_start_ms={request_start_ms} delegation_created_ms={delegation_created_ms} heard={:?}",
             request_timing.as_ref().map(|t| t.input_text.as_str())
+        );
+
+        // The cut lands while the job runs on the host: wait until the
+        // delegation's worker has started there. The browser's
+        // DelegationCreated alone does not say the host has the job: Live
+        // gate run 42332080717 (attempt 1) cut 63 ms after it, before the
+        // delegation had reached the host at all.
+        let (job_operation, job_phase) =
+            wait_delegated_worker_started(&mut live, &seen_executor_turns, Duration::from_secs(60))
+                .await?;
+        println!(
+            "GPT_LIVE_S107_JOB_STARTED operation={job_operation} phase={job_phase} at_ms={}",
+            started.elapsed().as_millis()
         );
 
         // Cut the transport hard while the delegation runs, then a single
@@ -11044,6 +11153,59 @@ fn s101_committed_responses(
     committed
 }
 
+/// Each heard S101 response, in heard order: a `response_end` whose final
+/// transcript has letters or digits, with its response index, that
+/// transcript, and the number of input finals that preceded the response.
+fn s101_heard_responses(timeline: &[TimelineEntry]) -> Vec<(Option<u64>, &str, usize)> {
+    let input_finals: Vec<u64> = timeline
+        .iter()
+        .filter(|entry| entry.kind == TimelineKind::InputFinal)
+        .map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms))
+        .collect();
+    let mut heard = Vec::new();
+    for (position, response) in timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == TimelineKind::ResponseEnd)
+    {
+        let text = response.detail_str("text").unwrap_or_default();
+        if s101_compact(text).is_empty() {
+            continue;
+        }
+        let index = response.detail_u64("index");
+        let audio_start = timeline.iter().find(|entry| {
+            entry.kind == TimelineKind::AssistantAudioStart
+                && index.is_some()
+                && entry.detail_u64("response") == index
+        });
+        let after_inputs = match audio_start {
+            // The response began at its first audio; an input final before
+            // that preceded it.
+            Some(start) => {
+                let started_ms = start.t_ms.min(response.t_ms);
+                input_finals.iter().filter(|t| **t < started_ms).count()
+            }
+            // No audio was detected (the playback duck muted the whole
+            // response, or it stayed under the energy threshold), so no
+            // start time orders it. Its end time does not either: the peer
+            // pushes `response_end` when the next user transcript delta
+            // arrives, right after stamping that delta, so a one-delta
+            // utterance after the response can carry the earlier stamp.
+            // The input finals already on the timeline then are the
+            // utterances heard before the response: its first output delta
+            // closed any open one, and the first user delta after it ended
+            // the response.
+            None => timeline
+                .iter()
+                .take(position)
+                .filter(|entry| entry.kind == TimelineKind::InputFinal)
+                .count(),
+        };
+        heard.push((index, text, after_inputs));
+    }
+    heard
+}
+
 /// Outcome claims spoken (provider output transcript, sideband clock) before
 /// the provider learned the job was complete: the job's first commentary
 /// append after its "Started" narration, i.e. its "Finished" narration or
@@ -11521,7 +11683,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                     "not every executor turn reached terminality within 180 s: snapshots={} terminal={:?}; {}",
                     snapshots.len(),
                     terminal_at,
-                    delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await
+                    delegated_executor_diagnostic(
+                        &mut live.rpc,
+                        &live.mob_id,
+                        delegated_worker(live.execution_policy)
+                    )
+                    .await
                 )
                 .into());
             }
@@ -11668,36 +11835,10 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 spoken_at.len()
             ));
         }
-        let input_finals: Vec<u64> = timeline
-            .iter()
-            .filter(|entry| entry.kind == TimelineKind::InputFinal)
-            .map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms))
-            .collect();
-        let mut heard = Vec::new();
-        let mut heard_index = Vec::new();
-        for response in timeline
-            .iter()
-            .filter(|entry| entry.kind == TimelineKind::ResponseEnd)
-        {
-            let text = response.detail_str("text").unwrap_or_default();
-            if s101_compact(text).is_empty() {
-                continue;
-            }
-            let index = response.detail_u64("index");
-            // The response began at its first audio, or at its end when no
-            // audio was detected; an input final before that preceded it.
-            let started_ms = timeline
-                .iter()
-                .find(|entry| {
-                    entry.kind == TimelineKind::AssistantAudioStart
-                        && index.is_some()
-                        && entry.detail_u64("response") == index
-                })
-                .map_or(response.t_ms, |entry| entry.t_ms.min(response.t_ms));
-            let after_inputs = input_finals.iter().filter(|t| **t < started_ms).count();
-            heard.push((text, after_inputs));
-            heard_index.push(index);
-        }
+        let (heard_index, heard): (Vec<_>, Vec<_>) = s101_heard_responses(&timeline)
+            .into_iter()
+            .map(|(index, text, after_inputs)| (index, (text, after_inputs)))
+            .unzip();
         let mut responses = Vec::new();
         for ((index, (text, after_inputs)), committed) in heard_index
             .into_iter()
@@ -11983,7 +12124,12 @@ async fn run_s105_fork_and_merge_parallel(
             if Instant::now() >= deadline {
                 return Err(format!(
                     "the two forked turns did not both reach terminality within 180 s: {terminal_at:?}; {}",
-                    delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await
+                    delegated_executor_diagnostic(
+                        &mut live.rpc,
+                        &live.mob_id,
+                        delegated_worker(live.execution_policy)
+                    )
+                    .await
                 )
                 .into());
             }
@@ -15337,6 +15483,117 @@ mod config_tests {
             super::s101_committed_responses(&once, &[0], &[("Okay.", 1), ("Okay.", 1)]),
             [true, false]
         );
+    }
+
+    /// S101's browser timeline and committed history from Live gate run
+    /// 42297657299 (first attempt, on fb42a469), with the arrival of the
+    /// one-delta utterance " and" stamped `and_arrival_ms` (24917 there).
+    /// The reply " Checking on that" played while the user was speaking, so
+    /// the playback duck muted it for its whole length and the peer saw no
+    /// audio for it. The peer ends a response when the next user transcript
+    /// delta arrives, and pushed this one's `response_end` (24918) right
+    /// after stamping that delta. The runtime committed the reply, then the
+    /// "and" row, in the order the transcripts arrived.
+    fn s101_ducked_reply_run(
+        and_arrival_ms: u64,
+    ) -> (Vec<super::TimelineEntry>, Vec<serde_json::Value>) {
+        use serde_json::json;
+        let entries = timeline(&[
+            (11387, "input_final", json!({"index": 0, "t_ms": 11386})),
+            (11782, "assistant_audio_start", json!({"response": 0})),
+            (
+                17640,
+                "response_end",
+                json!({"index": 0, "text": " Okay, starting I'm on it, and I'll let you know when it's done."}),
+            ),
+            (23601, "input_final", json!({"index": 1, "t_ms": 23600})),
+            (24486, "playback_hint", json!({"hint": "duck"})),
+            (
+                24918,
+                "response_end",
+                json!({"index": 1, "text": " Checking on that"}),
+            ),
+            (
+                24956,
+                "input_final",
+                json!({"index": 2, "t_ms": and_arrival_ms, "closed_by": "response"}),
+            ),
+            (25425, "response_end", json!({"index": 2, "text": "."})),
+            (26991, "playback_hint", json!({"hint": "restore"})),
+            (36570, "input_final", json!({"index": 3, "t_ms": 36568})),
+            (37072, "assistant_audio_start", json!({"response": 3})),
+            (
+                69613,
+                "response_end",
+                json!({"index": 3, "text": " Got it, starting another one now, and I'm on it. And for your file question: there are 0 files. And the marker one dot txt file is created. And marker two dot txt is created."}),
+            ),
+        ]);
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let spoken = |text: &str| json!({"role": "block_assistant", "blocks": [{"block_type": "transcript", "data": {"text": text, "source": {"kind": "spoken"}}}]});
+        let messages = vec![
+            json!({"role": "system", "content": "voice"}),
+            user(
+                "start a slow job for me in the shell sleep for twenty five seconds and then create a file called marker one dot txt and tell me when it s done",
+            ),
+            spoken(" Okay, starting I'm"),
+            spoken(" on it, and I'll let you know when it's done."),
+            user(
+                "while that runs how many files are in your working directory right now answer as there are n files",
+            ),
+            spoken(" Checking"),
+            spoken(" on that"),
+            user("and"),
+            spoken("."),
+            user(
+                "hand the executor a second slow job right away don t wait for the first one sleep twenty seconds and create marker two dot txt and tell me when that one is done too",
+            ),
+            spoken(" Got it, starting"),
+            spoken(" another one now,"),
+            spoken(" and I'm on it. And for your file question: there are 0 files. And"),
+            spoken(" the marker one dot txt file is created. And"),
+            spoken(" marker two dot txt is created."),
+        ];
+        (entries, messages)
+    }
+
+    /// The S101 history check over `s101_ducked_reply_run`, as the scenario
+    /// runs it: every heard response is committed as its own assistant text
+    /// after the spoken user row of the last input that preceded it.
+    fn assert_s101_ducked_reply_committed(and_arrival_ms: u64) {
+        let (entries, messages) = s101_ducked_reply_run(and_arrival_ms);
+        let heard = super::s101_heard_responses(&entries);
+        let pairs: Vec<(&str, usize)> = heard
+            .iter()
+            .map(|&(_, text, after_inputs)| (text, after_inputs))
+            .collect();
+        assert_eq!(
+            super::s101_committed_responses(&messages, &[1, 4, 7, 9], &pairs),
+            [true, true, true],
+            "heard (index, text, input finals before it): {heard:?}"
+        );
+        assert_eq!(
+            heard
+                .iter()
+                .map(|&(index, _, after_inputs)| (index, after_inputs))
+                .collect::<Vec<_>>(),
+            [(Some(0), 1), (Some(1), 2), (Some(3), 4)]
+        );
+    }
+
+    /// The run as it was stamped: the reply's end entry 1 ms after the
+    /// arrival of the input that ended it. Dated by that end, the reply
+    /// counted " and" as heard before it, and its text was looked for only
+    /// after the "and" row.
+    #[test]
+    fn s101_a_ducked_reply_ended_a_millisecond_after_the_next_input_arrived() {
+        assert_s101_ducked_reply_committed(24917);
+    }
+
+    /// The same run with both stamps in one millisecond: the reply precedes
+    /// " and" here too.
+    #[test]
+    fn s101_a_ducked_reply_ended_in_the_millisecond_the_next_input_arrived() {
+        assert_s101_ducked_reply_committed(24918);
     }
 
     /// The barge-in reply is judged by content: "done" in assistant speech

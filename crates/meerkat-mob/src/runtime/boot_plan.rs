@@ -144,14 +144,14 @@ pub enum MobBootSetUnobservedCause {
 
 /// The default bound on one member wake (see
 /// [`super::MobBuilder::with_member_wake_timeout`]).
-pub(crate) const DEFAULT_MEMBER_WAKE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const DEFAULT_MEMBER_WAKE_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// The default first delay of the owed boot-work retry (see
 /// [`super::MobBuilder::with_member_wake_retry_backoff`]).
 pub(crate) const DEFAULT_OWED_WAKE_RETRY_INITIAL: Duration = Duration::from_secs(1);
 
 /// The default longest delay of the owed boot-work retry.
-pub(crate) const DEFAULT_OWED_WAKE_RETRY_MAX: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_OWED_WAKE_RETRY_MAX: Duration = Duration::from_mins(1);
 
 /// The default read concurrency of the `OnDemandVerified` pass: the
 /// builder's default restore concurrency.
@@ -180,14 +180,28 @@ pub(crate) struct MemberResidencyConfig {
     /// of its plan's wakes a clean-stop lift runs at once, and how many
     /// members it observes at once when it rebuilds them.
     pub(crate) verify_concurrency: usize,
-    /// Where a dormant seat takes its member's endpoint from; `None` until
-    /// the host names its members' comms transport, and every seat is
-    /// refused typed meanwhile.
+    /// Where a dormant seat takes its member's endpoint from, when the host
+    /// names its members' comms transport. `None` leaves it to the root the
+    /// session service reports
+    /// (`super::dormant_seat::member_seat_endpoint_source`).
     pub(crate) seat_endpoints: Option<super::dormant_seat::MemberSeatEndpointSource>,
     /// The host's per-member build preparation (its tools published before
     /// the member's first run).
     #[cfg(feature = "runtime-adapter")]
     pub(crate) build_preparer: Option<Arc<dyn super::MemberBuildPreparer>>,
+    /// How many dormant members' operator-instruction snapshots the mob
+    /// records store-only at once
+    /// (`MobBuilder::with_member_instruction_delivery_concurrency`).
+    pub(crate) instruction_delivery_concurrency: usize,
+    /// Whether the host holds the mob's identity changes from its start
+    /// (`MobBuilder::with_identity_changes_held`).
+    pub(crate) identity_changes_held: bool,
+    /// The host's mint of a member's grant, for the reads that build nothing
+    /// (`MobBuilder::with_member_grant_mint`).
+    pub(crate) member_grant_mint: Option<std::sync::Arc<dyn super::MemberGrantMint>>,
+    /// The host's rule for the members a member's own operator tools may not
+    /// know of (`MobBuilder::with_member_tool_audience`).
+    pub(crate) member_tool_audience: Option<std::sync::Arc<dyn super::MemberToolAudience>>,
 }
 
 impl Default for MemberResidencyConfig {
@@ -206,6 +220,11 @@ impl Default for MemberResidencyConfig {
             seat_endpoints: None,
             #[cfg(feature = "runtime-adapter")]
             build_preparer: None,
+            instruction_delivery_concurrency:
+                super::operator_instruction_delivery::DEFAULT_DORMANT_DELIVERY_CONCURRENCY,
+            identity_changes_held: false,
+            member_grant_mint: None,
+            member_tool_audience: None,
         }
     }
 }
@@ -221,7 +240,14 @@ impl std::fmt::Debug for MemberResidencyConfig {
             .field("wake_timeout", &self.wake_timeout)
             .field("owed_wake_retry", &self.owed_wake_retry)
             .field("verify_concurrency", &self.verify_concurrency)
-            .field("seat_endpoints", &self.seat_endpoints);
+            .field("seat_endpoints", &self.seat_endpoints)
+            .field(
+                "instruction_delivery_concurrency",
+                &self.instruction_delivery_concurrency,
+            )
+            .field("identity_changes_held", &self.identity_changes_held)
+            .field("member_grant_mint", &self.member_grant_mint.is_some())
+            .field("member_tool_audience", &self.member_tool_audience.is_some());
         #[cfg(feature = "runtime-adapter")]
         debug.field("build_preparer", &self.build_preparer.is_some());
         debug.finish()
@@ -436,6 +462,38 @@ impl<'a> BootObligationIndex<'a> {
         }
     }
 
+    /// Every runtime id that names a member here, with the member: each
+    /// spelling of its bound session's runtime, and the delivery address of
+    /// its current generation in this incarnation. A runtime the store
+    /// refuses but cannot name in its listings is attributed to its member
+    /// by these ids.
+    fn candidate_runtimes(
+        &self,
+    ) -> Vec<(meerkat_runtime::LogicalRuntimeId, &mob_dsl::AgentIdentity)> {
+        let mut candidates: Vec<_> = self
+            .by_session_runtime
+            .iter()
+            .map(|(runtime_id, identity)| (runtime_id.clone(), identity))
+            .collect();
+        for (identity, candidate) in &self.by_identity {
+            let address = meerkat_runtime::MemberDeliveryAddress {
+                mob_id: self.mob_id.to_string(),
+                incarnation: Some(self.incarnation),
+                identity: identity.clone(),
+                generation: candidate.generation,
+            };
+            match meerkat_runtime::LogicalRuntimeId::for_member(&address) {
+                Ok(runtime_id) => candidates.push((runtime_id, &candidate.identity)),
+                Err(error) => tracing::debug!(
+                    mob_id = %self.mob_id,
+                    %error,
+                    "the boot obligation scan skipped a member whose delivery address does not form"
+                ),
+            }
+        }
+        candidates
+    }
+
     /// The seated member `runtime_id` names, if any. A member delivery
     /// address names a member only for this mob, this incarnation (or an
     /// address minted before incarnations existed, read fail-closed as this
@@ -587,6 +645,32 @@ pub(crate) async fn scan_boot_obligations_among(
                 .or_insert(mob_dsl::MemberRecoveryObligationKind::PendingDelivery);
         }
     }
+    // A refused runtime scope the store cannot name by runtime id (a host
+    // store's quarantined scope of a runtime whose id its scope names hash)
+    // is in neither scan: it is attributed here, by the ids that name each
+    // member, and its member is planned as holding work, as a refused
+    // runtime the store names is. Every other member stays as the scan left
+    // it, so such a scope never wakes the whole mob.
+    let unnamed = adapter.unnamed_refused_runtimes();
+    if !unnamed.is_empty() {
+        let mut attributed = BTreeSet::new();
+        for (runtime_id, identity) in index.candidate_runtimes() {
+            if adapter.store_refuses_runtime(&runtime_id) {
+                by_member.insert(
+                    identity.clone(),
+                    mob_dsl::MemberRecoveryObligationKind::RuntimeWork,
+                );
+                attributed.insert(identity.clone());
+            }
+        }
+        let scopes: Vec<String> = unnamed.iter().map(ToString::to_string).collect();
+        tracing::warn!(
+            %mob_id,
+            ?scopes,
+            attributed = attributed.len(),
+            "the runtime store refuses runtime scopes it cannot name by runtime id; each seated member they belong to is planned as holding recovery work"
+        );
+    }
     Ok(BootObligations {
         by_member,
         basis: MobBootSetBasis::Observed,
@@ -599,8 +683,9 @@ pub(crate) async fn scan_boot_obligations_among(
 
 /// Seed the host's member-residency inputs into MobMachine: once per start,
 /// on the fresh authority, before any replay or plan. The policy, the
-/// composition authority and the host-pending set are machine state from
-/// then on: every plan, wake and seat reads them there.
+/// composition authority, the host-pending set and the host's hold of the
+/// mob's identity changes are machine state from then on: every plan, wake,
+/// seat and change reads them there.
 pub(crate) fn seed_member_residency(
     authority: &mut mob_dsl::MobMachineAuthority,
     config: &MemberResidencyConfig,
@@ -615,13 +700,24 @@ pub(crate) fn seed_member_residency(
             .map(mob_dsl::AgentIdentity::from_domain)
             .collect(),
     };
-    mob_dsl::MobMachineMutator::apply(authority, input)
-        .map(|_| ())
+    mob_dsl::MobMachineMutator::apply(authority, input).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine ({context}) rejected the member residency seed: {error}"
+        ))
+    })?;
+    // The host's hold of the mob's identity changes, from its start.
+    if config.identity_changes_held {
+        mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::SetIdentityChangesHeld { held: true },
+        )
         .map_err(|error| {
             MobError::Internal(format!(
-                "MobMachine ({context}) rejected the member residency seed: {error}"
+                "MobMachine ({context}) rejected the identity changes hold: {error}"
             ))
-        })
+        })?;
+    }
+    Ok(())
 }
 
 /// What one start's `PlanBootMaterialization` inputs decided.
@@ -1054,6 +1150,7 @@ pub(crate) fn verified_member_signal(
             bridge_session_id: Some(session_id.clone()),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     ))

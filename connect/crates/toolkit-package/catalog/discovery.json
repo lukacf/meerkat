@@ -1,0 +1,565 @@
+[
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "github",
+      "version": "discovery-2026-09-30.2"
+    },
+    "display_name": "GitHub",
+    "description": "Provider-hosted MCP candidate for repository and collaboration operations.",
+    "provenance": {
+      "source": "https://raw.githubusercontent.com/github/github-mcp-server/main/docs/remote-server.md",
+      "source_revision": "sha256:871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "hosted",
+        "kind": "remote_mcp",
+        "instructions": "Inspect the official remote server and auth documentation. Candidate endpoint: https://api.githubcopilot.com/mcp/. Choose the minimum relevant toolsets and use a read-only variant for a read-only request. Establish the exact user, organisation and repository access through the configured credential owner. Before activation, verify actual available tools, result limits, pagination and the application grant. Hosted and local capabilities can differ.",
+        "sources": [
+          "https://raw.githubusercontent.com/github/github-mcp-server/main/docs/remote-server.md",
+          "https://raw.githubusercontent.com/github/github-mcp-server/main/README.md"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "The application OAuth registration or permitted token route for this host.",
+          "Account and organisation policy, exact tool identity and current endpoint compatibility."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "github.service",
+        "role": "service_connector",
+        "description": "Repository, issue and pull-request operations selected by the setup agent."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80",
+        "assessed_at_unix_ms": 1790719164987,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "github",
+            "revision": "sha256:871acf118eb662bbaf7a8e3306d2a3bbe2716343b0c8965695ba376e85247f80"
+          },
+          {
+            "owner": "toolkit-source-observations",
+            "record": "github-auth",
+            "revision": "sha256:0686b41067fd437abbde4b473c394fe2365e5ad2ae81c21b9f988735359c9666"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "linear",
+      "version": "discovery-2026-09-30.1"
+    },
+    "display_name": "Linear",
+    "description": "Provider-hosted MCP candidate for issues and projects.",
+    "provenance": {
+      "source": "https://linear.app/docs/mcp",
+      "source_revision": "sha256:9f206d87629f367ba8b121a9dcef73f3234d1aab1448069ef7d0466c885c5315",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "hosted",
+        "kind": "remote_mcp",
+        "instructions": "The documented Streamable HTTP endpoint is https://mcp.linear.app/mcp. OAuth supports dynamic client registration; an existing permitted bearer token is another route. A read-only endpoint is https://mcp.linear.app/mcp/readonly. Select an account/workspace explicitly and keep separate workspaces in separate credential contexts. Reconnecting alone does not select another workspace. Verify actual operations and grants before binding.",
+        "sources": [
+          "https://linear.app/docs/mcp"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Client auth support and authorised workspace.",
+          "Requested operations, pagination, rate limits and current schemas."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "linear.service",
+        "role": "service_connector",
+        "description": "Issue and project search or mutation under separately authorised access."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:9f206d87629f367ba8b121a9dcef73f3234d1aab1448069ef7d0466c885c5315",
+        "assessed_at_unix_ms": 1790719164996,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "linear",
+            "revision": "sha256:9f206d87629f367ba8b121a9dcef73f3234d1aab1448069ef7d0466c885c5315"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "notion",
+      "version": "discovery-2026-09-30.1"
+    },
+    "display_name": "Notion",
+    "description": "Provider-hosted MCP candidate for workspace content.",
+    "provenance": {
+      "source": "https://developers.notion.com/guides/mcp/get-started-with-mcp",
+      "source_revision": "sha256:830608d6d2d771b81fdced6019643df3ff47f013f4bb2b4d1d495730dfe6197b",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "hosted",
+        "kind": "remote_mcp",
+        "instructions": "Use the maintained hosted candidate https://mcp.notion.com/mcp with OAuth after checking workspace policy. Select and verify the intended account and accessible content. The documented local notion-mcp-server package is no longer actively maintained and is not an equivalent default. If hosted access is unsuitable, investigate an explicit alternative and record its maintenance and operation differences. Bind only verified tools under the application grant.",
+        "sources": [
+          "https://developers.notion.com/guides/mcp/get-started-with-mcp"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Workspace client approval and actual accessible pages.",
+          "Requested content operation coverage and client authentication compatibility."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "notion.service",
+        "role": "service_connector",
+        "description": "Workspace content reads and writes supported by the selected implementation."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:830608d6d2d771b81fdced6019643df3ff47f013f4bb2b4d1d495730dfe6197b",
+        "assessed_at_unix_ms": 1790719164898,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "notion",
+            "revision": "sha256:830608d6d2d771b81fdced6019643df3ff47f013f4bb2b4d1d495730dfe6197b"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "slack",
+      "version": "discovery-2026-09-30.2"
+    },
+    "display_name": "Slack",
+    "description": "Separate Slack service-access and agent-frontend setup strategies in one discovery package.",
+    "provenance": {
+      "source": "https://docs.slack.dev/ai/slack-mcp-server/",
+      "source_revision": "sha256:7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "service",
+        "kind": "remote_mcp",
+        "instructions": "Investigate Slack's MCP server at https://mcp.slack.com/mcp. The documented access route requires an eligible Marketplace or internal app, relevant user scopes and workspace approval. Confirm this host's own app registration and callback before promising a beginner flow; another client's public client ID is not this application's registration. Use protected credential entry and verify workspace/account plus actual requested operations. A service connection alone exposes no agent frontend.",
+        "sources": [
+          "https://docs.slack.dev/ai/slack-mcp-server/"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "This host's eligible app, OAuth client and callback configuration.",
+          "Workspace administrator decision and exact permitted history/send scopes."
+        ]
+      },
+      {
+        "id": "agent-frontend",
+        "kind": "research_skill",
+        "instructions": "Build or select a separate Slack frontend adapter. Events API HTTP delivery uses a verified request URL and authenticated event handling. Preserve the provider event identity through durable receipt before dispatch. The application binds admitted people, conversation, agent and reply audience. Verify duplicate handling, private/shared conversations and last-hop response receipts. Enabling this frontend must not grant service-history access to arbitrary agents.",
+        "sources": [
+          "https://docs.slack.dev/apis/events-api/using-http-request-urls"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Maintained adapter artifact and app installation.",
+          "Application admission, conversation isolation, durable delivery and audience contracts."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "slack.service",
+        "role": "service_connector",
+        "description": "History/search/send operations; sends retain their own business-effect authority."
+      },
+      {
+        "id": "slack.frontend",
+        "role": "agent_frontend",
+        "description": "A separately admitted Slack entrypoint to an existing agent."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad",
+        "assessed_at_unix_ms": 1790719165452,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "slack",
+            "revision": "sha256:7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad"
+          },
+          {
+            "owner": "toolkit-source-observations",
+            "record": "slack-frontend",
+            "revision": "sha256:f90a0e5b887d1c2dd6f3c357ba180a0e10580021f81649201f10f5427e134aae"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "home-assistant",
+      "version": "discovery-2026-09-30.1"
+    },
+    "display_name": "Home Assistant",
+    "description": "A host-specific Home Assistant MCP service connection.",
+    "provenance": {
+      "source": "https://www.home-assistant.io/integrations/mcp_server/",
+      "source_revision": "sha256:86a3c0bb9918c0f1738734514038ef9f8c0b9f88e7e849d402ea9dd70cd7458c",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "configured-instance",
+        "kind": "configuration_recipe",
+        "instructions": "Obtain the intended instance URL from host configuration or the user; never scan the local network. The MCP integration exposes /api/mcp and requires authentication. Home Assistant documents OAuth with URL-based client IDs and client metadata rather than mandatory dynamic registration; confirm the callback and hostname agreement. Select the intended API and exposed entities. Verify with authorised read-only observations, not physical control. Keep household device policy at the effect boundary.",
+        "sources": [
+          "https://www.home-assistant.io/integrations/mcp_server/"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Instance identity, MCP integration activation and exposed entities.",
+          "Client auth compatibility, API selection and household operation policy."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "home-assistant.service",
+        "role": "service_connector",
+        "description": "Selected home state and device operations; no robot or household actuation during setup verification."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:86a3c0bb9918c0f1738734514038ef9f8c0b9f88e7e849d402ea9dd70cd7458c",
+        "assessed_at_unix_ms": 1790719165037,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "home-assistant",
+            "revision": "sha256:86a3c0bb9918c0f1738734514038ef9f8c0b9f88e7e849d402ea9dd70cd7458c"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "playwright",
+      "version": "discovery-2026-09-30.1"
+    },
+    "display_name": "Playwright",
+    "description": "Official local MCP candidate for controlled browser automation.",
+    "provenance": {
+      "source": "https://raw.githubusercontent.com/microsoft/playwright-mcp/main/README.md",
+      "source_revision": "sha256:b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "local-mcp",
+        "kind": "local_mcp",
+        "instructions": "Inspect Microsoft's Playwright MCP source and selected release. The documented package is @playwright/mcp and requires a Node runtime. Pin executable and browser dependencies before proposing installation. Use a dedicated profile/context with explicit host authority. This browser is for agent automation; authentication ceremonies that must hide credentials need the host's protected user-action route. Provider origin flags are not a substitute for a security boundary.",
+        "sources": [
+          "https://raw.githubusercontent.com/microsoft/playwright-mcp/main/README.md"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Exact package/release and dependency identities.",
+          "Browser lifecycle, profile partition, auth handoff and allowed network/file effects."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "playwright.service",
+        "role": "service_connector",
+        "description": "Browser operations in the explicitly selected host context."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87",
+        "assessed_at_unix_ms": 1790719165162,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "playwright",
+            "revision": "sha256:b33aa71a13d655e96e6b736d0c9de1e5ddea52f205916ca20b876387ff830e87"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "gmail",
+      "version": "discovery-2026-09-30.1"
+    },
+    "display_name": "Gmail",
+    "description": "Research and adapter recipe for mail access and requested sending.",
+    "provenance": {
+      "source": "https://developers.google.com/workspace/gmail/api/quickstart/python",
+      "source_revision": "sha256:07dbee38e9b1dc440221885373fac8d31632dd705a293a2fb0fcc4810a24a7b6",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "api-or-maintained-mcp",
+        "kind": "research_skill",
+        "instructions": "Inspect Google's Gmail API setup and search for a maintained compatible MCP or operation adapter. The API quickstart requires a Google Cloud project, enabled API, OAuth consent and client credentials. Do not describe an unprepared project as one-click setup. Reuse a suitable authorised host credential binding when available. Select read and send access independently. Verify mailbox identity and bounded reads without sending test mail; the original agent owns the requested business send.",
+        "sources": [
+          "https://developers.google.com/workspace/gmail/api/quickstart/python"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Maintained implementation and exact artifact or endpoint.",
+          "OAuth application preparation, account restrictions and requested scopes.",
+          "Pagination, attachments, message identity and uncertain-send recovery."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "gmail.service",
+        "role": "service_connector",
+        "description": "Mail reads and sends through the selected implementation and exact mailbox grant."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:07dbee38e9b1dc440221885373fac8d31632dd705a293a2fb0fcc4810a24a7b6",
+        "assessed_at_unix_ms": 1790719165433,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "gmail",
+            "revision": "sha256:07dbee38e9b1dc440221885373fac8d31632dd705a293a2fb0fcc4810a24a7b6"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "google-calendar",
+      "version": "discovery-2026-10-28.1"
+    },
+    "display_name": "Google Calendar",
+    "description": "Research and adapter recipe for calendar operations.",
+    "provenance": {
+      "source": "https://developers.google.com/workspace/calendar/api/quickstart/python",
+      "source_revision": "sha256:464cd4d07fa019a0e0ecbd431f424e19a7af838d47b0f79f1f35766558c6fbb6",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "api-or-maintained-mcp",
+        "kind": "research_skill",
+        "instructions": "Inspect Google's Calendar API setup and a maintained compatible connector. Google Cloud/API and OAuth preparation may be required. Identify the intended account and calendars. Preserve the selected application's write restrictions and operation/version receipts. When the host keeps its own calendar write rules, a direct MCP alias must not bypass them. Verify access with bounded reads. Setup does not create, modify or delete calendar events merely to establish readiness.",
+        "sources": [
+          "https://developers.google.com/workspace/calendar/api/quickstart/python"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "Maintained implementation and exact artifact or endpoint.",
+          "OAuth client preparation and per-calendar access.",
+          "Recurring-event semantics, pagination and a write-ledger adapter where required by the selected host calendar owner."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "google-calendar.service",
+        "role": "service_connector",
+        "description": "Calendar access retaining application-specific write semantics."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed discovery and setup guidance only. No tested Toolkit operation or frontend deployment.",
+        "source_revision": "sha256:464cd4d07fa019a0e0ecbd431f424e19a7af838d47b0f79f1f35766558c6fbb6",
+        "assessed_at_unix_ms": 1790719165771,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "calendar",
+            "revision": "sha256:464cd4d07fa019a0e0ecbd431f424e19a7af838d47b0f79f1f35766558c6fbb6"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "identity": {
+      "publisher": "meerkat-toolkit",
+      "name": "telegram",
+      "version": "discovery-2026-10-28.1"
+    },
+    "display_name": "Telegram",
+    "description": "Frontend discovery guidance for a Telegram bot frontend built on the Meerkat Toolkit Python frontend modules. The agent selects a compatible host; this metadata installs nothing and establishes no readiness.",
+    "provenance": {
+      "source": "https://core.telegram.org/bots/api",
+      "source_revision": "sha256:da1783d3c0f9b476fbe71eabeb95c185cac504324ff0194dd95093b805bba2ab",
+      "license": "Toolkit-authored recipe: MIT OR Apache-2.0. Upstream service, source and documentation retain their own terms.",
+      "notices": [
+        "This is a Toolkit-authored discovery recipe, not an upstream-published package or a port of the linked source.",
+        "The source hash identifies the observed documentation or contract only. It does not pin a deployed server or executable artifact.",
+        "Documentation inspection does not establish Toolkit compatibility, account access, beginner readiness or successful activation.",
+        "The Meerkat Toolkit Python SDK ships the Bot API transport, update normalization and reply presenter as frontend modules under MIT OR Apache-2.0; see sdk/python/TELEGRAM.md. This recipe contains no wheel, download entitlement, deployment approval or automatic installation route."
+      ],
+      "local_patches": []
+    },
+    "strategies": [
+      {
+        "id": "bot-frontend",
+        "kind": "research_skill",
+        "instructions": "Use this strategy when people need to talk to an agent through Telegram. A Telegram sendMessage/sendPhoto tool is a service operation and does not receive conversations or bind them to an agent. The Meerkat Toolkit Python SDK frontend modules provide Bot API transport, update normalization and a reply presenter; they are not a standalone MCP server or a complete host. Use them from a compatible Python 3.11+ host, with the pinned python-telegram-bot 22.7 parser when using update normalization. Do not run the consumer library installer for this unmapped strategy.\nFirst agree the bot, admitted people/groups, target agent and reply audience with the host policy owner. The user or authorized operator creates or selects the bot in Telegram BotFather; transfer the token directly through the host protected secret-entry surface, never chat, tool arguments, package metadata or logs. This bot-token route is not a provider OAuth browser redirect. A host-owned authenticated getMe check can establish which bot the token represents, but does not authenticate incoming people or grant them access.\nChoose exactly one active incoming delivery owner: long polling with a durably committed update cursor, or an HTTPS webhook whose host validates the selected secret_token header before admission. Registering/replacing/deleting a webhook changes provider state and needs the host selected authority. Preserve update IDs and durable deduplication before invoking the admitted agent. Host admission maps provider user/chat/thread facts to a principal and conversation, applies audience/requester ceilings, and chooses the target agent. Never promote payload IDs or group membership into trusted authorization.\nAfter an admitted turn, use the reply presenter with the same host-authorized chat/topic and delivery owner. Preserve per-part receipts, unknown results and cancellation without automatic resend. Validate wrong-user/group/topic refusal, duplicate inbound delivery, restart and uncertain outbound results before enabling the frontend. Confirm BotFather privacy mode, bot membership and actual update visibility for the selected chats without silently widening permissions. Incoming routing, authentication, lifecycle, secrets and durable delivery remain host integration work; this catalog entry supplies guidance, not readiness.",
+        "sources": [
+          "https://core.telegram.org/bots/api",
+          "https://core.telegram.org/bots/features"
+        ],
+        "known_requirements": [],
+        "unresolved_details": [
+          "A compatible host that embeds the SDK frontend modules; the current consumer bundle does not include a Telegram frontend installer.",
+          "BotFather bot selection and protected bot-token custody; authenticated bot identity is distinct from admitted human identity.",
+          "One polling or HTTPS webhook owner, durable update deduplication/cursor, webhook secret validation when selected, and provider registration authority.",
+          "Host principal/conversation/agent mapping, requester and audience ceilings, reply chat/topic policy, durable delivery and lifecycle activation.",
+          "Live account, restart, group/privacy-mode and last-hop validation under explicit scoped authority."
+        ]
+      }
+    ],
+    "known_exports": [
+      {
+        "id": "telegram.frontend",
+        "role": "agent_frontend",
+        "description": "Incoming bot conversations and host-authorized replies through an agent frontend. This is not a grant of outgoing service tools or a ready-to-run listener."
+      }
+    ],
+    "assessments": [
+      {
+        "status": "experimental",
+        "scope": "Source-reviewed frontend setup guidance for the SDK frontend modules. No automatic installation, account authentication, incoming admission, routing or active listener is established by this recipe.",
+        "source_revision": "sha256:da1783d3c0f9b476fbe71eabeb95c185cac504324ff0194dd95093b805bba2ab",
+        "assessed_at_unix_ms": 1791092154935,
+        "evidence": [
+          {
+            "owner": "toolkit-source-observations",
+            "record": "telegram-api-20261004",
+            "revision": "sha256:da1783d3c0f9b476fbe71eabeb95c185cac504324ff0194dd95093b805bba2ab"
+          },
+          {
+            "owner": "toolkit-source-observations",
+            "record": "telegram-botfather-20261004",
+            "revision": "sha256:e9d974bbae552f49850e3c032e60a970e2d884eca1c7c11787ae463a2b1f6a32"
+          }
+        ]
+      }
+    ]
+  }
+]

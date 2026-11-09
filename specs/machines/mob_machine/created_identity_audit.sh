@@ -1,0 +1,2165 @@
+#!/usr/bin/env bash
+# TLC audit of MobMachine created identity entries.
+#
+# usage: created_identity_audit.sh [--mutants]
+#                                  [--part recovery|changes|doors|<run>[,<run>...]]
+#                                  [extra tlc args...]
+#
+# Derives each run's TLC config from the generated ci.cfg next to this script
+# (its SPECIFICATION, its generated invariants and its domains), as
+# identity_entry_audit.sh does for the declared apply, with the VIEW of
+# member_residency_audit that leaves out the four counters no guard reads
+# (model_step_count, topology_epoch and the identity life marker,
+# identity_life_resets and identity_life_ends); the runner first checks that
+# the model reads none of them anywhere else. It checks eighteen runs of
+# created_identity_audit.tla, each over its whole space with TLC coverage, in
+# three parts (every part by default; --part <run>,<run>... checks those runs,
+# as a CI shard does). Its recovery part (--part recovery):
+#
+# - scan: member 1 recovered and bound, its Declared entry row replayed or
+#   not, before or after the scan of its rows (its own replay never after
+#   the scan of its row pending its host's preparation: the boot replays
+#   first, runtime/builder.rs:9362 and :9369 before :9424, an order
+#   MobMachine relies on for such a row; the names run keeps it too),
+#   member 2 with no member, and the boot scan of a row of either with every
+#   presence and revival record, in a running and a stopped mob, until the
+#   boot plan's seal. Exactly one arm answers every row while the replay
+#   runs and none after the seal (AuditRecoverExactlyOne), and no step turns
+#   a Created entry Declared (AuditCreatedEntryNeverDeclared; the names run
+#   checks it too).
+# - reseat: the scan of rows of two identities without a member (without a
+#   revival record, but member 2's Present row), a ladder without custody
+#   for member 1 and one with each pair of custodies for member 2, seated on
+#   member 2's revival record or a fresh session, their aborts, the worker
+#   ensure of either member, the worker reconcile of both members or of
+#   none and the forced destroy: no ladder opens for a reserved name
+#   (AuditNoLadderForReservedName), a ladder's custody matches its name's
+#   origin (AuditLadderCustodyMatchesOrigin), a seat under created custody
+#   binds the revival record (AuditCreatedSeatTakesRecord), no ladder close
+#   seats a member under a reserved name, so a ladder opened before the
+#   reservation is aborted (AuditNoSeatUnderReservedName), no worker ensure
+#   records a reserved name for a spawn (worker_reconcile_spares_entries),
+#   and exactly one arm answers every row and every admission probe,
+#   ladders and reseated members included.
+# - names: the scan of both identities' rows (without a revival record),
+#   then the declarations, the seal over every desired set, the legacy
+#   adoption, the agent lane and the admission probe, under either
+#   composition authority, in a running and a stopped mob: exactly one arm
+#   answers each, and the seal never touches a Created entry or an
+#   unreadable name's (AuditSealNeverTouchesCreated).
+# - placed: member 2 seated on a bound member host by the placed spawn
+#   ladder and its activation, its row scanned at any point of the ladder:
+#   a Present row of a placed member reserves the name, and the remote
+#   commit seats no member under a name reserved while its ladder was open
+#   (AuditNoSeatUnderReservedName).
+#
+# Its changes part (--part changes, 0.9.9):
+#
+# - admit: the admission of every change from every fact, over the only
+#   state it reads (the build seed's composition authority, the host's
+#   changes hold, a running and a stopped mob): exactly one arm answers
+#   every admission (AuditAdmitExactlyOne). The admission changes nothing,
+#   so the commit run leaves it out: there it added no state and 288
+#   self-loops to every state.
+# - commit: a worker member, a name reserved by its row or not, the record
+#   of either name from every request's facts, the host's changes hold, and
+#   a ladder under created custody, its dormant seat or its membership
+#   commit, in a running and a stopped mob: exactly one arm answers every
+#   record (AuditRecordExactlyOne), a new store-owned entry takes only a
+#   free name (AuditRecordTakesFreeNames), its cause follows the declared
+#   apply's precedence over its facts (AuditRecordCauseFollowsFacts), and an
+#   entry held for its creation is never seated Dormant
+#   (AuditHeldNeverSeatedDormant).
+# - update: a roster-owned and a store-owned identity owed their seats and
+#   seated under the same profile and runtime mode, and their declarations
+#   of the same change, the store-owned one's by its update: exactly one arm
+#   answers every update (AuditUpdateExactlyOne), and both answer the same
+#   verdict whenever their facts are the same, seated or not
+#   (AuditUpdateParity).
+# - removal: a roster-owned identity seated and removed through its
+#   retirement to its terminal (running or stopped) or ended by the mob's
+#   destroy with its mark; a store-owned one removed unseated with every
+#   cause, seated and removed through its retirement, or archived; a
+#   reserved name, the changes hold and the composition authority: exactly
+#   one arm answers every removal (AuditRemovalExactlyOne), and every
+#   removal's end but the destroy's tombstones its name
+#   (AuditRemovalTombstones).
+# - archive: a store-owned identity owed its seat or awaiting its host's
+#   preparation, seated, archived through its retirement, unarchived and
+#   seated again on its archived session, updated and removed at any point,
+#   its spawn ladder at any point, and a roster-owned identity's archive
+#   refused: exactly one arm answers every archive, unarchive and update
+#   (AuditArchiveExactlyOne), no member is seated under an archived
+#   identity (AuditArchivedNeverSeated), it keeps its name until its
+#   unarchive (in a running, authoritative mob with no changes hold) or its
+#   removal (AuditArchivedKeepsItsName), an identity awaiting its
+#   preparation is never archived (AuditPendingNeverArchived), and the
+#   update of an archived or pending identity changes its row only
+#   (AuditStoreUpdateKeepsStanding).
+# - preparation: a roster-owned identity whose rule requires its
+#   preparation and a store-owned one pending it, the start, settle and end
+#   of their held constructions with every fact, their ladders (each
+#   construction's own ladder opening after its activation was accepted, as
+#   the shell opens it at the publication), seats, membership commits,
+#   archives and removals, and the store-owned one's update, firing the
+#   attempts' arms that change state (their refusals are the verdict run's),
+#   in the initial authoritative composition: an attempt is open only for an
+#   entry awaiting its preparation (AuditConstructionAwaitsPreparation),
+#   while an activation is accepted no end of its attempt but its failed
+#   publication is enabled (AuditAcceptedActivationIsFinal), such an entry
+#   is seated only by its accepted activation's membership commit
+#   (AuditPendingSeatedOnlyByItsActivation), a `constructed` preparation is
+#   never settled without an attempt
+#   (AuditConstructedNeverSettledWithoutAttempt), the update of a pending
+#   identity changes its row only (AuditStoreUpdateKeepsStanding), and
+#   exactly one arm answers every archive, ladders and seats included
+#   (AuditPrepArchiveExactlyOne).
+# - prepverdicts: every arm of an attempt's start, settle and end, from
+#   every fact, over the facts their verdicts read (each identity's
+#   preparation, its held and its activating attempt, the build seed's
+#   composition authority, a running and a stopped mob) and no ladder:
+#   exactly one arm answers each (AuditPrepExactlyOne).
+# - placement: a store-owned identity hosted on its first use (placed, or
+#   externally bound) or owed its seat, its placed and peer-only spawns
+#   holding its created custody (the placed and peer-only witnesses): the
+#   placed opener holds created custody only for an identity hosted on its
+#   first use (AuditPlacedCreatedCustodyHosted).
+# - unlist: a roster-owned identity declared, seated through its ladder,
+#   unlisted and retired to its terminal, a store-owned identity, and the
+#   record of the unlisted identity's name: exactly one arm answers every
+#   unlist (AuditUnlistExactlyOne), an unlist changes no other identity and
+#   never a Created entry (AuditUnlistDecidesItsIdentityAlone), and a
+#   record takes no name an entry or the unlisted identity's archived
+#   session record holds (AuditRecordTakesFreeNames).
+# - recovered: a store-owned identity replayed seated (recovered, bound, its
+#   peer endpoint recorded and its Created entry row replayed), its one row
+#   scanned (the store holds one row per identity, a scope restriction), a
+#   removal's or an archive's, before or after the replay, and the
+#   retirement the recovered mark owes to its terminal, running or stopped,
+#   once the boot plan is sealed (a scope restriction: the order the shell
+#   keeps): exactly one arm answers every row (AuditRecoverExactlyOne), the
+#   removal's end tombstones the name (AuditRemovalTombstones), no replay
+#   or seat puts a member under the archived identity
+#   (AuditArchivedNeverSeated), and the boot plan's seal, a stop and a
+#   resume keep its standing and its name (AuditArchivedKeepsItsName).
+# - edges (0.9.11): two store-owned identities recorded owed their seats,
+#   then a roster-owned identity declared and seated, then the first of
+#   them seated under created custody, one step at a time (or a candidate
+#   composition before); the roster-owned identity removed through its
+#   retirement; the seated store-owned one archived through its
+#   retirement, unarchived and removed; the other archived, unarchived and
+#   removed at once; the declaration, the end for either cause, the boot's
+#   recovery and an import's restoration of each edge among them (and of a
+#   self edge) by each store-owned identity, and a plain unwire's admission
+#   and a realization's verdict of each; and, once both members are seated
+#   and before any end begins, the host's changes hold, in a running and a
+#   stopped mob: exactly one arm answers each (AuditEdgesExactlyOne), an
+#   owned edge ends only by its owner's end or by an end's removal
+#   (AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd), it keeps its owner while
+#   owned (AuditOwnedEdgeKeepsItsOwner), no end naming another identity
+#   than its owner ends it (AuditOnlyTheOwnerEndsItsEdge), it is realized
+#   and refused a plain unwire exactly while both its ends are identity
+#   entries (AuditOwnedEdgeBindsIdentitiesOnly; a recovery before the
+#   roster-owned identity's declaration owns an edge whose end no entry
+#   holds), and an import restores exactly the edges a start's recovery
+#   recovers (AuditRestoreIsTheRecovery). Its domains add a third identity,
+#   the run's third end.
+# - adoption (0.9.11): a worker the replay recovered and bound, then a
+#   roster-owned identity declared, owed its seat and seated, one step at a
+#   time (or a candidate composition before); the roster-owned identity
+#   unlisted and the worker retired; a store-owned identity recorded owed
+#   its seat, or a name the scan of its row reserves; a declared apply
+#   opened and closed; the adoption of each from either source at each
+#   generation, of a member spawned with an override or not; and, once both
+#   are seated and before any adoption, the host's changes hold, in a
+#   running and a stopped mob: exactly one arm answers each
+#   (AuditAdoptExactlyOne), an adoption keeps its member's runtime,
+#   generation and session (AuditAdoptionKeepsTheIncarnation), takes a
+#   settled member only, outside a declared apply
+#   (AuditAdoptionTakesASettledMember), and takes no worker spawned with an
+#   override (AuditAdoptionTakesNoOverriddenWorker). Its domains add a
+#   third identity.
+# - cycle (0.9.11): a worker the replay recovered and bound, and a
+#   roster-owned identity declared owed its seat, its spawn ladder opened
+#   and its first incarnation seated, one step at a time; then the worker's
+#   adoption into store custody and a store-owned identity's record owed
+#   its seat, each or not, under the host's changes hold, in a running and
+#   a stopped mob (or a candidate composition before the seed); a start's
+#   pass of each name its scan read no row of; the purge with each receipt,
+#   by the host operator or not, of a mob whose scan read rows or none; a
+#   change's admission; and the import of each kind of record for each
+#   name, a roster's adoption or not, over each row of its name, naming the
+#   worker's session or another: exactly one arm answers each
+#   (AuditCycleExactlyOne), the purge changes nothing of the machine but
+#   its own fact (AuditPurgeTouchesNothingElse) and goes on only when the
+#   scan read rows (AuditPurgeNeedsRows), an import restores a record only
+#   where the store holds no row of its name
+#   (AuditImportRestoresOverNoRow), binds a member in place on its
+#   incarnation (AuditImportKeepsTheIncarnation) and a plain member only on
+#   the session its record names (AuditImportBindsOnTheRecordsSession), and
+#   a Created entry whose row was purged stays reserved (the generated
+#   created_origin_without_row_is_unreadable). Its domains add a third
+#   identity.
+#
+# Its doors part (--part doors, 0.9.11):
+#
+# - doors: member 1 recovered externally addressable and bound, its
+#   Declared entry row replayed or not; member 2 recovered externally
+#   addressable or not, bound to its session or not, its peer registered or
+#   not; the scan of either member's created entry row (Present or
+#   Unreadable); and work of either origin to either member under either
+#   runtime and fence token, naming no expected session, member 1's or
+#   member 2's: no external work is admitted to an identity entry or to a
+#   name reserved unreadable, by its session or its peer
+#   (AuditDoorsNoExternalEntryAdmission), at most one arm answers every
+#   piece of work, the stale session refusal among them
+#   (AuditDoorsAtMostOne), and external work to an entry or a reserved name
+#   is refused as an identity member, whatever session it names, whenever
+#   no refusal of a member that is not there, not live, not current or
+#   retiring answers it (AuditDoorsEntryExactlyOne). Internal work to an
+#   entry, the host's own door, is admitted as to any member, and the stale
+#   session refusal still answers what its guard spares: a worker's external
+#   work and an entry's internal work that name a moved session (two
+#   witnesses).
+#
+# Every run checks every generated invariant (the created entries' among
+# them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
+# worker_reconcile_spares_entries and destroyed_mob_holds_no_member_lifecycle),
+# the scan run its AuditScanUnseatedCauses (the scan records a Created
+# entry unseated only owed its seat, awaiting its host's preparation or
+# archived), and the doors run its AuditDoorsNoExternalEntryAdmission and
+# AuditDoorsAtMostOne, in their witness and mutant runs too.
+#
+# Each run must finish without an error, reach at least its floor of distinct
+# states and fire every action of its covered list (TLC coverage; an arm a
+# run fires only through a named wrapper is read under the wrapper's name,
+# by the closed table covered_aliases): an arm that answers exactly the
+# states its guard names (a refusal of a reserved name, say) has the
+# coverage check as its witness. The runner also requires
+# every witness reached (a step goal's negation violated), and --mutants
+# seeds the defects listed at its end, each of which TLC must refuse with
+# the named violation: defects of the created entries' invariants and
+# properties and of the new guards a reachable state needs. The list names
+# what each defect breaks; not every invariant or property has a mutant of
+# its own. The created_custody_local_kept, recovered_removal_unmarked,
+# accepted_ladder_refused, stale_session_spares_no_external and
+# stale_session_spares_no_entry mutants instead require a witness
+# unreachable (their runs end without an error). An anchor this script expects but
+# cannot find fails the run. Each TLC run is held to the canonical lane's
+# per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
+set -euo pipefail
+
+run_mutants=false
+run_part=all
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mutants)
+      run_mutants=true
+      shift
+      ;;
+    --part)
+      run_part="${2:-}"
+      shift 2 || { echo "error: --part needs a part or a run" >&2; exit 2; }
+      ;;
+    *) break ;;
+  esac
+done
+# usage: part_of <run>: the part that checks <run>.
+part_of() {
+  case "$1" in
+    scan|reseat|names|placed) echo recovery ;;
+    admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered|edges|adoption|cycle) echo changes ;;
+    doors) echo doors ;;
+    *) return 1 ;;
+  esac
+}
+# A part is all, recovery, changes, doors, or a comma-separated list of runs
+# (a CI shard names the runs it checks).
+case "${run_part}" in
+  all|recovery|changes|doors) ;;
+  *)
+    IFS=, read -r -a listed_runs <<< "${run_part}"
+    for listed_run in "${listed_runs[@]}"; do
+      if ! part_of "${listed_run}" > /dev/null; then
+        echo "error: unknown part '${listed_run}' (recovery, changes, doors or runs)" >&2
+        exit 2
+      fi
+    done
+    ;;
+esac
+# usage: in_part <run>: whether the selected part checks <run>.
+in_part() {
+  [[ "${run_part}" == "all" || "${run_part}" == "$(part_of "$1")" || ",${run_part}," == *",$1,"* ]]
+}
+# Each run's distinct-state floor is 90% of the whole space its first green
+# run found, so a guard that silently disables arms fails the lane. A new
+# run's floor may be `unmeasured` until then, which checks no floor and
+# prints the run's distinct-state count.
+scan_states=3264
+reseat_states=13193
+names_states=2880
+placed_states=198
+admit_states=12
+commit_states=7680
+update_states=70
+removal_states=38976
+archive_states=2016
+preparation_states=2790
+prepverdicts_states=294
+placement_states=105
+unlist_states=336
+recovered_states=180
+edges_states=3089
+adoption_states=1620
+cycle_states=2599
+doors_states=576
+
+# Every arm each run must fire. TLC names an arm after the generated
+# operator where it is applied plainly (an audit wrapper that only applies
+# it, or a disjunct); one a run fires only through a named wrapper whose
+# conjunct restricts it is read under the wrapper's name (covered_aliases
+# below).
+scan_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntrySeatedStopped
+  RecoverCreatedIdentityEntryRetiredRunning
+  RecoverCreatedIdentityEntryRetiredStopped
+  RecoverCreatedIdentityEntryPendingRunning
+  RecoverCreatedIdentityEntryPendingStopped
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryTombstoneStopped
+  RecoverCreatedIdentityEntryUnreadableRunning
+  RecoverCreatedIdentityEntryUnreadableStopped
+  RecoverCreatedIdentityEntryRemovingRunning
+  RecoverCreatedIdentityEntryRemovingStopped
+  RecoverCreatedIdentityEntryArchivingRunning
+  RecoverCreatedIdentityEntryArchivingStopped
+  RecoverCreatedIdentityEntryArchivedRunning
+  RecoverCreatedIdentityEntryArchivedStopped
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  SealBootMaterializationPlan
+)
+
+reseat_covered_actions=(
+  RecoverCreatedIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntryRetiredRunning
+  RecoverCreatedIdentityEntryPendingRunning
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SeedMemberResidencyRunning
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  AbortSpawnExecActiveRunning
+  CommitDormantSeatRunning
+  ReconcileRunning
+  EnsureMemberRunningExisting
+  EnsureMemberRunningMissing
+  BeginPlacedCompletionLifecycleQuiesceFresh
+  DestroyFromAny
+)
+
+names_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntrySeatedStopped
+  RecoverCreatedIdentityEntryRetiredRunning
+  RecoverCreatedIdentityEntryRetiredStopped
+  RecoverCreatedIdentityEntryPendingRunning
+  RecoverCreatedIdentityEntryPendingStopped
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryTombstoneStopped
+  RecoverCreatedIdentityEntryUnreadableRunning
+  RecoverCreatedIdentityEntryUnreadableStopped
+  SeedMemberResidencyRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryRefusedNameHeldByWorker
+  DeclareIdentityEntryRefusedNonAuthoritative
+  DeclareIdentityEntryRefusedNameOwnedByCreated
+  DeclareIdentityEntryRefusedNameTombstoned
+  DeclareIdentityEntryRefusedNameUnreadable
+  DeclareIdentityEntryMobNotRunningStopped
+  SealDeclaredRosterSealed
+  SealDeclaredRosterNonAuthoritative
+  SealDeclaredRosterMobNotRunningStopped
+  AdoptLegacyIdentityEntryAdopted
+  AdoptLegacyIdentityEntryNameHeldByWorker
+  AdoptLegacyIdentityEntryNotAdoptable
+  AdoptLegacyIdentityEntryNotSeated
+  AdoptLegacyIdentityEntryAlreadyAnEntry
+  AdoptLegacyIdentityEntryOtherCustody
+  AdoptLegacyIdentityEntryNonAuthoritative
+  AdoptLegacyIdentityEntryMobNotRunningStopped
+  ResolveAgentLaneMemberAdmissionAdmittedRunning
+  ResolveAgentLaneMemberAdmissionAdmittedStopped
+  ResolveAgentLaneMemberAdmissionIdentityMemberRunning
+  ResolveAgentLaneMemberAdmissionIdentityMemberStopped
+  ResolveAgentLaneMemberAdmissionUnreadableNameRunning
+  ResolveAgentLaneMemberAdmissionUnreadableNameStopped
+  ProbeMemberAdmissionDuplicateRunning
+  ProbeMemberAdmissionDuplicateStopped
+  ProbeMemberAdmissionAdmittedRunning
+  ProbeMemberAdmissionAdmittedStopped
+  ProbeMemberAdmissionIdentityMemberRunning
+  ProbeMemberAdmissionIdentityMemberStopped
+  ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning
+  ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped
+  ProbeMemberAdmissionIdentityNameReservedRunning
+  ProbeMemberAdmissionIdentityNameReservedStopped
+)
+
+placed_covered_actions=(
+  BindOwnerBridgeSessionRunning
+  BeginHostBindFreshUnplaced
+  CommitHostBind
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecRemote
+  CommitSpawnMembershipRemote
+  CommitSpawnActivationFinalRunning
+  RecoverCreatedIdentityEntryRetiredRunning
+  RecoverCreatedIdentityEntryPendingRunning
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+)
+
+admit_covered_actions=(
+  SeedMemberResidencyRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  SetIdentityChangesHeldRunning
+  SetIdentityChangesHeldStopped
+  AdmitIdentityChangeAdmitted
+  AdmitIdentityChangeReplayed
+  AdmitIdentityChangeOperationReused
+  AdmitIdentityChangeNonAuthoritative
+  AdmitIdentityChangeChangesHeld
+  AdmitIdentityChangeDecisionUnbound
+  AdmitIdentityChangeDecisionExpired
+  AdmitIdentityChangeImportedNotHostOperator
+  AdmitIdentityChangeGrantRevoked
+  AdmitIdentityChangeStaleSpec
+  AdmitIdentityChangeMobNotRunningStopped
+)
+
+commit_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SeedMemberResidencyRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  SetIdentityChangesHeldRunning
+  SetIdentityChangesHeldStopped
+  RecordCreatedIdentityEntryRecorded
+  RecordCreatedIdentityEntryNameHeldByIdentity
+  RecordCreatedIdentityEntryNameHeldByWorker
+  RecordCreatedIdentityEntryNameTombstoned
+  RecordCreatedIdentityEntryNameUnreadable
+  RecordCreatedIdentityEntryNonAuthoritative
+  RecordCreatedIdentityEntryChangesHeld
+  RecordCreatedIdentityEntryMobNotRunningStopped
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  CommitSpawnMembershipFresh
+  AbortSpawnExecActiveRunning
+  SealBootMaterializationPlan
+)
+
+update_covered_actions=(
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryRuntimeModeRestamp
+  DeclareIdentityEntryRoleMigrate
+  DeclareIdentityEntryRoleMigrationHeld
+  DeclareIdentityEntryLifecycleInFlight
+  RecordCreatedIdentityEntryRecorded
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+)
+
+removal_covered_actions=(
+  SeedMemberResidencyRunning
+  SetIdentityChangesHeldRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  RecoverCreatedIdentityEntryUnreadableRunning
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryRefusedNameTombstoned
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  RetireRunningReleasingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  ObserveMemberRetirementArchivedLiveStopped
+  BeginPlacedCompletionLifecycleQuiesceFresh
+  AdmitDestroyCleanup
+  AdmitDestroyMemberRetireArchiveOnlyRunning
+  SessionIngressDetachedForMobDestroyRunning
+  ObserveDestroyMemberRetirementArchivedLiveRunning
+  RecordCreatedIdentityEntryRecorded
+  ArchiveIdentityEntryArchived
+  RemoveIdentityEntryRetiring
+  RemoveIdentityEntryRemoved
+  RemoveIdentityEntryAlreadyRemoved
+  RemoveIdentityEntryUnknown
+  RemoveIdentityEntryInFlight
+  RemoveIdentityEntryNameUnreadable
+  RemoveIdentityEntryNonAuthoritative
+  RemoveIdentityEntryChangesHeld
+  RemoveIdentityEntryMobNotRunningStopped
+)
+
+archive_covered_actions=(
+  SeedMemberResidencyRunning
+  SetIdentityChangesHeldRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  RecoverCreatedIdentityEntryUnreadableRunning
+  DeclareIdentityEntrySeatOwed
+  RecordCreatedIdentityEntryRecorded
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  CommitSpawnMembershipFresh
+  AbortSpawnExecActiveRunning
+  RetireRunningReleasingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  ArchiveIdentityEntryArchiving
+  ArchiveIdentityEntryArchived
+  ArchiveIdentityEntryAlreadyArchived
+  ArchiveIdentityEntryOwnedByRoster
+  ArchiveIdentityEntryUnknown
+  ArchiveIdentityEntryInFlight
+  ArchiveIdentityEntryNameUnreadable
+  ArchiveIdentityEntryNonAuthoritative
+  ArchiveIdentityEntryChangesHeld
+  ArchiveIdentityEntryMobNotRunningStopped
+  UnarchiveIdentityEntryRestored
+  UnarchiveIdentityEntryNotArchived
+  UnarchiveIdentityEntryOwnedByRoster
+  UnarchiveIdentityEntryUnknown
+  UnarchiveIdentityEntryInFlight
+  UnarchiveIdentityEntryNameUnreadable
+  UnarchiveIdentityEntryNonAuthoritative
+  UnarchiveIdentityEntryChangesHeld
+  UnarchiveIdentityEntryMobNotRunningStopped
+  ArchiveIdentityEntryPreparationPending
+  DeclareIdentityEntryKept
+  DeclareIdentityEntryLifecycleInFlight
+  DeclareIdentityEntryRecordOnly
+  RemoveIdentityEntryRetiring
+  RemoveIdentityEntryRemoved
+  RemoveIdentityEntryInFlight
+)
+
+preparation_covered_actions=(
+  DeclareIdentityEntryPreparationPending
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryLifecycleInFlight
+  RecordCreatedIdentityEntryRecorded
+  BeginPreparationConstructionHeld
+  SettleHostPreparationSeat
+  SettleHostPreparationActivationAccepted
+  EndPreparationConstructionEndedRunning
+  EndPreparationConstructionEndedStopped
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  CommitSpawnMembershipFresh
+  AbortSpawnExecActiveRunning
+  RemoveIdentityEntryRemoved
+  RemoveIdentityEntryInFlight
+  ArchiveIdentityEntryPreparationPending
+  ArchiveIdentityEntryOwnedByRoster
+  DeclareIdentityEntryRecordOnly
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+)
+
+prepverdicts_covered_actions=(
+  SeedMemberResidencyRunning
+  DeclareIdentityEntryPreparationPending
+  DeclareIdentityEntrySeatOwed
+  RecordCreatedIdentityEntryRecorded
+  BeginPreparationConstructionHeld
+  BeginPreparationConstructionNotPending
+  BeginPreparationConstructionNotConstructed
+  BeginPreparationConstructionConstructionOpen
+  BeginPreparationConstructionNonAuthoritative
+  BeginPreparationConstructionMobNotRunningStopped
+  SettleHostPreparationSeat
+  SettleHostPreparationActivationAccepted
+  SettleHostPreparationNotPending
+  SettleHostPreparationConstructionRequired
+  SettleHostPreparationConstructionOpen
+  SettleHostPreparationStaleAttempt
+  SettleHostPreparationExpired
+  SettleHostPreparationMismatch
+  SettleHostPreparationActivationPending
+  SettleHostPreparationNonAuthoritative
+  SettleHostPreparationMobNotRunningStopped
+  EndPreparationConstructionEndedRunning
+  EndPreparationConstructionEndedStopped
+  EndPreparationConstructionNotOpenRunning
+  EndPreparationConstructionNotOpenStopped
+  EndPreparationConstructionActivationPendingRunning
+  EndPreparationConstructionActivationPendingStopped
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+)
+
+placement_covered_actions=(
+  BindOwnerBridgeSessionRunning
+  BeginHostBindFreshUnplaced
+  CommitHostBind
+  RecordCreatedIdentityEntryRecorded
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecRemote
+  AbortSpawnExecMaterializePendingRunning
+  CommitSpawnMembershipRemote
+  BeginSpawnExecFreshPeerOnly
+  AbortSpawnExecActiveRunning
+  CommitSpawnMembershipFreshPeerOnly
+  CommitSpawnActivationFinalRunning
+)
+
+unlist_covered_actions=(
+  SeedMemberResidencyRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryKept
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  AbortSpawnExecActiveRunning
+  RetireRunningReleasingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  RecordCreatedIdentityEntryRecorded
+  RecordCreatedIdentityEntryNameHeldByIdentity
+  UnlistIdentityEntryRetiring
+  UnlistIdentityEntryRemoved
+  UnlistIdentityEntryDeferred
+  UnlistIdentityEntryNotADeclaredEntry
+  UnlistIdentityEntryNonAuthoritative
+  UnlistIdentityEntryMobNotRunningStopped
+)
+
+# The recovered run scans its one row through a named wrapper of one arm
+# for each arm that answers it (C1OneRow*, each gated on no row's mark):
+# the alias table reads the Removing, Archiving and Unreadable arms under
+# theirs. It scans no Present row, so the Seated arm's coverage is the scan
+# run's.
+recovered_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverMemberPeerEndpointFreshRunning
+  RecoverIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntryRemovingRunning
+  RecoverCreatedIdentityEntryArchivingRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SealBootMaterializationPlan
+  RetireRunningReleasingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  ObserveMemberRetirementArchivedLiveStopped
+)
+
+# The edges run fires every arm of an owned edge's declaration, end, plain
+# unwire's admission and recovery in a running and a stopped mob, of its
+# realization's verdict and of an import's restoration of one (their
+# completed and destroyed arms, and a stopped mob's verdict on an edge out
+# of force, are arm_coverage_not_covered.txt's), and the removal and
+# archive arms that end or keep an edge.
+edges_covered_actions=(
+  DeclareOwnedIdentityEdgeDeclared
+  DeclareOwnedIdentityEdgeAlreadyOwned
+  DeclareOwnedIdentityEdgePeerUnknown
+  DeclareOwnedIdentityEdgeOwnerInvalid
+  DeclareOwnedIdentityEdgeMobNotRunningStopped
+  EndOwnedIdentityEdgeEnded
+  EndOwnedIdentityEdgeNotOwner
+  EndOwnedIdentityEdgeAbsent
+  EndOwnedIdentityEdgeNonAuthoritative
+  EndOwnedIdentityEdgeChangesHeld
+  EndOwnedIdentityEdgeMobNotRunningStopped
+  AdmitMemberUnwireAdmittedRunning
+  AdmitMemberUnwireAdmittedStopped
+  AdmitMemberUnwireOwnedEdgeRunning
+  AdmitMemberUnwireOwnedEdgeStopped
+  RecoverOwnedIdentityEdgeRecoveredRunning
+  RecoverOwnedIdentityEdgeRecoveredStopped
+  RecoverOwnedIdentityEdgeSkippedRunning
+  RecoverOwnedIdentityEdgeSkippedStopped
+  AdmitOwnedEdgeRealizationRealizeRunning
+  AdmitOwnedEdgeRealizationRealizeStopped
+  AdmitOwnedEdgeRealizationNotOwnedRunning
+  AdmitOwnedEdgeRealizationNotOwnedStopped
+  AdmitOwnedEdgeRealizationEndNotAnIdentityRunning
+  RestoreOwnedIdentityEdgeRestored
+  RestoreOwnedIdentityEdgeSkipped
+  RestoreOwnedIdentityEdgeMobNotRunningStopped
+  RemoveIdentityEntryRetiring
+  RemoveIdentityEntryRemoved
+  ArchiveIdentityEntryArchiving
+  ArchiveIdentityEntryArchived
+  UnarchiveIdentityEntryRestored
+)
+
+# The adoption run fires every arm of an adoption in a running mob and its
+# stopped arm (its completed and destroyed arms are
+# arm_coverage_not_covered.txt's), with the steps it stages.
+adoption_covered_actions=(
+  AdoptIdentityIntoStoreAdopted
+  AdoptIdentityIntoStoreNotAdoptable
+  AdoptIdentityIntoStorePredecessorMismatch
+  AdoptIdentityIntoStoreAdmissionUnsettled
+  AdoptIdentityIntoStoreDeclaredApplyOpen
+  AdoptIdentityIntoStoreNameUnreadable
+  AdoptIdentityIntoStoreNameTombstoned
+  AdoptIdentityIntoStoreNonAuthoritative
+  AdoptIdentityIntoStoreChangesHeld
+  AdoptIdentityIntoStoreMobNotRunningStopped
+  UnlistIdentityEntryRetiring
+  OpenDeclaredApplyOpened
+  CloseDeclaredApplyRunning
+)
+
+# The cycle run fires every arm of the purge, of a start's pass of a name
+# without a row and of an import in a running mob and their stopped arms
+# (the completed and destroyed ones are arm_coverage_not_covered.txt's),
+# and the admission's arm after a purge.
+cycle_covered_actions=(
+  PurgeIdentityRowsPurged
+  PurgeIdentityRowsNonAuthoritative
+  PurgeIdentityRowsReplayed
+  PurgeIdentityRowsOperationReused
+  PurgeIdentityRowsRowsPurged
+  PurgeIdentityRowsNotHostOperator
+  PurgeIdentityRowsChangesNotHeld
+  PurgeIdentityRowsNothingToPurge
+  PurgeIdentityRowsMobNotRunningStopped
+  RecoverRowlessCreatedEntryReservedRunning
+  RecoverRowlessCreatedEntryReservedStopped
+  RecoverRowlessCreatedEntryKeptRunning
+  RecoverRowlessCreatedEntryKeptStopped
+  ImportIdentityRecordRestoredInPlace
+  ImportIdentityRecordRestoredOwedSeat
+  ImportIdentityRecordRestoredPending
+  ImportIdentityRecordRestoredArchived
+  ImportIdentityRecordRestoredTombstone
+  ImportIdentityRecordRestoredByAdoption
+  ImportIdentityRecordUnchanged
+  ImportIdentityRecordNameTakenMeanwhile
+  ImportIdentityRecordUnsettled
+  ImportIdentityRecordNonAuthoritative
+  ImportIdentityRecordChangesHeld
+  ImportIdentityRecordRowsPurged
+  ImportIdentityRecordMobNotRunningStopped
+  AdmitIdentityChangeRowsPurged
+)
+
+# The doors run's work arms change nothing: each fires into known states,
+# so its coverage counts the successor states it generated. The refusals
+# of a member that is not live or retiring answer no work here (no member
+# retires), and the scan of a row reserves member 1's Declared name only
+# through the Unreadable arm.
+doors_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverIdentityEntrySeatedRunning
+  RegisterMemberPeerRunning
+  RecoverCreatedIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SubmitWorkRunningExternal
+  SubmitWorkRunningExternalPeerOnly
+  SubmitWorkRunningInternal
+  SubmitWorkRunningInternalPeerOnly
+  ResolveSubmitWorkRejectionMemberNotFound
+  ResolveSubmitWorkRejectionStaleFenceToken
+  ResolveSubmitWorkRejectionIdentityMember
+  ResolveSubmitWorkRejectionIdentityMemberUnreadableName
+  ResolveSubmitWorkRejectionNotExternallyAddressable
+  ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable
+  ResolveSubmitWorkRejectionStaleSessionBinding
+)
+
+# A covered arm a run fires only through a named wrapper whose conjunct
+# restricts its exploration: TLC's coverage names such an action after the
+# wrapper (an action whose body is a conjunction is named after its
+# operator), so in that run the arm's coverage is read under the wrapper's
+# name. A closed table of <run>:<wrapper>:<arm>; never a match on a
+# coverage line's location.
+covered_aliases=(
+  "scan:C1RecoverInBootOrder:RecoverRosterMemberRunning"
+  "names:C1RecoverInBootOrder:RecoverRosterMemberRunning"
+  "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly"
+  "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly"
+  "recovered:C1OneRowRemoving:RecoverCreatedIdentityEntryRemovingRunning"
+  "recovered:C1OneRowArchiving:RecoverCreatedIdentityEntryArchivingRunning"
+  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning"
+  "cycle:CycleRestoresInPlace:ImportIdentityRecordRestoredInPlace"
+  "cycle:CycleRestoresOwedSeat:ImportIdentityRecordRestoredOwedSeat"
+  "cycle:CycleRestoresPending:ImportIdentityRecordRestoredPending"
+  "cycle:CycleRestoresArchived:ImportIdentityRecordRestoredArchived"
+  "cycle:CycleRestoresTombstone:ImportIdentityRecordRestoredTombstone"
+  "cycle:CycleRestoresByAdoption:ImportIdentityRecordRestoredByAdoption"
+)
+
+spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ci_cfg="${spec_dir}/ci.cfg"
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/created-identity-audit.XXXXXX")"
+# An interrupted or killed run ends its TLC child too (tlc_run_cap.sh).
+trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -rf "${work_dir}"' EXIT
+
+replace_exact_line() {
+  local from="$1" to="$2" file="$3"
+  local count
+  count="$(grep -cxF -- "${from}" "${file}" || true)"
+  if [[ "${count}" != "1" ]]; then
+    echo "error: expected exactly one line '${from}' in ${ci_cfg}, found ${count}" >&2
+    exit 1
+  fi
+  FROM="${from}" TO="${to}" awk '$0 == ENVIRON["FROM"] { print ENVIRON["TO"]; next } { print }' \
+    "${file}" > "${file}.next"
+  mv "${file}.next" "${file}"
+}
+
+# The VIEW leaves out model_step_count, topology_epoch and the identity life
+# marker (identity_life_resets, identity_life_ends), so the generated
+# model must read them nowhere but in their own updates, Init, the UNCHANGED
+# frames and the generated profiles' state constraints (which the audit does
+# not use). Prints their positions in the `vars` tuple.
+view_counter_positions() {
+  MODEL="${spec_dir}/model.tla" python3 - <<'PY'
+import os, re, sys
+lines = open(os.environ["MODEL"]).read().split("\n")
+allowed = {
+    "model_step_count": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ model_step_count = 0$",
+        r"    /\\ model_step_count' = model_step_count \+ 1$",
+        r"CiStateConstraint == ",
+        r"DeepStateConstraint == ",
+    ],
+    "topology_epoch": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ topology_epoch = 0$",
+        r"    /\\ topology_epoch' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+    ],
+    "identity_life_resets": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_resets = 0$",
+        r"    /\\ identity_life_resets' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+    ],
+    "identity_life_ends": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_ends = ",
+        r"    /\\ identity_life_ends' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+        r"CiStateConstraint == ",
+        r"DeepStateConstraint == ",
+    ],
+}
+for name, patterns in allowed.items():
+    word = re.compile(r"\b" + name + r"\b")
+    for number, line in enumerate(lines, 1):
+        if word.search(line) and not any(re.match(p, line) for p in patterns):
+            sys.exit(f"error: the audit's VIEW leaves out {name}, but model.tla line {number} reads it: {line[:160]}")
+tuples = [line for line in lines if line.startswith("vars == << ") and line.endswith(" >>")]
+if len(tuples) != 1:
+    sys.exit("error: expected one `vars == << ... >>` tuple in model.tla")
+names = [name.strip() for name in tuples[0][len("vars == << "):-len(" >>")].split(",")]
+for name in allowed:
+    if names.count(name) != 1:
+        sys.exit(f"error: expected {name} once in the vars tuple of model.tla")
+print(" ".join(str(names.index(name) + 1) for name in allowed))
+PY
+}
+view_positions="$(view_counter_positions)"
+read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_positions}"
+
+# usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
+#                  [without-totality|without-totality-or-properties]
+# without-totality leaves out the run's ENABLED totality invariants;
+# without-totality-or-properties its action properties too (its safety
+# invariants and the generated ones stay).
+write_cfg() {
+  local run="$1" cfg="$2" invariants="$3" properties="$4" totality="${5:-}"
+  local spec run_properties run_invariants run_safety="" section_end
+  cp "${ci_cfg}" "${cfg}"
+  case "${run}" in
+    scan)
+      spec="ScanSpec"
+      run_properties="
+  AuditCreatedEntryNeverDeclared"
+      run_invariants="
+  AuditRecoverExactlyOne"
+      run_safety="
+  AuditScanUnseatedCauses"
+      ;;
+    reseat)
+      spec="ReseatSpec"
+      run_properties="
+  AuditNoLadderForReservedName
+  AuditLadderCustodyMatchesOrigin
+  AuditCreatedSeatTakesRecord
+  AuditNoSeatUnderReservedName"
+      run_invariants="
+  AuditReseatRecoverExactlyOne
+  AuditReseatProbeExactlyOne"
+      ;;
+    names)
+      spec="NamesSpec"
+      run_properties="
+  AuditSealNeverTouchesCreated
+  AuditCreatedEntryNeverDeclared"
+      run_invariants="
+  AuditNamesDeclareExactlyOne
+  AuditSealExactlyOne
+  AuditNamesAdoptionExactlyOne
+  AuditNamesLaneExactlyOne
+  AuditNamesProbeExactlyOne"
+      ;;
+    placed)
+      spec="PlacedScanSpec"
+      run_properties="
+  AuditNoSeatUnderReservedName"
+      run_invariants="
+  AuditRecoverExactlyOne"
+      ;;
+    admit)
+      spec="AdmitSpec"
+      run_properties=""
+      run_invariants="
+  AuditAdmitExactlyOne"
+      ;;
+    commit)
+      spec="CommitSpec"
+      run_properties="
+  AuditRecordTakesFreeNames
+  AuditRecordCauseFollowsFacts
+  AuditHeldNeverSeatedDormant"
+      run_invariants="
+  AuditRecordExactlyOne"
+      ;;
+    update)
+      spec="UpdateSpec"
+      run_properties=""
+      run_invariants="
+  AuditUpdateExactlyOne"
+      # The parity is checked in its mutant runs too: its mutant keeps
+      # exactly one arm per update.
+      run_safety="
+  AuditUpdateParity"
+      ;;
+    removal)
+      spec="RemovalSpec"
+      run_properties="
+  AuditRemovalTombstones"
+      run_invariants="
+  AuditRemovalExactlyOne"
+      ;;
+    archive)
+      spec="ArchiveSpec"
+      # TLC reports the first property a step breaks in this order: a step
+      # that seats an archived identity breaks both archive properties, and
+      # is reported as the seat; an update that changes an archived
+      # identity's standing in a held mob (the run declares without the
+      # change's admission, which refuses a held change) breaks the name
+      # property's restore branch too, and is reported as the update.
+      run_properties="
+  AuditArchivedNeverSeated
+  AuditStoreUpdateKeepsStanding
+  AuditArchivedKeepsItsName
+  AuditPendingNeverArchived"
+      run_invariants="
+  AuditArchiveExactlyOne"
+      ;;
+    preparation)
+      spec="PrepSpec"
+      run_properties="
+  AuditPendingSeatedOnlyByItsActivation
+  AuditConstructedNeverSettledWithoutAttempt
+  AuditPendingNeverArchived
+  AuditStoreUpdateKeepsStanding"
+      run_invariants="
+  AuditPrepArchiveExactlyOne"
+      run_safety="
+  AuditConstructionAwaitsPreparation
+  AuditAcceptedActivationIsFinal"
+      ;;
+    prepverdicts)
+      spec="PrepVerdictsSpec"
+      run_properties=""
+      run_invariants="
+  AuditPrepExactlyOne"
+      run_safety="
+  AuditConstructionAwaitsPreparation
+  AuditAcceptedActivationIsFinal"
+      ;;
+    placement)
+      spec="PlacementSpec"
+      run_properties="
+  AuditPlacedCreatedCustodyHosted"
+      run_invariants=""
+      ;;
+    unlist)
+      spec="UnlistSpec"
+      run_properties="
+  AuditUnlistDecidesItsIdentityAlone
+  AuditRecordTakesFreeNames"
+      run_invariants="
+  AuditUnlistExactlyOne"
+      ;;
+    recovered)
+      spec="RecoveredSpec"
+      # A replay that seats a member under an archived identity breaks both
+      # archive properties, and is reported as the seat.
+      run_properties="
+  AuditRemovalTombstones
+  AuditArchivedNeverSeated
+  AuditArchivedKeepsItsName"
+      run_invariants="
+  AuditRecoverExactlyOne"
+      ;;
+    edges)
+      spec="EdgesSpec"
+      run_properties="
+  AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd
+  AuditOwnedEdgeKeepsItsOwner
+  AuditOnlyTheOwnerEndsItsEdge
+  AuditOwnedEdgeBindsIdentitiesOnly
+  AuditRestoreIsTheRecovery"
+      run_invariants="
+  AuditEdgesExactlyOne"
+      ;;
+    adoption)
+      spec="AdoptionSpec"
+      run_properties="
+  AuditAdoptionKeepsTheIncarnation
+  AuditAdoptionTakesASettledMember
+  AuditAdoptionTakesNoOverriddenWorker"
+      run_invariants="
+  AuditAdoptExactlyOne"
+      ;;
+    cycle)
+      spec="CycleSpec"
+      run_properties="
+  AuditPurgeTouchesNothingElse
+  AuditPurgeNeedsRows
+  AuditImportKeepsTheIncarnation
+  AuditImportBindsOnTheRecordsSession"
+      run_invariants="
+  AuditCycleExactlyOne
+  AuditImportRestoresOverNoRow"
+      ;;
+    doors)
+      spec="DoorsSpec"
+      run_properties=""
+      run_invariants="
+  AuditDoorsEntryExactlyOne"
+      # The admission and overlap invariants hold in every state, so its
+      # mutant runs check them too: the admission first, which an entry's
+      # admitted external work breaks before the overlap it also makes.
+      run_safety="
+  AuditDoorsNoExternalEntryAdmission
+  AuditDoorsAtMostOne"
+      ;;
+    *)
+      echo "error: unknown audit run '${run}'" >&2
+      exit 1
+      ;;
+  esac
+  case "${totality}" in
+    "") ;;
+    without-totality) run_invariants="" ;;
+    without-totality-or-properties) run_invariants="" run_properties="" ;;
+    *)
+      echo "error: unknown write_cfg mode '${totality}'" >&2
+      exit 1
+      ;;
+  esac
+  # The declared apply's runs' domains (identity_entry_audit.sh); the edges
+  # run adds a third identity, its third end, and the adoption run one no
+  # member holds.
+  local identities='{"agentidentity_1", "agentidentity_2"}'
+  if [[ "${run}" == "edges" || "${run}" == "adoption" || "${run}" == "cycle" ]]; then
+    identities='{"agentidentity_1", "agentidentity_2", "agentidentity_3"}'
+  fi
+  replace_exact_line "  AgentIdentityValues = {}" "  AgentIdentityValues = ${identities}" "${cfg}"
+  replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"agentruntimeid_1", "agentruntimeid_2", "agentruntimeid_3"}' "${cfg}"
+  replace_exact_line "  FenceTokenValues = {1}" "  FenceTokenValues = {1, 2, 3}" "${cfg}"
+  replace_exact_line "  GenerationValues = {1}" "  GenerationValues = {0, 1}" "${cfg}"
+  replace_exact_line "  MobIdValues = {}" '  MobIdValues = {"mobid_1"}' "${cfg}"
+  replace_exact_line "  SessionIdValues = {}" '  SessionIdValues = {"sessionid_1", "sessionid_2", "sessionid_3"}' "${cfg}"
+  replace_exact_line "  StringValues = {}" '  StringValues = {"profile_1", "profile_2", "model_1", "digest_1", "reason_1", "code_1", "objective_1"}' "${cfg}"
+  replace_exact_line "  ResumeAttemptIdValues = {}" '  ResumeAttemptIdValues = {"resumeattemptid_1"}' "${cfg}"
+  replace_exact_line "CONSTANTS" "CONSTANTS
+  AuditStepIndex = ${step_index}
+  AuditEpochIndex = ${epoch_index}
+  AuditLifeResetsIndex = ${life_resets_index}
+  AuditLifeEndsIndex = ${life_ends_index}
+  AuditMaxAttempts = 1" "${cfg}"
+  replace_exact_line "SPECIFICATION Spec" "SPECIFICATION ${spec}" "${cfg}"
+  replace_exact_line "INVARIANTS" "PROPERTIES${run_properties}${properties}
+INVARIANTS" "${cfg}"
+  # The audit's invariants follow the generated ones: TLC reports the first
+  # invariant a state breaks in the config's order, so a mutant seeded
+  # against a generated invariant is refused by that invariant even where
+  # its state also breaks an audit invariant.
+  section_end="$(awk '/^INVARIANTS$/ { inside = 1; next } inside && /^[A-Z]/ { print; exit }' "${cfg}")"
+  if [[ "${section_end}" != "CONSTRAINTS" ]]; then
+    echo "error: expected the CONSTRAINTS section right after INVARIANTS in ${ci_cfg}, found '${section_end}'" >&2
+    exit 1
+  fi
+  local listed="${run_invariants}${run_safety}${invariants}"
+  replace_exact_line "CONSTRAINTS" "${listed#$'\n'}
+VIEW AuditView
+CONSTRAINTS" "${cfg}"
+  replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
+  printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
+}
+
+# The generated model's initial predicate needs a deep JVM stack on both the
+# launcher (JDK_JAVA_OPTIONS) and the VM (JAVA_TOOL_OPTIONS); respect an
+# explicit caller policy.
+if [[ " ${JAVA_TOOL_OPTIONS:-} " != *" -Xss"* ]]; then
+  export JAVA_TOOL_OPTIONS="-Xss512m -XX:+UseParallelGC${JAVA_TOOL_OPTIONS:+ ${JAVA_TOOL_OPTIONS}}"
+fi
+if [[ " ${JDK_JAVA_OPTIONS:-} " != *" -Xss"* ]]; then
+  export JDK_JAVA_OPTIONS="-Xss512m${JDK_JAVA_OPTIONS:+ ${JDK_JAVA_OPTIONS}}"
+fi
+workers="${TLC_WORKERS:-auto}"
+# shellcheck source=../meerkat_machine/tlc_run_cap.sh
+source "${spec_dir}/../meerkat_machine/tlc_run_cap.sh"
+cd "${spec_dir}"
+
+# usage: run_tlc <name> <cfg> [extra tlc args...]; checks the audit module in
+# the current directory and leaves the log at ${work_dir}/<name>.log
+run_tlc() {
+  local name="$1" cfg="$2"
+  shift 2
+  local status=0
+  # Witness and mutant runs end in a violation by design: -noGenerateSpecTE
+  # keeps TLC from writing trace-exploration files into the spec directory.
+  tlc_run_capped created_identity_audit "${name}" "${work_dir}/${name}.log" \
+    -workers "${workers}" -metadir "${work_dir}/${name}-states" -noGenerateSpecTE \
+    -config "${cfg}" "$@" created_identity_audit.tla || status=$?
+  return "${status}"
+}
+
+tlc_args=("$@")
+
+# usage: check_space <run> <states of its first green run> <covered action...>
+# runs <run> over its whole space with coverage and checks the outcome, the
+# distinct-state floor (90% of the first green run) and the covered actions.
+check_space() {
+  local run="$1" whole_space="$2"
+  shift 2
+  local floor=0
+  if [[ "${whole_space}" != "unmeasured" ]]; then
+    floor=$(( whole_space * 9 / 10 ))
+  fi
+  local cfg="${work_dir}/${run}.cfg"
+  write_cfg "${run}" "${cfg}" "" ""
+  local status=0
+  run_tlc "${run}" "${cfg}" -coverage 1 ${tlc_args[@]+"${tlc_args[@]}"} || status=$?
+  local log="${work_dir}/${run}.log"
+  cat "${log}"
+  if [[ "${status}" != "0" ]] \
+    || ! grep -q "Model checking completed. No error has been found." "${log}"; then
+    echo "error: created identity audit ${run} run failed (tlc exit ${status})" >&2
+    exit 1
+  fi
+  local distinct
+  distinct="$(sed -nE 's/^[0-9]+ states generated, ([0-9]+) distinct states found, 0 states left on queue\.$/\1/p' \
+    "${log}" | tail -1)"
+  if [[ -z "${distinct}" ]]; then
+    echo "error: the created identity audit ${run} run reported no final distinct-state count" >&2
+    exit 1
+  fi
+  if [[ "${whole_space}" == "unmeasured" ]]; then
+    echo "created identity audit ${run} run: ${distinct} distinct states (floor unmeasured: set ${run}_states=${distinct} from the first green run)"
+  elif (( distinct < floor )); then
+    echo "error: created identity audit ${run} run: ${distinct} distinct states, below the floor ${floor} (90% of ${whole_space})" >&2
+    exit 1
+  else
+    echo "created identity audit ${run} run: ${distinct} distinct states (floor ${floor})"
+  fi
+
+  # TLC prints a coverage block every minute and one at the end; read the
+  # last. An action's line is
+  # `<Action line L, col C to line L, col C of module model>: D:T`, with D the
+  # new distinct states it found and T the successor states it generated; an
+  # action that fires only into known states has D = 0, so T counts.
+  local coverage="${work_dir}/${run}-coverage.txt"
+  awk '/^The coverage statistics at / { block = ""; next } { block = block $0 "\n" } END { printf "%s", block }' \
+    "${log}" > "${coverage}"
+  local action generated named alias
+  for action in "$@"; do
+    named="${action}"
+    for alias in "${covered_aliases[@]}"; do
+      if [[ "${alias%%:*}" == "${run}" && "${alias##*:}" == "${action}" ]]; then
+        named="${alias#*:}"
+        named="${named%%:*}"
+      fi
+    done
+    generated="$(awk -v head="<${named} line " '
+      index($0, head) == 1 && $0 ~ / of module (model|created_identity_audit|identity_entry_apply_audit|member_residency_audit)( \([0-9]+ [0-9]+ [0-9]+ [0-9]+\))?>: [0-9]+:[0-9]+$/ {
+        split($NF, counts, ":"); total += counts[2]; found = 1
+      }
+      END { if (found) print total }' "${coverage}")"
+    if [[ -z "${generated}" || "${generated}" == "0" ]]; then
+      echo "error: created identity audit ${run} run: ${action} never fired (coverage of ${named}: '${generated:-absent}')" >&2
+      exit 1
+    fi
+    if [[ "${named}" == "${action}" ]]; then
+      echo "covered ${action}: ${generated} successor states"
+    else
+      echo "covered ${action} through ${named}: ${generated} successor states"
+    fi
+  done
+}
+
+for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered edges adoption cycle doors; do
+  if in_part "${run}"; then
+    floor_var="${run}_states"
+    arms_var="${run}_covered_actions[@]"
+    check_space "${run}" "${!floor_var}" "${!arms_var}"
+  fi
+done
+
+# Each witness is <run>:<kind>:<name>: a state goal's negation joins the
+# invariants, a step goal's negation ([][~step]_vars) joins the properties.
+# A witness run leaves out its run's ENABLED totality invariants and its
+# action properties: it explores a part of the run's space, whose
+# whole-space run checks them in every state and step (they cost most of a
+# witness run's time, and only end it early).
+for witness in \
+  "scan:Action property:ScanSeated" "scan:Action property:ScanRetired" \
+  "scan:Action property:ScanPending" "scan:Action property:ScanTombstone" \
+  "scan:Action property:ScanUnreadable" "scan:Action property:ScanContradictedDeclared" \
+  "scan:Action property:ScanContradictedMember" "scan:Action property:ScanEntryTombstoned" \
+  "reseat:Action property:ReseatOnRecord" "reseat:Action property:CreatedCustodyAborted" \
+  "reseat:Action property:ScanContradictedLadder" "reseat:Action property:ReservedLadderAborted" \
+  "reseat:Action property:ReconcileSparesReserved" "reseat:Action property:DestroyClearsReserved" \
+  "reseat:Action property:EnsureSparesReserved" \
+  "names:Action property:SealKeepsCreated" "names:Action property:SealSkipsUnreadable" \
+  "names:Action property:ProbeOtherOrigin" \
+  "placed:Action property:ScanContradictedPlaced" \
+  "commit:Action property:CommitRecordedPending" "commit:Action property:CommitRecordedHosted" \
+  "commit:Action property:CommitRecordedHeld" "admit:Action property:CommitStaleSpec" \
+  "commit:Action property:CommitHeldRefused" "commit:Action property:CommitWorkerRefused" \
+  "commit:Action property:CommitCreatedSeat" "commit:Action property:CommitHeldCreated" \
+  "update:Action property:UpdateMigrates" "update:Action property:UpdateRestamps" \
+  "update:Action property:UpdateOfUnseated" \
+  "removal:Action property:RemovalRetiring" "removal:Action property:RemovalEndsAtTerminal" \
+  "removal:Action property:RemovalEndsAtStoppedTerminal" "removal:Action property:RemovalStoreOwnedEndsAtTerminal" \
+  "removal:Action property:RemovalDestroyClearsMark" \
+  "removal:Action property:RemovalAtOnce" "removal:Action property:RemovalOfArchived" \
+  "removal:Action property:RemovalAlreadyRemoved" "removal:Action property:RemovalRefusesDeclaration" \
+  "archive:Action property:ArchiveRetires" "archive:Action property:ArchiveAtTerminal" \
+  "archive:Action property:ArchiveRestored" "archive:Action property:ArchiveReseated" \
+  "archive:Action property:ArchiveOwnedByRoster" "archive:Action property:ArchivePendingRefused" \
+  "archive:Action property:ArchiveUpdateRecordOnly" "archive:Action property:ArchiveRemovalWaits" \
+  "preparation:Action property:PrepRosterPending" "preparation:Action property:PrepRosterSettledByDeclaration" \
+  "preparation:Action property:PrepStoreSettleSeats" "preparation:Action property:PrepAccepted" \
+  "preparation:Action property:PrepPublished" "preparation:Action property:PrepRosterPublished" \
+  "prepverdicts:Action property:PrepAbortRefusedWhileActivating" "preparation:Action property:PrepExpired" \
+  "preparation:Action property:PrepRemovalEndsHeld" "preparation:Action property:PrepRemovalWaits" \
+  "preparation:Action property:PrepArchiveRefusedWhileHeld" "preparation:Action property:PrepUpdateRecordOnly" \
+  "preparation:Action property:PrepLadderOpensAfterAcceptance" \
+  "preparation:Action property:PrepRosterLadderOpensAfterAcceptance" \
+  "placement:Action property:PlacedCreated" "placement:Action property:PeerOnlyCreated" \
+  "unlist:Action property:UnlistMarksSeated" "unlist:Action property:UnlistRemovesUnseated" \
+  "unlist:Action property:UnlistDefersLadder" "unlist:Action property:UnlistEndsAtTerminal" \
+  "unlist:Action property:UnlistedNameRefused" "unlist:Action property:UnlistLeavesCreated" \
+  "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds" \
+  "edges:Action property:EdgeDeclared" "edges:Action property:EdgeToUnseatedDeclared" \
+  "edges:Action property:EdgeSecondDeclaration" "edges:Action property:EdgePeerUnknown" \
+  "edges:Action property:EdgeEndedByOwner" "edges:Action property:EdgeEndedByPolicy" \
+  "edges:Action property:EdgeNotOwner" "edges:Action property:EdgeEndedByPeerRemoval" \
+  "edges:Action property:EdgeEndedByOwnerRemoval" "edges:Action property:EdgeKeptByThirdRemoval" \
+  "edges:Action property:EdgeKeptByArchive" "edges:Action property:EdgeUnwireRefused" \
+  "edges:Action property:EdgeRecovered" "edges:Action property:EdgeOutOfForce" \
+  "edges:Action property:EdgeOutOfForceUnwire" "edges:Action property:EdgeRealized" \
+  "edges:Action property:EdgeRestoredToNoEntry" \
+  "adoption:Action property:AdoptRosterSeated" "adoption:Action property:AdoptRosterOwedSeat" \
+  "adoption:Action property:AdoptWorker" "adoption:Action property:AdoptStaleGeneration" \
+  "adoption:Action property:AdoptUnlistingRefused" "adoption:Action property:AdoptRetiringRefused" \
+  "adoption:Action property:AdoptApplyOpen" "adoption:Action property:AdoptStoreOwned" \
+  "adoption:Action property:AdoptNotAMember" "adoption:Action property:AdoptTombstoned" \
+  "adoption:Action property:AdoptUnreadable" "adoption:Action property:AdoptHeld" \
+  "adoption:Action property:AdoptCandidate" "adoption:Action property:AdoptStopped" \
+  "adoption:Action property:AdoptOverrideRefused" \
+  "cycle:Action property:CycleReserved" "cycle:Action property:CycleDeclaredKept" \
+  "cycle:Action property:CycleInPlace" "cycle:Action property:CycleOwedSeat" \
+  "cycle:Action property:CycleTombstone" "cycle:Action property:CycleNameTaken" \
+  "cycle:Action property:CycleReleased" "cycle:Action property:CyclePurgeNothing" \
+  "cycle:Action property:CyclePlainInPlace" "cycle:Action property:CyclePlainOtherSession" \
+  "doors:Action property:DoorsExternalWorkerAdmitted" "doors:Action property:DoorsInternalEntryAdmitted" \
+  "doors:Action property:DoorsExternalEntryRefused" "doors:Action property:DoorsExternalCreatedRefused" \
+  "doors:Action property:DoorsExternalEntryMovedSessionRefused" \
+  "doors:Action property:DoorsExternalWorkerMovedSessionRefused" \
+  "doors:Action property:DoorsInternalEntryMovedSessionRefused"; do
+  run="${witness%%:*}"
+  if ! in_part "${run}"; then
+    continue
+  fi
+  rest="${witness#*:}"
+  kind="${rest%%:*}"
+  name="${rest#*:}"
+  cfg="${work_dir}/witness-${name}.cfg"
+  if [[ "${kind}" == "Invariant" ]]; then
+    write_cfg "${run}" "${cfg}" "
+  NotAuditWitness${name}" "" without-totality-or-properties
+  else
+    write_cfg "${run}" "${cfg}" "" "
+  NotAuditWitness${name}" without-totality-or-properties
+  fi
+  status=0
+  run_tlc "witness-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"} || status=$?
+  log="${work_dir}/witness-${name}.log"
+  if ! grep -q "Error: ${kind} NotAuditWitness${name} is violated" "${log}"; then
+    cat "${log}"
+    echo "error: witness ${name} is not reachable (tlc exit ${status})" >&2
+    exit 1
+  fi
+  depth="$(grep -cE '^State [0-9]+:' "${log}" || true)"
+  echo "witness ${name} reached in ${depth} states"
+done
+
+if [[ "${run_mutants}" == "true" ]]; then
+  # Edit helpers the mutants share: each mutant's python edit runs after
+  # them, rewrites the copied model.tla in place and must find each anchor
+  # it names.
+  read -r -d '' mutant_prelude <<'PY' || true
+import os, re
+path = os.environ["MODEL"]
+
+def _arm(text, arm):
+    found = list(re.finditer(r"^" + re.escape(arm) + r"(\([^)]*\))? ==\n.*?\n\n", text, re.S | re.M))
+    assert len(found) == 1, f"expected one definition of {arm}, found {len(found)}"
+    return found[0]
+
+def keep_var(arm, var):
+    """The arm leaves `var` as it was instead of updating it."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    lines = found.group(0).split("\n")
+    hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ " + var + "' = ")]
+    assert len(hits) == 1, f"expected one update of {var} in {arm}, found {len(hits)}"
+    lines[hits[0]] = "    /\\ " + var + "' = " + var
+    open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+
+def update_var(arm, var, rhs):
+    """The arm updates `var`, which its UNCHANGED frame keeps, to `rhs`."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    body = found.group(0)
+    frames = re.findall(r"^    /\\ (UnchangedFrame_[0-9a-f]+)$", body, re.M)
+    assert len(frames) == 1, f"expected one UNCHANGED frame in {arm}"
+    definition = re.findall(r"^" + frames[0] + r" == UNCHANGED << (.*) >>$", text, re.M)
+    assert len(definition) == 1, "expected one definition of " + frames[0]
+    names = [name.strip() for name in definition[0].split(",")]
+    assert var in names, f"{arm} no longer leaves {var} unchanged"
+    kept = ", ".join(name for name in names if name != var)
+    body = body.replace("    /\\ " + frames[0] + "\n",
+                        "    /\\ " + var + "' = " + rhs + "\n    /\\ UNCHANGED << " + kept + " >>\n")
+    open(path, "w").write(text[:found.start()] + body + text[found.end():])
+
+def replace_update(arm, var, rhs):
+    """The arm updates `var`, which it updates already, to `rhs`."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    lines = found.group(0).split("\n")
+    hits = [i for i, line in enumerate(lines) if line.startswith("    /\\ " + var + "' = ")]
+    assert len(hits) == 1, f"expected one update of {var} in {arm}, found {len(hits)}"
+    lines[hits[0]] = "    /\\ " + var + "' = " + rhs
+    open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+
+def drop_guard(arm, needle):
+    """The arm loses the one guard line, before its first update, that
+    contains `needle`."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    lines = found.group(0).split("\n")
+    first_update = next(i for i, line in enumerate(lines) if "' = " in line)
+    hits = [i for i, line in enumerate(lines[:first_update]) if line.startswith("    /\\ ") and needle in line]
+    assert len(hits) == 1, f"expected one guard with {needle!r} in {arm}, found {len(hits)}"
+    del lines[hits[0]]
+    open(path, "w").write(text[:found.start()] + "\n".join(lines) + text[found.end():])
+
+def replace_in_arm(arm, old, new, count=1):
+    """The `count` occurrences of `old` in the arm's definition become
+    `new`."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    body = found.group(0)
+    assert body.count(old) == count, f"expected {count} of {old[:70]!r} in {arm}, found {body.count(old)}"
+    open(path, "w").write(text[:found.start()] + body.replace(old, new) + text[found.end():])
+
+def replace_text(old, new):
+    """The one occurrence of `old` in the model becomes `new`."""
+    text = open(path).read()
+    assert text.count(old) == 1, f"expected one {old[:70]!r}, found {text.count(old)}"
+    open(path, "w").write(text.replace(old, new))
+
+def replace_in_loops(arm, fields, old, new):
+    """The one occurrence of `old` in the arm's lowered loop over each of
+    `fields` becomes `new`. The generated model lowers a `for` loop of an
+    arm's update to one recursive operator per field it updates
+    (<arm>_ForEach<n>_<field>(acc, ...), <n> counting every loop of the
+    machine), which holds the loop body's filters; the arm calls them."""
+    text = open(path).read()
+    for field in fields:
+        found = list(re.finditer(
+            r"^" + re.escape(arm) + r"_ForEach[0-9]+_" + re.escape(field) + r"\(acc, .*$", text, re.M))
+        assert len(found) == 1, f"expected one lowered loop of {arm} over {field}, found {len(found)}"
+        line = found[0].group(0)
+        assert line.count(old) == 1, f"expected one {old[:70]!r} in the loop of {arm} over {field}, found {line.count(old)}"
+        text = text[:found[0].start()] + line.replace(old, new) + text[found[0].end():]
+    open(path, "w").write(text)
+PY
+
+  # usage: mutate <run> <name> <expected violation regex>; reads a python
+  # edit on stdin, run after the shared helpers, that rewrites model.tla in
+  # place and must find each anchor it names. A mutant that expects a
+  # totality invariant (an ExactlyOne) runs with everything its run checks.
+  # Any other runs without its run's ENABLED totality invariants (they cost
+  # most of a deep run's time), and, unless it expects an action property,
+  # without its action properties too: a mutant that expects a generated
+  # invariant or an action property then meets it even where the totality
+  # would refuse an earlier state first (a second arm answering a row), and
+  # one that expects an invariant where another step's property would.
+  mutate() {
+    local run="$1" name="$2" violation="$3"
+    if ! in_part "${run}"; then
+      cat > /dev/null
+      return 0
+    fi
+    local totality=""
+    if [[ "${violation}" == "Action property "* ]]; then
+      totality=without-totality
+    elif [[ "${violation}" != *ExactlyOne* ]]; then
+      totality=without-totality-or-properties
+    fi
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}"/*.tla "${dir}/"
+    { printf '%s\n' "${mutant_prelude}"; cat; } | MODEL="${dir}/model.tla" python3 -
+    local cfg="${work_dir}/mutant-${name}.cfg"
+    write_cfg "${run}" "${cfg}" "" "" "${totality}"
+    local status=0
+    (cd "${dir}" && run_tlc "mutant-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"}) || status=$?
+    local log="${work_dir}/mutant-${name}.log"
+    if ! grep -qE "Error: (${violation}) is violated" "${log}"; then
+      cat "${log}"
+      echo "error: mutant ${name} was not refused by ${violation} (tlc exit ${status})" >&2
+      exit 1
+    fi
+    echo "mutant ${name} refused by $(grep -oE "Error: (${violation}) is violated" "${log}" | head -1)"
+  }
+
+  # usage: mutate_unreached <run> <name> <witness>; reads a python edit on
+  # stdin as mutate does. The mutant is refused when the witness's goal is
+  # no longer reachable: the witness run, as the witness runs it, ends
+  # without an error.
+  mutate_unreached() {
+    local run="$1" name="$2" witness="$3"
+    if ! in_part "${run}"; then
+      cat > /dev/null
+      return 0
+    fi
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}"/*.tla "${dir}/"
+    { printf '%s\n' "${mutant_prelude}"; cat; } | MODEL="${dir}/model.tla" python3 -
+    local cfg="${work_dir}/mutant-${name}.cfg"
+    write_cfg "${run}" "${cfg}" "" "
+  NotAuditWitness${witness}" without-totality-or-properties
+    local status=0
+    (cd "${dir}" && run_tlc "mutant-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"}) || status=$?
+    local log="${work_dir}/mutant-${name}.log"
+    if [[ "${status}" != "0" ]] \
+      || ! grep -q "Model checking completed. No error has been found." "${log}"; then
+      cat "${log}"
+      echo "error: mutant ${name} left the witness ${witness} reachable (tlc exit ${status})" >&2
+      exit 1
+    fi
+    echo "mutant ${name} refused: the witness ${witness} is no longer reachable"
+  }
+
+  # The scan answers a row after the boot plan's seal.
+  mutate scan scan_after_seal "Invariant AuditRecoverExactlyOne" <<'PY'
+drop_guard("RecoverCreatedIdentityEntrySeatedRunning", "(boot_plan_sealed = FALSE)")
+PY
+
+  # A Present row whose identity has no member records the entry hosted on
+  # its first use instead of owed its seat.
+  mutate scan retired_records_hosted "Invariant AuditScanUnseatedCauses" <<'PY'
+replace_update("RecoverCreatedIdentityEntryRetiredRunning", "identity_entry_unseated",
+               'MapSet(identity_entry_unseated, agent_identity, "HostedOnFirstUse")')
+PY
+
+  # A removed row keeps the Created entry its earlier row recorded.
+  mutate scan tombstone_keeps_entry "Invariant tombstone_is_never_an_entry" <<'PY'
+keep_var("RecoverCreatedIdentityEntryTombstoneRunning", "identity_entry_origins")
+keep_var("RecoverCreatedIdentityEntryTombstoneRunning", "identity_entry_unseated")
+keep_var("RecoverCreatedIdentityEntryTombstoneRunning", "identity_entry_archived_sessions")
+PY
+
+  # A Present row of a seated member records it over its Declared entry
+  # (its no_declared_entry guard dropped).
+  mutate scan seated_over_declared "Invariant AuditRecoverExactlyOne" <<'PY'
+drop_guard("RecoverCreatedIdentityEntrySeatedRunning", 'Some("Declared"))')
+PY
+
+  # A Present row of a seated member records it over an unreadable name
+  # (its name_readable guard dropped).
+  mutate scan seated_over_unreadable "Invariant AuditRecoverExactlyOne" <<'PY'
+drop_guard("RecoverCreatedIdentityEntrySeatedRunning", "identity_entry_unreadable) = FALSE)")
+PY
+
+  # A row pending its preparation (no member) while the replay seated one is
+  # not reserved. The generated model lowers the guard's disjunction to a
+  # chain of (IF a THEN TRUE ELSE ...); the mutant makes that one condition
+  # FALSE, and no arm answers the row.
+  mutate scan member_contradiction_ignored "Invariant AuditRecoverExactlyOne" <<'PY'
+replace_in_arm("RecoverCreatedIdentityEntryUnreadableRunning",
+               '(IF ((presence = "PresentUnseated") /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = TRUE)) THEN TRUE ELSE ',
+               "(IF FALSE THEN TRUE ELSE ")
+PY
+
+  # A Present row of an identity without a member records an entry under a
+  # removed entry's name (its name_not_tombstoned guard dropped).
+  mutate scan retired_ignores_tombstone "Invariant tombstone_is_never_an_entry" <<'PY'
+drop_guard("RecoverCreatedIdentityEntryRetiredRunning", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # The journal replay recovers a member under a removed entry's name (the
+  # roster replay's name_not_tombstoned guard dropped).
+  mutate scan replay_ignores_tombstone "Invariant tombstone_is_never_an_entry" <<'PY'
+drop_guard("RecoverRosterMemberRunning", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # The replay of a Declared entry row replaces the Created entry the scan
+  # recorded first (the entry replay's entry_of_the_rows_origin guard
+  # dropped): a store-owned identity turns roster-owned.
+  mutate scan replay_replaces_a_created_entry "Action property AuditCreatedEntryNeverDeclared" <<'PY'
+drop_guard("RecoverIdentityEntrySeatedRunning", '(origin = "Created"))')
+PY
+
+  # A removal's row after an archive's row of the same seated identity marks
+  # it removing beside archiving (its no_archive_mark guard dropped).
+  mutate scan removal_row_over_archive_mark "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+drop_guard("RecoverCreatedIdentityEntryRemovingRunning", "identity_entry_archiving) = FALSE)")
+PY
+
+  # A spawn ladder opens for a reserved name (its name_not_reserved guard
+  # dropped).
+  mutate reseat ladder_takes_reserved_name "Action property AuditNoLadderForReservedName" <<'PY'
+drop_guard("BeginSpawnExecFresh", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # Created custody takes a Created entry with any unseated cause (one
+  # awaiting its host's preparation, an archived one): the last of the
+  # causes it takes (owed its seat, hosted on its first use, held for its
+  # creation) becomes any cause.
+  mutate reseat created_custody_any_created "Action property AuditLadderCustodyMatchesOrigin" <<'PY'
+replace_in_arm("BeginSpawnExecFresh", '= Some("HeldCreation"))', '# None)')
+PY
+
+  # Entry custody takes a Created entry's name: the Declared check of its
+  # custody clause (the arm's one comparison with Some("Declared")) takes
+  # any entry.
+  mutate reseat entry_custody_takes_created "Action property AuditLadderCustodyMatchesOrigin" <<'PY'
+replace_in_arm("BeginSpawnExecFresh", '= Some("Declared"))', '# None)')
+PY
+
+  # An abort keeps the created custody of the ladder it ends.
+  mutate reseat abort_keeps_created_custody "Invariant entry_custodies_are_disjoint" <<'PY'
+keep_var("AbortSpawnExecActiveRunning", "spawn_exec_created_custody")
+PY
+
+  # A removed row drops the Created entry a created ladder acts for (its
+  # no_spawn_ladder guard dropped).
+  mutate reseat tombstone_ignores_ladder "Invariant entry_custodies_are_disjoint" <<'PY'
+drop_guard("RecoverCreatedIdentityEntryTombstoneRunning", "DOMAIN spawn_exec_phase) = FALSE)")
+PY
+
+  # A seat under created custody binds another session than the revival
+  # record (its created_seat_takes_its_record guard dropped).
+  mutate reseat created_seat_any_session "Action property AuditCreatedSeatTakesRecord" <<'PY'
+drop_guard("CommitDormantSeatRunning", "spawn_exec_created_custody) = FALSE)")
+PY
+
+  # The dormant seat seats a member under a name reserved while its ladder
+  # was open (its name_not_reserved guard dropped).
+  mutate reseat close_takes_reserved "Action property AuditNoSeatUnderReservedName" <<'PY'
+drop_guard("CommitDormantSeatRunning", "identity_entry_unreadable) = FALSE))")
+PY
+
+  # The worker reconcile spawns a tombstoned name.
+  mutate reseat reconcile_spawns_tombstone "Invariant worker_reconcile_spares_entries" <<'PY'
+replace_text(" /\\ member \\notin arg_identity_entry_tombstones", "")
+PY
+
+  # The worker reconcile retires an unreadable name's member.
+  mutate reseat reconcile_retires_unreadable "Invariant worker_reconcile_spares_entries" <<'PY'
+replace_text(" /\\ member \\notin arg_identity_entry_unreadable }\n    ELSE {}", " }\n    ELSE {}")
+PY
+
+  # The worker ensure records a reserved name for a spawn (its
+  # name_not_reserved guard dropped).
+  mutate reseat ensure_takes_reserved "Invariant worker_reconcile_spares_entries" <<'PY'
+drop_guard("EnsureMemberRunningMissing", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # The admission probe admits a reserved name (its name_not_reserved guard
+  # dropped).
+  mutate reseat probe_admits_reserved "Invariant AuditReseatProbeExactlyOne" <<'PY'
+drop_guard("ProbeMemberAdmissionAdmittedRunning", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # The forced destroy keeps the reserved names.
+  mutate reseat destroy_keeps_tombstones "Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
+keep_var("DestroyFromAny", "identity_entry_tombstones")
+PY
+
+  # A declaration over a reserved name (its name_not_reserved guard
+  # dropped).
+  mutate names declare_over_reserved "Invariant AuditNamesDeclareExactlyOne" <<'PY'
+drop_guard("DeclareIdentityEntrySeatOwed", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # The tombstone refusal answers an unreadable name too (its name_readable
+  # guard dropped).
+  mutate names tombstone_refusal_over_unreadable "Invariant AuditNamesDeclareExactlyOne" <<'PY'
+drop_guard("DeclareIdentityEntryRefusedNameTombstoned", "identity_entry_unreadable) = FALSE)")
+PY
+
+  # The declared apply takes a Created entry's name (the no entry or a
+  # Declared entry guard, lowered to (IF <no entry> THEN TRUE ELSE
+  # <Declared entry>), dropped from every arm that carries it).
+  mutate names declare_over_created "Invariant AuditNamesDeclareExactlyOne" <<'PY'
+for verdict in ("Kept", "SeatOwed", "HostedOnFirstUse", "AwaitHeldCreation", "RuntimeModeRestamp",
+                "RoleMigrate", "RoleRotate", "RoleMigrationHeld", "LifecycleInFlight",
+                "RefusedNameHeldByWorker", "RefusedHostAdopted", "RefusedNonAuthoritative"):
+    drop_guard("DeclareIdentityEntry" + verdict, "identity_entry_origins) = FALSE) THEN TRUE ELSE")
+PY
+
+  # The seal marks an unlisted Created entry's seated member as it does a
+  # Declared one (the Declared filter of its lowered mark loop takes a
+  # Created entry too). The seal ends no entry itself (the one-entry unlist
+  # does, whose own filter the unlist run's mutants drop), so the mark loop
+  # is its one lowered loop. TLC checks a successor's invariants before the
+  # step's action properties, so retiring_entry_is_a_declared_entry may
+  # refuse it first.
+  mutate names seal_takes_created \
+    "Invariant retiring_entry_is_a_declared_entry|Action property AuditSealNeverTouchesCreated" <<'PY'
+replace_in_loops("SealDeclaredRosterSealed",
+                 ("identity_entry_retiring",),
+                 ' = Some("Declared"))', ' \\in {Some("Declared"), Some("Created")})')
+PY
+
+  # The seal acts on an unreadable name's Declared entry (the readable
+  # filter dropped from its lowered mark loop).
+  mutate names seal_takes_unreadable "Action property AuditSealNeverTouchesCreated" <<'PY'
+replace_in_loops("SealDeclaredRosterSealed",
+                 ("identity_entry_retiring",),
+                 " /\\ ((id \\in identity_entry_unreadable) = FALSE)", "")
+PY
+
+  # The legacy adoption adopts a reserved name (its call of the adoption's
+  # verdict rule passes no reserved name).
+  mutate names adopt_reserved "Invariant AuditNamesAdoptionExactlyOne" <<'PY'
+replace_in_arm("AdoptLegacyIdentityEntryAdopted",
+               "(IF ((agent_identity \\in identity_entry_tombstones) = TRUE) THEN TRUE ELSE ((agent_identity \\in identity_entry_unreadable) = TRUE))",
+               "FALSE")
+PY
+
+  # A Created entry answers the adoption as already an entry (its
+  # declared_entry guard and its call of the adoption's verdict rule take
+  # any entry as a declared one: the guard, which the arm checks first, is
+  # the rule's own declared argument, so both copies go).
+  mutate names already_entry_over_created "Invariant AuditNamesAdoptionExactlyOne" <<'PY'
+replace_in_arm("AdoptLegacyIdentityEntryAlreadyAnEntry",
+               '((IF (agent_identity \\in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \\in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))',
+               "TRUE", count=2)
+PY
+
+  # The agent lane admits an unreadable name (its name_readable guard
+  # dropped).
+  mutate names lane_admits_unreadable "Invariant AuditNamesLaneExactlyOne" <<'PY'
+drop_guard("ResolveAgentLaneMemberAdmissionAdmittedRunning", "identity_entry_unreadable) = FALSE)")
+PY
+
+  # A Present row of a placed member records it a Created entry (the
+  # placement half of its member_seated_locally guard dropped).
+  mutate placed seated_takes_placed "Invariant AuditRecoverExactlyOne" <<'PY'
+replace_in_arm("RecoverCreatedIdentityEntrySeatedRunning",
+               " /\\ ((agent_identity \\in DOMAIN member_placement) = FALSE)", "")
+PY
+
+  # The remote commit seats a placed member under a name reserved while its
+  # ladder was open (its name_not_reserved guard dropped).
+  mutate placed remote_commit_takes_reserved "Action property AuditNoSeatUnderReservedName" <<'PY'
+drop_guard("CommitSpawnMembershipRemote", "identity_entry_unreadable) = FALSE))")
+PY
+
+  # The changes part (0.9.9).
+
+  # A record takes a removed name (the name_tombstoned argument of its
+  # verdict read as FALSE).
+  mutate commit record_takes_tombstoned "Invariant tombstone_is_never_an_entry" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in identity_entry_tombstones) = TRUE)", "FALSE")
+PY
+
+  # A new entry's cause takes a held creation before a placed or externally
+  # bound spec (created_entry_cause's precedence swapped).
+  mutate commit record_cause_held_before_placed "Action property AuditRecordCauseFollowsFacts" <<'PY'
+replace_text('(IF (placement # "Local") THEN "HostedOnFirstUse" ELSE (IF (held_creation = TRUE) THEN "HeldCreation" ELSE "SeatOwed"))',
+             '(IF (held_creation = TRUE) THEN "HeldCreation" ELSE (IF (placement # "Local") THEN "HostedOnFirstUse" ELSE "SeatOwed"))')
+PY
+
+  # Two arms answer a record: the worker refusal answers every record (its
+  # verdict guard dropped).
+  mutate commit record_two_answers "Invariant AuditRecordExactlyOne" <<'PY'
+drop_guard("RecordCreatedIdentityEntryNameHeldByWorker", '"NameHeldByWorker")')
+PY
+
+  # Two arms answer an admission: the stale refusal answers every change
+  # (its verdict guard dropped).
+  mutate admit admit_two_answers "Invariant AuditAdmitExactlyOne" <<'PY'
+drop_guard("AdmitIdentityChangeStaleSpec", '"StaleSpec")')
+PY
+
+  # The dormant seat seats an entry held for its creation (its
+  # unseated_entry_owed_its_seat guard dropped).
+  mutate commit dormant_seat_takes_held "Action property AuditHeldNeverSeatedDormant" <<'PY'
+drop_guard("CommitDormantSeatRunning", '= Some("SeatOwed")))')
+PY
+
+  # A store-owned update skips the declared migration: the migration arm
+  # refuses created custody, so a store-owned profile change with its
+  # migration declared answers no verdict.
+  mutate update store_update_skips_the_declared_migration "Invariant AuditUpdateExactlyOne" <<'PY'
+replace_in_arm("DeclareIdentityEntryRoleMigrate", '    /\\ phase = "Running"\n',
+               '    /\\ phase = "Running"\n    /\\ (created_custody = FALSE)\n')
+PY
+
+  # A store-owned update answers RoleMigrate for a runtime-mode restamp and
+  # RuntimeModeRestamp for a migration: each update still takes exactly one
+  # arm, and only the parity with the roster's change refuses it.
+  mutate update update_parity_swapped "Invariant AuditUpdateParity" <<'PY'
+replace_in_arm("DeclareIdentityEntryRuntimeModeRestamp", '= "RuntimeModeRestamp")',
+               '= (IF created_custody = TRUE THEN "RoleMigrate" ELSE "RuntimeModeRestamp"))')
+replace_in_arm("DeclareIdentityEntryRoleMigrate", '= "RoleMigrate")',
+               '= (IF created_custody = TRUE THEN "RuntimeModeRestamp" ELSE "RoleMigrate"))')
+PY
+
+  # The end of a roster-owned identity's removal ends its entry without
+  # tombstoning its name.
+  mutate removal remove_roster_owned_without_tombstone "Action property AuditRemovalTombstones" <<'PY'
+keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_tombstones")
+PY
+
+  # A removed roster-owned name is seated again by its roster's declaration
+  # (the declared apply's name_not_reserved guard dropped).
+  mutate removal tombstoned_name_seated "Invariant tombstone_is_never_an_entry" <<'PY'
+drop_guard("DeclareIdentityEntrySeatOwed", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # A removal marks an unseated entry's ending as a seated one's (the
+  # verdict's seated branch taken for every removal), so no retirement ever
+  # ends it. The anchor names the change verdict's Remove branch: the
+  # unlist verdict ends in the same seated branch.
+  mutate removal removal_marks_an_unseated_entry "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+replace_text('(IF (kind = "Remove") THEN (IF (seated = TRUE) THEN "Retiring" ELSE "Removed")', '(IF (kind = "Remove") THEN "Retiring"')
+PY
+
+  # Two arms answer a removal: the unreadable refusal answers every removal
+  # (its verdict guard dropped).
+  mutate removal removal_two_answers "Invariant AuditRemovalExactlyOne" <<'PY'
+drop_guard("RemoveIdentityEntryNameUnreadable", '"NameUnreadable")')
+PY
+
+  # The Stopped terminal of a removal's retirement keeps the removal's mark
+  # on the entry it ends.
+  mutate removal stopped_terminal_keeps_the_mark "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+keep_var("ObserveMemberRetirementArchivedLiveStopped", "identity_entry_removing")
+PY
+
+  # The destroy's archive of a member whose removal marked its entry keeps
+  # the mark on an identity with no entry and no member.
+  mutate removal destroy_keeps_the_removal_mark "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+keep_var("ObserveDestroyMemberRetirementArchivedLiveRunning", "identity_entry_removing")
+PY
+
+  # An archive frees the name: a record takes a name an entry holds (the
+  # entry half of the held_by_identity argument of its verdict read as
+  # FALSE), so a new entry replaces the archived one.
+  mutate archive archive_frees_the_name "Action property AuditArchivedKeepsItsName" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in DOMAIN identity_entry_origins) = TRUE)", "FALSE")
+PY
+
+  # A roster-owned identity is archived as a store-owned one: the archive
+  # of an unseated entry reads any entry as store-owned (its Created check
+  # takes any entry).
+  mutate archive archive_takes_a_roster_entry "Invariant archived_entry_is_store_owned" <<'PY'
+replace_in_arm("ArchiveIdentityEntryArchived", '= Some("Created"))', '# None)')
+PY
+
+  # An archived entry is seated without its unarchive: created custody takes
+  # a Created entry with any unseated cause, and the membership commit of
+  # its ladder seats it.
+  mutate archive archived_entry_seated "Action property AuditArchivedNeverSeated" <<'PY'
+replace_in_arm("BeginSpawnExecFresh", '= Some("HeldCreation"))', '# None)')
+PY
+
+  # An archive takes an entry awaiting its host's preparation (the change
+  # verdict's preparation branch taken by no archive): the old Archived
+  # path, which drops the preparation.
+  mutate archive archive_takes_a_pending_entry "Action property AuditPendingNeverArchived" <<'PY'
+replace_text('(preparation_pending = TRUE)) THEN "PreparationPending"', 'FALSE) THEN "PreparationPending"')
+PY
+
+  # The archive terminal keeps the archive's mark on the entry it unseats.
+  mutate archive archive_terminal_keeps_the_mark "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_archiving")
+PY
+
+  # A removal of an entry an archive marked retires it as well (the
+  # archive's mark dropped from the removal's in-flight fact), so the entry
+  # carries both marks.
+  mutate archive removal_over_an_archive_mark "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+replace_in_arm("RemoveIdentityEntryRetiring", "(IF ((agent_identity \\in identity_entry_archiving) = TRUE) THEN TRUE ELSE ",
+               "(IF FALSE THEN TRUE ELSE ")
+PY
+
+  # Two arms answer an archive: the unreadable refusal answers every
+  # archive (its verdict guard dropped).
+  mutate archive archive_two_answers "Invariant AuditArchiveExactlyOne" <<'PY'
+drop_guard("ArchiveIdentityEntryNameUnreadable", '"NameUnreadable")')
+PY
+
+  # A store-owned update of an identity awaiting its host's preparation, or
+  # archived, is declared as any other (the declared apply's verdict takes
+  # no RecordOnly branch): it is owed its seat, its standing dropped. Its
+  # step has the unarchive's successor, so only the update's own property
+  # refuses it.
+  mutate archive update_skips_record_only "Action property AuditStoreUpdateKeepsStanding" <<'PY'
+replace_text('(IF (record_only = TRUE) THEN "RecordOnly" ELSE ', '(IF FALSE THEN "RecordOnly" ELSE ')
+PY
+
+  # The dormant seat seats an entry awaiting its host's preparation (its
+  # unseated_entry_owed_its_seat guard dropped): its shortest path seats the
+  # entry with its held attempt still recorded.
+  mutate preparation dormant_seat_takes_pending "Invariant AuditConstructionAwaitsPreparation" <<'PY'
+drop_guard("CommitDormantSeatRunning", '= Some("SeatOwed")))')
+PY
+
+  # The membership commit publishes a held construction whose activation no
+  # settle accepted (its pending_entry_publishes_its_accepted_activation
+  # guard dropped).
+  mutate preparation commit_publishes_unaccepted "Action property AuditPendingSeatedOnlyByItsActivation" <<'PY'
+drop_guard("CommitSpawnMembershipFresh", "identity_entry_constructions_activating) = TRUE))")
+PY
+
+  # An abort or an expiry ends an accepted activation.
+  mutate preparation accepted_attempt_aborted "Invariant AuditAcceptedActivationIsFinal" <<'PY'
+replace_text('(IF (end = "PublicationFailed") THEN "Ended" ELSE "ActivationPending")', '"Ended"')
+PY
+
+  # A new attempt starts while one is open.
+  mutate preparation second_attempt_while_open "Invariant construction_is_held_or_activating" <<'PY'
+replace_text('(IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Held")', '"Held"')
+PY
+
+  # A `constructed` preparation is settled without an attempt, seating its
+  # entry.
+  mutate preparation settle_seats_constructed "Action property AuditConstructedNeverSettledWithoutAttempt" <<'PY'
+replace_text('(IF (constructed = TRUE) THEN "ConstructionRequired" ELSE (IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Seat"))',
+             '(IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Seat")')
+PY
+
+  # A removal ends the entry but keeps the attempt held for it.
+  mutate preparation removal_keeps_held_attempt "Invariant AuditConstructionAwaitsPreparation" <<'PY'
+keep_var("RemoveIdentityEntryRemoved", "identity_entry_constructions_held")
+PY
+
+  # Two arms answer a settle: the mismatch refusal answers every settle (its
+  # verdict guard dropped).
+  mutate prepverdicts prep_two_answers "Invariant AuditPrepExactlyOne" <<'PY'
+drop_guard("SettleHostPreparationMismatch", '"Mismatch")')
+PY
+
+  # Created custody stays local (the guard 0.9.9 dropped): the placed spawn
+  # of a store-owned identity hosted on its first use refuses its custody,
+  # and the placed witness is not reachable.
+  mutate_unreached placement created_custody_local_kept PlacedCreated <<'PY'
+replace_in_arm("BeginSpawnExecRemote", '    /\\ (placement # None)\n',
+               '    /\\ (placement # None)\n    /\\ (created_custody = FALSE)\n')
+PY
+
+  # A placed ladder holds created custody for an entry not hosted on its
+  # first use (the created half of its placed_custody_hosted_on_first_use
+  # guard dropped).
+  mutate placement placed_created_custody_unhosted "Invariant placed_entry_custody_is_hosted_on_first_use" <<'PY'
+replace_in_arm("BeginSpawnExecRemote", "(IF ((entry_custody = FALSE) /\\ (created_custody = FALSE)) THEN TRUE ELSE",
+               "(IF (entry_custody = FALSE) THEN TRUE ELSE")
+PY
+
+  # The abort of a placed ladder (MaterializePending) keeps its created
+  # custody.
+  mutate placement materialize_abort_keeps_created_custody "Invariant entry_custodies_are_disjoint" <<'PY'
+keep_var("AbortSpawnExecMaterializePendingRunning", "spawn_exec_created_custody")
+PY
+
+  # The unlist acts on a Created entry as on a Declared one (every unlist
+  # arm reads any entry as Declared).
+  mutate unlist unlist_takes_created "Action property AuditUnlistDecidesItsIdentityAlone" <<'PY'
+for verdict in ("Retiring", "Removed", "Deferred", "NotADeclaredEntry", "NonAuthoritative"):
+    replace_in_arm("UnlistIdentityEntry" + verdict, '= Some("Declared"))', '# None)')
+PY
+
+  # A record takes an unlisted roster-owned identity's name (the archived
+  # session half of the held_by_identity argument of its verdict read as
+  # FALSE), letting its archived session record go.
+  mutate unlist unlisted_name_freed "Action property AuditRecordTakesFreeNames" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in DOMAIN identity_entry_archived_sessions) = TRUE)", "FALSE")
+PY
+
+  # Two arms answer an unlist: the candidate refusal answers every unlist
+  # (its verdict guard dropped).
+  mutate unlist unlist_two_answers "Invariant AuditUnlistExactlyOne" <<'PY'
+drop_guard("UnlistIdentityEntryNonAuthoritative", '"NonAuthoritative")')
+PY
+
+  # A record takes the name of a roster-owned identity's entry (the entry
+  # half of the held_by_identity argument of its verdict read as FALSE):
+  # member 1's unseated Declared entry becomes a Created one.
+  mutate unlist record_takes_a_declared_entrys_name "Action property AuditRecordTakesFreeNames" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in DOMAIN identity_entry_origins) = TRUE)", "FALSE")
+PY
+
+  # A ladder takes an entry awaiting its preparation only while its attempt
+  # is held, as before the fix: the construction's own spawn, which opens
+  # its ladder at its publication, after the settle accepted its
+  # activation, is refused, and its publication fails.
+  mutate_unreached preparation accepted_ladder_refused PrepLadderOpensAfterAcceptance <<'PY'
+replace_in_arm("BeginSpawnExecFresh", '(IF ((agent_identity \\in DOMAIN identity_entry_constructions_held) = TRUE) THEN TRUE ELSE ((agent_identity \\in DOMAIN identity_entry_constructions_activating) = TRUE))', '((agent_identity \\in DOMAIN identity_entry_constructions_held) = TRUE)', 2)
+PY
+
+  # The journal replay recovers a member under an archived entry (the
+  # roster replay's entry_not_archived guard dropped): the scan of an
+  # archive's row before the replay leaves the entry archived, and the
+  # replay then seats its member.
+  mutate recovered replay_seats_an_archived_entry "Action property AuditArchivedNeverSeated" <<'PY'
+drop_guard("RecoverRosterMemberRunning", '# Some("Archived"))')
+PY
+
+  # The replay of a removal's row marks no removal, in a running or a
+  # stopped mob: the retirement then keeps the entry unseated, and a
+  # recovered removal never reaches its terminal.
+  mutate_unreached recovered recovered_removal_unmarked RecoveredRemovalEnds <<'PY'
+keep_var("RecoverCreatedIdentityEntryRemovingRunning", "identity_entry_removing")
+keep_var("RecoverCreatedIdentityEntryRemovingStopped", "identity_entry_removing")
+PY
+
+  # An end naming another identity than the edge's owner ends it (its
+  # owned_by_owner guard read as the edge being owned at all).
+  mutate edges edge_removed_by_non_owner "Action property AuditOnlyTheOwnerEndsItsEdge" <<'PY'
+replace_in_arm("EndOwnedIdentityEdgeEnded",
+               '((IF (edge \\in DOMAIN identity_edge_owners) THEN Some((IF edge \\in DOMAIN identity_edge_owners THEN identity_edge_owners[edge] ELSE "None")) ELSE None) = Some(owner))',
+               "(edge \\in DOMAIN identity_edge_owners)")
+PY
+
+  # A removal ends every owned edge, those of identities it is no end of
+  # too: a change of a third identity cascades over their edges.
+  mutate edges cascade_on_third_party_change "Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd" <<'PY'
+replace_update("RemoveIdentityEntryRetiring", "identity_edge_owners",
+               "[edge \\in {} |-> agent_identity]")
+PY
+
+  # A removal of an unseated entry keeps its owned edges: an edge keeps the
+  # removed identity as its owner, no entry any more.
+  mutate edges removal_keeps_owned_edges "Invariant owned_edge_owner_is_a_store_owned_end" <<'PY'
+keep_var("RemoveIdentityEntryRemoved", "identity_edge_owners")
+PY
+
+  # A removal of an unseated entry ends only the edges the removed identity
+  # owns: an edge another identity owns joins the tombstone it leaves.
+  mutate edges removal_ends_only_its_own_edges "Invariant owned_edge_joins_no_tombstone" <<'PY'
+replace_update("RemoveIdentityEntryRemoved", "identity_edge_owners",
+               "[edge \\in { e \\in DOMAIN identity_edge_owners : identity_edge_owners[e] # agent_identity } |-> identity_edge_owners[edge]]")
+PY
+
+  # A second declaration takes the edge's custody (the declaration's
+  # edge_not_owned guard dropped).
+  mutate edges second_declaration_takes_custody "Action property AuditOwnedEdgeKeepsItsOwner" <<'PY'
+drop_guard("DeclareOwnedIdentityEdgeDeclared", "identity_edge_owners) = FALSE)")
+PY
+
+  # A plain unwire of an owned edge in force is admitted (the admission's
+  # edge_not_in_force guard dropped): two arms answer it.
+  mutate edges unwire_admits_owned_edge "Invariant AuditEdgesExactlyOne" <<'PY'
+drop_guard("AdmitMemberUnwireAdmittedRunning", "owned_edge_out_of_force(")
+PY
+
+  # An owned edge counts in force whatever its ends (the helper and its
+  # complement read the custody alone): an edge one of whose ends no entry
+  # holds is realized, and its pair refused a plain unwire.
+  mutate edges realization_admits_a_name_no_identity_holds "Action property AuditOwnedEdgeBindsIdentitiesOnly" <<'PY'
+replace_text("owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == ((owned = TRUE) /\\ (a_is_an_entry = TRUE) /\\ (b_is_an_entry = TRUE))",
+             "owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == (owned = TRUE)")
+replace_text("owned_edge_out_of_force(owned, a_is_an_entry, b_is_an_entry) == (IF (owned = FALSE) THEN TRUE ELSE (IF (a_is_an_entry = FALSE) THEN TRUE ELSE (b_is_an_entry = FALSE)))",
+             "owned_edge_out_of_force(owned, a_is_an_entry, b_is_an_entry) == (owned = FALSE)")
+PY
+
+  # An import's restoration needs the edge's other end to be an identity
+  # entry, as a declaration does: it holds fewer edges than the start's
+  # recovery of the same rows.
+  mutate edges restore_needs_an_identity_peer "Action property AuditRestoreIsTheRecovery" <<'PY'
+replace_in_arm("RestoreOwnedIdentityEdgeRestored",
+               "    /\\ ((edge \\in DOMAIN identity_edge_owners) = FALSE)\n",
+               "    /\\ ((edge \\in DOMAIN identity_edge_owners) = FALSE)\n"
+               "    /\\ (mob_machine_wiring_edge_other(edge, owner) \\in DOMAIN identity_entry_origins)\n")
+replace_in_arm("RestoreOwnedIdentityEdgeSkipped",
+               "ELSE ((mob_machine_wiring_edge_b(edge) \\in identity_entry_removing) = TRUE))",
+               "ELSE (((mob_machine_wiring_edge_b(edge) \\in identity_entry_removing) = TRUE) \\/ (mob_machine_wiring_edge_other(edge, owner) \\notin DOMAIN identity_entry_origins)))")
+PY
+
+  # An adoption rotates its member: its generation moves on.
+  mutate adoption adopt_rotates_the_member "Action property AuditAdoptionKeepsTheIncarnation" <<'PY'
+update_var("AdoptIdentityIntoStoreAdopted", "identity_runtime_generations",
+           "[identity_runtime_generations EXCEPT ![agent_identity] = @ + 1]")
+PY
+
+  # An adoption runs beside an open declared apply (the verdict reads the
+  # apply closed).
+  mutate adoption adopt_while_declared_apply_open "Action property AuditAdoptionTakesASettledMember" <<'PY'
+replace_in_arm("AdoptIdentityIntoStoreAdopted", "identity_changes_held, declared_apply_open,",
+               "identity_changes_held, FALSE,")
+PY
+
+  # An adoption takes a roster-owned identity its unlisting retires: the
+  # entry turns Created while its unlisted retirement runs, which the
+  # generated invariant refuses first (a retiring entry is a Declared
+  # entry).
+  mutate adoption adopt_takes_an_unlisting_entry "Invariant retiring_entry_is_a_declared_entry" <<'PY'
+replace_in_arm("AdoptIdentityIntoStoreAdopted", "((agent_identity \\in identity_entry_retiring) = TRUE)",
+               "FALSE")
+PY
+
+  # The adoption's verdict reads no spawn override: a worker spawned with
+  # one is adopted.
+  mutate adoption adopt_takes_an_overridden_worker "Action property AuditAdoptionTakesNoOverriddenWorker" <<'PY'
+replace_text("(IF (session_bound = FALSE) THEN TRUE ELSE (spawn_overridden = TRUE))",
+             "(session_bound = FALSE)")
+PY
+
+  # The purge drops the archived session records: a session reference
+  # the import re-binds is lost.
+  mutate cycle purge_drops_a_session "Action property AuditPurgeTouchesNothingElse" <<'PY'
+update_var("PurgeIdentityRowsPurged", "identity_entry_archived_sessions", "[x \\in {} |-> x]")
+PY
+
+  # A start's pass of a Created entry whose row was purged leaves its name
+  # readable, so a created custody seat may take it with no row.
+  mutate cycle reseat_without_row "Invariant created_origin_without_row_is_unreadable" <<'PY'
+keep_var("RecoverRowlessCreatedEntryReservedRunning", "identity_entry_unreadable")
+PY
+
+  # The purge's verdict reads no row count: a mob whose scan read no row
+  # purges.
+  mutate cycle purge_with_no_row "Action property AuditPurgeNeedsRows" <<'PY'
+replace_text("(IF (rows_present = FALSE) THEN \"NothingToPurge\" ELSE \"Purged\")", "\"Purged\"")
+PY
+
+  # The import's verdict reads no session: a plain member on another
+  # session than its record names is bound in place.
+  mutate cycle import_binds_another_session "Action property AuditImportBindsOnTheRecordsSession" <<'PY'
+replace_text("(session_bound = TRUE) /\\ (session_matches = TRUE)) THEN \"RestoredInPlace\"",
+             "(session_bound = TRUE)) THEN \"RestoredInPlace\"")
+PY
+  # External work reaches an identity entry by its session (the external
+  # admission's not_an_identity_entry guard dropped).
+  mutate doors external_admits_entry "Invariant AuditDoorsNoExternalEntryAdmission" <<'PY'
+drop_guard("SubmitWorkRunningExternal", "DOMAIN identity_entry_origins")
+PY
+
+  # External work reaches a name reserved unreadable by its peer (the
+  # peer-only external admission's name_readable guard dropped).
+  mutate doors peer_admits_unreadable "Invariant AuditDoorsNoExternalEntryAdmission" <<'PY'
+drop_guard("SubmitWorkRunningExternalPeerOnly", "identity_entry_unreadable")
+PY
+
+  # The identity member refusal answers a worker's external work too (its
+  # identity_entry guard dropped), beside the admission.
+  mutate doors identity_member_answers_worker "Invariant AuditDoorsAtMostOne" <<'PY'
+drop_guard("ResolveSubmitWorkRejectionIdentityMember", "DOMAIN identity_entry_origins")
+PY
+
+  # External work to an entry is answered by no arm (the identity member
+  # refusal never enabled), as before the fix it was admitted.
+  mutate doors entry_refusal_unanswered "Invariant AuditDoorsEntryExactlyOne" <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionIdentityMember", '(origin = "External")', "FALSE")
+PY
+
+  # The stale session refusal answers external work to an entry that names
+  # another session too (its guard against identity members dropped),
+  # beside the identity member refusal.
+  mutate doors stale_session_answers_entry "Invariant AuditDoorsAtMostOne" <<'PY'
+drop_guard("ResolveSubmitWorkRejectionStaleSessionBinding", "DOMAIN identity_entry_origins")
+PY
+
+  # The stale session refusal answers external work to a name reserved
+  # unreadable that names another session too (the unreadable half of its
+  # guard read as TRUE), beside the unreadable name's refusal.
+  mutate doors stale_session_answers_unreadable "Invariant AuditDoorsAtMostOne" <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", "((agent_identity \\in identity_entry_unreadable) = FALSE)", "TRUE")
+PY
+
+  # The stale session refusal answers no external work (its guard reads the
+  # origin alone): a worker's external work that names a moved session is
+  # then answered by no arm.
+  mutate_unreached doors stale_session_spares_no_external DoorsExternalWorkerMovedSessionRefused <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", "ELSE (((agent_identity \\in DOMAIN identity_entry_origins) = FALSE) /\\ ((agent_identity \\in identity_entry_unreadable) = FALSE))", "ELSE FALSE")
+PY
+
+  # The stale session refusal answers no work to an entry (its guard reads
+  # the entry for every origin): the host's internal work that names a moved
+  # session is then answered by no arm.
+  mutate_unreached doors stale_session_spares_no_entry DoorsInternalEntryMovedSessionRefused <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", '(IF (origin # "External") THEN TRUE ELSE', '(IF FALSE THEN TRUE ELSE')
+PY
+fi
+echo "created identity audit passed"

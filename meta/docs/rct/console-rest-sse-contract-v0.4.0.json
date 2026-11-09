@@ -1,0 +1,207 @@
+{
+  "contract_version": "0.4.0",
+  "version_pin": "v0.4.0",
+  "spec_source": {
+    "rct_spec_markdown": ".rct/spec.md",
+    "rct_spec_yaml": ".rct/spec.yaml"
+  },
+  "type_refs": {
+    "experience": "TYPE-005",
+    "identity_status_row": "TYPE-006",
+    "activity_filter_preset": "TYPE-012",
+    "console_frame": "TYPE-020",
+    "console_timeline_query": "TYPE-021",
+    "console_send_request": "TYPE-022",
+    "console_timeline_accepted": "TYPE-023",
+    "console_interaction_rejected_error": "TYPE-019"
+  },
+  "breaking_changes": [
+    {
+      "id": "BC-001",
+      "surface": "identity-first status and inspect payloads",
+      "change": "addressability wire values are lowercase",
+      "previous_examples": [
+        "Addressable",
+        "InternalOnly"
+      ],
+      "current_examples": [
+        "addressable",
+        "internal_only"
+      ],
+      "action_required": "Clients matching on addressability strings must update to lowercase wire enums."
+    },
+    {
+      "id": "BC-002",
+      "surface": "console timeline query and replay payloads",
+      "change": "timeline queries add explicit since/recent modes and cursor-window fields",
+      "previous_examples": [
+        { "after": "console:10", "limit": 200 }
+      ],
+      "current_examples": [
+        { "mode": "recent", "before": "console:1000", "limit": 200 }
+      ],
+      "action_required": "Clients using recent or before paging must require contract_version 0.4.0 or newer."
+    }
+  ],
+  "surfaces": {
+    "rest": {
+      "experience": {
+        "method": "GET",
+        "path": "/console/experience",
+        "response": {
+          "type_ref": "TYPE-005",
+          "required_top_level_fields": [
+            "contract_version",
+            "runtime_capabilities",
+            "base_panel",
+            "agent_sidebar",
+            "activity_feed",
+            "chat_inspector",
+            "topology",
+            "health_overview",
+            "flows",
+            "session_history"
+          ]
+        }
+      },
+      "modules": {
+        "method": "GET",
+        "path": "/console/modules",
+        "response": {
+          "required_top_level_fields": [
+            "contract_version",
+            "modules"
+          ]
+        }
+      },
+      "timeline": {
+        "method": "GET",
+        "path": "/console/timeline",
+        "query_optional_fields": [
+          "identity",
+          "conversation_id",
+          "after",
+          "before",
+          "mode",
+          "limit"
+        ],
+        "response": {
+          "required_top_level_fields": [
+            "frames"
+          ],
+          "optional_top_level_fields": [
+            "next_cursor",
+            "latest_cursor",
+            "exhausted"
+          ],
+          "mode_values": [
+            "since",
+            "recent"
+          ]
+        }
+      }
+    },
+    "rpc": {
+      "console_rpc_endpoint": {
+        "method": "POST",
+        "path": "/console/rpc",
+        "protocol": "JSON-RPC 2.0"
+      },
+      "methods": {
+        "meta/console/send": {
+          "request": {
+            "type_ref": "TYPE-022",
+            "required_fields": [
+              "identity",
+              "content"
+            ]
+          },
+          "success": {
+            "type_ref": "TYPE-023"
+          },
+          "errors": [
+            {
+              "type_ref": "TYPE-019",
+              "codes": [
+                -32001,
+                -32002,
+                -32003,
+                -32004,
+                -32602,
+                -32603
+              ]
+            }
+          ]
+        },
+        "meta/console/query_timeline": {
+          "request": {
+            "type_ref": "TYPE-021"
+          },
+          "success": {
+            "required_fields": [
+              "frames"
+            ],
+            "optional_fields": [
+              "next_cursor",
+              "latest_cursor",
+              "exhausted"
+            ],
+            "request_optional_fields": [
+              "identity",
+              "conversation_id",
+              "after",
+              "before",
+              "mode",
+              "limit"
+            ],
+            "mode_values": [
+              "since",
+              "recent"
+            ]
+          },
+          "errors": [
+            {
+              "type_ref": "TYPE-019",
+              "codes": [
+                -32001,
+                -32002,
+                -32003,
+                -32004,
+                -32013,
+                -32602,
+                -32603
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "sse": {
+      "timeline": {
+        "method": "GET",
+        "path": "/console/timeline/stream",
+        "events": {
+          "type_ref": "TYPE-020"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "reason": "console stream requires a valid auth token"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "replay_unavailable",
+              "requested_cursor": "console:1",
+              "latest_cursor": "console:99"
+            }
+          }
+        ]
+      },
+      "activity_feed_keep_alive_event": "keep-alive"
+    }
+  }
+}

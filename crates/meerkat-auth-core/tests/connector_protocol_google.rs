@@ -125,7 +125,7 @@ async fn fixture_with_domains(
         ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new()));
     let lifecycle = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
     let flows = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         lifecycle,
     ));
     let authority = ConnectorOAuthAuthority::with_http(

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Publish every release crate to crates.io, one dependency level at a time.
+# Publish every release crate of one product to crates.io, one dependency
+# level at a time.
 #
-# The levels come from the canonical order (scripts/release-rust-crates.sh
-# --levels: that order plus `cargo metadata`). The crates of one level do not
+# The product's crate list is MEERKAT_RELEASE_CRATE_LIST, a script that prints
+# the canonical order and answers --levels (default
+# scripts/release-rust-crates.sh, Core's 47 crates; Meta's release passes
+# scripts/release-meta-crates.sh). Each product publishes only its own list,
+# so a Meta release never republishes Core and the reverse.
+#
+# The levels come from the canonical order (<list> --levels: that order plus
+# `cargo metadata`). The crates of one level do not
 # depend on each other, so they publish concurrently, at most
 # MEERKAT_CRATE_PUBLISH_JOBS at a time (default 6 for uploads, which skip
 # cargo's verify build; 1 for a dry run or a verifying upload, which compile
@@ -20,13 +27,29 @@
 # finish), and the publication stops with the status of the first failed
 # crate in canonical order (124 after MEERKAT_CRATE_PUBLISH_TIMEOUT); no
 # later level starts.
+#
+# Every cargo publish gets a [patch.crates-io] config naming the list's
+# other crates (scripts/generate-patch-config.sh), so a crate resolves its
+# unpublished siblings from their paths. The patch is part of the packaged
+# Cargo.lock: a patched sibling is recorded as a path package, and an unused
+# patch as [[patch.unused]]. MEERKAT_CRATE_PUBLISH_PATCH=false (default
+# true) drops the patch from real uploads, which then package exactly what
+# `cargo package` packages without one: each level waits for the one below
+# in the index, so a crate resolves its siblings from crates.io. A dry run
+# keeps the patch, since nothing it names is published.
 
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+CRATE_LIST="${MEERKAT_RELEASE_CRATE_LIST:-${ROOT}/scripts/release-rust-crates.sh}"
+if [[ ! -x "$CRATE_LIST" ]]; then
+  echo "MEERKAT_RELEASE_CRATE_LIST must name an executable crate list script, got ${CRATE_LIST}" >&2
+  exit 2
+fi
 DRY_RUN="${MEERKAT_REGISTRY_DRY_RUN:-false}"
 PUBLISH_TIMEOUT="${MEERKAT_CRATE_PUBLISH_TIMEOUT:-20m}"
 NO_VERIFY="${MEERKAT_CARGO_PUBLISH_NO_VERIFY:-true}"
+PATCH="${MEERKAT_CRATE_PUBLISH_PATCH:-true}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 INDEX_URL="${MEERKAT_CRATE_INDEX_URL:-https://index.crates.io}"
 INDEX_TIMEOUT="${MEERKAT_CRATE_INDEX_TIMEOUT:-600}"
@@ -35,6 +58,14 @@ INDEX_POLL="${MEERKAT_CRATE_INDEX_POLL_SECONDS:-5}"
 case "$DRY_RUN" in
   1|true|TRUE|yes|YES|on|ON) DRY_RUN=true ;;
   *) DRY_RUN=false ;;
+esac
+
+case "$PATCH" in
+  true|false) ;;
+  *)
+    echo "MEERKAT_CRATE_PUBLISH_PATCH must be true or false, got ${PATCH}" >&2
+    exit 2
+    ;;
 esac
 
 case "$NO_VERIFY" in
@@ -74,7 +105,7 @@ publish_one() {
   output_file="$(mktemp)"
   target_dir="${RUNNER_TEMP}/meerkat-publish-target/${crate}"
 
-  "$ROOT/scripts/generate-patch-config.sh" "$ROOT" "$crate" > "$tmp_cfg"
+  MEERKAT_RELEASE_CRATE_LIST="$CRATE_LIST" "$ROOT/scripts/generate-patch-config.sh" "$ROOT" "$crate" > "$tmp_cfg"
   mkdir -p "${target_dir}/package"
   ln -sfn "${ROOT}/meerkat-core" "${target_dir}/package/meerkat-core"
 
@@ -92,7 +123,12 @@ publish_one() {
     rc=$?
     set -e
   else
-    local cmd=(cargo publish -p "$crate" --locked --config "$tmp_cfg")
+    local cmd=(cargo publish -p "$crate" --locked)
+    if [[ "$PATCH" == "true" ]]; then
+      cmd+=(--config "$tmp_cfg")
+    else
+      echo "  ${crate}: upload without the patch config; its siblings resolve from crates.io"
+    fi
     if [[ "$NO_VERIFY" == "true" ]]; then
       cmd+=(--no-verify)
       echo "  ${crate}: upload mode skips cargo's duplicate verifier; release validation already packaged and linked these crates"
@@ -326,7 +362,7 @@ fi
 
 # Canonical order within each level; the levels in ascending order (a level's
 # crates are not contiguous in the canonical order).
-levels="$("$ROOT/scripts/release-rust-crates.sh" --levels | sort -s -t $'\t' -k1,1n)"
+levels="$("$CRATE_LIST" --levels | sort -s -t $'\t' -k1,1n)"
 WORK_DIR="$(mktemp -d "${RUNNER_TEMP}/meerkat-publish-levels.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
@@ -344,4 +380,4 @@ done <<<"$levels"
 if [[ "${#level_entries[@]}" -gt 0 ]]; then
   publish_level "$current_level" "${level_entries[@]}"
 fi
-echo "Every release crate is published"
+echo "Every release crate is published ($(basename "$CRATE_LIST"))"

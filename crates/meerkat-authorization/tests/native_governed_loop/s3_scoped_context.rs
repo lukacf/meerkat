@@ -79,6 +79,7 @@ async fn scoped_destination_carries_a_native_turn_and_refuses_other_destinations
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -88,6 +89,7 @@ async fn scoped_destination_carries_a_native_turn_and_refuses_other_destinations
         .expect("actual controller lineage with unrestricted lifetime");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -121,6 +123,7 @@ async fn scoped_destination_carries_a_native_turn_and_refuses_other_destinations
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -165,7 +168,7 @@ async fn scoped_destination_carries_a_native_turn_and_refuses_other_destinations
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("actual immutable selected LlmClientAdapter");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     // This scripted transport has no physical vault or external credential.
     // Native readiness still uses the actual machine's generated owner and the
     // exact credential identity pinned by the real adapter.
@@ -325,6 +328,7 @@ async fn a_retired_destination_keeps_the_known_result_and_the_executor() {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -334,6 +338,7 @@ async fn a_retired_destination_keeps_the_known_result_and_the_executor() {
         .expect("actual controller lineage with unrestricted lifetime");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -367,6 +372,7 @@ async fn a_retired_destination_keeps_the_known_result_and_the_executor() {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -412,7 +418,7 @@ async fn a_retired_destination_keeps_the_known_result_and_the_executor() {
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("actual immutable selected LlmClientAdapter");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     // This scripted transport has no physical vault or external credential.
     // Native readiness still uses the actual machine's generated owner and the
     // exact credential identity pinned by the real adapter.

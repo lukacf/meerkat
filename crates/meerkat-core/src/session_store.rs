@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::TranscriptRewriteSelection;
 use crate::session::{
     SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
-    SESSION_VERSION, SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionMeta,
+    SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionMeta,
     TranscriptRevisionBody,
 };
 use crate::time_compat::SystemTime;
@@ -2583,16 +2583,22 @@ impl SessionHead {
         })
     }
 
-    /// Require the current envelope before minting a new persisted head.
+    /// Require a current envelope before minting a new persisted head.
     ///
     /// Read migration may retain an older physical predecessor, but every
     /// successor must fence readers that cannot honor current callback state.
+    /// The envelope is chosen per document: the current version for a
+    /// document carrying an operator-instruction fact, the baseline for every
+    /// other one ([`Session::persisted_envelope_version`]); both are current.
     pub fn require_current_envelope_for_write(&self) -> Result<(), SessionStoreError> {
-        if self.version != SESSION_VERSION {
+        use crate::generated::session_persistence_version_authority::session_envelope_version_for_document;
+        let baseline = session_envelope_version_for_document(false);
+        let current = session_envelope_version_for_document(true);
+        if self.version != baseline && self.version != current {
             return Err(SessionStoreError::InvalidTranscriptRewrite {
                 id: self.id.clone(),
                 reason: format!(
-                    "new session head requires envelope version {SESSION_VERSION}, got {}",
+                    "new session head requires envelope version {baseline} or {current}, got {}",
                     self.version
                 ),
             });
@@ -2953,7 +2959,7 @@ impl SessionHead {
         };
         let head = Self {
             id: session.id().clone(),
-            version: session.version(),
+            version: session.persisted_envelope_version(),
             strand,
             head_revision,
             message_count: session.messages().len() as u64,
@@ -4001,7 +4007,7 @@ impl PreparedHeadCanonicalMutation {
             reason,
         };
         if session.id() != &self.successor_head.id
-            || session.version() != self.successor_head.version
+            || session.persisted_envelope_version() != self.successor_head.version
             || session.messages().len() as u64 != self.successor_head.message_count
             || session.created_at() != self.successor_head.created_at
             || session.updated_at() != self.successor_head.updated_at
@@ -8415,6 +8421,7 @@ mod tests {
                 run_id,
                 objective_id: None,
                 turn_input: None,
+                requester: None,
             },
             created_at,
             assistant_message_id: None,
@@ -8452,6 +8459,7 @@ mod tests {
                         run_id: Some(crate::lifecycle::RunId::new()),
                         objective_id: None,
                         turn_input: None,
+                        requester: None,
                     };
                     assistant.created_at = base_time + chrono::Duration::hours(1);
                 }
@@ -9392,8 +9400,8 @@ mod tests {
         let verified = compact
             .clone()
             .verify_materialized_session(session.clone())
-            .expect("supported v3 head must verify its normalized v4 Session");
-        assert_eq!(verified.session().version(), 4);
+            .expect("supported v3 head must verify its normalized Session");
+        assert_eq!(verified.session().version(), crate::SESSION_VERSION);
         assert_eq!(verified.session().messages(), session.messages());
         assert_eq!(verified.session().metadata(), session.metadata());
         assert_eq!(
@@ -9411,7 +9419,7 @@ mod tests {
             compact.clone().verify_materialized_session(changed),
             Err(SessionStoreError::TranscriptRevisionConflict { .. })
         ));
-        for unsupported in [0, 2, 5, u32::MAX] {
+        for unsupported in [0, 2, crate::SESSION_VERSION + 1, u32::MAX] {
             let mut invalid = compact.clone();
             invalid.version = unsupported;
             assert!(

@@ -92,7 +92,7 @@ machine_authority_path() {
     crates/meerkat-machine-codegen/*|crates/meerkat-machine-derive/*|crates/meerkat-machine-dsl/*|crates/meerkat-machine-dsl-core/*|crates/meerkat-machine-kernels/*|crates/meerkat-machine-schema/*|crates/meerkat-authorization/*|crates/meerkat-authorization-contracts/*)
       return 0
       ;;
-    crates/meerkat-runtime/src/meerkat_machine/*|crates/meerkat-runtime/src/auth_machine/*|crates/meerkat-mob/src/ids.rs|crates/meerkat-mob/src/machines/*|crates/meerkat-mob/src/runtime/*|crates/meerkat-schedule/src/machines/*)
+    crates/meerkat-runtime/src/meerkat_machine/*|crates/meerkat-runtime/src/auth_machine/*|crates/meerkat-runtime/src/tool_grant/*|crates/meerkat-runtime/src/decision/*|crates/meerkat-mob/src/ids.rs|crates/meerkat-mob/src/machines/*|crates/meerkat-mob/src/runtime/*|crates/meerkat-schedule/src/machines/*)
       return 0
       ;;
     # meerkat-session is listed explicitly: protocol-codegen emits
@@ -113,6 +113,11 @@ machine_authority_path() {
       return 0
       ;;
     crates/xtask/tests/machine_verify_all_tlc_test.sh|crates/xtask/tests/machines_contracts.rs|crates/xtask/tests/protocol_codegen_drift.rs|crates/xtask/tests/runtime_authority_bypass.rs)
+      return 0
+      ;;
+    # The one TLC install every TLC lane runs (the JDK and the mirrored TLC
+    # jar): a jar or JDK change reruns the audit shards.
+    .github/actions/setup-tlc-ci/*)
       return 0
       ;;
   esac

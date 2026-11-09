@@ -2484,8 +2484,9 @@ pub enum InputAbandonReason {
     ToolProcessInterrupted,
     /// A graceful stop kept the input queued for the next start
     /// (`ClassifyStopInputDisposition` answered `Retain`), and the next start
-    /// found it older than that stop's max age, so it ended without running.
-    /// Resolves to the public `Abandoned` class.
+    /// came more than that stop's max age after the stop, so the input ended
+    /// without running. The shell decides the expiry from the stop's time;
+    /// the machine holds no clock. Resolves to the public `Abandoned` class.
     RequeueExpired,
     /// The input's resume was refused, so it ended without running: the run
     /// it was bound to was resumable after a restart and the host's resume
@@ -2529,6 +2530,13 @@ pub enum RunStartHoldReason {
     MobStop,
     /// A restored member waits until its host has published its tools.
     ToolsNotPublished,
+    /// A mob member whose host preparation is owed (a role move its mob
+    /// holds) starts no run until its mob releases it.
+    HostPreparation,
+    /// The session's host holds it while it recovers it (for example while
+    /// it settles a run a crash left open, `SettleRetainedRun`). No mob or
+    /// Meta code stages or releases this reason; only its host does.
+    HostRecovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2894,6 +2902,33 @@ pub enum EmptyResumeRetirementVerdict {
     #[default]
     Retire,
     KeepServing,
+}
+
+/// The verdict for a host's settle of the run its session retained
+/// (`SettleRetainedRun`): accepted (no run is current and the observed run is
+/// the one marked resumable, so its stop is recorded and the runtime settles
+/// it), busy (a run is current, the registration cannot settle the run it
+/// retained now, or the observed run is not the marked one), or not retained
+/// (no run is current and none is marked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RetainedRunSettleVerdict {
+    Accepted,
+    Busy,
+    #[default]
+    NotRetained,
+}
+
+/// The verdict for a host's request that the session's next compaction check
+/// compact (`RequestCompaction`): requested (the registration serves and now
+/// holds the request), already requested (it already held one, not yet
+/// consumed: nothing changed), or not serving (the registration is
+/// initializing, retired, stopped or destroyed: nothing changed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CompactionRequestVerdict {
+    Requested,
+    AlreadyRequested,
+    #[default]
+    NotServing,
 }
 
 /// What an unregister does with inputs still queued behind the session's
@@ -4032,6 +4067,34 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_active: bool,
             turn_tool_overlay_allow_names: Set<ToolName>,
             turn_tool_overlay_deny_names: Set<ToolName>,
+            // The scoped tool grant gate. `tool_grant_gated_names` are the
+            // names this build marked grant-gated, replaced by every build
+            // (ReplaceToolGrantGate). `tool_grant_open_names` are the gated
+            // names a live grant opened at the last model-request boundary
+            // (ApplyToolGrantOpenSet). The gated names no grant opened are
+            // hidden. The machine never reads a grant: the open set is the
+            // grant service's adjudication, applied as an input.
+            tool_grant_gated_names: Set<ToolName>,
+            tool_grant_open_names: Set<ToolName>,
+            // The MCP servers this build marked grant-gated, by server name.
+            // Every tool a gated server provides is gated from the moment it
+            // appears: a boundary adds its names (ExtendToolGrantGate), and
+            // a grant-time live attach stages only a server the gate gates
+            // (SurfaceStageGatedAdd). Replaced by every build.
+            tool_grant_gated_servers: Set<String>,
+            // Whether this build gates every MCP server it does not configure
+            // ungated: one the installation provides, at the build or later,
+            // and one attached later by any path. Replaced by every build.
+            tool_grant_gates_unconfigured_servers: bool,
+            // The servers this build configures and leaves ungated: while the
+            // mode above is on, the only servers it does not gate. Empty while
+            // the mode is off. Replaced by every build.
+            tool_grant_ungated_servers: Set<String>,
+            // The role gate entries this build ignored outright: the names of
+            // a role family the member does not mount and the role names the
+            // build's tool policy refuses. Never gated and never open; kept so
+            // a listing can show them as not mounted. Replaced by every build.
+            tool_grant_not_mounted_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
             // Authenticated shell supplies exact opaque association bytes. These
@@ -4163,6 +4226,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             // drops its hold. Live only: never persisted, every registration
             // holds its recovered inputs again from their first answer.
             input_controller_holds: Set<String>,
+            // The run marked resumable whose host's resumed-run admission
+            // could not decide (every attempt answered unavailable or late):
+            // it stays marked, with its inputs bound and none ended, and
+            // waits for a later lap of the runtime loop or a later
+            // registration to ask again. While it is held, ResumeRun and the
+            // resumed-run plan refuse it; a later `Continue` releases it
+            // (ReleaseResumedRunAdmission), and settling or releasing the
+            // run drops it. It names only the run marked resumable. Live
+            // only: never persisted, every registration asks again.
+            resumed_run_admission_hold: Option<RunId>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
             // Whether the registration served live work: an input admitted
             // live (QueueAccepted, SteerAccepted), a resubmission
@@ -4293,6 +4366,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             // equality joins.
             live_delegation_operation_by_interaction: Map<String, OperationId>,
             live_delegation_channel_by_operation: Map<OperationId, String>,
+            // The member-turn reasoning preference the operation's channel
+            // sealed when the operation was admitted: a worker that starts
+            // after that channel closed still carries it.
+            live_delegation_member_turn_reasoning_by_operation: Map<OperationId, Enum<LiveMemberTurnReasoning>>,
+            // Channels whose delegation intake the coordinator closed with the
+            // first step of its close sweep: no delegation is admitted on such a
+            // channel any more. Channel ids are never reused, so, like the revoked
+            // set, it only grows.
+            live_delegation_intake_closed_channels: Set<String>,
             live_delegation_schedule_state_by_operation: Map<OperationId, Enum<LiveDelegationScheduleState>>,
             live_delegation_active_worker_count_by_channel: Map<String, u64>,
             live_delegation_channel_worker_cap: u64,
@@ -4734,6 +4816,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             mob_overlay_peer_endpoints: Set<PeerEndpoint>,
             peer_projection_epoch: u64,
             mob_overlay_epoch: u64,
+
+            // A host's request that the session's next compaction check
+            // compact (`RequestCompaction`), consumed by that check
+            // (`ConsumeCompactionRequest`). A one-shot fact of this
+            // registration: never persisted, and no threshold changes with
+            // it. A re-registration of the same session keeps it, as it keeps
+            // the session's run-start holds; a new session binding clears it.
+            compaction_requested: bool,
         }
 
         init(Initializing) {
@@ -4868,6 +4958,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_allow_active = false,
             turn_tool_overlay_allow_names = EmptySet,
             turn_tool_overlay_deny_names = EmptySet,
+            tool_grant_gated_names = EmptySet,
+            tool_grant_open_names = EmptySet,
+            tool_grant_gated_servers = EmptySet,
+            tool_grant_gates_unconfigured_servers = false,
+            tool_grant_ungated_servers = EmptySet,
+            tool_grant_not_mounted_names = EmptySet,
             // Input lifecycle substate
             input_authority_bindings = EmptyMap,
             input_authority_batch_keys = EmptyMap,
@@ -4916,6 +5012,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             run_stop_requested = None,
             run_start_holds = EmptySet,
             input_controller_holds = EmptySet,
+            resumed_run_admission_hold = None,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -4989,6 +5086,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_steer_delivered_by_continuation = EmptyMap,
             live_delegation_operation_by_interaction = EmptyMap,
             live_delegation_channel_by_operation = EmptyMap,
+            live_delegation_member_turn_reasoning_by_operation = EmptyMap,
+            live_delegation_intake_closed_channels = EmptySet,
             live_delegation_schedule_state_by_operation = EmptyMap,
             live_delegation_active_worker_count_by_channel = EmptyMap,
             live_delegation_channel_worker_cap = 4,
@@ -5221,6 +5320,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             mob_overlay_peer_endpoints = EmptySet,
             peer_projection_epoch = 0,
             mob_overlay_epoch = 0,
+            compaction_requested = false,
         }
 
         terminal [Destroyed]
@@ -5613,6 +5713,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             RuntimeState { runtime_id: String },
             ModelRoutingStatus { session_id: SessionId },
             SetModelRoutingBaseline { baseline_model: String, realtime_capable: bool },
+            // `target_carries_transcript`: whether every request the target
+            // would serve can carry the session's transcript as it stands
+            // (the operator-instruction entry rows the session wrote itself,
+            // where they stand, and its ordered instruction activations). A
+            // target that cannot is a permanent refusal: the switch is
+            // denied, never held.
             RequestFiniteSwitchTurn {
                 request_id: String,
                 target_model: String,
@@ -5623,6 +5729,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
+                target_carries_transcript: bool,
             },
             RequestUntilChangedSwitchTurn {
                 request_id: String,
@@ -5633,6 +5740,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 approval_denied: bool,
                 approval_reason: Option<Enum<RoutingSwitchApprovalReason>>,
                 realtime_detach_allowed: bool,
+                target_carries_transcript: bool,
             },
             CompleteUntilChangedSwitchTurnReconfigure { request_id: String },
             AdmitModelRoutingAssistantTurn,
@@ -7350,6 +7458,66 @@ macro_rules! meerkat_catalog_machine_dsl {
             // releases it.
             HoldInputController { input_id: String },
             ReleaseInputController { input_id: String },
+            // The scoped tool grant gate: every build replaces the gated
+            // names, the gated servers, the unconfigured-servers mode, the
+            // ungated servers and the not-mounted names (every open name
+            // closes), and every model-request boundary applies the gated
+            // names a live grant opens.
+            ReplaceToolGrantGate {
+                gated: Set<ToolName>,
+                gated_servers: Set<String>,
+                gates_unconfigured_servers: bool,
+                ungated_servers: Set<String>,
+                not_mounted_names: Set<ToolName>,
+            },
+            ApplyToolGrantOpenSet { open: Set<ToolName> },
+            // A failed until-changed switch-turn reconfigure withdraws the
+            // request it staged, and nothing else
+            // (AbortUntilChangedSwitchTurnReconfigure).
+            AbortUntilChangedSwitchTurnReconfigure { request_id: String },
+            // A host settles the run its session retained, without resuming
+            // it: the machine decides, and an accepted settle records the
+            // run's stop, which the runtime then settles. `run_id` is the run
+            // the caller observed marked resumable, under the same mutation
+            // gate as this input (none when none is marked).
+            SettleRetainedRun { run_id: Option<RunId> },
+            // The run marked resumable whose resumed-run admission could not
+            // decide is held (`resumed_run_admission_hold`); a later
+            // `Continue` releases it. Appended last: every input before them
+            // keeps its place.
+            HoldResumedRunForAdmission { run_id: RunId },
+            ReleaseResumedRunAdmission { run_id: RunId },
+            // A model-request boundary gates the names a gated MCP server
+            // provides now (ExtendToolGrantGate): the gate only grows within
+            // a build, and no name opens.
+            ExtendToolGrantGate { server: String, gated: Set<ToolName> },
+            // A grant-time live attach stages an MCP server the gate gates,
+            // and no other (SurfaceStageGatedAdd); the ordinary stage is
+            // SurfaceStageAdd.
+            SurfaceStageGatedAdd { surface_id: String, now_ms: u64 },
+            // The coordinator's close sweep closes the channel's delegation
+            // intake (CloseLiveDelegationIntake).
+            CloseLiveDelegationIntake {
+                channel_id: String,
+                runtime_id: AgentRuntimeId,
+                fence_token: FenceToken,
+                generation: Generation,
+            },
+            // Rehydrate an ungoverned recovered row's requester batch key, as
+            // BindInputAuthority rehydrates a governed row's binding.
+            BindInputRequesterBatchKey {
+                input_id: String,
+                #[redacted]
+                authority_batch_key: String,
+            },
+            // A host asks the session's next compaction check to compact
+            // (`MeerkatMachine::request_compaction`): the machine records the
+            // request or answers why not.
+            RequestCompaction,
+            // The agent's compaction check of `run_id` consumes a recorded
+            // request: the machine answers whether this check compacts at
+            // the host's request.
+            ConsumeCompactionRequest { run_id: RunId },
         }
 
         surface_only [
@@ -8727,6 +8895,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             // runtime plans again, and the input may stage, or the run it is
             // bound to resume.
             InputControllerReleased,
+            // The verdict for a host's settle of the run its session
+            // retained: `run_id` is the run an accepted settle settles, the
+            // current run (if any) of a busy one, and none otherwise.
+            RetainedRunSettleResolved { verdict: Enum<RetainedRunSettleVerdict>, run_id: Option<RunId> },
+            // A boundary cancel bound to the exact run `run_id`, current when
+            // the cancel was admitted. Realized only through the executor's
+            // exact-run boundary handle, never as a runtime-loop effect: the
+            // loop applies its effects only between runs, so a loop-delivered
+            // cancel could never reach this run, and an executor-wide cancel
+            // there would meet no run, or another one.
+            ExactRunBoundaryCancel { run_id: RunId, reason: String },
+            // The verdict for a host's compaction request.
+            CompactionRequestResolved { verdict: Enum<CompactionRequestVerdict> },
+            // The compaction check of `run_id` consumed the host's request:
+            // the check compacts without asking the compactor's trigger, or,
+            // with nothing to compact, skips and says so.
+            CompactionRequestConsumed { run_id: RunId },
         }
 
         // =====================================================================
@@ -9009,6 +9194,17 @@ macro_rules! meerkat_catalog_machine_dsl {
         // The runtime loop that releases a kept input's controller hold
         // reads the wake from its own transition and plans again.
         disposition InputControllerReleased => local seam SurfaceResultAlignment,
+        // The host's settle verb answers the verdict of its own transition.
+        disposition RetainedRunSettleResolved => local seam SurfaceResultAlignment,
+        // Only the executor's exact-run boundary handle realizes a run-bound
+        // boundary cancel.
+        disposition ExactRunBoundaryCancel => local seam NoOwnerRealization,
+        // The host's compaction request answers the verdict of its own
+        // transition.
+        disposition CompactionRequestResolved => local seam SurfaceResultAlignment,
+        // The agent's compaction check reads the consumption from its own
+        // transition, as it reads TurnCheckCompaction.
+        disposition CompactionRequestConsumed => local seam NoOwnerRealization,
 
         // =====================================================================
         // Helpers
@@ -9901,8 +10097,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // An abandoned interaction never leaves a live delegation behind:
             // its operation was refused at reconciliation, reached a worker
             // terminal, carries a cancellation reason, ended Cancelled or
-            // Failed, or never bound a worker at all (a queued item that the
-            // shell cancels on the same channel close).
+            // Failed, or never bound a worker at all (an item still queued
+            // for its worker).
             && for_all(operation_id in self.live_delegation_interaction_by_operation.keys(),
                 !self.live_abandoned_interactions.contains(
                     self.live_delegation_interaction_by_operation.get_cloned(operation_id).get("value"))
@@ -10396,9 +10592,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_authority_bindings.contains_key(input_id))
         }
 
+        // Every governed binding has its batch key. A batch key without a
+        // binding is an ungoverned input's requester key. Either belongs to a
+        // tracked or admission-authorized input.
         invariant input_authority_bindings_have_native_owner {
-            self.input_authority_bindings.keys() == self.input_authority_batch_keys.keys()
-            && for_all(input_id in self.input_authority_bindings.keys(),
+            for_all(input_id in self.input_authority_bindings.keys(),
+                self.input_authority_batch_keys.contains_key(input_id))
+            && for_all(input_id in self.input_authority_batch_keys.keys(),
                 self.input_phases.contains_key(input_id)
                 || self.admission_authorized_plans.contains_key(input_id))
         }
@@ -10437,6 +10637,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                             || self.input_phases.get_cloned(input_id) == Some(InputPhase::Applied)
                             || self.input_phases.get_cloned(input_id)
                                 == Some(InputPhase::AppliedPendingConsumption)))))
+        }
+
+        // A resumed-run admission hold names only the run marked resumable:
+        // releasing, settling or resuming the run drops it with the mark.
+        invariant resumed_run_admission_hold_names_the_marked_run {
+            self.resumed_run_admission_hold == None
+            || self.resumed_run_admission_hold == self.resumable_run_id
         }
 
         // Durable in-turn Steer delivery. The tracked delivery class exists
@@ -10704,6 +10911,25 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.supervisor_bound_address == self.supervisor_rotation_previous_address
                 && self.supervisor_bound_signing_public_key == self.supervisor_rotation_previous_signing_public_key
                 && self.supervisor_bound_epoch == self.supervisor_rotation_previous_epoch)
+        }
+
+        // The scoped tool grant gate opens only names this build gated.
+        invariant tool_grant_open_names_are_gated {
+            for_all(name in self.tool_grant_open_names,
+                self.tool_grant_gated_names.contains(name))
+        }
+
+        // A role entry the build ignored is never gated, so no grant can
+        // ever open it.
+        invariant tool_grant_not_mounted_are_not_gated {
+            for_all(name in self.tool_grant_not_mounted_names,
+                !self.tool_grant_gated_names.contains(name))
+        }
+
+        // A server the build configures ungated is never a gated server.
+        invariant tool_grant_ungated_servers_are_not_gated {
+            for_all(server in self.tool_grant_ungated_servers,
+                !self.tool_grant_gated_servers.contains(server))
         }
 
 
@@ -11676,6 +11902,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 for_all(held_input_id in self.input_controller_holds,
                     self.input_run_associations.get_cloned(held_input_id) != Some(run_id))
             }
+            // A run whose resumed-run admission could not decide does not
+            // resume until a later answer releases it (the resumed-run plan
+            // refuses it too).
+            guard "run_admission_not_held" { self.resumed_run_admission_hold != Some(run_id) }
             // A governed run on a document that requires a destination
             // resumes only once one is bound again (or was bound, and then
             // retired), as `scoped_context_attached` stages recovered
@@ -11726,6 +11956,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
             update {
                 self.resumable_run_id = None;
+                // Its admission hold goes with the mark.
+                self.resumed_run_admission_hold = None;
                 // Its held inputs stop waiting with it: they requeue as
                 // inputs of no run, and the runtime asks their host again for
                 // a controller client they still miss.
@@ -11761,6 +11993,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.resumable_run_id = None;
                 self.turn_terminal_run_id = Some(run_id);
+                // Its admission hold goes with the mark.
+                self.resumed_run_admission_hold = None;
                 // Its held inputs stop waiting with it; the shell then ends
                 // them with the run.
                 for held_input_id in self.input_controller_holds {
@@ -11826,6 +12060,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
+                }
                 self.current_session_llm_identity = None;
                 self.current_session_capability_surface = None;
                 self.current_session_capability_surface_status =
@@ -11839,6 +12079,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // A compaction request belongs to the session it was made
+                // for.
+                self.compaction_requested = false;
             }
             to Idle
         }
@@ -11862,6 +12105,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
                 }
             }
             to Idle
@@ -12007,6 +12256,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
+                }
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -12046,6 +12301,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::ToolsNotPublished) {
                     self.run_start_holds.insert(RunStartHoldReason::ToolsNotPublished);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
+                }
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
                 self.current_session_llm_identity = None;
@@ -12061,6 +12322,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // A compaction request belongs to the session it was made
+                // for.
+                self.compaction_requested = false;
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-registered under a new session binding" }
@@ -13994,15 +14258,60 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
         }
 
+        // A switch onto a target that cannot carry the session's transcript
+        // as it stands is denied whatever else holds: the refusal is
+        // permanent, so a request held for it would never end.
+        transition RequestFiniteSwitchTurnTranscriptUnsupported {
+            per_phase [Idle, Attached, Running]
+            on input RequestFiniteSwitchTurn {
+                request_id, target_model, turns, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_not_carried" { !target_carries_transcript }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
+        transition RequestUntilChangedSwitchTurnTranscriptUnsupported {
+            per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_not_carried" { !target_carries_transcript }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::CapabilityPolicy);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::CapabilityPolicy }
+        }
+
         transition RequestFiniteSwitchTurnApprovalUnavailable {
             per_phase [Idle, Attached, Running]
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ApprovalRequiredButUnavailable);
@@ -14016,10 +14325,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
@@ -14037,13 +14350,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "scoped_conflict" {
                 self.model_routing_turn_override_id != None
                 || self.model_routing_operation_override_id != None
                 || self.model_routing_pending_switch_request_id != None
             }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ScopedOverrideConflict);
@@ -14057,8 +14374,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestFiniteSwitchTurn {
                 request_id, target_model, turns, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
@@ -14067,6 +14385,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.model_routing_operation_override_id == None
                 && self.model_routing_pending_switch_request_id == None
             }
+            // A denied request stays denied: no request is staged under an id
+            // that holds a denial (RequestUntilChangedSwitchTurnAccepted).
+            guard "request_not_denied" { !self.model_routing_switch_denials.contains_key(request_id) }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
@@ -14086,10 +14407,28 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
+            // A retry of the pending request itself stages it again, so a
+            // caller that abandoned the request inside its reconfigure can
+            // finish it; only an until-changed switch is taken over that way,
+            // never a finite one staged under the same id. Another request's
+            // pending switch is a conflict
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "no_other_pending_switch" {
+                self.model_routing_pending_switch_request_id == None
+                || (self.model_routing_pending_switch_request_id == Some(request_id)
+                    && self.model_routing_pending_switch_turns == None)
+            }
+            // A denied request stays denied: no request is staged under an id
+            // that holds a denial, and the shell answers its retry with the
+            // recorded denial. A pending switch's id never holds one
+            // (RequestUntilChangedSwitchTurnPendingConflict), so the retry
+            // that finishes a pending switch is staged again.
+            guard "request_not_denied" { !self.model_routing_switch_denials.contains_key(request_id) }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
@@ -14110,10 +14449,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_unavailable" { requires_approval && !approval_available }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
                 self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ApprovalRequiredButUnavailable);
@@ -14127,10 +14470,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input RequestUntilChangedSwitchTurn {
                 request_id, target_model, target_realtime_capable,
                 requires_approval, approval_available, approval_denied,
-                approval_reason, realtime_detach_allowed
+                approval_reason, realtime_detach_allowed, target_carries_transcript
             }
+            guard "transcript_carried" { target_carries_transcript }
             guard "approval_denied" { requires_approval && approval_available && approval_denied }
             guard "approval_reason_present" { approval_reason != None }
+            // A request with the pending switch's id is never denied
+            // (RequestUntilChangedSwitchTurnPendingConflict).
+            guard "request_not_pending" { self.model_routing_pending_switch_request_id != Some(request_id) }
             update {
                 self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Denied);
                 self.model_routing_approval_parent_kind.insert(request_id, RoutingApprovalParentKind::SwitchTurn);
@@ -14143,8 +14490,51 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingApprovalTerminalized { approval_id: request_id, phase: RoutingApprovalPhase::Denied }
         }
 
-        transition CompleteUntilChangedSwitchTurnReconfigure {
+        // An until-changed request that arrives while another switch is
+        // pending is refused with the conflict a finite request meets: it
+        // would otherwise replace the pending switch, whose own reconfigure
+        // could then neither complete nor withdraw. It requires the approval
+        // the accept requires, so it never overlaps the approval arms and an
+        // approval refusal still answers first, as it does for a finite
+        // request. A retry of the pending request itself is accepted again
+        // (RequestUntilChangedSwitchTurnAccepted), and no refusal arm, finite
+        // or until-changed, records a denial under the pending switch's id:
+        // the denial would answer the retry that finishes the switch as
+        // denied, and the switch would stay pending. A request with the
+        // pending switch's id that cannot be accepted (a finite one, one not
+        // approved, one onto a target that cannot carry the transcript, or an
+        // until-changed one that reuses the id of a staged finite switch)
+        // matches no arm: its caller gets an error and nothing is recorded
+        // under the id.
+        transition RequestUntilChangedSwitchTurnPendingConflict {
             per_phase [Idle, Attached, Running]
+            on input RequestUntilChangedSwitchTurn {
+                request_id, target_model, target_realtime_capable,
+                requires_approval, approval_available, approval_denied,
+                approval_reason, realtime_detach_allowed, target_carries_transcript
+            }
+            guard "transcript_carried" { target_carries_transcript }
+            guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
+            guard "pending_switch_conflict" {
+                self.model_routing_pending_switch_request_id != None
+                && self.model_routing_pending_switch_request_id != Some(request_id)
+            }
+            update {
+                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
+                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::ScopedOverrideConflict);
+            }
+            to Idle
+            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::ScopedOverrideConflict }
+        }
+
+        // A reconfigured until-changed switch completes in whatever phase the
+        // session reached meanwhile: the shell releases its session mutation
+        // gate while the reconfigure runs, so a stop or a retirement can land
+        // before it takes the gate again. The completion records the applied
+        // target as the routing baseline itself, so no separate baseline
+        // input is needed in a phase that refuses one (Stopped).
+        transition CompleteUntilChangedSwitchTurnReconfigure {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CompleteUntilChangedSwitchTurnReconfigure { request_id }
             guard "pending_until_changed_reconfigure" {
                 self.model_routing_pending_switch_request_id == Some(request_id)
@@ -14152,6 +14542,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.model_routing_pending_switch_phase == Some(RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
             }
             update {
+                self.model_routing_baseline_model = Some(self.model_routing_pending_switch_target_model.get("value"));
+                self.model_routing_baseline_realtime = Some(self.model_routing_pending_switch_realtime.get("value"));
+                self.model_routing_topology_epoch = self.model_routing_topology_epoch + 1;
                 self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::PersistentReconfigureApplied);
                 self.model_routing_pending_switch_request_id = None;
                 self.model_routing_pending_switch_target_model = None;
@@ -14160,6 +14553,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit ModelRoutingStatusChanged { topology_epoch: self.model_routing_topology_epoch }
+        }
+
+        // A failed until-changed reconfigure withdraws exactly what its
+        // accepted request staged: the pending switch, and the approval the
+        // request recorded. The shell releases its session mutation gate
+        // while the reconfigure runs, so other inputs may commit in the
+        // meantime (an admitted input, a run, a lifecycle change); this arm
+        // leaves every such fact as it stands and records no terminal, as a
+        // request that never staged. A request that is no longer the pending
+        // one is refused, so nothing another request staged is withdrawn.
+        transition AbortUntilChangedSwitchTurnReconfigure {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortUntilChangedSwitchTurnReconfigure { request_id }
+            guard "pending_until_changed_reconfigure" {
+                self.model_routing_pending_switch_request_id == Some(request_id)
+                && self.model_routing_pending_switch_turns == None
+                && self.model_routing_pending_switch_phase == Some(RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
+            }
+            update {
+                self.model_routing_approval_phases.remove(request_id);
+                self.model_routing_approval_parent_kind.remove(request_id);
+                self.model_routing_pending_switch_request_id = None;
+                self.model_routing_pending_switch_target_model = None;
+                self.model_routing_pending_switch_realtime = None;
+                self.model_routing_pending_switch_phase = None;
+            }
+            to Idle
         }
 
         // Committed cross-run routing handoff lifecycle.
@@ -15687,8 +16107,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // 11. CancelAfterBoundary: Attached + Running self-loops.
-        // The first cancel in a turn window dispatches (RuntimeEffectFact)
-        // and marks the dispatch outstanding; while outstanding, further
+        // The first cancel in a turn window dispatches and marks the dispatch
+        // outstanding. With no run current (Attached) the dispatch is the
+        // runtime-loop RuntimeEffectFact, the one way to reach an idle
+        // executor. With a run current (Running) it is ExactRunBoundaryCancel
+        // for that run, realized only through the exact-run boundary handle;
+        // no runtime-loop effect is emitted, so an executor-wide cancel never
+        // follows a run-bound one. While outstanding, further
         // cancels take the AlreadyPending no-op arms below — this is what
         // bounds an embedder boundary handle that (wrongly) re-enters
         // MeerkatMachine::cancel_after_boundary to exactly one extra lap.
@@ -15729,7 +16154,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: self.current_run_id.get("value"), reason: reason }
         }
         transition CancelAfterBoundaryAttachedAlreadyPending {
             on input CancelAfterBoundary { reason }
@@ -15786,7 +16211,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: run_id, reason: reason }
         }
         transition CancelAfterBoundaryForRunRetired {
             on input CancelAfterBoundaryForRun { run_id, reason }
@@ -15806,7 +16231,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Retired
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: run_id, reason: reason }
         }
         transition CancelAfterBoundaryForRunRunningAlreadyPending {
             on input CancelAfterBoundaryForRun { run_id, reason }
@@ -19278,6 +19703,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        // Rehydrate an ungoverned recovered row's requester batch key, as
+        // BindInputAuthority rehydrates a governed row's binding. It names no
+        // binding and adds no permission; a different key is never replaced.
+        transition BindInputRequesterBatchKey {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BindInputRequesterBatchKey { input_id, authority_batch_key }
+            guard "tracked_input" { self.input_phases.contains_key(input_id) }
+            guard "nonempty_batch_key" { authority_batch_key != "" }
+            guard "ungoverned_input" { !self.input_authority_bindings.contains_key(input_id) }
+            guard "immutable_batch_key" {
+                !self.input_authority_batch_keys.contains_key(input_id)
+                || self.input_authority_batch_keys.get_cloned(input_id) == Some(authority_batch_key)
+            }
+            update {
+                self.input_authority_batch_keys.insert(input_id, authority_batch_key);
+            }
+            to Idle
+        }
+
         // Scoped destination binding of this session document. Only while no
         // run is in flight; the generation strictly increases.
         transition BindScopedContext {
@@ -19336,9 +19780,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedTerminalQueue {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19377,6 +19830,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -19421,9 +19876,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedTerminalSteer {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19465,6 +19929,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
@@ -19521,9 +19987,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedQueue {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19564,6 +20039,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -19630,9 +20107,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedSteer {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19676,6 +20162,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, if turn_append_shape == AdmissionTurnAppendShape::InTurnEligible
@@ -19767,9 +20255,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultQueueKind {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19810,6 +20307,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -19866,9 +20365,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19908,6 +20416,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -19965,9 +20475,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanPeerResponseProgress {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20012,6 +20531,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
@@ -20065,9 +20586,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20106,6 +20636,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -20150,9 +20682,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultContinuation {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20195,6 +20736,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
@@ -20256,9 +20799,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanWorkgraphAttentionContinuation {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20297,6 +20849,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -20353,9 +20907,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanOperation {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20394,6 +20957,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -23469,6 +24034,82 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // SurfaceStageGatedAdd: a grant-time live attach's stage of a gated
+        // MCP server, the live attach's check (its caller lands with the
+        // live attach; a build's lazy residency of a gated server it
+        // configures is the factory's build-composition filter). It is the
+        // ordinary add stage, admitted only for a server the build's scoped
+        // tool grant gate gates (a server the gate names, or, while the build
+        // gates every server it does not configure ungated, any server
+        // outside its ungated servers). Its apply is the ordinary
+        // SurfaceApplyBoundary.
+        transition SurfaceStageGatedAddIdle {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Idle
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+        transition SurfaceStageGatedAddAttached {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Attached
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+        transition SurfaceStageGatedAddRunning {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Running
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+
         transition SurfaceStageRemoveIdle {
             on input SurfaceStageRemove { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Idle }
@@ -25939,6 +26580,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "input_controller_not_held" {
                 !self.input_controller_holds.contains(input_id)
             }
+            // The Steer lane is first in, first out across requesters: a
+            // Steer-lane input stages only while no stageable Steer-lane
+            // input admitted before it waits with another batch key (another
+            // requester's, or none where it has one, or the reverse). Such an
+            // input waits for a run of its own, so a later input of another
+            // key waits behind it rather than overtake it, through the
+            // runtime loop or a live-boundary realization. Inputs of one key
+            // keep their own order rules. A held input, or recovered governed
+            // work waiting for its destination, is not stageable and holds
+            // nothing back, as the runtime loop's plan passes it over.
+            guard "steer_lane_fifo_across_requesters" {
+                self.input_lane.get_cloned(input_id) != Some(InputLane::Steer)
+                || for_all(waiting_input_id in self.input_lane.keys(),
+                    self.input_lane.get_cloned(waiting_input_id) != Some(InputLane::Steer)
+                    || self.input_phases.get_cloned(waiting_input_id) != Some(InputPhase::Queued)
+                    || self.input_authority_batch_keys.get_cloned(waiting_input_id)
+                        == self.input_authority_batch_keys.get_cloned(input_id)
+                    || !self.input_admission_seq.contains_key(waiting_input_id)
+                    || !self.input_admission_seq.contains_key(input_id)
+                    || self.input_admission_seq.get_cloned(input_id).get("value")
+                        <= self.input_admission_seq.get_cloned(waiting_input_id).get("value")
+                    || self.input_controller_holds.contains(waiting_input_id)
+                    || (self.scoped_context_required == true
+                        && self.scoped_context_binding == None
+                        && self.scoped_context_generation == 0
+                        && self.input_authority_bindings.contains_key(waiting_input_id)))
+            }
             // Destination homogeneity follows from `homogeneous_run_authority`:
             // the batch key includes the exact target.
             update {
@@ -26290,6 +26958,36 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.current_run_id.get("value") == run_id
             }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // Request-only context enters a run as its input's own
+            // contribution, so it takes the durable join's requester rule:
+            // the input's batch key is the key of the batch the run staged,
+            // and an input with a requester never enters a run that staged
+            // no batch (a direct service turn).
+            guard "live_join_same_requester" {
+                (self.authority_staged_run == Some(run_id)
+                    && self.authority_staged_batch == self.input_authority_batch_keys.get_cloned(input_id))
+                || (self.authority_staged_run != Some(run_id)
+                    && !self.input_authority_batch_keys.contains_key(input_id))
+            }
+            // It keeps the Steer lane's order across requesters too, as
+            // StageForRun and the durable join do.
+            guard "steer_lane_fifo_across_requesters" {
+                self.input_lane.get_cloned(input_id) != Some(InputLane::Steer)
+                || for_all(waiting_input_id in self.input_lane.keys(),
+                    self.input_lane.get_cloned(waiting_input_id) != Some(InputLane::Steer)
+                    || self.input_phases.get_cloned(waiting_input_id) != Some(InputPhase::Queued)
+                    || self.input_authority_batch_keys.get_cloned(waiting_input_id)
+                        == self.input_authority_batch_keys.get_cloned(input_id)
+                    || !self.input_admission_seq.contains_key(waiting_input_id)
+                    || !self.input_admission_seq.contains_key(input_id)
+                    || self.input_admission_seq.get_cloned(input_id).get("value")
+                        <= self.input_admission_seq.get_cloned(waiting_input_id).get("value")
+                    || self.input_controller_holds.contains(waiting_input_id)
+                    || (self.scoped_context_required == true
+                        && self.scoped_context_binding == None
+                        && self.scoped_context_generation == 0
+                        && self.input_authority_bindings.contains_key(waiting_input_id)))
+            }
             update {
                 if self.live_boundary_context_sequence_by_run.contains_key(run_id) {
                     self.live_boundary_context_sequence_by_run.insert(
@@ -26429,6 +27127,38 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "live_join_run_is_ungoverned" {
                 for_all(owner_input_id in self.input_authority_bindings.keys(),
                     self.input_run_associations.get_cloned(owner_input_id) != Some(run_id))
+            }
+            // Inputs of different requesters never share a run: the joining
+            // input's batch key (its requester's, or none) is the key of the
+            // batch the run staged. An input with a requester never joins a
+            // run that staged no batch.
+            guard "live_join_same_requester" {
+                (self.authority_staged_run == Some(run_id)
+                    && self.authority_staged_batch == self.input_authority_batch_keys.get_cloned(input_id))
+                || (self.authority_staged_run != Some(run_id)
+                    && !self.input_authority_batch_keys.contains_key(input_id))
+            }
+            // The Steer lane is first in, first out across requesters, as
+            // StageForRun keeps it: an input joins only while no stageable
+            // Steer-lane input admitted before it waits with another batch
+            // key. Such an input waits for a run of its own, and this one
+            // waits behind it.
+            guard "steer_lane_fifo_across_requesters" {
+                self.input_lane.get_cloned(input_id) != Some(InputLane::Steer)
+                || for_all(waiting_input_id in self.input_lane.keys(),
+                    self.input_lane.get_cloned(waiting_input_id) != Some(InputLane::Steer)
+                    || self.input_phases.get_cloned(waiting_input_id) != Some(InputPhase::Queued)
+                    || self.input_authority_batch_keys.get_cloned(waiting_input_id)
+                        == self.input_authority_batch_keys.get_cloned(input_id)
+                    || !self.input_admission_seq.contains_key(waiting_input_id)
+                    || !self.input_admission_seq.contains_key(input_id)
+                    || self.input_admission_seq.get_cloned(input_id).get("value")
+                        <= self.input_admission_seq.get_cloned(waiting_input_id).get("value")
+                    || self.input_controller_holds.contains(waiting_input_id)
+                    || (self.scoped_context_required == true
+                        && self.scoped_context_binding == None
+                        && self.scoped_context_generation == 0
+                        && self.input_authority_bindings.contains_key(waiting_input_id)))
             }
             guard "turn_at_model_boundary" { self.turn_phase == TurnPhase::CallingLlm }
             guard "no_cancel_after_boundary" { self.cancel_after_boundary == false }
@@ -29538,6 +30268,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A delegation is admitted only while its channel's delegation intake
+        // is open. The coordinator closes the intake as the first step of the
+        // channel's close sweep (Turbo S S107): a delegation the provider's
+        // lifecycle seam still carries past that sweep is refused, instead of
+        // admitted where no channel loop can claim it and no sweep settles it.
         transition AdmitLiveDelegation {
             per_phase [Idle, Attached, Running]
             on input AdmitLiveDelegation {
@@ -29570,6 +30305,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "operation_not_known" {
                 !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
             }
+            guard "delegation_intake_open" {
+                !self.live_delegation_intake_closed_channels.contains(channel_id)
+            }
             update {
                 if !self.live_conversation_started_channels.contains_key(channel_id) {
                     self.live_conversation_started_channels.insert(
@@ -29579,6 +30317,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
                 self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
+                if self.live_member_turn_reasoning_by_channel.contains_key(channel_id) {
+                    self.live_delegation_member_turn_reasoning_by_operation.insert(
+                        operation_id,
+                        self.live_member_turn_reasoning_by_channel.get_copied(channel_id).get("value")
+                    );
+                }
                 self.live_delegation_schedule_state_by_operation.insert(
                     operation_id,
                     LiveDelegationScheduleState::Created
@@ -29637,11 +30381,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 !self.live_interaction_channel_by_id.contains_key(interaction_id)
                 && !self.live_delegation_reconciliation_by_operation.contains_key(operation_id)
             }
+            guard "delegation_intake_open" {
+                !self.live_delegation_intake_closed_channels.contains(channel_id)
+            }
             update {
                 self.live_interaction_channel_by_id.insert(interaction_id, channel_id);
                 self.live_active_interaction_by_channel.insert(channel_id, interaction_id);
                 self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
                 self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
+                if self.live_member_turn_reasoning_by_channel.contains_key(channel_id) {
+                    self.live_delegation_member_turn_reasoning_by_operation.insert(
+                        operation_id,
+                        self.live_member_turn_reasoning_by_channel.get_copied(channel_id).get("value")
+                    );
+                }
                 self.live_delegation_schedule_state_by_operation.insert(
                     operation_id,
                     LiveDelegationScheduleState::Created
@@ -29663,6 +30416,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A delegation admitted under the channel's exact binding keeps its
+        // admission when the channel closes before its worker starts (Turbo
+        // S S107: the delegation reached the host as the close began, and
+        // the close cancelled it as work that never started). Close unbinds
+        // the channel, so, as for `ResolveLiveDelegationWorkerStart`, the
+        // worker start is authorized either under the current exact binding
+        // or, once the operation's own channel carries no runtime, fence, or
+        // generation binding at all, on the exact operation join alone. Every
+        // open mints a fresh channel id, so a retired channel never aliases a
+        // later incarnation, and a still-bound channel with a different fence
+        // or generation is refused as before. A closed channel holds no worker
+        // count: close removed it, and the revoked-worker reconciliation that
+        // settles a worker of a closed channel never releases a slot. The
+        // number of workers started after the close is therefore bounded by
+        // the coordinator's schedule (its per-channel worker limit), not by
+        // the machine. The post-close terms also need the session still
+        // registered: unregistering keeps delegation custody, but no
+        // delegation of an unregistered session reconciles, starts, steers or
+        // requeues after its channel closed. The worker carries the
+        // member-turn reasoning preference its operation was admitted under,
+        // which outlives the channel's own.
         transition AuthorizeLiveDelegationWorkerStart {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveDelegationWorkerStart {
@@ -29672,12 +30446,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "worker_identity_present" { worker_identity != "" }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -29706,10 +30495,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     LiveDelegationScheduleState::Claimed
                 );
-                if self.live_delegation_active_worker_count_by_channel.contains_key(channel_id) {
-                    self.live_delegation_active_worker_count_by_channel.increment(channel_id, 1);
-                } else {
-                    self.live_delegation_active_worker_count_by_channel.insert(channel_id, 1);
+                if self.live_execution_runtime_id_by_channel.contains_key(channel_id) {
+                    if self.live_delegation_active_worker_count_by_channel.contains_key(channel_id) {
+                        self.live_delegation_active_worker_count_by_channel.increment(channel_id, 1);
+                    } else {
+                        self.live_delegation_active_worker_count_by_channel.insert(channel_id, 1);
+                    }
                 }
                 self.live_delegation_worker_identity_by_operation.insert(operation_id, worker_identity);
                 if worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
@@ -29727,7 +30518,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: operation_id,
                 worker_identity: worker_identity,
                 worker_ownership: worker_ownership,
-                member_turn_reasoning: self.live_member_turn_reasoning_by_channel.get_copied(channel_id)
+                member_turn_reasoning: self.live_delegation_member_turn_reasoning_by_operation.get_copied(operation_id)
             }
         }
 
@@ -29752,6 +30543,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -29759,6 +30551,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -29766,6 +30559,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_worker_start_authority" {
@@ -29812,6 +30606,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A delegation admitted before its channel closed still reconciles
+        // its canonical transcript after the close (Turbo S S107), on the same
+        // terms as `AuthorizeLiveDelegationWorkerStart`: under the channel's
+        // current exact binding or, once the operation's own channel carries
+        // no runtime, fence, or generation binding at all, on the exact
+        // operation join alone. The conflict and missing arms below take the
+        // same binding guards.
         transition ReconcileLiveDelegationTranscriptConfirmed {
             per_phase [Idle, Attached, Running]
             on input ReconcileLiveDelegationTranscript {
@@ -29825,12 +30626,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -29876,12 +30692,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -29927,12 +30758,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -30524,13 +31370,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                     LiveDelegationWorkerPhase::Retired
                 );
                 // The revoked worker's schedule state settles with its
-                // recorded terminal, exactly as a live terminal record does.
+                // recorded terminal, as a live terminal record does, except
+                // that a blocked hand-back settles Cancelled: its channel is
+                // unbound, and a requeue needs the binding, so nothing could
+                // ever serve it again.
                 self.live_delegation_schedule_state_by_operation.insert(
                     operation_id,
                     if terminal == LiveDelegationWorkerTerminalKind::Completed {
                         LiveDelegationScheduleState::Completed
                     } else { if terminal == LiveDelegationWorkerTerminalKind::Blocked {
-                        LiveDelegationScheduleState::Blocked
+                        LiveDelegationScheduleState::Cancelled
                     } else { if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
                         LiveDelegationScheduleState::Cancelled
                     } else {
@@ -30552,8 +31401,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Crash after generated terminal recording but before physical child
-        // retirement uses the same restart input. Exact durable terminal
-        // equality is required before old result eligibility is fenced.
+        // retirement uses the same restart input. The observed durable terminal
+        // must equal the recorded one before old result eligibility is fenced,
+        // except that a completed Mob turn agrees with a recorded Blocked,
+        // Failed or Cancelled terminal: those are the coordinator's
+        // classification of a completed turn against its work item (a worker
+        // that handed its item back, or an item that failed or was
+        // cancelled), and restart recovery observes only the Mob's completed
+        // turn behind them. The recorded classification stands and settles the
+        // operation as the in-process close settles it.
         transition ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustody {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ReconcileRevokedLiveDelegationWorkerAfterRestart {
@@ -30572,8 +31428,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
                 && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
-                && self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
-                    == Some(terminal)
+                && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                        == Some(terminal)
+                    || (terminal == LiveDelegationWorkerTerminalKind::Completed
+                        && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Blocked)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Failed)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Cancelled))))
                 && (self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                         == Some(LiveDelegationWorkerPhase::Terminal)
                     || self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
@@ -30594,6 +31457,21 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     LiveDelegationWorkerPhase::Retired
                 );
+                // A blocked terminal recorded while the channel was bound
+                // settles Cancelled once the channel is unbound: a requeue
+                // needs the binding, so nothing could ever serve it again.
+                // The recorded terminal decides, whether the in-process close
+                // passes it or restart recovery passes the completed turn
+                // behind it.
+                if self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationWorkerTerminalKind::Blocked)
+                    && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Blocked) {
+                    self.live_delegation_schedule_state_by_operation.insert(
+                        operation_id,
+                        LiveDelegationScheduleState::Cancelled
+                    );
+                }
                 self.live_delegation_late_terminal_operations.insert(operation_id);
                 self.live_delegation_result_eligible_operations.remove(operation_id);
             }
@@ -30625,8 +31503,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
                 && self.live_delegation_interaction_by_operation.get_cloned(operation_id) == Some(interaction_id)
                 && self.live_delegation_worker_identity_by_operation.get_cloned(operation_id) == Some(worker_identity)
-                && self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
-                    == Some(terminal)
+                && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                        == Some(terminal)
+                    || (terminal == LiveDelegationWorkerTerminalKind::Completed
+                        && (self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Blocked)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Failed)
+                            || self.live_delegation_worker_terminal_by_operation.get_copied(operation_id)
+                                == Some(LiveDelegationWorkerTerminalKind::Cancelled))))
                 && self.live_delegation_worker_phase_by_operation.get_copied(operation_id)
                     == Some(LiveDelegationWorkerPhase::Retired)
                 && self.live_delegation_late_terminal_operations.contains(operation_id)
@@ -30786,7 +31671,11 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // A worker start that failed before anything physical existed (the
         // source member was still mid-turn after the bounded wait) leaves the
-        // item queued: the same exact operation may bind a worker again.
+        // item queued: the same exact operation may bind a worker again. The
+        // item keeps that admission when its channel closes (Turbo S S107),
+        // so the requeue also resolves on the exact operation join alone
+        // once the operation's own channel carries no runtime, fence, or
+        // generation binding at all.
         transition RequeueUnstartedLiveDelegation {
             per_phase [Idle, Attached, Running]
             on input RequeueLiveDelegation {
@@ -30794,12 +31683,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -30882,6 +31786,32 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // The coordinator's close sweep closes the channel's delegation intake
+        // first, under the channel's exact binding: from then on no delegation
+        // is admitted on it (see `AdmitLiveDelegation`). Delegations admitted
+        // before keep their custody and still start, run and settle after the
+        // close. Closing again changes nothing; a channel already unbound
+        // admits nothing anyway.
+        transition CloseLiveDelegationIntake {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CloseLiveDelegationIntake {
+                channel_id, runtime_id, fence_token, generation
+            }
+            guard "runtime_binding_matches" {
+                self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+            }
+            guard "fence_binding_matches" {
+                self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+            }
+            guard "generation_binding_matches" {
+                self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+            }
+            update {
+                self.live_delegation_intake_closed_channels.insert(channel_id);
+            }
+            to Idle
+        }
+
         // Executor state narration is templated by the shell and reaches the
         // provider only through this authority. Each kind is released at most
         // once per schedule pass and must match the generated schedule state.
@@ -30961,7 +31891,12 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // Speech that continues a user's utterance after the provider created
         // its delegation (the delegation fired at a pause mid-sentence) is
-        // delivered to that delegation's worker as a steer. The protocol has
+        // delivered to that delegation's worker as a steer. A delegation
+        // admitted before its channel closed starts after the close (Turbo S
+        // S107), and a continuation held for it while it waited joins that
+        // start, so the steer family (this authorization, its delivery and its
+        // reconciliation below) takes the post-close binding terms of
+        // `AuthorizeLiveDelegationWorkerStart`. The protocol has
         // no utterance identity: the continuation is the next finished user
         // turn after a delegation that took an open user turn, before any
         // other delegation, which is the closest typed stand-in for "the
@@ -30986,12 +31921,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -31042,12 +31992,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer_awaiting_delivery" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31079,12 +32044,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31120,12 +32100,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31159,12 +32154,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "not_committed" { continuation_committed == false }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31186,6 +32196,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A worker started after its channel closed (Turbo S S107) still
+        // needs its consequential-effect authority: under the channel's
+        // current exact binding or, once the operation's own channel carries
+        // no runtime, fence, or generation binding at all, on the exact
+        // operation join alone, as for `AuthorizeLiveDelegationWorkerStart`.
         transition AuthorizeLiveConsequentialEffect {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveConsequentialEffect {
@@ -31195,12 +32210,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "authority_present" { authority_id != "" }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "interaction_is_admitted_and_not_abandoned" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -36516,6 +37546,119 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        // ReplaceToolGrantGate: every build installs its scoped tool grant
+        // gate (the names it marked grant-gated, the MCP servers it gated,
+        // whether it gates every server it does not configure ungated, the
+        // servers it configures ungated, and the role entries it ignored as
+        // not mounted), and every open name closes. A new build therefore
+        // starts closed until a model-request boundary applies the open set a
+        // live grant admits. A build without a gate installs the empty gate,
+        // which clears the last build's. An ignored name is never gated and
+        // an ungated server is never a gated server: a gate that says
+        // otherwise matches no arm and is refused.
+        transition ReplaceToolGrantGate {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceToolGrantGate {
+                gated,
+                gated_servers,
+                gates_unconfigured_servers,
+                ungated_servers,
+                not_mounted_names
+            }
+            guard "session_registered" { self.session_id != None }
+            guard "not_mounted_disjoint" {
+                for_all(name in not_mounted_names, !gated.contains(name))
+            }
+            guard "server_sets_disjoint" {
+                for_all(server in ungated_servers, !gated_servers.contains(server))
+            }
+            update {
+                self.tool_grant_gated_names = gated;
+                self.tool_grant_open_names = EmptySet;
+                self.tool_grant_gated_servers = gated_servers;
+                self.tool_grant_gates_unconfigured_servers = gates_unconfigured_servers;
+                self.tool_grant_ungated_servers = ungated_servers;
+                self.tool_grant_not_mounted_names = not_mounted_names;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        // ExtendToolGrantGate: a model-request boundary gates the names an MCP
+        // server the gate gates provides now (a server the gate names, or,
+        // while the build gates every server it does not configure ungated,
+        // any server outside its ungated servers). Within a build the gated
+        // names only grow, and no name opens; a name the build ignored as not
+        // mounted that such a server provides becomes gated. An extension for
+        // a server the gate does not gate matches no arm and is refused.
+        transition ExtendToolGrantGateChanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExtendToolGrantGate { server, gated }
+            guard "session_registered" { self.session_id != None }
+            guard "server_is_gated" {
+                self.tool_grant_gated_servers.contains(server)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(server))
+            }
+            // The negation of the unchanged arm's `already_gated`, so the two
+            // arms exclude each other by their guards' form.
+            guard "adds_names" {
+                !for_all(name in gated, self.tool_grant_gated_names.contains(name))
+            }
+            update {
+                for name in gated {
+                    self.tool_grant_gated_names.insert(name);
+                    self.tool_grant_not_mounted_names.remove(name);
+                }
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        transition ExtendToolGrantGateUnchanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExtendToolGrantGate { server, gated }
+            guard "session_registered" { self.session_id != None }
+            guard "server_is_gated" {
+                self.tool_grant_gated_servers.contains(server)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(server))
+            }
+            guard "already_gated" {
+                for_all(name in gated, self.tool_grant_gated_names.contains(name))
+            }
+            update {}
+            to Idle
+        }
+
+        // ApplyToolGrantOpenSet: a model-request boundary applies the gated
+        // names a live grant opens now, as the grant service adjudicated
+        // them. Only gated names open: a set naming any other name matches
+        // no arm and is refused, and the gate stays as it was.
+        transition ApplyToolGrantOpenSetChanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyToolGrantOpenSet { open }
+            guard "session_registered" { self.session_id != None }
+            guard "open_names_are_gated" {
+                for_all(name in open, self.tool_grant_gated_names.contains(name))
+            }
+            guard "open_set_changed" { open != self.tool_grant_open_names }
+            update {
+                self.tool_grant_open_names = open;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        transition ApplyToolGrantOpenSetUnchanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyToolGrantOpenSet { open }
+            guard "session_registered" { self.session_id != None }
+            guard "open_set_unchanged" { open == self.tool_grant_open_names }
+            update {}
+            to Idle
+        }
+
         // =====================================================================
         // MCP server lifecycle transitions
         // =====================================================================
@@ -40241,6 +41384,277 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit InputControllerReleased
         }
+
+        // A host settles the run its session retained, without resuming it
+        // and without a model request: the run a restart (a crash, a power
+        // cut, or a graceful stop that kept it) left open, which the
+        // registration marked resumable and which has not begun again.
+        // `run_id` is the run the caller observed marked, under the same
+        // mutation gate as this input. The machine owns the verdict, one arm
+        // per case, total over every phase:
+        //
+        // - Accepted: no run is current, the observed run is the marked one,
+        //   and the registration is not draining. The run's stop is
+        //   recorded on it, as `StopCurrentRunForRunResumable` records it:
+        //   the run never resumes (`ResumeRun` refuses it), and the runtime
+        //   settles it at its loop's next lap, ahead of any run-start hold or
+        //   resumed-run admission, its bound inputs abandoned as `Cancelled`
+        //   (`SettleResumableRun` refuses to settle it as a refused resume).
+        //   Accepting it again while its stop stands changes nothing more:
+        //   the settle is idempotent per run.
+        // - Busy: a run is current (the marked run resumed, or another run
+        //   started), the registration cannot settle the run it marked now
+        //   (it drains for its unregister, whose next registration finds the
+        //   run open again, or it is initializing, running without a current
+        //   run, retired or stopped), or the observed run is not the marked
+        //   one. Nothing changes: a run that is executing is never stopped
+        //   here.
+        // - NotRetained: no run is current and none is marked, or the
+        //   runtime is destroyed. Nothing changes.
+        transition SettleRetainedRunAccepted {
+            per_phase [Idle, Attached]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            guard "observed_run_retained" { self.resumable_run_id == run_id }
+            guard "registration_not_draining" {
+                self.registration_phase != RegistrationPhase::Draining
+            }
+            update {
+                self.run_stop_requested = run_id;
+            }
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Accepted,
+                run_id: run_id
+            }
+        }
+
+        transition SettleRetainedRunBusyRunCurrent {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input SettleRetainedRun { run_id }
+            guard "run_current" { self.current_run_id != None }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: self.current_run_id
+            }
+        }
+
+        transition SettleRetainedRunBusyDraining {
+            per_phase [Idle, Attached]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            guard "observed_run_retained" { self.resumable_run_id == run_id }
+            guard "registration_draining" {
+                self.registration_phase == RegistrationPhase::Draining
+            }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunBusyStaleRun {
+            per_phase [Idle, Attached]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            guard "observed_run_not_retained" { self.resumable_run_id != run_id }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunBusyNotServing {
+            per_phase [Initializing, Running, Retired, Stopped]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunNotRetained {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "no_run_retained" { self.resumable_run_id == None }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::NotRetained,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunInert {
+            per_phase [Destroyed]
+            on input SettleRetainedRun { run_id }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::NotRetained,
+                run_id: None
+            }
+        }
+
+        // The run marked resumable waits for its resumed-run admission. When
+        // every attempt of the host's admission answered unavailable or did
+        // not answer in time, the run is neither resumed nor settled: it is
+        // held, stays marked with its inputs bound, and a later lap of the
+        // runtime loop or a later registration asks again. A run whose stop
+        // was asked is settled instead, never held. Holding a run already
+        // held changes nothing.
+        transition HoldResumedRunForAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input HoldResumedRunForAdmission { run_id }
+            guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
+            update {
+                self.resumed_run_admission_hold = Some(run_id);
+            }
+            to Idle
+        }
+
+        // A later answer of the admission let the held run continue: the
+        // hold is released, and the runtime resumes the run in the same lap
+        // (ResumeRun). Settling or releasing the run drops the hold instead.
+        transition ReleaseResumedRunAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReleaseResumedRunAdmission { run_id }
+            guard "run_admission_held" { self.resumed_run_admission_hold == Some(run_id) }
+            update {
+                self.resumed_run_admission_hold = None;
+            }
+            to Idle
+        }
+
+        // A host asks the session's next compaction check to compact
+        // (`MeerkatMachine::request_compaction`), without a rebuild and
+        // without changing any threshold. The request is a one-shot fact of
+        // this registration, consumed by the next compaction check of a run
+        // (`ConsumeCompactionRequest`). The machine owns the verdict, one arm
+        // per case, total over every phase:
+        //
+        // - Requested: the registration serves (idle, attached, or running a
+        //   turn, which keeps running) and holds no request: it now holds
+        //   one. A running turn's next check consumes it; a turn that makes
+        //   no further model request leaves it to the next run's first
+        //   check.
+        // - AlreadyRequested: the registration serves and already holds a
+        //   request no check consumed yet: nothing changes, so two requests
+        //   before a check give one compaction.
+        // - NotServing: the registration is initializing, retired, stopped
+        //   or destroyed: nothing changes.
+        transition RequestCompactionRecorded {
+            per_phase [Idle, Attached, Running]
+            on input RequestCompaction
+            guard "no_compaction_requested" { self.compaction_requested == false }
+            update {
+                self.compaction_requested = true;
+            }
+            to Idle
+            emit CompactionRequestResolved {
+                verdict: CompactionRequestVerdict::Requested
+            }
+        }
+
+        transition RequestCompactionAlreadyRecorded {
+            per_phase [Idle, Attached, Running]
+            on input RequestCompaction
+            guard "compaction_requested" { self.compaction_requested == true }
+            update {}
+            to Idle
+            emit CompactionRequestResolved {
+                verdict: CompactionRequestVerdict::AlreadyRequested
+            }
+        }
+
+        transition RequestCompactionNotServing {
+            per_phase [Initializing, Retired, Stopped, Destroyed]
+            on input RequestCompaction
+            update {}
+            to Idle
+            emit CompactionRequestResolved {
+                verdict: CompactionRequestVerdict::NotServing
+            }
+        }
+
+        // The agent's compaction check of `run_id` consumes the host's
+        // request. The machine emits the check on the current run's entry
+        // into CallingLlm (`TurnCheckCompaction`), and the agent asks at the
+        // moment it evaluates that check, before the model request. A run
+        // is current while the registration runs it, or drains it once
+        // retired. Total over every phase:
+        //
+        // - Taken: the run is current, its turn calls the model and a
+        //   request is held: the request is consumed, and the check compacts
+        //   without asking the compactor's trigger (its thresholds and
+        //   cadence), or, with nothing to compact (before the session's first
+        //   model request, or nothing to fold), skips and says so.
+        // - None: the same with no request held: nothing changes, and the
+        //   compactor's trigger decides as before.
+        // - Every other case (another run is current, the turn is not
+        //   calling the model, or no run can be current): nothing changes,
+        //   and a held request waits for the next check.
+        transition ConsumeCompactionRequestTaken {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
+            guard "compaction_requested" { self.compaction_requested == true }
+            update {
+                self.compaction_requested = false;
+            }
+            to Idle
+            emit CompactionRequestConsumed { run_id: run_id }
+        }
+
+        transition ConsumeCompactionRequestNone {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
+            guard "no_compaction_requested" { self.compaction_requested == false }
+            update {}
+            to Idle
+        }
+
+        transition ConsumeCompactionRequestStaleRun {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_not_current" { self.current_run_id != Some(run_id) }
+            update {}
+            to Idle
+        }
+
+        transition ConsumeCompactionRequestOutsideCheck {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_not_calling_llm" { self.turn_phase != TurnPhase::CallingLlm }
+            update {}
+            to Idle
+        }
+
+        transition ConsumeCompactionRequestInert {
+            per_phase [Initializing, Idle, Attached, Stopped, Destroyed]
+            on input ConsumeCompactionRequest { run_id }
+            update {}
+            to Idle
+        }
     }
         }
 
@@ -40407,7 +41821,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 /// `ResumeRun` guard `run_not_stopped`), at least one input
                 /// is bound to it, no input bound to it is held for its
                 /// controller (mirrors the `ResumeRun` guard
-                /// `run_inputs_not_controller_held`), and its destination is
+                /// `run_inputs_not_controller_held`), its admission does not
+                /// hold it (`run_admission_not_held`), and its destination is
                 /// attached (`resumed_run_destination_attached`).
                 #[must_use]
                 pub fn authorize_resumed_run_from_state(
@@ -40426,6 +41841,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                         .iter()
                         .any(|held| state.input_run_associations.get(held) == Some(run_id))
                     {
+                        return None;
+                    }
+                    // Mirrors the `ResumeRun` guard `run_admission_not_held`.
+                    if state.resumed_run_admission_hold.as_ref() == Some(run_id) {
                         return None;
                     }
                     if !resumed_run_destination_attached(state, run_id) {
@@ -40508,6 +41927,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if input_ids.iter().any(|id| state.input_authority_batch_keys.get(id) != first_authority) {
                     return None;
                 }
+                // Mirrors the StageForRun guard `homogeneous_run_authority`:
+                // a run that staged a batch takes only inputs of its key.
+                if state.authority_staged_run.as_ref() == Some(run_id)
+                    && state.authority_staged_batch.as_ref() != first_authority
+                {
+                    return None;
+                }
                 // A separately requested stage must preserve terminal-response cardinality.
                 if input_ids.len() > 1 && input_ids.iter().any(|input_id| {
                     state.input_runtime_peer_response_terminal_apply_intent.get(input_id)
@@ -40541,6 +41967,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if !state.input_recovery_lanes.contains_key(input_id) {
                         return None;
                     }
+                    // Mirrors the StageForRun guard
+                    // `steer_lane_fifo_across_requesters`.
+                    if !steer_lane_fifo_admits(state, input_id) {
+                        return None;
+                    }
                     // No run-association check: the association is attribution
                     // that `StageForRun` rebinds, and refusing a queued input
                     // for carrying one wedged the fifo lane forever (0.8.22).
@@ -40549,6 +41980,59 @@ macro_rules! meerkat_catalog_machine_dsl {
                     stage_capability: AuthorizedStageForRun::mint_from_generated_command_plan(),
                     input_ids: input_ids.to_vec(),
                     source,
+                })
+            }
+
+            /// Whether `input_id` may join the current run `run_id` at a live
+            /// boundary: inputs of different requesters never share a run (the
+            /// input's batch key, its governed binding's, its requester's, or
+            /// none, is the key of the batch the run staged, or the run staged
+            /// no batch and the input has no key), and the Steer lane is first
+            /// in, first out across requesters (no stageable Steer-lane input
+            /// admitted before it waits with another key). An input it refuses
+            /// waits in its lane for a run of its own. Mirrors the
+            /// `JoinLiveBoundaryDurableAppend` and
+            /// `ResolveLiveBoundaryContextReceipt` guards
+            /// `live_join_same_requester` and
+            /// `steer_lane_fifo_across_requesters`, which `StageForRun`'s
+            /// `homogeneous_run_authority` and its own order guard imply for a
+            /// run that staged a batch.
+            #[must_use]
+            pub fn live_boundary_joins_run_batch(
+                state: &MeerkatMachineState,
+                input_id: &String,
+                run_id: &RunId,
+            ) -> bool {
+                let key = state.input_authority_batch_keys.get(input_id);
+                let same_requester = if state.authority_staged_run.as_ref() == Some(run_id) {
+                    state.authority_staged_batch.as_ref() == key
+                } else {
+                    key.is_none()
+                };
+                same_requester && steer_lane_fifo_admits(state, input_id)
+            }
+
+            // Mirrors the `steer_lane_fifo_across_requesters` guard of
+            // StageForRun, JoinLiveBoundaryDurableAppend and
+            // ResolveLiveBoundaryContextReceipt: a Steer-lane input runs only
+            // while no stageable Steer-lane input admitted before it waits
+            // with another batch key.
+            fn steer_lane_fifo_admits(state: &MeerkatMachineState, input_id: &String) -> bool {
+                if state.input_lane.get(input_id) != Some(&InputLane::Steer) {
+                    return true;
+                }
+                let key = state.input_authority_batch_keys.get(input_id);
+                let sequence = state.input_admission_seq.get(input_id);
+                state.input_lane.iter().all(|(waiting_input_id, lane)| {
+                    *lane != InputLane::Steer
+                        || state.input_phases.get(waiting_input_id) != Some(&InputPhase::Queued)
+                        || state.input_authority_batch_keys.get(waiting_input_id) == key
+                        || match (sequence, state.input_admission_seq.get(waiting_input_id)) {
+                            (Some(sequence), Some(waiting)) => sequence <= waiting,
+                            _ => true,
+                        }
+                        || !controller_stageable(state, waiting_input_id)
+                        || !scoped_context_stageable(state, waiting_input_id)
                 })
             }
 

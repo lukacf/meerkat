@@ -20,7 +20,11 @@
 #   PYTHON                           Python 3.11+ interpreter
 #   semver_analyser                  path to scripts/check_semver_breaks.py
 #   semver_changelog                 path to the CHANGELOG.md under test
-#   workspace_version                workspace.package.version of HEAD
+#   workspace_version                the product's version at HEAD
+#                                    (workspace.package.version for Core)
+#   semver_reference_crate           optional crate whose crates.io versions
+#                                    are the product's releases (meerkat-core)
+#   semver_tag_prefix                optional release tag prefix (v; meta-v)
 #   MEERKAT_SEMVER_BASELINE_VERSION  optional explicit baseline override
 #   MEERKAT_SEMVER_REQUIRE_RELEASE_TREE  "1" refuses a post-release tree: the
 #                                    release workflow's own measurement sets it,
@@ -40,7 +44,7 @@
 semver_published_version() {
     curl -fsSL --retry 6 --retry-delay 10 \
         -H 'User-Agent: meerkat-semver-breaks (https://github.com/lukacf/meerkat)' \
-        'https://crates.io/api/v1/crates/meerkat-core' \
+        "https://crates.io/api/v1/crates/${semver_reference_crate:-meerkat-core}" \
         | "$PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_version"])'
 }
 
@@ -70,6 +74,36 @@ semver_fetch_release_tag() {
     return 0
 }
 
+# A product's baseline tag (meta-v<version>). Sets baseline_tag_absent:
+# false when the tag is local or was fetched from origin; true when origin
+# answers that it has no such tag, which is the case for a product release
+# cut before the product's tags lived in this repository (Meta 0.9.7 and
+# earlier were tagged v<version> in their own repository). The caller then
+# measures every release crate against the registry release of that
+# version, which is exactly what was published. Returns 1 (after saying
+# why) when origin could not be asked: that is no evidence the tag is
+# missing. Core's tags always live here; Core does not call this.
+resolve_product_baseline_tag() {
+    local tag="$1" fetch_status
+    baseline_tag_absent=false
+    if git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null 2>&1; then
+        return 0
+    fi
+    if semver_fetch_release_tag "$tag"; then
+        fetch_status=0
+    else
+        fetch_status=$?
+    fi
+    case "$fetch_status" in
+        0) return 0 ;;
+        2)
+            baseline_tag_absent=true
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 # Returns non-zero, after explaining why on stderr, when no baseline applies.
 resolve_semver_baseline() {
     baseline_version="${MEERKAT_SEMVER_BASELINE_VERSION:-}"
@@ -91,7 +125,7 @@ resolve_semver_baseline() {
             ;;
     esac
 
-    local release_tag="v${workspace_version}"
+    local release_tag="${semver_tag_prefix:-v}${workspace_version}"
     if [[ "$notes_baseline" == "workspace-version" && "${MEERKAT_SEMVER_REQUIRE_RELEASE_TREE:-}" == "1" ]]; then
         echo "error: this is a post-release tree: its pending \`## [Unreleased]\` notes sit above the stamped" >&2
         echo "       ${workspace_version} section, so it is not the ${workspace_version} release and must not publish as it." >&2
@@ -149,12 +183,12 @@ resolve_semver_baseline() {
             # release, not this tag; say so when the two differ.
             if newest_published="$(semver_published_version 2>/dev/null)" && [[ -n "$newest_published" ]]; then
                 if [[ "$newest_published" != "$workspace_version" ]]; then
-                    echo "warning: crates.io's newest meerkat-core is ${newest_published}, not ${workspace_version} (unpublished," >&2
+                    echo "warning: crates.io's newest ${semver_reference_crate:-meerkat-core} is ${newest_published}, not ${workspace_version} (unpublished," >&2
                     echo "         yanked, or a published prerelease). These notes are measured against ${release_tag}, but" >&2
                     echo "         the next release commit is measured against ${newest_published}, so this run may not predict it." >&2
                 fi
             else
-                echo "warning: could not read crates.io's newest meerkat-core to compare with ${release_tag}; the next" >&2
+                echo "warning: could not read crates.io's newest ${semver_reference_crate:-meerkat-core} to compare with ${release_tag}; the next" >&2
                 echo "         release commit is measured against it, so this run may not predict that measurement." >&2
             fi
             return 0

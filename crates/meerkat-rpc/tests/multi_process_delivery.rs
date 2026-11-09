@@ -57,7 +57,7 @@ const SEED_PROMPT: &str = "seed prompt";
 /// The one subscription every committed job delivers to.
 const SUBSCRIPTION: &str = "watcher";
 /// Hang guard for every awaited cross-process signal; never pacing.
-const GUARD: Duration = Duration::from_secs(120);
+const GUARD: Duration = Duration::from_mins(2);
 
 /// Scripted model: answers every request with a fixed text and counts calls.
 /// A gated client leaves its `gate`-th request unanswered after announcing

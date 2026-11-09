@@ -1,0 +1,179 @@
+{
+  "experimental_gateway_config": {
+    "principal": "user:example",
+    "realm": "example",
+    "factory_kind": "openai-gpt-live",
+    "factory_version": "v1",
+    "gate0_qualification": "gate0-v1",
+    "auth_binding": {
+      "realm": "example",
+      "binding": "chatgpt-oauth",
+      "profile": "example"
+    },
+    "voice": "marin",
+    "execution_profiles": [
+      {
+        "profile_id": "example.device.open-room.v1",
+        "session_instructions": "You are a test voice agent."
+      }
+    ]
+  },
+  "openai_live_gateway_config": {
+    "principal": "user:example",
+    "realm": "example",
+    "auth_binding": {
+      "realm": "example",
+      "binding": "openai-api-key",
+      "profile": "example"
+    },
+    "voice": "marin",
+    "session_instructions": "You are a test voice agent."
+  },
+  "openai_live_gateway_config_with_summary": {
+    "principal": "user:example",
+    "realm": "example",
+    "auth_binding": {
+      "realm": "example",
+      "binding": "openai-api-key",
+      "profile": "example"
+    },
+    "voice": "marin",
+    "session_instructions": "You are a test voice agent.",
+    "summary": {
+      "model": "gpt-5.4-mini",
+      "max_input_bytes": 32768,
+      "max_output_bytes": 2048
+    }
+  },
+  "openai_live_public_profile_id": "openai.gpt-live-1.client-context.v1",
+  "execution_identity": {
+    "version": "v1",
+    "profile_id": "example.device.open-room.v1"
+  },
+  "channel_handle": {
+    "channel_id": "live-ch-1",
+    "target_identity": "identity:example",
+    "transport": {
+      "transport": "websocket",
+      "url": "wss://gateway.example/live/ws",
+      "token": "fixture-token"
+    },
+    "capabilities": {
+      "audio_in": true,
+      "audio_out": true,
+      "text_in": true,
+      "text_out": true,
+      "image_in": true,
+      "video_in": false,
+      "transcript_supported": true,
+      "barge_in_supported": true,
+      "provider_native_resume": false
+    },
+    "continuity": {
+      "mode": "transcript_only"
+    }
+  },
+  "pending_channel_handle": {
+    "channel_id": "live-ch-1",
+    "target_identity": "identity:example",
+    "execution_mode": "client_context",
+    "pending_receipt": "opaque-pending-receipt",
+    "transport": {
+      "transport": "webrtc",
+      "token": "fixture-token",
+      "answer_method": "live/webrtc/answer"
+    },
+    "capabilities": {
+      "audio_in": true,
+      "audio_out": true,
+      "text_in": false,
+      "text_out": true,
+      "image_in": false,
+      "video_in": false,
+      "transcript_supported": true,
+      "barge_in_supported": true,
+      "provider_native_resume": false
+    },
+    "continuity": {
+      "mode": "transcript_only"
+    }
+  },
+  "channel_handle_with_advisories": {
+    "channel_id": "live-ch-1",
+    "target_identity": "identity:example",
+    "transport": {
+      "transport": "websocket",
+      "url": "wss://gateway.example/live/ws",
+      "token": "fixture-token"
+    },
+    "capabilities": {
+      "audio_in": true,
+      "audio_out": true,
+      "text_in": true,
+      "text_out": true,
+      "image_in": true,
+      "video_in": false,
+      "transcript_supported": true,
+      "barge_in_supported": true,
+      "provider_native_resume": false
+    },
+    "continuity": {
+      "mode": "transcript_only"
+    },
+    "advisories": ["staged_prompt_refused", "a_future_advisory"]
+  },
+  "pending_channel_handle_with_advisories": {
+    "channel_id": "live-ch-1",
+    "target_identity": "identity:example",
+    "execution_mode": "client_context",
+    "pending_receipt": "opaque-pending-receipt",
+    "transport": {
+      "transport": "webrtc",
+      "token": "fixture-token",
+      "answer_method": "live/webrtc/answer"
+    },
+    "capabilities": {
+      "audio_in": true,
+      "audio_out": true,
+      "text_in": false,
+      "text_out": true,
+      "image_in": false,
+      "video_in": false,
+      "transcript_supported": true,
+      "barge_in_supported": true,
+      "provider_native_resume": false
+    },
+    "continuity": {
+      "mode": "transcript_only"
+    },
+    "advisories": ["staged_prompt_refused", "a_future_advisory"]
+  },
+  "active_channel_handle": {
+    "channel_id": "live-ch-1",
+    "target_identity": "identity:example",
+    "execution_mode": "client_context",
+    "activation_receipt": "opaque-active-receipt"
+  },
+  "playback_owner_readiness": {
+    "channel_id": "live-ch-1",
+    "readiness_receipt": "opaque-readiness-receipt"
+  },
+  "pending_status": {
+    "phase": "pending"
+  },
+  "active_status": {
+    "phase": "active",
+    "handle": {
+      "channel_id": "live-ch-1",
+      "target_identity": "identity:example",
+      "execution_mode": "client_context",
+      "activation_receipt": "opaque-active-receipt"
+    }
+  },
+  "revoked_status": {
+    "phase": "revoked"
+  },
+  "closed_status": {
+    "phase": "closed"
+  }
+}

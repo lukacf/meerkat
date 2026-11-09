@@ -379,6 +379,11 @@ impl MeerkatMachine {
             }
         };
         let own = own_admission(state, association, expected)?;
+        // `publish` runs under the turn boundary, the registration's mutation
+        // gate and the driver lock: a protected section, where it never waits.
+        let _section = meerkat_core::protected_section::enter(
+            meerkat_core::protected_section::ProtectedSection::HistoricalAdmission,
+        );
         Ok(publish(&AdmittedOriginal {
             registration,
             input_id: &state.input_id,

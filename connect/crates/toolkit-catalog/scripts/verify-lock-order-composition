@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Check the lock-order (I10) model: RED legs first, then GREEN.
+
+Usage: verify-lock-order-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY
+Order: the A baseline legs and the B mutants first (each must violate exactly
+its attributed invariant, or deadlock under generic deadlock checking, with
+the intended final state), then the clean passes (A has no cycle; the planned
+design keeps the declared order with nothing blocking in a section). A
+bounded contract model, not the real mutexes.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+SUMMARY = r'^.*states generated, .*distinct states found, .*states left on queue\.$'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def final_state(text):
+    states = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+    if not states:
+        # An initial state that violates an invariant is printed without a State header.
+        states = re.split(r'^Error: Invariant \w+ is violated by the initial state:\n', text,
+                          flags=re.MULTILINE)[1:]
+    if not states:
+        raise ValueError('missing counterexample')
+    fields, current = {}, None
+    for line in states[-1].split('\n\n', 1)[0].splitlines():
+        match = re.match(r'^/\\ (\w+) = (.*)$', line)
+        if match:
+            current = match[1]
+            fields[current] = match[2].strip()
+        elif current is not None:
+            fields[current] += ' ' + line.strip()
+    return {name: re.sub(r'\s+', ' ', value) for name, value in fields.items()}
+
+
+def record(value):
+    return dict(re.findall(r'(\w+) \|-> (\d+)', value or ''))
+
+
+def witness(name, f):
+    owner = record(f.get('owner'))
+    initial = re.fullmatch(r'<<(1, )*1>>', f.get('pc', '')) is not None
+    checks = {
+        'a-order': '"CONN"' in f.get('held', '') or '"RC"' in f.get('held', ''),
+        'a-sections': initial,
+        'b-publication-inside-store': '"CONN"' in f.get('held', ''),
+        'b-publication-inside-store-deadlock': owner.get('PUB', '0') != '0'
+            and owner.get('CONN', '0') != '0' and owner['PUB'] != owner['CONN'],
+        'b-control-before-publication': '"RC"' in f.get('held', ''),
+        'b-control-before-publication-deadlock': owner.get('PUB', '0') != '0'
+            and owner.get('RC', '0') != '0' and owner['PUB'] != owner['RC'],
+        'b-bind-takes-lock': initial,
+        'b-blocking-native-read': initial,
+        'b-historical-waits': initial,
+        # The class preparation holds the exclusion and is about to wait for the source writer.
+        'b-exclusion-before-writer': '"CX"' in f.get('held', '') and owner.get('CX', '0') != '0',
+        # One actor holds the source writer, another the exclusion: the cycle.
+        'b-exclusion-before-writer-deadlock': owner.get('SW', '0') != '0'
+            and owner.get('CX', '0') != '0' and owner['SW'] != owner['CX'],
+        # Under the old table the code's order (the source writer, then the exclusion) is refused.
+        'b-old-table-order': '"SW"' in f.get('held', '') and owner.get('SW', '0') != '0',
+    }
+    if name not in checks:
+        raise ValueError('no final-state predicate for ' + name)
+    if not checks[name]:
+        raise ValueError('wrong final state for ' + name)
+
+
+def main():
+    generated, run = [Path(arg).resolve() for arg in sys.argv[1:]]
+    manifest = json.loads((generated / 'manifest.json').read_text())
+    generator = Path(__file__).with_name('generate-lock-order-composition')
+    if sha(generator) != manifest['generator_sha256']:
+        raise ValueError('generator changed after export')
+    source = Path(__file__).resolve().parents[1] / 'models' / manifest['model']
+    if sha(source) != manifest['model_sha256'] or sha(generated / manifest['model']) != manifest['model_sha256']:
+        raise ValueError('exported model differs from the repository source')
+    artifacts = manifest['artifact_hashes']
+    if any(sha(generated / name) != digest for name, digest in artifacts.items()):
+        raise ValueError('export changed')
+    for name in manifest['profiles']:
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', (generated / (name + '.cfg')).read_text()):
+            raise ValueError('generic deadlock checking must stay on')
+    run.mkdir(exist_ok=False)
+    inputs = run / 'inputs'
+    shutil.copytree(generated, inputs)
+    result = {'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'scope': manifest['scope'], 'full_b1_acceptance': False,
+              'manifest_sha256': sha(generated / 'manifest.json'),
+              'verifier_sha256': sha(Path(__file__)), 'profiles': {},
+              'resources': {'workers': 1, 'heap_mib': 1024, 'timeout_seconds': 600,
+                            'sequential': True, 'generic_deadlock_checking': 'ON'}}
+    save(run / 'STARTED.json', result)
+    env = os.environ.copy()
+    env['JAVA_TOOL_OPTIONS'] = '-Xmx1024m'
+    profiles = manifest['profiles']
+    order = ([n for n, p in profiles.items() if p['expected'] is not None]
+             + [n for n, p in profiles.items() if p['expected'] is None])
+    passed = True
+    for name in order:
+        profile = profiles[name]
+        expected = profile['expected']
+        log = run / (name + '.log')
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / manifest['model'])]
+        row = {'kind': profile['kind'], 'command': command, 'expected': expected}
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out, stderr=subprocess.STDOUT,
+                                         env=env, timeout=600, check=False)
+            text = log.read_text()
+            row['exit_code'] = process.returncode
+            row['states'] = re.findall(SUMMARY, text, re.MULTILINE)
+            if expected is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('expected a clean pass')
+                counts = {action: {'distinct': int(d), 'total': int(t)} for action, d, t in re.findall(
+                    r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module lock_order>: (\d+):(\d+)$',
+                    text, re.MULTILINE) if action in manifest['actions']}
+                if set(counts) != set(manifest['actions']) or any(v['total'] == 0 for v in counts.values()):
+                    raise ValueError('not every action was taken')
+                row['action_coverage'] = counts
+            elif expected == 'deadlock':
+                if process.returncode != 11 or 'Error: Deadlock reached.' not in text:
+                    raise ValueError('expected a deadlock')
+                fields = final_state(text)
+                witness(name, fields)
+                row['final_state'] = fields
+            else:
+                if process.returncode != 12 or f'Invariant {expected} is violated' not in text:
+                    raise ValueError('did not violate its attributed invariant')
+                fields = final_state(text)
+                witness(name, fields)
+                row['final_state'] = fields
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(json.dumps({'profile': name, 'kind': profile['kind'], 'passed': row['passed'],
+                          'exit': row.get('exit_code'), 'states': row.get('states'),
+                          'error': row.get('error')}), flush=True)
+    result['export_unchanged'] = all(sha(generated / n) == d for n, d in artifacts.items())
+    result['inputs_unchanged'] = all(sha(inputs / n) == d for n, d in artifacts.items())
+    result['generator_unchanged'] = sha(generator) == manifest['generator_sha256']
+    result['model_unchanged'] = sha(source) == manifest['model_sha256']
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (len(result['profiles']) == len(profiles)
+               and all(value for key, value in result.items() if key.endswith('_unchanged')))
+    result['result'] = 'passed_slice' if passed else 'failed_or_incomplete'
+    result['at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

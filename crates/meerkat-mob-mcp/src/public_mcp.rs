@@ -400,7 +400,7 @@ static PUBLIC_TOOLS: &[PublicTool] = &[
     },
     PublicTool {
         name: "meerkat_mob_list",
-        description: "List active mobs.",
+        description: "List active mobs, and under `quarantined` the persisted mobs whose stores did not restore.",
         schema: typed_schema::<MeerkatMobNoParamsInput>,
     },
     PublicTool {
@@ -686,15 +686,13 @@ pub async fn handle_public_tools_call(
         }
         "meerkat_mob_list" => {
             // Status is projected through the typed wire contract
-            // (`WireMobLifecycleStatus`), never via Display-string folklore.
-            let mobs = state
-                .mob_list()
+            // (`WireMobLifecycleStatus`), never via Display-string folklore,
+            // from one inventory read that also names the quarantined mobs.
+            let inventory = state
+                .mob_inventory()
                 .await
-                .map_err(|err| McpToolError::from_mob(&err))?
-                .into_iter()
-                .map(|(mob_id, observation)| crate::wire_mob_status_row(&mob_id, &observation))
-                .collect::<Vec<_>>();
-            Ok(json!(meerkat_contracts::MobListResult { mobs }))
+                .map_err(|err| McpToolError::from_mob(&err))?;
+            Ok(json!(crate::wire_mob_list_result(&inventory)))
         }
         "meerkat_mob_status" => {
             let input: MeerkatMobIdInput = parse_args(arguments)?;
@@ -2127,6 +2125,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

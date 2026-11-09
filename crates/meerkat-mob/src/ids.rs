@@ -288,6 +288,115 @@ impl AgentIdentity {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The one encoding of a name into a member id
+// ---------------------------------------------------------------------------
+
+/// The marker that begins a member id encoding a name
+/// ([`member_id_for_name`]): a reserved namespace, so a name that begins
+/// with it is encoded too and every name round-trips.
+pub const ENCODED_MEMBER_ID_MARKER: &str = "mk--";
+
+/// Whether `name` is a member comms-name component: an ASCII letter or `_`,
+/// then ASCII alphanumerics, `-` or `_` (the rule each component of a
+/// member's comms name keeps, [`meerkat_core::connection::MemberCommsName`]).
+fn is_member_comms_component(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `name` escaped: `_` as `__`, `:` as `_c`, and any other character
+/// outside `[A-Za-z0-9-]` as `_x{hex}_`.
+fn escape_member_name(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len() + 8);
+    for c in name.chars() {
+        match c {
+            '_' => escaped.push_str("__"),
+            ':' => escaped.push_str("_c"),
+            c if c.is_ascii_alphanumeric() || c == '-' => escaped.push(c),
+            c => escaped.push_str(&format!("_x{:x}_", u32::from(c))),
+        }
+    }
+    escaped
+}
+
+/// The name an escaped body spells ([`escape_member_name`]); `None` when the
+/// body is no escape production, which no encoding produced.
+fn unescape_member_name(body: &str) -> Option<String> {
+    let mut name = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '_' {
+            name.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '_' => name.push('_'),
+            'c' => name.push(':'),
+            'x' => {
+                let mut hex = String::new();
+                loop {
+                    match chars.next()? {
+                        '_' => break,
+                        digit => hex.push(digit),
+                    }
+                }
+                let code = u32::from_str_radix(&hex, 16).ok()?;
+                name.push(char::from_u32(code)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(name)
+}
+
+/// The member id for `name`, in the one encoding of a name into a member id
+/// ([`AgentIdentity`]): `name` itself when it is a member comms-name
+/// component (an ASCII letter or `_`, then ASCII alphanumerics, `-` or `_`)
+/// that does not begin with [`ENCODED_MEMBER_ID_MARKER`]; otherwise the
+/// marker and the escaped name, where `_` is `__`, `:` is `_c` and any
+/// other character outside `[A-Za-z0-9-]` is `_x{hex}_`.
+/// [`name_for_member_id`] inverts it.
+///
+/// A host that names its identities in a form no member id can spell
+/// (`team:alice`) seats each under this id, and the legacy adoption reads a
+/// member's identity label through it.
+pub fn member_id_for_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if is_member_comms_component(name) && !name.starts_with(ENCODED_MEMBER_ID_MARKER) {
+        std::borrow::Cow::Borrowed(name)
+    } else {
+        std::borrow::Cow::Owned(format!(
+            "{ENCODED_MEMBER_ID_MARKER}{}",
+            escape_member_name(name)
+        ))
+    }
+}
+
+/// The name `member_id` encodes ([`member_id_for_name`]): the member id
+/// itself when it is no encoding (it does not begin with
+/// [`ENCODED_MEMBER_ID_MARKER`], or what follows the marker is no escape
+/// production).
+pub fn name_for_member_id(member_id: &str) -> std::borrow::Cow<'_, str> {
+    match decode_member_id(member_id) {
+        Some(name) => std::borrow::Cow::Owned(name),
+        None => std::borrow::Cow::Borrowed(member_id),
+    }
+}
+
+/// The name an encoded member id spells ([`member_id_for_name`]): `None`
+/// when `member_id` does not begin with [`ENCODED_MEMBER_ID_MARKER`], or
+/// what follows the marker is no escape production, which no encoding
+/// produced. The one decoder of the encoding.
+pub(crate) fn decode_member_id(member_id: &str) -> Option<String> {
+    member_id
+        .strip_prefix(ENCODED_MEMBER_ID_MARKER)
+        .and_then(unescape_member_name)
+}
+
 /// Monotonically increasing generation counter for a mob member.
 ///
 /// Starts at 0 on first spawn, advances on each reset. The generation is
@@ -510,6 +619,53 @@ pub struct WorkSpec {
     #[serde(skip)]
     pub(crate) request_reasoning:
         Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
+    /// The original requester of this work: an opaque, qualified principal
+    /// the host authenticated, never a request body, a tool argument or
+    /// model output. Only host human input carries one (the member's runtime
+    /// stores it with the admitted input and its run hands it to tool
+    /// dispatch); other work that carries one is refused. Set only through
+    /// [`Self::with_requester`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
+    /// Request-only context for this member turn
+    /// ([`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::request_only_context`]):
+    /// projected into the turn's model requests and never stored, so only a
+    /// local session-backed member's runtime input carries it; remote,
+    /// peer-only and autonomous inbox delivery refuse it. Set only through
+    /// [`Self::with_request_only_context`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) request_only_context:
+        Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    /// The label naming the person who sent this host human input, for the
+    /// member's model (see [`SenderLabel`]). Only host human input carries
+    /// one; other work that carries one is refused. Set only through
+    /// [`Self::with_sender_label`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) sender_label: Option<SenderLabel>,
+}
+
+/// The label a host gives the member's model for the person who sent host
+/// human input, such as "Message from alice@example.com". It is attribution
+/// the model reads before the message, never control data: nothing parses
+/// it back. The member's turn receives it as its own injected-context row
+/// right before the message, whether the input is queued or steered into a
+/// running turn, which ordinary injected context cannot be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderLabel(String);
+
+impl SenderLabel {
+    /// A label with the text `text`; `None` when the text is blank.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Option<Self> {
+        let text = text.into();
+        (!text.trim().is_empty()).then_some(Self(text))
+    }
+
+    /// The label's text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl WorkSpec {
@@ -526,7 +682,49 @@ impl WorkSpec {
             interaction_id: None,
             objective_id: None,
             request_reasoning: None,
+            requester: None,
+            request_only_context: None,
+            sender_label: None,
         }
+    }
+
+    /// Carry request-only context for this member turn (see the
+    /// `request_only_context` field): its model requests see it, its
+    /// transcript and the stored input never hold it.
+    #[must_use]
+    pub fn with_request_only_context(
+        mut self,
+        context: meerkat_core::lifecycle::run_primitive::TurnRequestContext,
+    ) -> Self {
+        self.request_only_context = Some(context);
+        self
+    }
+
+    /// Carry the original requester the host authenticated for this work
+    /// (see the `requester` field): only host human input may carry one.
+    #[must_use]
+    pub fn with_requester(mut self, requester: meerkat_core::PrincipalRef) -> Self {
+        self.requester = Some(requester);
+        self
+    }
+
+    /// The original requester this work carries, if any.
+    pub fn requester(&self) -> Option<&meerkat_core::PrincipalRef> {
+        self.requester.as_ref()
+    }
+
+    /// Carry the label naming the person who sent this work, for the
+    /// member's model (see [`SenderLabel`]): only host human input may carry
+    /// one.
+    #[must_use]
+    pub fn with_sender_label(mut self, label: SenderLabel) -> Self {
+        self.sender_label = Some(label);
+        self
+    }
+
+    /// The sender label this work carries, if any.
+    pub fn sender_label(&self) -> Option<&SenderLabel> {
+        self.sender_label.as_ref()
     }
 
     /// Carry a live delegation admission's reasoning preference.
@@ -757,6 +955,51 @@ mod tests {
             serde_json::from_str::<ProfileName>(&serde_json::to_string(&profile).unwrap()).unwrap(),
             profile
         );
+    }
+
+    // --- The one encoding of a name into a member id ---
+
+    /// Every name round-trips through its member id, which is a member
+    /// comms-name component; a plain member id is its own name.
+    #[test]
+    fn a_name_round_trips_through_its_member_id() {
+        for name in [
+            "team:alice",
+            "rt:review:singleton:0",
+            "with_underscore:and:colons",
+            "user@host",
+            "a.b:c",
+            "9starts-with-digit",
+            "\u{fc}n\u{ef}code:1",
+            "mk--reserved",
+            "",
+        ] {
+            let member_id = member_id_for_name(name);
+            assert!(
+                member_id.starts_with(ENCODED_MEMBER_ID_MARKER),
+                "{name:?} is encoded: {member_id:?}"
+            );
+            assert!(
+                is_member_comms_component(&member_id),
+                "{member_id:?} is a comms-name component"
+            );
+            assert_eq!(name_for_member_id(&member_id), name, "{name:?}");
+        }
+        for plain in ["worker", "lead-agent", "_x", "a_b"] {
+            assert_eq!(member_id_for_name(plain), plain);
+            assert_eq!(name_for_member_id(plain), plain);
+        }
+        assert_eq!(member_id_for_name("team:alice"), "mk--team_calice");
+        assert_eq!(member_id_for_name("a_b:c"), "mk--a__b_cc");
+    }
+
+    /// A member id that begins with the marker but is no escape production
+    /// is its own name.
+    #[test]
+    fn a_member_id_that_is_no_encoding_is_its_own_name() {
+        for member_id in ["mk--bad_q", "mk--open_x41", "mk--trailing_"] {
+            assert_eq!(name_for_member_id(member_id), member_id);
+        }
     }
 
     // --- Identity-first model types ---

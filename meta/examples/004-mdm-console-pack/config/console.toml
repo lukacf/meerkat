@@ -1,0 +1,80 @@
+title = "MDM Console"
+
+[brand]
+label = "Meerkat Device Manager"
+logo_alt = "MDM"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "local / remote-target demo"
+
+[layout]
+initial_preset = "two_columns"
+initial_control = "roster"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "needs-claim"
+empty_text = "No target needs operator attention."
+
+[[rail.filter_presets]]
+id = "needs-claim"
+label = "Needs Claim"
+alert_levels = ["elevated", "critical"]
+
+[[rail.filter_presets]]
+id = "offline"
+label = "Offline"
+alert_levels = ["critical"]
+
+[sidebar]
+visible_controls = ["roster", "topology", "timeline", "logs", "health"]
+hidden_controls = []
+
+[agent_list]
+group_by = ["labels.console_group", "labels.site", "role"]
+subgroup_by = ["labels.platform", "labels.claim_state"]
+section_order = ["Fleet Control", "Managed Targets", "Internal"]
+fallback_group = "Targets"
+fallback_subgroup = "Unknown"
+collapse_single_subgroup = false
+default_pinned_agent_ids = ["hive"]
+
+[[agent_list.badges]]
+id = "site"
+label = "Site"
+field = "labels.site"
+tone = "info"
+
+[[agent_list.badges]]
+id = "claim"
+label = "Claim"
+field = "labels.claim_state"
+tone = "warning"
+
+[[agent_list.badges]]
+id = "transport"
+label = "Transport"
+field = "labels.transport"
+
+[[agent_list.sections]]
+name = "Fleet Control"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Managed Targets"
+collapsed = false
+
+[actions]
+inspect_label = "Device"
+chat_label = "Open target"
+send_label = "Send"
+respawn_label = "Respawn"
+retire_label = "Retire"
+reset_label = "Reset target"
+show_reset = true

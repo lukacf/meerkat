@@ -63,7 +63,11 @@ API changes, error codes, SDKs, prebuilt binaries and Rust embedding:
   `session/input_status` shows `terminal_outcome: "abandoned"` (Rust
   `InputAbandonReason::MaxAttemptsExhausted {attempts}`). At the cap the whole
   refused batch ends this way, so other queued inputs can show it too.
-  Provider-level retries are separate (0.8.23).
+  Provider-level retries are separate (0.8.23). Since 0.9.9 a host store
+  fence gap suspends the run without spending attempts, a host runtime that
+  stops mid-turn leaves the inputs pending for the next start, and a kept
+  governed resume whose controller client the host cannot supply again ends
+  `InputAbandonReason::ResumeRefused` instead of exhausting its attempts.
 - Summaries (`message_count`, `total_tokens`, `last_assistant_text` in
   `session/read` and `session/list`) are seeded when the session actor is
   created: a new session reports `message_count` of at least 1 (its system
@@ -219,12 +223,16 @@ settings before the turn, so REST can change build settings that RPC refuses.
   is refused before anything is committed with `FORK_INSTRUCTION_REFUSED`
   (-32037, HTTP 422), `data.kind` `fork_instruction_refused` and
   `data.fork_instruction_refusal` (`cause`: `policy_refuses`,
-  `not_effective_in_source`, `lineage_body_budget_exceeded`, `activation` or
-  `member_host_unsupported`; `keys`). `reactivate_inherited` appends the
-  child's own activation of every key that was effective in the source; the
-  result's `reactivated_instruction_count` counts those rows, which
-  `message_count` includes. A prefix without activation rows forks the same
-  way under every value. In 0.9.3 such a fork succeeded and the child's turns
+  `not_effective_in_source`, `lineage_body_budget_exceeded`, `activation`,
+  `member_host_unsupported` or `head_body_retired`; `keys`).
+  `reactivate_inherited` appends the child's own activation of every key
+  that was effective in the source; the result's
+  `reactivated_instruction_count` counts those rows, which `message_count`
+  includes. Under it, a prefix whose last row of a key holds a body a
+  compaction of the source retired (0.9.9: a later row of that key, past the
+  prefix, superseded it) is refused with `head_body_retired`; fork at a
+  later boundary, which copies the superseding row with its body. A prefix
+  without activation rows forks the same way under every value. In 0.9.3 such a fork succeeded and the child's turns
   then failed. SDKs: Python `fork_session_at(..., inherited_instructions=...)`
   and `SessionForkResult.reactivated_instruction_count`; TypeScript
   `forkSessionAt(id, index, { inheritedInstructions })` and
@@ -254,8 +262,55 @@ settings before the turn, so REST can change build settings that RPC refuses.
   rewrite and compaction cannot mint prompt versions.
 - `session/activate_instruction` activates one immutable instruction revision
   at a safe boundary; `session/instruction_activations` reads the records
-  (0.8.30). Once durable instruction activations are effective, system-prompt
-  replacement for that target is refused.
+  (0.8.30). Since 0.9.9 a keyed system-prompt update, a transcript rewrite and
+  a revision restore keep each activation row at its place among the
+  conversation rows, so a later prompt version commits after an activation
+  too (0.9.8 refused it once an activation followed the prompt's current
+  version); moving an activation across a conversation row, or minting,
+  altering, erasing or reordering one, is still refused.
+- A compaction retires the body of every activation row that a later
+  activation of its key superseded (0.9.9): the row keeps its identity and
+  place, its content becomes the `[meerkat-retired-instruction-v1]` header
+  (`status=superseded`), and the newest row of each key keeps its body. The
+  1 MiB activation budget counts live bodies only.
+- Operator instructions (0.9.9 Rust API; since 0.9.11 also JSON-RPC
+  `session/set_instruction`, `session/revoke_instruction` and
+  `session/instruction_status`, and the Python and TypeScript SDKs): standing
+  instructions by slot (namespace and key), revision and body.
+  `SessionServiceInstructionExt::set_session_instruction` and
+  `read_session_instructions` (the persistent service; the ephemeral one
+  refuses `durability_unavailable`) record a session-owned write without
+  waking anything; the pending changes apply at the session's next fresh run
+  start as one System entry before the run's input, and a compaction folds
+  the entries into one snapshot; each applied entry is published as an
+  `operator_instructions_applied` event (an observation; the status read is
+  the authority). Limits: 64 slots, 256 KiB a body, 1 MiB of
+  Active bodies; a stale or conflicting revision is refused typed
+  (`InstructionSetErrorCode`, on the wire `error.data.instruction_set_code`).
+  A governed runtime refuses every write `prepared_authorization_required`.
+  A model that lowers System rows only in its
+  leading prompt defers them (`leading_prefix_only`), and a backend whose
+  wire carries one leading System row keeps them pending
+  (`lowering_unavailable`). A mob member's session belongs to its mob
+  (`MobHandle::set_operator_instruction`, `mob/set_instruction`), and its own
+  host's writes are refused `owned_by_mob`. Instruction activations
+  (`session/activate_instruction`) are deprecated since 0.9.11 in favour of
+  operator instructions.
+- System-row prune (0.9.9, Rust API):
+  `SessionServiceTranscriptEditExt::prune_system_rows` removes ordinary
+  System rows a host names (each by its 0-based index and the `sha256:`
+  digest of its content) from an idle session in one audited rewrite
+  (reason kind `system-row-prune`), optionally retiring superseded activation
+  bodies (`retire_superseded_activation_bodies`); a stale digest or any
+  refused row refuses the whole prune, and a running session answers `Busy`.
+- A session that holds operator-instruction facts, a retired activation body
+  or a rewrite that moved an activation row is written at session envelope 5,
+  which a release before 0.9.9 refuses; every other session stays at
+  envelope 4 (`rkat storage doctor` lists them, finding
+  `operator-instruction-envelope`).
+- A resume whose explicit system prompt is exactly the newest System row the
+  model reads as a prompt appends nothing (0.9.9); a different prompt still
+  appends one.
 - `session/inject_context {session_id, content, source?, idempotency_key?}`
   (REST `POST /sessions/{id}/system_context`) appends one ordinary durable
   System message at the admitted boundary; plain text content is accepted.
@@ -367,8 +422,51 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   cancelled and fails the run, which is closed as interrupted with its
   committed rounds kept; retire, destroy, reset and unregister abandon
   them; a graceful unregister that keeps queued work leaves the run to resume
-  at the next start, unless a bound input is older than the stop's max age
-  by then.
+  at the next start, unless the stop's max age has passed since the stop by
+  then.
+- Settling a kept run without a model request (0.9.11, a host's Recover
+  flow): hold the member with `HostRunStartHoldReason::HostRecovery`
+  (`MobBuilder::hold_restored_member_run_starts`, before the start; no mob or
+  Meta path stages or releases it, and a retire or destroy of the member
+  drops it), wake it under the hold (`MobHandle::ensure_member_live`), call
+  `MobHandle::settle_member_retained_run` (runtime:
+  `MeerkatMachine::settle_retained_run`), then release the hold on every
+  answer that leaves no open run. `RetainedRunSettlement::Settled { run_id,
+  inputs }` once the settlement committed (never resumed; the run's inputs
+  hold their committed terminals: cancelled, closed as interrupted, when the
+  settle ended it, or a stop's, reset's or retire's reason when one ended it
+  first); `NotRetained` when nothing is kept,
+  which is also the answer to a retry after the settle;
+  `Busy { current_run_id: Some(_) }` when a run is current (it is never
+  stopped); `Busy { current_run_id: None }` when the registration cannot
+  settle now: keep the hold and settle again. A settlement that did not
+  commit, or that left the run's tail standing, is never `Settled`:
+  `MobError::MemberReloadRequired` when its write failed (reload, settle
+  again; on a host store realm, a write the store refused or left unsettled
+  poisons the session's scopes, and the reload fails until the realm is
+  opened again, so the member stays held) or its tail repair failed
+  (reload; the member then keeps no run),
+  `MobError::MemberSessionNotLive` when the session leaves the process
+  (its store realm lost its fence, or an unregister ended the run
+  first: its inputs then stopped when it keeps queued work, a mob
+  Shutdown's default, and cancelled when it stops), and
+  `MobError::MemberInputTerminalNotYetReadable` when the run is no longer
+  kept but an input of it reads no committed terminal yet (settle again). A
+  member not live in this process is refused
+  `MobError::MemberSessionNotLive` and never woken. `MemberNotFound` (a
+  member the mob no longer holds; a release answers it too) and
+  `UnsupportedForMode` (a placed or session-less member, never held) answer
+  the same on every round: that member is done. A host store realm that
+  lost its fence (`SpiRealm::realm_poisoned`: no wake, reload or cold read
+  in this process serves a member until the realm is opened again), and a
+  mob destroyed or shut down (every command to its actor answers
+  `ActorCommandChannelClosed`),
+  end the recovery in this process.
+  `MeerkatMachine::session_work_state` reads cold whether one session
+  holds the work a start wakes a member for, without loading or registering
+  it: `Registered`, `Idle`,
+  `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })` or
+  `Unobserved(cause)` (never idle).
 - Not resumed, closed as interrupted with content kept: a bound input already
   settled, a retired runtime, or a run with no bound inputs (direct and
   machine-service turns). A run settled without resuming (a stop first, a
@@ -403,9 +501,10 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   with per-round commits in flight like a crash: the turn stops at once
   (work since the last round commit is redone), its inputs stay bound with
   waiters answered `requeued_across_stop`, and the run continues at the next
-  open, before the kept queued prompts; if a bound input is older than
-  `max_age` (from admission; unregister: no default, 1 ms to 24 h; mob:
-  15 min default) at that start, the inputs end `requeue_expired` instead
+  open, before the kept queued prompts; if more than `max_age` (counted
+  from the stop, not from admission; unregister: no default, 1 ms to 24 h;
+  mob: 15 min default) has passed at that start, the inputs end
+  `requeue_expired` instead
   and the run is closed as interrupted, its committed rounds kept. No
   Requeue, an explicit stop/cancel, retire, destroy, reset, a requeue stop
   that meets a steer being written into the turn, or a session without
@@ -459,8 +558,11 @@ settled as interrupted and not replayed, and the transcript gets a
 `tool_process_recovery` notice with a `tool_process_interrupted` block (the
 tool's effects may be partial or complete). Since 0.9.5 a run that can resume
 from a committed round (above) resumes instead: the call whose process may
-have run gets an `outcome_uncertain` result rather than running again, and the
-notice is still added. Custody knows whether the tool
+have run gets an `outcome_uncertain` result rather than running again. For a
+foreground shell call that result is the record: no `tool_process_interrupted`
+block is added for it, whether the run resumes or is settled without resuming
+(closed as interrupted). A background shell job, a monitor or a command hook
+keeps its notice, since its process outlives the call that started it. Custody knows whether the tool
 process started: a spawn gate holds the command until the host has durably
 recorded it, and if the host dies first nothing runs. When custody cannot be
 proven,

@@ -42,7 +42,7 @@ use deterministic_mob_provider::{
 /// Budget for one CLI verb against a cold debug-build realm.
 const VERB_TIMEOUT: Duration = Duration::from_secs(150);
 /// Budget between run start and the stalled member turn's HTTP request.
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(120);
+const DISPATCH_TIMEOUT: Duration = Duration::from_mins(2);
 /// Budget between SIGTERM and the CLI's post-cancel exit (the in-process
 /// cancel grace is 30s; the flow's own cancel grace is 2s).
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(90);

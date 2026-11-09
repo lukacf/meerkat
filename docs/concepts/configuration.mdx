@@ -250,6 +250,12 @@ cataloged models scale the token trigger to 80 percent of the smaller of their
 context window and separate input ceiling, when one is declared. For
 `gpt-6-astra`, the 922,000-token input ceiling gives a 737,600-token default
 trigger; its shared input-plus-output context window remains 1,050,000 tokens.
+When the selected account states a smaller prompt limit for the model (a
+GitHub Copilot account model's `max_prompt_tokens`, or its context window less
+the session's output budget, `max_tokens`), the trigger is 80 percent
+of that limit instead. An explicit `auto_compact_threshold`, or a per-build
+override, above the account's prompt limit is lowered to the limit, with a
+warning: the account refuses a longer prompt whatever the threshold.
 Built-in provider clients also attach the current provider's approximate
 request-byte cap to each lowered request; the byte trigger fires at 80 percent
 of that cap. `max_request_bytes` is an optional operator override, especially
@@ -571,6 +577,27 @@ the realm opens; a section that cannot be read or is malformed refuses the
 realm's governed work. Unknown or misspelled fields are refused, including
 inside the reviewer's identity.
 
+`[governance.decisions]` names the approver ids the operator of an `rkat-rpc`
+stdio connection acts for when the connection presents and decides
+[durable decisions](/api/rpc#the-operator-of-a-stdio-connection):
+
+```toml
+[governance.decisions]
+operator_approver_ids = ["operator", "team:owners"]
+```
+
+- `operator_approver_ids`: each entry an approver id (non-empty, at most 256
+  bytes, no whitespace or control characters). Without the key the operator
+  acts for `["operator"]`; an explicit empty list makes it act for none, so
+  the connection presents nothing and refuses every decide.
+
+A plain stdio connection reads the list from the realm's effective
+configuration each time it presents or decides, so a change applies to the
+next presentation (a decision that opens, or a `decision/list`) and the next
+`decision/decide`; a decision already presented is refused once its approver
+id is no longer listed. The stock governed pipe reads its host's
+configuration as the pipe started, so a change reaches it at its next start.
+
 Governance is administered by the realm's trusted host in the realm's own
 config document. An ordinary config write (`config/set`, `config/patch`,
 `PUT`/`PATCH /config`, the MCP config tool or the CLI) cannot change,
@@ -629,12 +656,32 @@ A launch the platform's backend cannot confine as required is refused at that
 launch with typed `confinement_refused` feedback; it never runs unconfined,
 and the rest of the run continues. At startup a host reports each launch
 kind's requested and effective confinement (the backend that enforces it, or
-that every launch of the kind is refused), what keeps the host's own inputs
-from its confined processes, and each convention source it does not trust.
+that every launch of the kind is refused, with any host setting the backend
+can tell it lacks, such as `vm.memfd_noexec`), what keeps the host's own
+inputs from its confined processes, and each convention source it does not
+trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
-user namespaces, and it refuses deny lists, Unix socket grants, nested grants,
-and granted paths that do not exist or pass through a symbolic link. Other
-platforms refuse every confined launch. A confined process finds its program,
+user namespaces (with pid and cgroup namespaces in them, and network
+namespaces for a launch without IP access) and memory files it may execute
+(`vm.memfd_noexec` below 2), and it refuses deny lists, Unix socket grants,
+nested grants, a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in
+them, and granted paths that do not exist or pass through a symbolic link.
+One link is accepted
+on Linux: the last component of a read-only literal file grant in a `custom`
+requirement, such as `{ kind = "literal", path = "/etc/resolv.conf" }` on a
+systemd-resolved host for name resolution with unrestricted `network`, when
+the link's own text alone names its regular file (a link to a link is
+refused), that file is not in `/proc`, `/sys` or `/dev`, and only root or the
+host's user can replace the link or a directory above it. These checks trust
+the owners and modes the filesystem reports, so for a link on a FUSE or
+network filesystem they trust that filesystem's server. That file is bound
+read-only at the link's path. A file replaced under its name (a new file
+renamed into place, as systemd-resolved does when its DNS settings change) is
+checked again by the same rules at the next launch, which binds it. A link
+replaced with other text refuses the launch, even when it names the same
+file, and so does a file replaced by anything the same rules refuse. macOS
+refuses such a grant. Other platforms refuse every
+confined launch. A confined process finds its program,
 libraries and data only inside its granted subtrees and the platform
 baseline; grant anything else it needs with `read`. A confined command hook,
 MCP stdio server or stdio skill source names its program by absolute path and
@@ -642,6 +689,43 @@ receives only its configured environment, never the host's; a relative
 program name or a loader variable such as `LD_PRELOAD` refuses that launch. A
 confined stdio skill source starts in the kind's working directory, as an MCP
 stdio server does; its own `cwd` does not apply.
+
+On Linux each confined launch runs in a pid namespace of its own. Its first
+process, the one the host holds (the launch's PID and the leader of its
+process group), runs the setup, starts the command as pid 2 of the namespace
+and then runs a small init that the backend executes from a sealed memory
+file: it holds none of the host's memory, and the command cannot inspect it.
+When the command ends, the init reports the command's exit status (an exit
+code, or the signal that ended it), which is the launch's, and every other
+process of the launch ends with it; killing the launch's PID ends them all at
+once. A signal to the launch's process group reaches the command and every
+process it started; any signal other than SIGKILL or SIGSTOP sent to the
+launch's PID alone reaches only the init, which ignores it. Inside, `$$` and
+`getpid()` are 2, never the PID the host records. Each confined launch
+therefore counts as two processes toward a pids limit.
+
+The launch sees a read-only `/proc` of its own pid namespace with process
+entries only: `/proc/self/exe` resolves, which Rust toolchains need, while
+`/proc/sys`, `/proc/net` and other host-wide entries are absent, and only the
+launch's own processes are listed. A launch without IP access also gets a
+network namespace of its own, so `/proc/self/net` shows only its own loopback
+interface. With `network = "unrestricted"` the launch shares the host's
+network namespace, and `/proc/self/net` lists its connections and Unix socket
+names. Each launch also gets a cgroup namespace of its own, so
+`/proc/self/cgroup` shows the launch's cgroup as `/`, never the host's cgroup
+path, while `/proc/self/mountinfo` still names the source device, filesystem
+type and mount options of each path bound into the launch. A host that
+refuses the backend this mount, such as a container runtime that masks or
+overmounts `/proc`, or a kernel before 5.8, still runs confined launches,
+without `/proc`.
+
+With IP access, a confined process may create Unix stream and seqpacket
+socket pairs, which the Rust standard library uses to start processes; a
+datagram pair stays refused, since it can be addressed to another socket. A
+pair socket cannot connect to or serve anything outside the launch, but it
+can bind an abstract socket name in the shared network namespace, taking
+that name from other processes, and pass descriptors between processes of
+the launch.
 
 ### Composition
 
@@ -690,7 +774,20 @@ administration from out of its confined processes' reach:
   the session), and a refused definition does not fail the rest of the
   session's setup. An untrusted `mcp.toml` that does not parse, or that
   states an invalid access policy, still fails the setup, as a trusted one
-  does.
+  does. An embedding host can also judge the hook files by their content:
+  a `HookSourceTrust` installed with `AgentFactory::with_hook_source_trust`
+  is asked once per build about each convention hook file the build read
+  (the project and user `.rkat/config.toml`), with the SHA-256 of the exact
+  bytes it parsed, so a file rewritten after the host checked it is judged
+  as rewritten, and every hook of a file it refuses is refused the same
+  way. It judges those bytes only: not the program or script a command
+  hook names (read when the hook runs), not a run's hook overrides (the
+  caller's own input), and not the hooks of the config the host passes to
+  the build, which `Config::load` fills from the project `.rkat/config.toml`
+  (or else the user's). A build handed its own hook engine
+  (`AgentBuildConfig::hook_engine_override`) reads neither file, so the
+  trust is not asked, and the `resolve_layered_hooks_config` helper layers
+  both with no decision.
 - Links: an input or a skills directory is judged with the symbolic links in
   it. A start whose realm state or credential store links to a path a
   confined process could change (a target that does not exist yet

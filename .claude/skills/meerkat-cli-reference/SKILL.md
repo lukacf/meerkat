@@ -621,7 +621,16 @@ a coherent WAL read. Reports per-root realm inventory,
 manifest state, schema-ledger versions per database, dual-root split-brain
 twins, persisted-session structural decode failures, transcript-history
 footprint, dangling session→blob references, and orphaned
-lock/lease/backup artifacts.
+lock/lease/backup artifacts. Since 0.9.9 it also lists, as informational
+findings, the sessions written at session envelope 5
+(`operator-instruction-envelope`) and the mob databases that hold
+operator-instruction events (`operator-instruction-mob-events`), which a
+release before 0.9.9 refuses.
+Since 0.9.10 it also reports `identity-store-rows`, an informational finding
+with counts only (the total and the archived, tombstone and unreadable rows),
+for each mob database that holds identity-store rows of schema version 2 or
+later, which a release before 0.9.9 does not read: check it when planning a
+rollback.
 Exit 0 = no error-severity findings; exit 1 = errors found.
 
 `storage migrate` is the offline migration framework, dry-run by default;
@@ -675,6 +684,7 @@ rkat auth test <BINDING_ID>
 rkat auth status <PROFILE_ID>
 rkat auth login [PROVIDER] [--backend <BACKEND>] [--method <METHOD>]
 rkat auth login <PROVIDER> --non-interactive [--secret <SECRET>] [--backend <BACKEND>] [--method <METHOD>]
+rkat auth login copilot --non-interactive [--secret <TOKEN> | --from-env]
 rkat auth logout [<REALM>:]<BINDING_ID>
 rkat auth refresh <PROFILE_ID>
 rkat auth connector-client set <ID> --issuer <ISSUER> --client <CLIENT_ID> [--client-secret [--secret-stdin]] [--authorize-param NAME=VALUE...] [--no-resource-indicator] [--protocol <PROTOCOL>] [--redirect-uri <HTTPS_URI>...]
@@ -693,6 +703,19 @@ GitHub device OAuth (`github_copilot_oauth`) and provisions
 `global:copilot_gemini`. These routes share the `github_copilot` credential
 account and use provider-specific Copilot backends; Copilot is not a fourth
 LLM `--provider` value. Reduced builds without `copilot` cannot use this login.
+`rkat auth login copilot --non-interactive` uses a GitHub token instead of the
+device flow, like GitHub Copilot CLI with `COPILOT_GITHUB_TOKEN`: it writes the
+same three routes with `auth_method = "github_copilot_token"`. With
+`--from-env` they read `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+`GITHUB_TOKEN` and nothing is stored; otherwise the token from `--secret` or
+stdin is checked and stored under the `github_copilot` account. A refused
+token is never stored; classic `ghp_` tokens are refused; `--backend` and
+`--method` are refused. The routes hold one method at a time, so each login
+refuses routes configured for the other. `rkat auth test copilot_openai`
+prints the `account:` and `plan:` the token resolves to; for a GitHub App
+installation token, or a token GitHub's identity lookup does not answer (the
+route then uses the default Copilot API host), it prints
+`account: not named by GitHub (...)` and no `plan:`.
 Non-interactive api-key login (`--non-interactive` requires the provider and
 reads the secret from stdin when `--secret` is omitted) only stores the token
 under `global:default_<provider>`; it writes no backend/auth/binding config, so
@@ -735,10 +758,10 @@ Runtime env fallback order:
 active realm. Agents mutate ordinary WorkGraph items through `workgraph_*` tools.
 
 ```bash
-rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph show <ID> [--namespace <NS>] [--json]
-rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
-rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
+rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
@@ -751,6 +774,12 @@ rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespac
 
 `--status` on `list`/`snapshot` is repeatable: `open`, `in-progress`,
 `blocked`, `completed`, `cancelled`, `failed`. `--label` is repeatable.
+
+`list`, `ready` and `snapshot` page: a page that ends early prints
+`N of M, more with --cursor <CURSOR>` (`--json` carries `next_cursor`), and
+`--cursor <CURSOR>` reads the next page. `events` prints
+`more with --after-seq <N>` (`--json` carries `next_after_seq`) for
+`--after-seq`.
 
 The flags above are parsed, but the current CLI binds WorkGraph to the active
 realm's immutable `default` namespace grant. Non-default `--namespace` requests

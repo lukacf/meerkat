@@ -633,6 +633,24 @@ fn bad(reason: String) {
 }
 
 #[test]
+fn generated_exact_run_boundary_cancel_shape_fails() {
+    let findings = findings_for(
+        "crates/meerkat-runtime/src/runtime_loop.rs",
+        r"
+fn bad(run_id: RunId, reason: String) {
+    let _ = MeerkatMachineEffect::ExactRunBoundaryCancel { run_id, reason };
+}
+",
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("must not construct runtime effect literals")),
+        "a shell-built exact-run boundary cancel must fail the audit: {findings:#?}"
+    );
+}
+
+#[test]
 fn public_hard_cancel_authority_fails() {
     expect_failure(
         "public hard-cancel authority",

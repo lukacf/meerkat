@@ -307,6 +307,11 @@ references, and event snapshots. It is optional and enabled through
   `POST /workgraph/goal/status`, `POST /workgraph/attention/list`.
 - Python/TypeScript SDKs expose typed read-only wrappers and session options
   `enable_workgraph` / `enableWorkGraph`.
+- Reads are pages (0.9.9): list and snapshot newest first, every list, ready
+  and snapshot result with `total_items`, `truncated` and, when it ended
+  early, a `next_cursor` to pass back as `cursor`; events page with
+  `after_seq` (`next_after_seq`). Evidence is withdrawn by a later ref's
+  `withdraws`, never removed.
 
 Use WorkGraph for durable pending work, dependencies, claims, and evidence. Use
 Schedule for time and recurrence; use memory for retrieved knowledge; use comms
@@ -512,8 +517,8 @@ surface, not the old live-adapter/docs-refresh snapshot:
   `rkat session repair-wholeblob <session-id> --json`, then `--apply`).
   Treat these as "session intact, not runnable yet", not as service faults.
 - `rkat run --output html` / `--html` writes standalone HTML artifacts.
-- Image generation uses `generate_image` with OpenAI `gpt-image-2` and Gemini
-  `gemini-nano-banana-2.1` as provider defaults.
+- Image generation uses `generate_image` with OpenAI `gpt-image-2.6-sunburst`
+  and Gemini `gemini-nano-banana-2.1` as provider defaults.
 - Mob host surfaces include batch wiring, helper/fork/respawn/cancel/wait
   operations, profile CRUD when a profile store is present, store-issued
   resume verdicts, and certified bounded helper results for SDK consumers.
@@ -1135,7 +1140,7 @@ Every session resolves credentials through realm-scoped bindings. Two onramps:
 
 **Quick start - env keys**: Meerkat resolves API keys from provider-specific env vars. Anthropic: `RKAT_ANTHROPIC_API_KEY`, then `ANTHROPIC_API_KEY`. OpenAI: `RKAT_OPENAI_API_KEY`, then `OPENAI_API_KEY`. Gemini: `RKAT_GEMINI_API_KEY`, `GEMINI_API_KEY`, `RKAT_GOOGLE_API_KEY`, then `GOOGLE_API_KEY`. Azure OpenAI: `RKAT_AZURE_OPENAI_API_KEY` + `RKAT_AZURE_OPENAI_ENDPOINT`, then `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` (used only when no OpenAI key is set or an `RKAT_AZURE_OPENAI_API_KEY`/`RKAT_AZURE_OPENAI_ENDPOINT` is set). Meerkat synthesizes an ephemeral env-default binding outside the persisted realm chain; it is tried last, after configured bindings for the same provider. Keys do not choose the provider: with no model/provider/binding hint the model is OpenAI `gpt-6-astra`, so pass `-m`/`-p` or set `rkat --default-model` to run on another provider's key.
 
-**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config and select a binding with CLI `--auth-binding <realm>:<binding>[:profile]` or the surface's typed `auth_binding` field. CLI `rkat auth login <provider>` provisions the reserved `global` realm in the HOME-rooted doc (`~/.rkat/config.toml`), inherited through the chain tail. Direct-provider OAuth writes `global:anthropic_oauth`, `global:openai_oauth`, or `global:google_oauth`; non-interactive api-key login stores only a token under `global:default_<provider>` (no backend, auth or binding config is written; add a binding whose auth profile has `source = { kind = "managed_store" }` and select it with `--auth-binding global:default_<provider>`). With `copilot` compiled (default), `rkat auth login copilot` uses GitHub device OAuth and provisions `global:copilot_openai`, `global:copilot_anthropic`, and `global:copilot_gemini`. All three share the `github_copilot` credential account and route through their provider-specific backends; Copilot is not a fourth LLM provider family. Credential reads inherit down the chain; a binding's owning realm is where it is DEFINED. Legacy `dev`-realm logins migrate to `global` on the run path (token + `[realm.global]` section), idempotent and no-clobber, so an existing sign-in keeps working.
+**Realm bindings — OAuth, cloud IAM, multi-tenant**: declare `[realm.<id>.{backend,auth,binding}]` in config and select a binding with CLI `--auth-binding <realm>:<binding>[:profile]` or the surface's typed `auth_binding` field. CLI `rkat auth login <provider>` provisions the reserved `global` realm in the HOME-rooted doc (`~/.rkat/config.toml`), inherited through the chain tail. Direct-provider OAuth writes `global:anthropic_oauth`, `global:openai_oauth`, or `global:google_oauth`; non-interactive api-key login stores only a token under `global:default_<provider>` (no backend, auth or binding config is written; add a binding whose auth profile has `source = { kind = "managed_store" }` and select it with `--auth-binding global:default_<provider>`). With `copilot` compiled (default), `rkat auth login copilot` uses GitHub device OAuth and provisions `global:copilot_openai`, `global:copilot_anthropic`, and `global:copilot_gemini`. All three share the `github_copilot` credential account and route through their provider-specific backends; Copilot is not a fourth LLM provider family. For service accounts and CI, `auth_method = "github_copilot_token"` authenticates the same routes with a GitHub token from any credential source and no device sign-in, as GitHub Copilot CLI does with `COPILOT_GITHUB_TOKEN`: `rkat auth login copilot --non-interactive --from-env` writes routes that read `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`; without `--from-env` it checks and stores a token from `--secret` or stdin. Fine-grained tokens with Copilot Requests, OAuth and GitHub App user tokens, and App installation tokens (preview) work; classic `ghp_` tokens are refused. Credential reads inherit down the chain; a binding's owning realm is where it is DEFINED. Legacy `dev`-realm logins migrate to `global` on the run path (token + `[realm.global]` section), idempotent and no-clobber, so an existing sign-in keeps working.
 
 ```bash
 rkat auth login anthropic                                     # OAuth (PKCE S256) -> global
@@ -1148,6 +1153,7 @@ Supported auth methods:
 
 - API keys (env or per-binding)
 - OAuth: `claude_ai_oauth` (Anthropic), `managed_chatgpt_oauth` (OpenAI), `google_oauth` (Code Assist), `github_copilot_oauth` (GitHub device flow; requires `copilot`)
+- GitHub Copilot with an operator GitHub token: `github_copilot_token` (no device sign-in; requires `copilot`)
 - Cloud IAM: AWS Bedrock (`bedrock_aws_sigv4`), GCP Vertex (`vertex_google_auth`), Azure Foundry (`foundry_azure_ad`), Gemini ADC (`adc`, `compute_adc`). These compile only with the `meerkat-anthropic` features `bedrock`/`vertex`/`foundry` and `meerkat-gemini/adc`, which the prebuilt `rkat`, `rkat-rpc`, `rkat-rest` and `rkat-mcp` do not enable; key and bearer methods (`bedrock_bearer`, `foundry_api_key`, `api_key_express`) need no extra feature.
 
 Tokens refresh automatically per credential identity (the binding, or a shared `credential_account` such as `github_copilot`), starting 60 seconds before expiry. `auth_binding` is persisted on the session. Switching to another model of the same provider keeps that binding; switching provider without an explicit `auth_binding` drops it, and the new provider's credential resolves through the session's realm chain (no cross-realm bleed). RPC `turn/start` can set (`{"action": "set", "value": ...}`) or clear (`{"action": "clear"}`) the binding per turn; REST `POST /sessions/{id}/messages` accepts `auth_binding` and rebuilds the agent; the SDK turn methods take none.
@@ -1239,13 +1245,13 @@ tools.
 
 ```toml
 # Default: three providers + Copilot backend; no persistent realm/comms/MCP/skills/memory/live activation
-meerkat = "=0.9.8"
+meerkat = "=0.9.11"
 
 # Single provider, minimal
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "=0.9.8", features = [
+meerkat = { version = "=0.9.11", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live", "live-webrtc"
@@ -1276,7 +1282,7 @@ surfaces. The default `rkat` feature set includes `memory-store` and
 builds:
 
 ```bash
-cargo install rkat --version "=0.9.8" --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "=0.9.11" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
@@ -1644,6 +1650,7 @@ names) and `read_only`, but no `allow`; the `[tools]` config section has no
   - CLI: `--wait-for-mcp` blocks before the first turn; the CLI also waits automatically when a server may need OAuth (streamable HTTP without a static `Authorization` header). The wait is the largest `connect_timeout_secs` plus 5 s (plus 300 s with `--mcp-auth interactive`); servers still pending then abort the run (`MCP servers still pending after ...`).
   - SDK: `McpRouterAdapter::wait_until_ready(timeout)` provides the same blocking behavior
   - `AgentBuildConfig.wait_for_mcp: bool` field for programmatic surface control
+- **Scoped tool grants** (0.9.9) - a build gates built-in tool families and tool names (`grant_gated_tools` on `SessionBuildOptions`, `AgentBuildConfig` or RPC `session/create`): they are mounted hidden and refused at dispatch (`policy_denied`, code `tool_grant_required`) until a live grant opens them for a bounded window (at most 24 hours by default): `MeerkatMachine::grant_tool`, RPC `tool_grants/grant|revoke|list|audit`, Python `grant_tool`, TypeScript `grantTool`. A host can instead ask for a grant a person approves (0.9.11): RPC `tool_grants/request`, Python `request_tool_grant`, TypeScript `requestToolGrant`; a gated build's agent asks through its `request_tool_grant` tool. A gate that covers `web_search` turns the provider's native tools off. Details: `references/mcp_tools_skills_tools.md`.
 - **Composition** — most-restrictive wins (allow-lists intersect, deny-lists union, deny beats allow).
 - **Agent awareness** - a `tool_config_changed` event is emitted and a typed system notice ("Tool configuration changed: ...") is added to the conversation on any change. Notices are typed transcript rows; the literal `[SYSTEM NOTICE]` text prefix no longer exists.
 

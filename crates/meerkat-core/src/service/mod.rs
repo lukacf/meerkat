@@ -4,10 +4,14 @@
 //! Implementations may be ephemeral (in-memory only) or persistent (backed by a store).
 
 pub mod context_append;
+pub mod operator_instructions;
 pub mod transport;
 pub use context_append::{
     ContextControlFacts, PreparedSystemContextAppend, SystemContextAppendControl,
     SystemContextControlRequest,
+};
+pub use operator_instructions::{
+    SessionInstructionError, SessionInstructionRead, SessionServiceInstructionExt,
 };
 
 use crate::event::AgentEvent;
@@ -583,6 +587,82 @@ impl SessionError {
         }
     }
 
+    /// Structured-data `kind` of [`Self::system_row_prune_refused`].
+    pub const SYSTEM_ROW_PRUNE_REFUSED_KIND: &'static str = "system_row_prune_refused";
+
+    /// A system-row prune refused the row it names at `index`, for `cause`;
+    /// nothing was written. The structured data carries the index and the
+    /// typed cause, so a host never reads the message.
+    pub fn system_row_prune_refused(index: usize, cause: crate::SystemRowPruneRefusal) -> Self {
+        Self::FailedWithData {
+            message: TranscriptEditError::SystemRowPruneRefused { index, cause }.to_string(),
+            data: serde_json::json!({
+                "kind": Self::SYSTEM_ROW_PRUNE_REFUSED_KIND,
+                "index": index,
+                "cause": cause,
+            }),
+        }
+    }
+
+    /// The row index and typed cause of a [`Self::system_row_prune_refused`].
+    /// Unknown or malformed structured data fails closed as `None`.
+    pub fn system_row_prune_refusal(&self) -> Option<(usize, crate::SystemRowPruneRefusal)> {
+        let Self::FailedWithData { data, .. } = self.primary_error() else {
+            return None;
+        };
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::SYSTEM_ROW_PRUNE_REFUSED_KIND)
+        {
+            return None;
+        }
+        let index = data
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())?;
+        let cause = serde_json::from_value(data.get("cause")?.clone()).ok()?;
+        Some((index, cause))
+    }
+
+    /// Structured-data `kind` of [`Self::transcript_revision_conflict`].
+    pub const TRANSCRIPT_REVISION_CONFLICT_KIND: &'static str = "transcript_revision_conflict";
+
+    /// A transcript edit's `expected_parent_revision` is not the session's
+    /// current revision `actual`: the transcript changed since the caller
+    /// read it (a turn ran, or another edit committed). Nothing was written;
+    /// the caller reads again and retries. The structured data carries both
+    /// revisions, so a host never reads the message.
+    pub fn transcript_revision_conflict(expected: String, actual: String) -> Self {
+        Self::FailedWithData {
+            message: TranscriptEditError::RevisionConflict {
+                expected: expected.clone(),
+                actual: actual.clone(),
+            }
+            .to_string(),
+            data: serde_json::json!({
+                "kind": Self::TRANSCRIPT_REVISION_CONFLICT_KIND,
+                "expected": expected,
+                "actual": actual,
+            }),
+        }
+    }
+
+    /// The expected and the actual revision of a
+    /// [`Self::transcript_revision_conflict`]. Unknown or malformed
+    /// structured data fails closed as `None`.
+    pub fn transcript_revision_conflict_revisions(&self) -> Option<(String, String)> {
+        let Self::FailedWithData { data, .. } = self.primary_error() else {
+            return None;
+        };
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::TRANSCRIPT_REVISION_CONFLICT_KIND)
+        {
+            return None;
+        }
+        let expected = data.get("expected")?.as_str()?.to_string();
+        let actual = data.get("actual")?.as_str()?.to_string();
+        Some((expected, actual))
+    }
+
     /// Whether this error is a [`Self::runtime_teardown_in_progress`].
     pub fn is_runtime_teardown_in_progress(&self) -> bool {
         matches!(
@@ -676,6 +756,11 @@ impl SessionError {
     /// and keys.
     pub const FORK_INSTRUCTION_REFUSED_KIND: &'static str = "fork_instruction_refused";
 
+    /// Structured-data `kind` of a refused scoped tool grant gate
+    /// ([`crate::error::AgentError::ToolGrantGateRefused`]) on the wire. The
+    /// `tool_grant_gate_refusal` member carries the typed refusal.
+    pub const TOOL_GRANT_GATE_REFUSED_KIND: &'static str = "tool_grant_gate_refused";
+
     /// Return a stable error code string for wire formats.
     pub fn code(&self) -> &'static str {
         match self {
@@ -745,6 +830,12 @@ impl SessionError {
                 "kind": Self::FORK_INSTRUCTION_REFUSED_KIND,
                 "fork_instruction_refusal": refusal,
             })),
+            Self::Agent(crate::error::AgentError::ToolGrantGateRefused(refusal)) => {
+                Some(serde_json::json!({
+                    "kind": Self::TOOL_GRANT_GATE_REFUSED_KIND,
+                    "tool_grant_gate_refusal": refusal,
+                }))
+            }
             _ => None,
         }
     }
@@ -770,6 +861,21 @@ impl SessionError {
         data.get(Self::DURABLE_RESUME_HOLD_KEY)
             .and_then(serde_json::Value::as_str)
             .and_then(DurableResumeHold::from_wire_str)
+    }
+
+    /// Read a refused scoped tool grant gate back off the wire: the typed
+    /// refusal of the [`Self::TOOL_GRANT_GATE_REFUSED_KIND`] projection
+    /// [`Self::structured_data`] gives. Other or malformed structured data
+    /// fails closed as `None`.
+    pub fn tool_grant_gate_refusal_from_data(
+        data: &serde_json::Value,
+    ) -> Option<crate::tool_grant::GrantGateRefusal> {
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(Self::TOOL_GRANT_GATE_REFUSED_KIND)
+        {
+            return None;
+        }
+        serde_json::from_value(data.get("tool_grant_gate_refusal")?.clone()).ok()
     }
 
     /// Secret-free projection of a resume hold: the hold class, the session it
@@ -1176,6 +1282,18 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Opaque transport for this build's own MCP credential source, in place
+    /// of the one its factory holds (the `llm_client_override` type-erasure
+    /// precedent: the facade's `encode_mcp_auth_resolver_override_for_service`
+    /// erases an `Arc<dyn McpAuthResolver>`). Every MCP connection the build
+    /// opens reads its OAuth bearer and its stdio service secrets through it.
+    ///
+    /// Process-local: never serialized and never recovered, so a host that
+    /// needs it supplies it on every build of the session (a create, a
+    /// resume, a wake, a rebuild). Factory builders decode it fail-closed: a
+    /// payload that is not a credential source refuses every credential,
+    /// never falls back to the factory's.
+    pub mcp_auth_resolver_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// Opaque transport for an optional per-session comms-runtime override
     /// (multi-host mobs, DEC-P3H-3 — the `llm_client_override` type-erasure
     /// precedent).
@@ -1253,6 +1371,17 @@ pub struct SessionBuildOptions {
     /// member's session; flows into `AgentBuildConfig.mob_member_binding` and is
     /// persisted onto `SessionMetadata.mob_member_binding`.
     pub mob_member_binding: Option<crate::MobMemberBinding>,
+    /// The witness of the mob runtime performing this member build (a fresh
+    /// spawn, a restore or a wake): the incarnation of the mob the member is
+    /// built in, as that runtime runs it. Set only by the mob runtime, from
+    /// its own handle; `None` for every other build, and for a placed member
+    /// compiled on a host that does not run its mob. Never persisted. The
+    /// build forms the member's tool grant subject from it (its identity in
+    /// this incarnation, read before its session), and a host's member build
+    /// hook passes it to the mob operator grants
+    /// (`meerkat_runtime::mob_operator_authority`) to mint the member's scope
+    /// for the mob as it runs, without holding the mob's handle.
+    pub mob_incarnation: Option<LiveMobIncarnation>,
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
@@ -1337,6 +1466,19 @@ pub struct SessionBuildOptions {
     /// contracts and durable metadata; its owner must reconstruct it from
     /// generated authority after restart.
     pub tool_dispatch_admission: Option<Arc<dyn crate::ToolDispatchAdmission>>,
+    /// Tool families and tool names this build marks grant-gated: mounted,
+    /// but hidden and refused until a live scoped tool grant opens them.
+    /// Recorded in the session's tooling, so a resume that leaves this unset
+    /// restores the recorded gate. A gate needs the runtime's grant service.
+    pub grant_gated_tools: Option<crate::tool_grant::GrantGatedTools>,
+    /// The entries of a mob member's gate that come from its role's current
+    /// gate and that its own gate (`grant_gated_tools`) lacks. None ever
+    /// refuses the build: each is installed where the build can show it (a
+    /// tool name always, since it is gated from the moment it appears; a
+    /// family when the build mounts it), and a family the build does not
+    /// mount, or a name its tool policy refuses, is ignored. Set by the mob
+    /// runtime's member builds only.
+    pub grant_gated_tools_where_mounted: Option<crate::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy identity for this session.
     pub application_tool_policy: crate::ApplicationToolPolicyBinding,
     /// Host-scoped in-process registry. Executable policy is never serialized.
@@ -1434,15 +1576,17 @@ impl std::fmt::Display for OpaquePrincipalToken {
 ///
 /// Mob operator grants name the incarnation they were minted for, so a grant
 /// never reaches a later mob under the same id. The mob runtime hands its
-/// incarnation out through its handles.
+/// incarnation out through its handles, and as a witness to every member
+/// build it performs ([`SessionBuildOptions::mob_incarnation`]).
 ///
 /// The value is an identity, not a credential: it renders and serializes as
 /// its canonical form, a lowercase hyphenated UUID, and [`FromStr`] and
 /// `Deserialize` accept only that form. Holding one grants nothing. The
-/// grant functions take a [`LiveMobIncarnation`], which only the mob
-/// runtime's own handle hands out, so no grant binds a value decoded from
-/// input; the authority is the sealed [`MobToolAuthorityContext`] that names
-/// it, whose bindings are never serialized.
+/// grant functions take a [`LiveMobIncarnation`], which only the mob runtime
+/// hands out (from its handle, and to each member build it performs), so no
+/// grant binds a value decoded from input; the authority is the sealed
+/// [`MobToolAuthorityContext`] that names it, whose bindings are never
+/// serialized.
 ///
 /// [`FromStr`]: std::str::FromStr
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1506,12 +1650,16 @@ impl<'de> Deserialize<'de> for MobIncarnationId {
     }
 }
 
-/// A [`MobIncarnationId`] read from the mob runtime that runs at it:
-/// `meerkat_mob::MobHandle::live_incarnation` hands it out. The mob operator
-/// grant functions (`meerkat_runtime::mob_operator_authority::grant_manage_mob`
-/// and the spawn-profile grants) take this witness instead of a bare id, so a
-/// grant binds only an incarnation a mob runtime of this process runs or ran
-/// at, never a value decoded from input. It has no serde.
+/// A [`MobIncarnationId`] read from the mob runtime that runs at it. The
+/// runtime hands it out from its handle
+/// (`meerkat_mob::MobHandle::live_incarnation`), and to every member build it
+/// performs, fresh, restore or wake ([`SessionBuildOptions::mob_incarnation`],
+/// where a host's member build hook reads it without holding the mob's
+/// handle). The mob operator grant functions
+/// (`meerkat_runtime::mob_operator_authority::grant_manage_mob` and the
+/// spawn-profile grants) take this witness instead of a bare id, so a grant
+/// binds only an incarnation a mob runtime of this process runs or ran at,
+/// never a value decoded from input. It has no serde.
 ///
 /// Rust cannot keep another crate from calling a public constructor, so
 /// `LiveMobIncarnation::witnessed` is public but hidden from the docs, and
@@ -1964,6 +2112,10 @@ impl ParentToolCompositionAuthority {
         }
     }
 
+    /// The parent's visible tools, without the names a scoped tool grant
+    /// opened: a grant opens its subject's gate only, so no child inherits
+    /// a grant-opened tool through its ceiling. One read of the visibility
+    /// state answers both.
     fn visible_tool_snapshot_result(
         &self,
     ) -> Result<Vec<Arc<ToolDef>>, crate::tool_scope::ToolScopeStageError> {
@@ -1973,7 +2125,7 @@ impl ParentToolCompositionAuthority {
             }
         })?;
         tool_scope
-            .visible_tools_result()
+            .visible_tools_with_grant_gate_closed_result()
             .map(|tools| tools.iter().cloned().collect())
             .map_err(Self::map_visible_tools_error)
     }
@@ -2128,6 +2280,15 @@ pub struct MobToolsBuildArgs {
     pub session_id: crate::SessionId,
     /// Model name of the owning agent — inherited by implicit mob helpers.
     pub model: String,
+    /// The provider the owning agent's build resolved for `model`. Implicit
+    /// mob helpers inherit it with the model, so they run on the agent's own
+    /// route and a model outside the catalog (a realm `[models.<id>]` entry,
+    /// a self-hosted model) names its provider.
+    pub provider: crate::Provider,
+    /// The self-hosted server the owning agent's build resolved for `model`
+    /// (`Some` only when `provider` is [`crate::Provider::SelfHosted`]),
+    /// inherited with the provider.
+    pub self_hosted_server_id: Option<String>,
     /// Runtime-injected mob operator authority context.
     ///
     /// The session factory only calls [`MobToolsFactory::build_mob_tools`]
@@ -2294,6 +2455,7 @@ impl Default for SessionBuildOptions {
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: HostPromptSections::Full,
@@ -2317,6 +2479,7 @@ impl Default for SessionBuildOptions {
             config_generation: None,
             auth_binding: None,
             mob_member_binding: None,
+            mob_incarnation: None,
             keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -2331,6 +2494,8 @@ impl Default for SessionBuildOptions {
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
+            grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
             application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             shell_env: None,
@@ -2374,6 +2539,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field(
+                "mcp_auth_resolver_override",
+                &self.mcp_auth_resolver_override.is_some(),
+            )
             .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
@@ -2424,6 +2593,11 @@ impl std::fmt::Debug for SessionBuildOptions {
                 "tool_dispatch_admission",
                 &self.tool_dispatch_admission.is_some(),
             )
+            .field("grant_gated_tools", &self.grant_gated_tools)
+            .field(
+                "grant_gated_tools_where_mounted",
+                &self.grant_gated_tools_where_mounted,
+            )
             .field("shell_timeout_secs", &self.shell_timeout_secs)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
@@ -2441,6 +2615,7 @@ impl std::fmt::Debug for SessionBuildOptions {
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
+            .field("mob_incarnation", &self.mob_incarnation)
             .field("runtime_build_mode", &self.runtime_build_mode)
             .finish()
     }
@@ -2462,6 +2637,12 @@ pub struct StartTurnRuntimeSemantics {
     /// adapters stamp these values onto `InputHeader`; direct session
     /// backends that cannot provide durable input dedup must reject it.
     pub input_identity: Option<StartTurnInputIdentity>,
+    /// The original requester of this turn's input: an opaque, qualified
+    /// principal the host supplies from the caller it authenticated (never
+    /// from a request body, a tool argument or model output). Runtime
+    /// adapters stamp it onto `InputHeader`; direct session backends, which
+    /// keep no admitted input to carry it, reject it.
+    pub requester: Option<crate::PrincipalRef>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -2492,6 +2673,7 @@ impl Default for StartTurnRuntimeSemantics {
         Self {
             work_authorization: None,
             input_identity: None,
+            requester: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
             typed_turn_appends: Vec::new(),
@@ -2510,6 +2692,7 @@ impl StartTurnRuntimeSemantics {
         Self {
             work_authorization: None,
             input_identity: None,
+            requester: None,
             handling_mode,
             turn_tool_overlay,
             typed_turn_appends: Vec::new(),
@@ -2534,6 +2717,14 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn with_input_identity(mut self, input_identity: StartTurnInputIdentity) -> Self {
         self.input_identity = Some(input_identity);
+        self
+    }
+
+    /// Carry the original requester the host authenticated for this turn's
+    /// input (see [`Self::requester`]).
+    #[must_use]
+    pub fn with_requester(mut self, requester: crate::PrincipalRef) -> Self {
+        self.requester = Some(requester);
         self
     }
 
@@ -3397,6 +3588,21 @@ pub enum DurableForkSourceAdmission {
     /// its ordinary meaning and is still refused when it splits a tool-use
     /// group.
     CallerTurn,
+    /// The fork takes no message of the source: only `message_count =
+    /// Some(0)` is admitted, and any other count is refused with
+    /// `SessionError::Unsupported` before anything is read. The child starts
+    /// with an empty transcript and the build of the source's last committed
+    /// snapshot.
+    ///
+    /// The owner takes no lock and refuses no running source: an empty
+    /// prefix observes none of the transcript a running turn is about to
+    /// extend, so it neither waits for that turn nor queues behind it. The
+    /// committed snapshot is read whole, through a running turn's provisional
+    /// tail when one stands, and the owner never writes the source from this
+    /// path (no replayed-projection persist, no audit receipt repair; a
+    /// missing receipt fails the fork closed), as for
+    /// [`Self::CallerTurn`].
+    EmptyPrefix,
 }
 
 /// Result of creating an edited transcript branch.
@@ -3478,11 +3684,71 @@ pub struct SessionTranscriptRewriteResult {
     pub commit: TranscriptRewriteCommit,
 }
 
+/// Request to remove named ordinary System rows from a session in one
+/// audited rewrite ([`SessionServiceTranscriptEditExt::prune_system_rows`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SystemRowPruneRequest {
+    /// The ordinary System rows to remove, each named by its index and the
+    /// digest of its content as a history read showed it.
+    #[serde(default)]
+    pub remove: Vec<crate::session::SystemRowRef>,
+    /// Also retire, in the same commit, the body of every instruction
+    /// activation row that a later activation row of its key superseded, as
+    /// a compaction does.
+    #[serde(default)]
+    pub retire_superseded_activation_bodies: bool,
+    /// Refuse the prune unless the transcript head is still this revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_parent_revision: Option<String>,
+    /// Audit note recorded on the commit's reason (kind
+    /// [`crate::session::SYSTEM_ROW_PRUNE_REASON_KIND`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Audit actor recorded on the commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// Result of a system-row prune.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SystemRowPruneResult {
+    /// One rewrite commit removed the named rows and retired the bodies.
+    Pruned {
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
+        session_id: SessionId,
+        parent_revision: String,
+        revision: String,
+        message_count: usize,
+        removed_rows: usize,
+        retired_bodies: usize,
+        commit: TranscriptRewriteCommit,
+    },
+    /// The request named no row and there was no body to retire: nothing
+    /// was written.
+    NothingToPrune {
+        #[cfg_attr(feature = "schema", schemars(with = "String"))]
+        session_id: SessionId,
+        revision: String,
+        message_count: usize,
+    },
+}
+
 impl TranscriptEditError {
     /// Convert a typed edit validation failure into a surface-friendly session
-    /// error without widening the `SessionService` error enum.
+    /// error without widening the `SessionService` error enum. A system-row
+    /// prune's refusal keeps its row index and typed cause in the error's
+    /// structured data ([`SessionError::system_row_prune_refusal`]).
     pub fn into_session_error(self) -> SessionError {
-        SessionError::Agent(crate::error::AgentError::ConfigError(self.to_string()))
+        match self {
+            Self::SystemRowPruneRefused { index, cause } => {
+                SessionError::system_row_prune_refused(index, cause)
+            }
+            other => SessionError::Agent(crate::error::AgentError::ConfigError(other.to_string())),
+        }
     }
 }
 
@@ -4042,6 +4308,30 @@ pub trait SessionServiceTranscriptEditExt: SessionService {
             "restore_session_transcript_revision".to_string(),
         ))
     }
+
+    /// Remove named ordinary System rows from an idle session in one audited
+    /// rewrite, without waking it or calling a model, and, with
+    /// `retire_superseded_activation_bodies`, retire every superseded
+    /// instruction activation body in the same commit.
+    ///
+    /// The host names each row as a history read showed it (index and
+    /// content digest); Core never picks rows. A session with a running turn
+    /// is [`SessionError::Busy`]. A named row the prune refuses (not an
+    /// ordinary System row, a stale digest, an index out of range, a row an
+    /// operator-instruction entry follows in its group of System rows)
+    /// refuses the whole prune with its typed cause
+    /// ([`SessionError::system_row_prune_refusal`]), and nothing is written.
+    /// A stale `expected_parent_revision` writes nothing either; the
+    /// persistent service answers it with both revisions
+    /// ([`SessionError::transcript_revision_conflict_revisions`]).
+    async fn prune_system_rows(
+        &self,
+        id: &SessionId,
+        req: SystemRowPruneRequest,
+    ) -> Result<SystemRowPruneResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported("prune_system_rows".to_string()))
+    }
 }
 
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.
@@ -4061,6 +4351,254 @@ impl dyn SessionService {
 )]
 mod tests {
     use super::*;
+
+    /// A visibility owner holding one fixed projection.
+    struct FixedVisibilityOwner(crate::SessionToolVisibilityState);
+
+    impl crate::tool_scope::ToolVisibilityOwner for FixedVisibilityOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            Ok(self.0.clone())
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::tool_scope::ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: crate::tool_scope::ToolFilter,
+            _witnesses: BTreeMap<crate::types::ToolName, crate::ToolVisibilityWitness>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A grant opens its subject's gate only: the parent sees the
+    /// grant-opened name, but neither its snapshot nor the ceiling it hands
+    /// an inheriting child carries it.
+    #[test]
+    fn inherit_parent_snapshot_excludes_grant_opened_names() {
+        let tools: Arc<[Arc<ToolDef>]> = ["read_file", "shell", "shell_jobs"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(ToolDef {
+                    audience: Default::default(),
+                    name: name.into(),
+                    description: format!("test tool {name}"),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: Some(crate::types::ToolProvenance {
+                        kind: crate::types::ToolSourceKind::Callback,
+                        source_id: "owner-a".into(),
+                        artifact: None,
+                    }),
+                })
+            })
+            .collect();
+        let projection = crate::SessionToolVisibilityState {
+            tool_grant_gated_names: ["shell", "shell_jobs"]
+                .into_iter()
+                .map(crate::types::ToolName::from)
+                .collect(),
+            tool_grant_open_names: ["shell"]
+                .into_iter()
+                .map(crate::types::ToolName::from)
+                .collect(),
+            ..Default::default()
+        };
+        let owner = crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::new(
+            FixedVisibilityOwner(projection),
+        ));
+        let scope = crate::ToolScope::new_with_visibility_owner(
+            tools,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            owner,
+        )
+        .expect("tool scope");
+        let visible = scope.visible_tool_names().expect("visible names");
+        assert!(
+            visible.contains("shell"),
+            "the grant opened shell for the parent"
+        );
+        assert!(
+            !visible.contains("shell_jobs"),
+            "a gated name no grant opened stays hidden"
+        );
+
+        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition(None);
+        authority.set_tool_scope_from_agent_factory_composition(&scope);
+        let snapshot = authority
+            .snapshot_visible_tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(snapshot, ["read_file"]);
+
+        let ceiling = authority
+            .authorize_inherited_tool_visibility_with_overlays(None, None)
+            .expect("inherited ceiling");
+        match ceiling.filter() {
+            crate::tool_scope::ToolFilter::Allow(names) => {
+                assert!(names.contains("read_file"));
+                assert!(
+                    !names.contains("shell"),
+                    "a child never inherits a grant-opened tool"
+                );
+            }
+            other => panic!("expected an allow ceiling, got {other:?}"),
+        }
+    }
+
+    /// A visibility owner whose grant opens or closes the gated `deploy`
+    /// between two reads of its state.
+    struct GrantFlippingOwner {
+        reads: std::sync::atomic::AtomicUsize,
+        open_on_next_read: std::sync::atomic::AtomicBool,
+    }
+
+    impl crate::tool_scope::ToolVisibilityOwner for GrantFlippingOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let open = self
+                .open_on_next_read
+                .fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            let deploy = BTreeSet::from([crate::types::ToolName::from("deploy")]);
+            Ok(crate::SessionToolVisibilityState {
+                tool_grant_open_names: if open {
+                    deploy.clone()
+                } else {
+                    BTreeSet::new()
+                },
+                tool_grant_gated_names: deploy,
+                ..Default::default()
+            })
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::tool_scope::ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: crate::tool_scope::ToolFilter,
+            _witnesses: BTreeMap<crate::types::ToolName, crate::ToolVisibilityWitness>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::tool_scope::ToolScopeRevision, crate::tool_scope::ToolScopeStageError>
+        {
+            Ok(crate::tool_scope::ToolScopeRevision(0))
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::tool_scope::ToolScopeApplyError>
+        {
+            self.visibility_state()
+        }
+    }
+
+    /// The parent snapshot an inheriting child's ceiling is taken from reads
+    /// the visibility state once, so a grant that opens or closes a gated
+    /// name between two reads can never leak the name into the snapshot.
+    #[test]
+    fn parent_snapshot_reads_the_visibility_state_once() {
+        let owner = Arc::new(GrantFlippingOwner {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            open_on_next_read: std::sync::atomic::AtomicBool::new(true),
+        });
+        let tools: Arc<[Arc<ToolDef>]> = ["read_file", "deploy"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(ToolDef::new(
+                    name,
+                    format!("test tool {name}"),
+                    serde_json::json!({ "type": "object" }),
+                ))
+            })
+            .collect();
+        let visibility_owner: Arc<dyn crate::tool_scope::ToolVisibilityOwner> = owner.clone();
+        let scope = crate::ToolScope::new_with_visibility_owner(
+            tools,
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+            crate::tool_scope::generated_test_tool_visibility_owner_from(visibility_owner),
+        )
+        .expect("tool scope");
+        let authority = ParentToolCompositionAuthority::new_from_agent_factory_composition(None);
+        authority.set_tool_scope_from_agent_factory_composition(&scope);
+
+        for open_first in [true, false] {
+            owner.reads.store(0, std::sync::atomic::Ordering::SeqCst);
+            owner
+                .open_on_next_read
+                .store(open_first, std::sync::atomic::Ordering::SeqCst);
+            let snapshot = authority
+                .snapshot_visible_tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                snapshot,
+                ["read_file"],
+                "the gated name stays out of the snapshot (open on the first read: {open_first})"
+            );
+            assert_eq!(
+                owner.reads.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "one read of the visibility state (open on the first read: {open_first})"
+            );
+        }
+    }
 
     fn settlement_marker() -> crate::ToolDispatchSettlementFailure {
         crate::ToolDispatchSettlementFailure {
@@ -4251,6 +4789,42 @@ mod tests {
         );
     }
 
+    /// A refused scoped tool grant gate reads back off its own wire
+    /// projection as the same typed refusal; data of another kind, or a
+    /// refusal this binary cannot read, fails closed.
+    #[test]
+    fn a_refused_grant_gate_reads_back_off_its_structured_data() {
+        let refusal = crate::tool_grant::GrantGateRefusal::ToolNotMounted {
+            tool: "deploy".to_string(),
+        };
+        let error = SessionError::Agent(crate::error::AgentError::ToolGrantGateRefused(Box::new(
+            refusal.clone(),
+        )));
+        let data = error.structured_data().unwrap();
+        assert_eq!(
+            SessionError::tool_grant_gate_refusal_from_data(&data),
+            Some(refusal)
+        );
+        for other in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "kind": SessionError::FORK_INSTRUCTION_REFUSED_KIND,
+                "tool_grant_gate_refusal": {"kind": "no_grant_service"},
+            }),
+            serde_json::json!({"kind": SessionError::TOOL_GRANT_GATE_REFUSED_KIND}),
+            serde_json::json!({
+                "kind": SessionError::TOOL_GRANT_GATE_REFUSED_KIND,
+                "tool_grant_gate_refusal": {"kind": "a_later_refusal"},
+            }),
+        ] {
+            assert_eq!(
+                SessionError::tool_grant_gate_refusal_from_data(&other),
+                None,
+                "{other}"
+            );
+        }
+    }
+
     #[test]
     fn provider_auth_failure_projects_every_kind_without_secret_fields() {
         let kinds = [
@@ -4273,6 +4847,7 @@ mod tests {
             crate::AuthErrorKind::CredentialInteractionRequired,
             crate::AuthErrorKind::CredentialAccessPending,
             crate::AuthErrorKind::CredentialStoreUnavailable,
+            crate::AuthErrorKind::SourceUnavailable,
         ];
         for kind in kinds {
             let failure = SessionProviderAuthFailure {

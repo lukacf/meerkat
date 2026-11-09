@@ -506,6 +506,7 @@ async fn exercise_search(controller_server: &Server, helper_server: &Server, cas
     let issue = |name: &str, bounds: ExecutionRestrictions| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id(name),
                 principal("executor"),
@@ -579,6 +580,7 @@ async fn exercise_search(controller_server: &Server, helper_server: &Server, cas
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants: Arc::clone(&grants),
                 ingress,
@@ -618,7 +620,12 @@ async fn exercise_search(controller_server: &Server, helper_server: &Server, cas
                 }
             }
             grants
-                .revoke(&principal("grant-owner"), &lineage, &mut NoController)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &principal("grant-owner"),
+                    &lineage,
+                    &mut NoController,
+                )
                 .expect("revocation before the helper");
         })
     };
@@ -726,7 +733,7 @@ async fn exercise_search(controller_server: &Server, helper_server: &Server, cas
         .pin_controller_client_for_actor(&actor)
         .await
         .unwrap();
-    assert!(pin.selection() == &selected);
+    assert_eq!(pin.selection(), &selected);
     let vault = Arc::new(meerkat_auth_core::EphemeralTokenStore::new());
     meerkat_auth_core::save_tokens_and_publish_lifecycle(
         meerkat_core::auth::ProviderAuthPersistence::new(
@@ -1056,7 +1063,7 @@ async fn run_case(case: Case) {
     })
     .await;
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_search(&controller, &helper, case),
     ))
     .catch_unwind()

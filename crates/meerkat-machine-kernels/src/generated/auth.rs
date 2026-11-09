@@ -249,6 +249,58 @@ impl std::fmt::Display for RefreshFailureDisposition {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SourceCredentialPublicationDisposition {
+    #[default]
+    #[serde(rename = "Publish")]
+    Publish,
+    #[serde(rename = "AlreadyPublished")]
+    AlreadyPublished,
+}
+impl SourceCredentialPublicationDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Publish => "Publish",
+            Self::AlreadyPublished => "AlreadyPublished",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SourceCredentialPublicationDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Publish" => Ok(Self::Publish),
+            "AlreadyPublished" => Ok(Self::AlreadyPublished),
+            other => Err(format!(
+                "invalid SourceCredentialPublicationDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SourceCredentialPublicationDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SourceCredentialPublicationDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -265,7 +317,7 @@ pub enum Phase {
     Released,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub phase: Phase,
     pub expires_at: Option<u64>,
@@ -274,6 +326,7 @@ pub struct State {
     pub credential_present: bool,
     pub credential_generation: u64,
     pub credential_published_at_millis: Option<u64>,
+    pub credential_material_fingerprint: Option<String>,
     pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
     pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
     pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
@@ -284,6 +337,64 @@ pub struct State {
     pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
     pub oauth_outstanding_flow_count: u64,
     pub release_draining: bool,
+    pub adopted_marker_generation: Option<u64>,
+    pub released_publication_at_millis: Option<u64>,
+}
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("phase", &self.phase)
+            .field("expires_at", &self.expires_at)
+            .field("last_refresh", &self.last_refresh)
+            .field("refresh_attempt", &self.refresh_attempt)
+            .field("credential_present", &self.credential_present)
+            .field("credential_generation", &self.credential_generation)
+            .field(
+                "credential_published_at_millis",
+                &self.credential_published_at_millis,
+            )
+            .field(
+                "credential_material_fingerprint",
+                &self
+                    .credential_material_fingerprint
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .field("oauth_browser_flow_ids", &self.oauth_browser_flow_ids)
+            .field(
+                "oauth_browser_flow_providers",
+                &self.oauth_browser_flow_providers,
+            )
+            .field(
+                "oauth_browser_flow_redirect_uris",
+                &self.oauth_browser_flow_redirect_uris,
+            )
+            .field(
+                "oauth_browser_flow_expires_at_millis",
+                &self.oauth_browser_flow_expires_at_millis,
+            )
+            .field("oauth_device_flow_ids", &self.oauth_device_flow_ids)
+            .field(
+                "oauth_device_flow_providers",
+                &self.oauth_device_flow_providers,
+            )
+            .field(
+                "oauth_device_flow_expires_at_millis",
+                &self.oauth_device_flow_expires_at_millis,
+            )
+            .field("oauth_device_poll_ids", &self.oauth_device_poll_ids)
+            .field(
+                "oauth_outstanding_flow_count",
+                &self.oauth_outstanding_flow_count,
+            )
+            .field("release_draining", &self.release_draining)
+            .field("adopted_marker_generation", &self.adopted_marker_generation)
+            .field(
+                "released_publication_at_millis",
+                &self.released_publication_at_millis,
+            )
+            .finish()
+    }
 }
 impl Default for State {
     fn default() -> Self {
@@ -294,10 +405,29 @@ impl Default for State {
 pub mod inputs {
     #[allow(unused_imports)]
     use super::*;
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Acquire {
         pub expires_at_ts: Option<u64>,
         pub credential_published_at_millis: u64,
+        pub credential_material_fingerprint: Option<String>,
+    }
+    impl std::fmt::Debug for Acquire {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Acquire")
+                .field("expires_at_ts", &self.expires_at_ts)
+                .field(
+                    "credential_published_at_millis",
+                    &self.credential_published_at_millis,
+                )
+                .field(
+                    "credential_material_fingerprint",
+                    &self
+                        .credential_material_fingerprint
+                        .as_ref()
+                        .map(|_| "<redacted>"),
+                )
+                .finish()
+        }
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkExpiring {}
@@ -348,6 +478,8 @@ pub mod inputs {
         pub credential_generation: u64,
         pub credential_published_at_millis: Option<u64>,
         pub restored_oauth_membership_observed: bool,
+        pub adopted_marker_generation: Option<u64>,
+        pub released_publication_at_millis: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreOAuthBrowserFlow {
@@ -448,6 +580,39 @@ pub mod inputs {
         pub force_refresh: bool,
         pub refresh_allowed: bool,
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveSourceCredentialPublication {
+        pub credential_material_fingerprint: String,
+    }
+    impl std::fmt::Debug for ResolveSourceCredentialPublication {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ResolveSourceCredentialPublication")
+                .field("credential_material_fingerprint", &"<redacted>")
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MarkPublicationRefused {
+        pub refused_credential_generation: u64,
+        pub refused_credential_material_fingerprint: Option<String>,
+    }
+    impl std::fmt::Debug for MarkPublicationRefused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MarkPublicationRefused")
+                .field(
+                    "refused_credential_generation",
+                    &self.refused_credential_generation,
+                )
+                .field(
+                    "refused_credential_material_fingerprint",
+                    &self
+                        .refused_credential_material_fingerprint
+                        .as_ref()
+                        .map(|_| "<redacted>"),
+                )
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -482,6 +647,8 @@ pub enum Input {
     ResolveRefreshFailureDisposition(inputs::ResolveRefreshFailureDisposition),
     ResolveCredentialUseAdmission(inputs::ResolveCredentialUseAdmission),
     ResolveOAuthLoginCredentialDisposition(inputs::ResolveOAuthLoginCredentialDisposition),
+    ResolveSourceCredentialPublication(inputs::ResolveSourceCredentialPublication),
+    MarkPublicationRefused(inputs::MarkPublicationRefused),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -522,6 +689,10 @@ impl Input {
             Self::ResolveOAuthLoginCredentialDisposition(_) => {
                 InputKind::ResolveOAuthLoginCredentialDisposition
             }
+            Self::ResolveSourceCredentialPublication(_) => {
+                InputKind::ResolveSourceCredentialPublication
+            }
+            Self::MarkPublicationRefused(_) => InputKind::MarkPublicationRefused,
         }
     }
 }
@@ -557,6 +728,8 @@ pub enum InputKind {
     ResolveRefreshFailureDisposition,
     ResolveCredentialUseAdmission,
     ResolveOAuthLoginCredentialDisposition,
+    ResolveSourceCredentialPublication,
+    MarkPublicationRefused,
 }
 
 pub mod effects {
@@ -584,6 +757,10 @@ pub mod effects {
         pub browser_flow_ids: std::collections::BTreeSet<String>,
         pub device_flow_ids: std::collections::BTreeSet<String>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SourceCredentialPublicationResolved {
+        pub disposition: SourceCredentialPublicationDisposition,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -593,6 +770,7 @@ pub enum Effect {
     RefreshFailureDispositionResolved(effects::RefreshFailureDispositionResolved),
     CredentialUseAdmissionResolved(effects::CredentialUseAdmissionResolved),
     CancelOAuthFlowsForRelease(effects::CancelOAuthFlowsForRelease),
+    SourceCredentialPublicationResolved(effects::SourceCredentialPublicationResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -601,6 +779,7 @@ pub enum EffectKind {
     RefreshFailureDispositionResolved,
     CredentialUseAdmissionResolved,
     CancelOAuthFlowsForRelease,
+    SourceCredentialPublicationResolved,
 }
 
 #[allow(non_camel_case_types)]
@@ -779,6 +958,30 @@ pub enum TransitionId {
     ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidRefreshing,
     ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReauthRequired,
     ResolveOAuthLoginCredentialDispositionRefreshDisallowedNonValidReleased,
+    ResolveSourceCredentialPublicationNewMaterialValid,
+    ResolveSourceCredentialPublicationNewMaterialExpiring,
+    ResolveSourceCredentialPublicationNewMaterialExpired,
+    ResolveSourceCredentialPublicationNewMaterialRefreshing,
+    ResolveSourceCredentialPublicationNewMaterialReauthRequired,
+    ResolveSourceCredentialPublicationNewMaterialReleased,
+    ResolveSourceCredentialPublicationRenewalExpiring,
+    ResolveSourceCredentialPublicationRenewalExpired,
+    ResolveSourceCredentialPublicationAlreadyPublishedValid,
+    ResolveSourceCredentialPublicationAlreadyPublishedRefreshing,
+    ResolveSourceCredentialPublicationAlreadyPublishedReauthRequired,
+    ResolveSourceCredentialPublicationAlreadyPublishedReleased,
+    AcquireFromExpiring,
+    AcquireFromExpired,
+    MarkPublicationRefusedFromValid,
+    MarkPublicationRefusedFromExpiring,
+    MarkPublicationRefusedFromExpired,
+    MarkPublicationRefusedFromRefreshing,
+    MarkPublicationRefusedSupersededValid,
+    MarkPublicationRefusedSupersededExpiring,
+    MarkPublicationRefusedSupersededExpired,
+    MarkPublicationRefusedSupersededRefreshing,
+    MarkPublicationRefusedWithdrawnReauthRequired,
+    MarkPublicationRefusedWithdrawnReleased,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -857,6 +1060,7 @@ pub fn initial_state() -> State {
         credential_present: false,
         credential_generation: 0,
         credential_published_at_millis: None,
+        credential_material_fingerprint: None,
         oauth_browser_flow_ids: Default::default(),
         oauth_browser_flow_providers: Default::default(),
         oauth_browser_flow_redirect_uris: Default::default(),
@@ -867,5 +1071,7 @@ pub fn initial_state() -> State {
         oauth_device_poll_ids: Default::default(),
         oauth_outstanding_flow_count: 0,
         release_draining: false,
+        adopted_marker_generation: None,
+        released_publication_at_millis: None,
     }
 }

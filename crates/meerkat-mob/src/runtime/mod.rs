@@ -206,6 +206,7 @@ mod reconcile_cadence_tests {
 pub(crate) mod actor;
 mod actor_turn_executor;
 mod admission_close;
+mod approval_branch;
 mod boot_plan;
 pub mod bridge;
 pub mod bridge_protocol;
@@ -214,12 +215,19 @@ mod bridge_request_claim_test_support;
 pub use boot_plan::{
     MemberRestorePolicy, MobBootSetBasis, MobBootSetUnobservedCause, MobCompositionAuthority,
 };
+mod declared_apply;
+pub use declared_apply::{
+    DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
+};
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
 pub(crate) use dormant_seat::{SeatBuild, SeatBuildInputs, SeatLocalBuildInputs};
 mod builder;
 pub mod composition;
 pub mod conditions;
+mod created_identity;
 mod delegation;
 mod delivery_scope;
 mod delivery_wait;
@@ -239,6 +247,27 @@ mod fork_context;
 pub mod forked_participant_routing;
 mod handle;
 mod held_spawn;
+mod identity_change;
+pub use identity_change::{
+    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
+    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
+    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
+    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
+    MemberGrantMint, MemberGrantMintRequest, NotAdoptableReason, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
+mod identity_entry;
+mod identity_preparation;
+pub use identity_preparation::{
+    ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
+    IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
+};
+mod adoption;
+pub use adoption::{AdoptionSource, IdentityAdoption};
+mod created_set;
+pub use created_set::{IdentityImport, IdentityImportMode, IdentityRowsPurge};
+mod owned_edges;
+pub use owned_edges::OwnedEdgeEndOutcome;
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
@@ -329,6 +358,7 @@ mod member_history_proxy;
 mod member_instruction;
 mod member_live_proxy;
 mod member_operator_ceiling;
+mod member_session_authority;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use member_instruction::MemberInstructionActivationError;
 pub use member_operator_ceiling::MemberOperatorAuthorityCeiling;
@@ -339,11 +369,16 @@ pub mod member_upcall;
 mod mob_member_lifecycle_projection;
 mod mob_runtime_bridge_authority;
 mod mobpack_execution;
+pub(crate) mod operator_instruction_delivery;
 mod ops_adapter;
 mod panic_capture;
 pub mod path;
 mod pending_spawn_lineage;
 mod placed_carrier_cleanup;
+// A placed member's operator-instruction record and release on its member
+// host (protocol 7): a `BridgeReply` consumer, listed in
+// BRIDGE_CLASSIFIER_FILES.
+pub(crate) mod placed_member_instruction;
 mod provision_guard;
 mod provisioner;
 pub mod reconcile;
@@ -356,13 +391,18 @@ pub use registration_hook::{
 // Flow-spine lane file (remote flow tickets); declared here so the events
 // lane's pump can hand pages to `RemoteFlowTicketRegistry` by name (ADJ-P6-10
 // cross-lane seams). If the flow wave also adds this line, the lead dedups.
+mod member_grant_gate;
 mod placed_completion_reconciler;
 mod placed_kickoff_reconciler;
+pub use member_grant_gate::MemberGrantGate;
+#[cfg(feature = "runtime-adapter")]
+pub use member_grant_gate::{MemberToolGrant, MemberToolGrantError};
 pub mod recovery;
 mod remote_flow_ticket;
 mod remote_turn_reconciler;
 mod retirement_settlement;
 mod roster_authority;
+mod rotation_intent;
 #[cfg(feature = "runtime-adapter")]
 mod run_drain;
 pub(crate) mod scope_gate;
@@ -377,7 +417,7 @@ mod supervisor_bridge;
 mod terminalization;
 mod tools;
 pub(crate) use tools::mob_operator_tool_names;
-pub use tools::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
+pub use tools::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub mod topology;
 mod transaction;
 pub mod turn_executor;
@@ -497,10 +537,10 @@ pub use handle::{
     HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
     InitializeAdaptiveRunRequest, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
-    MemberDeliveryReceipt, MemberHandle, MemberInputAdmission, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
-    MemberRunState, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
-    MemberTurnOptions, MobActorTaskWait, MobActorTaskWatch, MobDestroyError,
+    MemberDeliveryReceipt, MemberHandle, MemberInputAdmission, MemberLifecycleSettlement,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal,
+    MemberRespawnReceipt, MemberRunState, MemberTargetAbsence, MemberTurnEventSender,
+    MemberTurnHandle, MemberTurnOptions, MobActorTaskWait, MobActorTaskWatch, MobDestroyError,
     MobDestroyMemberRefusal, MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig,
     MobEventsView, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
     MobMemberEndpointStatus, MobMemberListEntry, MobMemberPeerEndpoint, MobMemberSnapshot,
@@ -521,6 +561,15 @@ pub use held_spawn::HeldSpawnDeadline;
 pub use held_spawn::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use host_schedule::HostObservationScheduleMobHost;
+pub use identity_entry::{
+    EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
+    IdentityLife, IdentityRecordCensus, IdentityRecordRows, IdentityRecordRowsReadError,
+    IdentityTombstonePage, LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent,
+    MemberLifecyclePage, MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor,
+    RetiredRotation, SeatRotation, SeatedMember, UnseatedEntryCause, UnseatedEntryCounts,
+    WorkerMember,
+};
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey,
@@ -561,6 +610,8 @@ pub use retirement_settlement::{
     RetirementStage, ShutdownOptions, ShutdownOptionsError,
 };
 use roster_authority::{RosterAuthority, RosterMutator};
+pub use rotation_intent::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
+pub(crate) use rotation_intent::{RotationSuccessor, rotation_held_for_host};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;

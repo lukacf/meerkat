@@ -5,14 +5,42 @@
 //! own the canonical config-store, config-runtime, path-layout, and maintenance
 //! fence primitives, so this crate is not a blanket no-I/O layer.
 
-// Without `workspace-tests` (the published package: `cargo package` strips
-// the self dev-dependency that enables it) the unit tests that need the
-// workspace compile out, and the test helpers only they use go unused. The
-// workspace build turns the feature on and keeps both lints.
+// Without `workspace-tests` (the published package, whose test command
+// leaves it off) the unit tests that need the workspace compile out, and
+// the test helpers only they use go unused. The workspace's test builds
+// turn the feature on and keep both lints.
 #![cfg_attr(
     all(test, not(feature = "workspace-tests")),
     allow(dead_code, unused_imports)
 )]
+
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-core`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(test, not(feature = "workspace-tests")))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-core: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-core --features workspace-tests` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
 
 // All WASM Tokio users share these host adapters. Time and cooperative yields
 // own cancellable JavaScript resources here; spawning retains the upstream
@@ -40,7 +68,8 @@ pub mod agent;
 pub mod llm_client;
 pub mod tool_surface;
 pub use administration_entry::{
-    AdministrationEntry, AdministrationEntryRefusal, EnteredAdministration,
+    AdministeredChange, AdministeringPrincipal, AdministrationEntry, AdministrationEntryRefusal,
+    AdministrationOutcome, AdministrationRecord, AdministrationRecorder, EnteredAdministration,
 };
 pub use llm_client::{
     ControllerCredentialRequirement, ControllerFactsUnavailable, ControllerModelClient,
@@ -53,6 +82,7 @@ pub mod authorization;
 pub mod blob;
 pub mod budget;
 pub mod call_origin;
+pub mod canonical_json;
 pub use call_origin::{CALL_ORIGIN_META_KEY, TOOL_CALL_DEDUPE_KEY_META_KEY, WireCallOrigin};
 pub mod comms;
 pub mod compact;
@@ -115,9 +145,17 @@ pub mod pending_continuation;
 pub mod placement;
 pub mod prompt;
 pub mod prompt_cache_anchor;
+pub mod protected_section;
 pub mod provider;
 pub mod provider_evidence;
 pub mod provider_matrix;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod realm_admission;
+/// The wasm32 form of the admission guard: the same paths and the names
+/// target-neutral code uses, with nothing to fence.
+#[cfg(target_arch = "wasm32")]
+#[path = "realm_admission_wasm32.rs"]
+pub mod realm_admission;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
@@ -157,6 +195,7 @@ pub mod tool_catalog;
 pub mod tool_consequence_policy;
 pub mod tool_execution;
 pub mod tool_execution_policy;
+pub mod tool_grant;
 pub mod tool_process;
 pub mod tool_scope;
 pub mod transcript_replay;
@@ -231,8 +270,8 @@ pub use budget::{
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, SendAndStreamError,
-    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, SessionEventCursor,
-    SessionEventCursorRejection, SessionEventEpoch, SessionEventReplayLimits,
+    SendError, SendReceipt, SendTaintOverride, SenderContentTaint, SessionCommsIdentityRoot,
+    SessionEventCursor, SessionEventCursorRejection, SessionEventEpoch, SessionEventReplayLimits,
     SessionEventSubscription, StreamError, StreamScope, encoded_envelope_len,
 };
 pub use compact::{
@@ -295,12 +334,13 @@ pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BoundedToolResult,
     BudgetType, CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
     CompactionPreservedHistoryFit, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
-    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason, RunResumePointKind,
-    ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason,
-    StructuredOutputOrigin, ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, ToolConfigLifecycleBit, ToolResultBoundAxis,
-    TurnErrorMetadata, VerboseEventConfig, agent_event_type, compare_event_envelopes,
-    format_verbose_event, format_verbose_event_with_config, turn_usage_summary, usage_summary,
+    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason,
+    RequestedCompactionSkipReason, RunResumePointKind, ScopedAgentEvent,
+    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, StructuredOutputOrigin,
+    ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload, ToolConfigLifecycleBit, ToolResultBoundAxis, TurnErrorMetadata,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
+    format_verbose_event_with_config, turn_usage_summary, usage_summary,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -315,8 +355,8 @@ pub use exact_operation::{
 };
 pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use governance_config::{
-    GovernanceConfig, StockConsentAssurance, StockReviewConfig, StockReviewRule, StockReviewTarget,
-    StockReviewTier, StockReviewerSelection,
+    DecisionGovernanceConfig, GovernanceConfig, StockConsentAssurance, StockReviewConfig,
+    StockReviewRule, StockReviewTarget, StockReviewTier, StockReviewerSelection,
 };
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,
@@ -348,6 +388,7 @@ pub use image_content::{
     hydrate_messages_for_execution,
 };
 pub use image_generation::*;
+pub use interaction::GovernedSendOrigin;
 pub use interaction::{
     InboxInteraction, InteractionContent, InteractionId, ObjectiveId, PeerIngressAdmission,
     PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision, PeerIngressAuthExemption,
@@ -478,6 +519,14 @@ pub use provider_evidence::{
     UnmeasuredTurnUsageAccounting, ValidatedSourceCacheBreakpoint, canonical_cache_prefix_identity,
     provider_cache_breakpoint_claim,
 };
+#[cfg(target_arch = "wasm32")]
+pub use realm_admission::AdmissionGuard;
+#[cfg(not(target_arch = "wasm32"))]
+pub use realm_admission::{
+    AdmissionFence, AdmissionFenceKind, AdmissionGuard, AdmissionHold, AdmissionRefusal,
+    EnteredWorkLost, FenceIdentity, FenceUnavailable, FenceUnavailableCause, FileCoverage,
+    ImmutableInstallationFiles, UncoveredCredentialEntry, UncoveredFile,
+};
 pub use realtime_transcript::{
     LiveAssistantPlaybackTarget, PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome,
     RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage, RealtimeTranscriptRole,
@@ -521,10 +570,10 @@ pub use service::{
     SessionTranscriptRevisionListQuery, SessionTranscriptRevisionPage,
     SessionTranscriptRevisionQuery, SessionTranscriptRewriteRequest,
     SessionTranscriptRewriteResult, SessionUsage, SessionView, StageToolResultsDisposition,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TranscriptEditError,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptRewriteReason,
-    TranscriptRewriteSelection, TranscriptRewriteSemantic, TurnToolOverlay,
-    WorkGraphNamespaceGrant,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, SystemRowPruneRequest,
+    SystemRowPruneResult, TranscriptEditError, TranscriptEditRunningBehavior,
+    TranscriptReplacement, TranscriptRewriteReason, TranscriptRewriteSelection,
+    TranscriptRewriteSemantic, TurnToolOverlay, WorkGraphNamespaceGrant,
 };
 pub use session::{
     AUDITED_ENDPOINT_WRITE_REFUSAL_PREFIX, ActivationWindow, AuditedEndpointDivergence,
@@ -543,10 +592,11 @@ pub use session::{
     MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES,
     ModelBoundaryProjectionError, PendingDeferredPrompt, PendingToolResultsMessage,
     PersistedSessionMetadataView, PredecessorRestrictionsError, PredecessorToolRestrictions,
-    PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy, Released0810ImportError,
-    Released0810ImportEvidence, Released0810ImportReceipt, RetainedTranscriptRevisionRows,
-    RetiredTranscriptGraphBase, RetiredTranscriptPrefix, RoundPendingOperation, RunLoopCarryOver,
-    RunResumePoint, RunUsageCarryOver, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
+    PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy,
+    RETIRED_INSTRUCTION_RENDER_VERSION_V1, Released0810ImportError, Released0810ImportEvidence,
+    Released0810ImportReceipt, RetainedTranscriptRevisionRows, RetiredTranscriptGraphBase,
+    RetiredTranscriptPrefix, RoundPendingOperation, RunLoopCarryOver, RunResumePoint,
+    RunUsageCarryOver, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
     SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_SCHEMA_VERSION, SESSION_RUN_CURSOR_KEY,
     SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
     SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY, SESSION_VERSION, SerializedSessionArtifact,
@@ -575,6 +625,23 @@ pub use session::{
     transcript_rewrite_prefix_digest, try_lifecycle_terminal_from_map,
     try_session_metadata_from_map, try_tool_visibility_state_from_map,
     validate_current_persisted_transcript_history_slice,
+};
+pub use session::{
+    EffectiveInstructionSlot, EffectiveOperatorInstructions, INSTRUCTION_ENTRY_RENDER_VERSION_V1,
+    InstructionActiveRef, InstructionChange, InstructionDeferReason, InstructionEffect,
+    InstructionEntryIdentity, InstructionEntryKind, InstructionEntryLoweringRefusal,
+    InstructionEntryPlacement, InstructionLowering, InstructionRecordDisposition,
+    InstructionRecordReceipt, InstructionReleaseDisposition, InstructionRevision,
+    InstructionRunStart, InstructionSetErrorCode, InstructionSlot, InstructionStateError,
+    InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
+    InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
+    InvalidInstructionRevision, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
+    MAX_OPERATOR_INSTRUCTION_SLOTS, OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION,
+    RunStartInstructionApplication, RunStartInstructionOutcome, SESSION_ENVELOPE_BASELINE_VERSION,
+    SESSION_INSTRUCTION_STATE_KEY, SYSTEM_ROW_PRUNE_REASON_KIND, SessionInstructionChange,
+    SessionInstructionReceipt, SessionInstructionState, SessionInstructionWrite,
+    SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef, effective_operator_instructions,
+    materialize_operator_instruction_messages, validate_operator_instruction_messages,
 };
 pub use session_component_sidecar::{
     ComponentEventDigest, ComponentEventPrefixAuthority, ComponentEventPrefixDigest,
@@ -651,11 +718,17 @@ pub use tool_execution::{
     ToolExecutionContract, ToolExecutionContractError, ToolExecutionDeclarationError,
     ToolExecutionMode, ToolExecutionOwnerWitness, ToolExecutionResolutionContext,
     ToolExecutionResolutionError, ToolOperationTarget, ToolOutputPolicy, ToolProgressPolicy,
-    ephemeral_tool_catalog_binding_fingerprint,
+    ephemeral_tool_catalog_binding_fingerprint, mcp_request_digest,
 };
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,
     ToolExecutionPolicyError, ToolMutationClass,
+};
+pub use tool_grant::{
+    GatedToolTable, GrantGateRefusal, GrantGatedTools, SessionToolGrants, TOOL_GRANT_EXPIRED_CODE,
+    TOOL_GRANT_REQUIRED_CODE, TOOL_GRANT_REVOKED_CODE, TOOL_GRANT_UNAVAILABLE_CODE, ToolGrantCall,
+    ToolGrantGate, ToolGrantId, ToolGrantIdError, ToolGrantIssuer, ToolGrantRecord,
+    ToolGrantRefusal, ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
 };
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
@@ -695,19 +768,20 @@ pub use types::{
     InstructionRevisionId, InstructionRevisionRef, InvalidInstructionContentDigest,
     InvalidInstructionIdentifier, LiveContextObservationId, MemoryIndexExclusion,
     MemoryIndexableContent, Message, OutputSchema, PROVIDER_STOP_DETAIL_TEXT_CAP,
-    PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta, ProviderStopDetail, RunInput, RunResult,
-    SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolKind, SessionId, StopReason,
-    SystemMessage, SystemMessageIdentity, SystemNoticeBlock, SystemNoticeDirection,
-    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, SystemNoticeRecord, SystemPromptKey,
-    SystemPromptVersion, SystemPromptVersionIdentity, TOOL_ARTIFACT_REF_PART_MAX_BYTES,
-    ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart, ToolArtifactRefusal, ToolAudience,
-    ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName, ToolNameSet,
-    ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind, TranscriptMessageIdentity,
-    TranscriptSource, TranscriptUserRole, TurnUsage, TurnUsageAccountingMissing, Usage,
-    UserMessage, VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
-    has_non_text_content, has_video, is_supported_video_media_type,
-    materialize_latest_system_prompt_versions, superseded_system_prompt_offsets,
-    validate_inline_video_blocks, validate_system_prompt_version_order,
+    PROVIDER_STOP_DETAIL_TRUNCATION_MARKER, ProviderMeta, ProviderStopDetail,
+    RetiredInstructionBody, RunInput, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode,
+    ServerToolKind, SessionId, StopReason, SystemMessage, SystemMessageIdentity, SystemNoticeBlock,
+    SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer,
+    SystemNoticeRecord, SystemPromptKey, SystemPromptVersion, SystemPromptVersionIdentity,
+    TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
+    ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
+    ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage,
+    TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
+    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
+    has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
+    superseded_system_prompt_offsets, validate_inline_video_blocks,
+    validate_system_prompt_version_order,
 };
 pub use web_search::*;
 
@@ -717,10 +791,11 @@ pub use auth::{
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
     AuthRouteHints, AuthStatus, AuthStatusPhase, CredentialObservation, GoogleAuthMetadata,
     GoogleRouteHints, HttpAuthorizationContent, HttpAuthorizationReceipt, HttpAuthorizationRequest,
-    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer, OpenAiAuthMetadata,
-    OpenAiRouteHints, ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation,
-    ResolvedAuthEnvelope, ResolvedAuthKind, TokenLifecycleClearError,
-    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
+    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer,
+    HttpRequestInitiator, OpenAiAuthMetadata, OpenAiRouteHints, ProviderAuthMetadata,
+    PublishedAuthStatus, RefreshFailureObservation, ResolvedAuthEnvelope, ResolvedAuthKind,
+    TokenLifecycleClearError, lease_snapshot_expires_at_datetime,
+    mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker, persisted_auth_mode_is_directly_creatable,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
@@ -753,14 +828,14 @@ pub use auth::{
 pub use connection::{
     AuthBindingRef, AuthCredentialIdentity, AuthProfile, AuthProfileConfig, BackendProfile,
     BackendProfileConfig, BindingId, BindingOrigin, BindingPolicy, ConnectionTargetError,
-    ConnectorClientAuthMethod, ConnectorClientConfig, CredentialAccountBindingCandidates,
-    CredentialAccountId, CredentialAccountRef, CredentialSourceSpec, ExternalResolverId,
-    IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding, PeerRole, ProfileId,
-    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
-    RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
-    resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
-    resolve_credential_account_binding_for_provider, resolve_explicit_auth_binding_target,
-    resolve_realm_binding_target_for_provider,
+    ConnectorClientAuthMethod, ConnectorClientConfig, CopilotAccountConfig,
+    CredentialAccountBindingCandidates, CredentialAccountId, CredentialAccountRef,
+    CredentialSourceSpec, ExternalResolverId, IdentityError, MemberCommsName, MemberCommsNameError,
+    MobMemberBinding, PeerRole, ProfileId, ProviderBinding, ProviderBindingConfig,
+    ProviderBindingError, RealmConfigSection, RealmConnectionSet, RealmId,
+    ResolvedConnectionTarget, mob_realm_id, resolve_auth_binding_candidates_for_provider,
+    resolve_auth_binding_or_default_for_provider, resolve_credential_account_binding_for_provider,
+    resolve_explicit_auth_binding_target, resolve_realm_binding_target_for_provider,
 };
 pub use self_hosted_binding::{
     SelfHostedBindingCandidate, SelfHostedBindingServer, SelfHostedConnectionError,

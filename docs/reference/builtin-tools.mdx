@@ -58,7 +58,7 @@ may apply explicit presets of their own.
 | `mob_retire_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Retire a member and archive its session |
 | `mob_check_member` | Mob | Yes | `mob` + mob scope, or ownership of the member | Read member execution status and output |
 | `mob_list_members` | Mob | Yes | `mob` + mob scope; without it, only the members the caller owns | List a mob's members |
-| `mob_list` | Mob | Yes | `mob` + generated authority | List managed mobs |
+| `mob_list` | Mob | Yes | `mob` + generated authority | List the managed mobs the caller may manage |
 | `mob_wire` | Mob | Yes | `mob` + mob scope | Wire a member to a local or external peer |
 | `mob_unwire` | Mob | Yes | `mob` + mob scope | Remove a member wiring relationship |
 | `mob_profile_create` | Mob profile | Conditional | realm profile store | Create a reusable realm profile |
@@ -325,6 +325,12 @@ also adds `mob_profile_list_sources`. Admission is then checked again at each
 dispatch against the current typed mob, spawn, profile-mutation, or objective
 scope. See [Mob tools](/guides/mobs#agent-tools-vs-host-apis) for argument shapes
 and workflows.
+
+`mob_list` lists a mob only when its actor admits that the caller may manage
+it. A persisted mob whose store did not restore is quarantined and has no
+actor, so `mob_list` never lists it: the check fails closed. Hosts list
+quarantined mobs through `mob/list` and the MCP `meerkat_mob_list` tool (see
+[Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members)).
 
 ### `fork_off` and `council` delivery
 
@@ -621,6 +627,9 @@ tool arguments. Without manage scope over the mob, the forker can still:
   `read_failed` say to check again later and that only `status` and
   `progress.run_state` are current; `session_absent` says the member has no
   readable session, so checking again will not bring the preview back;
+  `store_refused` says the store refuses to read the member's session until
+  its realm is reopened, so checking again will not bring the preview back
+  before then, and that `status` and `progress.run_state` are current;
   `not_observed_while_retiring` says the member is retiring and its session
   was not read;
 - retire any of its descendants with `mob_retire_member`;
@@ -628,7 +637,11 @@ tool arguments. Without manage scope over the mob, the forker can still:
 
 A profile's member operator tools (`member_status`, `retire_member`,
 `force_cancel_member`, `list_members`) apply the same rule. With manage scope,
-all of these tools reach every member, as before.
+all of these tools reach every member, as before. A host can hide members
+from other members' operator tools (`MobBuilder::with_member_tool_audience`):
+`member_status`, `retire_member` and `force_cancel_member` answer a member its
+audience hides from the calling member exactly as a member the mob does not
+hold, with manage scope too, and do nothing to it.
 
 A member placed on a member host holds manage scope over its mob, including
 the privileged spawn arguments, unless its controlling host narrowed it with
@@ -1379,7 +1392,7 @@ opening general builtins. See the guide for the current surface matrix.
 
 **Supported universal options:** `size` accepts `auto`, `1024x1024`, `1024x1536`, `1536x1024`, or `WIDTHxHEIGHT`; `quality` accepts `auto`, `low`, `medium`, `high`; `format` accepts `auto`, `png`, `jpeg`, `jpg`, `webp`; `count` is currently limited to `1`.
 
-**Provider params:** Use top-level `size`, `quality`, `format`, and `intent` for normal requests; these are Meerkat fields, not raw provider params. For the current `gpt-image-2` default, OpenAI `provider_params` should normally be limited to `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; `background` is `auto` or `opaque` only, `output_compression` applies when `format` is `jpeg`/`webp`, `moderation` is `auto` or `low`, `action` is usually omitted in favor of top-level `intent`, and `input_fidelity` is not accepted by Meerkat. Gemini accepts `aspect_ratio` and `image_size`.
+**Provider params:** Use top-level `size`, `quality`, `format`, and `intent` for normal requests; these are Meerkat fields, not raw provider params. For the current `gpt-image-2.6-sunburst` default, OpenAI `provider_params` should normally be limited to `background`, `output_compression`, `moderation`, hosted-tool-only `action`, hosted-tool-only `reasoning_effort`, and hosted-tool-only `web_search`; `background` is `auto`, `opaque` or `transparent` (`transparent` needs `format` `png` or `webp`; with `jpeg` it is denied with `projection_unsupported`), `output_compression` applies when `format` is `jpeg`/`webp`, `moderation` is `auto` or `low`, `action` is usually omitted in favor of top-level `intent`, a `low`, `medium` or `high` `reasoning_effort` also sets a GPT Image 2.6 model's planning complexity, and `input_fidelity` is not accepted by Meerkat. Gemini accepts `aspect_ratio` and `image_size`.
 
 **Returns:** `ImageGenerationToolResult` JSON containing `operation_id`, `terminal`, `images`, `provider_text`, `revised_prompt`, `native_metadata`, and `warnings`. Each generated image includes `blob_ref.blob_id`, which can be saved from inside the session with `blob_save_file` or fetched externally with `rkat blob get <blob_id> --output image.png`.
 

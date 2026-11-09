@@ -380,6 +380,12 @@ Failed in:
                 "enum TokenStoreError in crates/meerkat-core/src/auth/token_store.rs:607",
                 ("TokenStoreError",),
             ),
+            # The struct twin of enum_marked_non_exhaustive, expected on the
+            # 0.9.9 report for WorkEvidenceRef. Names only the struct.
+            "struct_marked_non_exhaustive": (
+                "struct WorkEvidenceRef in crates/meerkat-workgraph/src/types.rs:695",
+                ("WorkEvidenceRef",),
+            ),
             "type_marked_deprecated": (
                 "Struct PeersTool in crates/meerkat-tools/src/builtin/comms/tools.rs:115",
                 ("PeersTool",),
@@ -387,6 +393,11 @@ Failed in:
             "function_marked_deprecated": (
                 "function meerkat::mcp::standalone_router in crates/meerkat/src/mcp.rs:41",
                 ("standalone_router",),
+            ),
+            "trait_method_marked_deprecated": (
+                "method claim_executor in trait meerkat_core::approval::decision::DecisionStore "
+                "in crates/meerkat-core/src/approval/decision/store.rs:198",
+                ("DecisionStore", "claim_executor"),
             ),
         }
         for lint_id, (item, expected) in cases.items():
@@ -429,6 +440,36 @@ Failed in:
         self.assertEqual(len(errors), 1)
         self.assertIn("missing: `DslRejectionKind`", errors[0])
         declared = "`TokenStoreError` is `#[non_exhaustive]`; `DslRejectionKind` gains a tuple variant."
+        self.assertEqual(gate.check_named(parsed, section(declared)), [])
+
+    def test_struct_marked_non_exhaustive_requires_the_struct_name(self) -> None:
+        # The struct twin of the enum shape above (template "struct {{name}}
+        # in <file>:<line>"): read in full, so it passes check_recognized, and
+        # the struct itself must be declared.
+        report = """\
+    Checking meerkat-workgraph v0.9.8 -> v0.9.9 (assume patch change)
+--- failure struct_marked_non_exhaustive: struct marked #[non_exhaustive] ---
+Failed in:
+  struct WorkEvidenceRef in crates/meerkat-workgraph/src/types.rs:695
+     Summary semver requires new major version: 1 major and 0 minor checks failed
+    Finished [   0.100s] meerkat-workgraph
+"""
+        parsed = gate.parse_report(report)
+        self.assertEqual(
+            [(f.lint_id, f.symbols, f.structural) for f in parsed.findings],
+            [("struct_marked_non_exhaustive", ("WorkEvidenceRef",), True)],
+        )
+        self.assertEqual(gate.check_recognized(parsed), [])
+
+        def section(body: str) -> "gate.Section":
+            return gate.Section(
+                "## [9.9.9] - 2026-01-01", "9.9.9", " - 2026-01-01", f"\n### Breaking\n\n- {body}\n"
+            )
+
+        errors = gate.check_named(parsed, section("`WorkItem` gains a method."))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing: `WorkEvidenceRef`", errors[0])
+        declared = "`WorkEvidenceRef` is now `#[non_exhaustive]`; build it with `WorkEvidenceRef::new`."
         self.assertEqual(gate.check_named(parsed, section(declared)), [])
 
     def test_variant_marked_non_exhaustive_requires_the_variant(self) -> None:
@@ -765,6 +806,63 @@ Failed in:
             gate.check_named(parsed, self.section("`SessionRuntime::set_callback_channel` deprecated.", "Deprecated")),
             [],
         )
+
+    TRAIT_METHOD_DEPRECATED_REPORT = """\
+    Checking meerkat-core v0.9.10 -> v0.9.10 (assume patch change)
+--- failure trait_method_marked_deprecated: trait method #[deprecated] added ---
+
+Description:
+A trait method is now #[deprecated]. Downstream crates will get a compiler warning when using this method.
+        ref: https://doc.rust-lang.org/reference/attributes/diagnostics.html#the-deprecated-attribute
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/trait_method_marked_deprecated.ron
+
+Failed in:
+  method claim_executor in trait meerkat_core::approval::decision::DecisionStore in crates/meerkat-core/src/approval/decision/store.rs:198
+
+     Summary semver requires new minor version: 0 major and 1 minor checks failed
+    Finished [   2.654s] meerkat-core
+"""
+
+    def test_deprecated_trait_methods_are_read_in_full(self) -> None:
+        # Measuring the 0.9.11 notes against v0.9.10: the whole-store executor
+        # claim of DecisionStore newly #[deprecated].
+        parsed = gate.parse_report(self.TRAIT_METHOD_DEPRECATED_REPORT)
+        self.assertEqual(
+            [(f.lint_id, f.symbols, f.structural) for f in parsed.findings],
+            [("trait_method_marked_deprecated", ("DecisionStore", "claim_executor"), True)],
+        )
+        self.assertEqual(gate.check_recognized(parsed), [])
+
+    def test_deprecated_trait_method_named_under_deprecated_passes(self) -> None:
+        parsed = gate.parse_report(self.TRAIT_METHOD_DEPRECATED_REPORT)
+        declared = (
+            "`meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and "
+            "`DurableDecisionService::claim_executor`, the whole-store executor claim."
+        )
+        self.assertEqual(gate.check_named(parsed, self.section(declared, "Deprecated")), [])
+
+    def test_unnamed_deprecated_trait_method_still_fails(self) -> None:
+        parsed = gate.parse_report(self.TRAIT_METHOD_DEPRECATED_REPORT)
+        # The replacement alone, or the trait alone, does not name the method.
+        for declaration in (
+            "Use `DecisionStore::claim_executor_kind`.",
+            "`DecisionStore` changed.",
+        ):
+            with self.subTest(declaration=declaration):
+                errors = gate.check_named(parsed, self.section(declaration, "Deprecated"))
+                self.assertEqual(len(errors), 1)
+                self.assertIn("missing: `claim_executor`", errors[0])
+        # The method without its trait is not enough either.
+        owner_missing = gate.check_named(parsed, self.section("`claim_executor` deprecated.", "Deprecated"))
+        self.assertEqual(len(owner_missing), 1)
+        self.assertIn("missing: `DecisionStore`", owner_missing[0])
+        # Named only under Breaking: a deprecation is declared under Deprecated.
+        only_breaking = gate.check_named(
+            parsed, self.section("`DecisionStore::claim_executor` deprecated.", "Breaking")
+        )
+        self.assertEqual(len(only_breaking), 1)
+        self.assertIn("`### Deprecated`", only_breaking[0])
+        self.assertIn("1 deprecation(s)", only_breaking[0])
 
 
 class NamingTests(unittest.TestCase):

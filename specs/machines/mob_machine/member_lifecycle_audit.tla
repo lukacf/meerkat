@@ -23,8 +23,11 @@
 \* count stays 0 or 1 and every member arm also meets a counted run): a
 \* roster reset
 \* that replaces a live incarnation in place, the Retiring and Retired
-\* replays, the four unplaced retirement-start replays and the
-\* addressability replay. A later roster recovery or reset mints the next
+\* replays, the four unplaced retirement-start replays, the addressability
+\* replay and the replay of a respawn's abandonment of a generation the
+\* identity has moved past (the stale arm,
+\* ObserveRespawnTopologyAbandonedStaleEndedSuccessor). A later roster
+\* recovery or reset mints the next
 \* incarnation of the same identity, so the first incarnation's runtime id,
 \* fence and session become stale. Domains: one identity, two runtime ids,
 \* two fence tokens, generations 0..1, two sessions, observation times 0,
@@ -32,12 +35,14 @@
 \* tokens.
 \*
 \* Each run explores the whole reachable state space of these domains, with
-\* no step bound. The TLC VIEW (AuditView) leaves out the two counters that
+\* no step bound. The TLC VIEW (AuditView) leaves out the four counters that
 \* no guard, no other variable's update and no invariant reads:
-\* model_step_count, which every arm increments, and topology_epoch, which
-\* many arms increment. States that differ only in them are one state, so
-\* the space is finite and TLC finishes it. The runner checks on every run
-\* that the generated model still reads neither counter anywhere else.
+\* model_step_count, which every arm increments, topology_epoch, which
+\* many arms increment, and the identity life marker (identity_life_resets,
+\* identity_life_ends), which every end of an identity moves. States that
+\* differ only in them are one state, so the space is finite and TLC finishes
+\* it. The runner checks on every run that the generated model still reads
+\* none of the counters anywhere else.
 \*
 \* Input shapes: the audit gives each arm the shapes the shell sends, so a
 \* guard refusal outside them is not explored. A Retire arm's (releasing,
@@ -51,11 +56,12 @@
 \* unplaced member (host None) with no peer endpoint; the retirement-start
 \* replays take topology preservation both ways and the Retired replays
 \* both of their preservation flags, as a respawn's journal records them.
-\* Progress observations report one in-flight count. In these shapes three
+\* Progress observations report one in-flight count. In these shapes four
 \* arms change no variable but the step count, so each returns to its
 \* source state: RecoverMemberSessionBindingAlreadyCurrentRunning,
-\* RecoverRosterMemberRetiringReplay and
-\* RecoverRosterMemberAddressabilityRunning;
+\* RecoverRosterMemberRetiringReplay,
+\* RecoverRosterMemberAddressabilityRunning and the stale abandonment arm,
+\* which takes every runtime id, fence and generation of the domains;
 \* RecoverRosterMemberRetirementStartedReleasingAlreadyApplied does too
 \* unless it records a topology preservation.
 \*
@@ -65,7 +71,8 @@
 \* lifecycle quiesce (DestroyMob, and the destroy admission
 \* AdmitDestroyCleanup, after which a member runtime destroyed still removes
 \* only that runtime), and every RetireAtScope verdict arm
-\* over every scope the domains can name, current or stale. The progress
+\* over every scope the domains can name, current or stale, and the
+\* RetireAbsent arms of a completed and a destroyed mob. The progress
 \* observations write only progress variables, and no guard of these arms,
 \* nor of the Retire arms the coherence property enables, reads one; so the
 \* smaller run loses no reachable value of the variables the verdicts and
@@ -104,6 +111,13 @@
 \*     member is ever placed, and every Retiring runtime is the one its
 \*     identity maps to. They check the reasons in the not-covered list
 \*     below.
+\*   AuditStaleAbandonmentAnsweredOnce (invariant): in the running mob, a
+\*     respawn's abandonment of a generation the identity has moved past (no
+\*     runtime holds the identity and its recorded generation is later, so a
+\*     later incarnation ended) is answered by exactly one
+\*     ObserveRespawnTopologyAbandoned arm, and the stale arm answers no
+\*     other marker. A resume replays every such row; with no arm answering
+\*     it, every resume of the mob failed.
 \*   In the scope run:
 \*   AuditRetireAtScopeExactlyOne (invariant): for every scope, exactly one
 \*     RetireAtScope verdict arm is enabled; the classifier is total and its
@@ -114,15 +128,22 @@
 \*     can follow: a Retire arm for that incarnation is enabled, or the
 \*     incarnation is already Retiring, or its runtime is no longer live (a
 \*     state the unscoped Retire refuses as well).
+\*   AuditRetireAbsentAnsweredInEveryPhase (invariant): a RetireAbsent arm
+\*     is enabled exactly when the identity maps to no runtime. MobMachine,
+\*     not the handle, answers the retire of an identity with no roster
+\*     incarnation, in a running, stopped, completed or destroyed mob alike,
+\*     and refuses it for an identity it still maps.
 \*
 \* The runner requires every action it lists (covered_actions) to fire (TLC
 \* coverage), a floor of distinct states, and every AuditWitness* goal to
 \* be reached (as an expected violation of its negation): a member bound to
 \* a session, a bound member's observation
 \* time advancing, a Retiring member, an archived incarnation, the
-\* recovery of an archived identity's next incarnation, and a delayed
+\* recovery of an archived identity's next incarnation, a delayed
 \* Retired record for an older generation of an unmapped identity taking
-\* RecoverRosterMemberRetiredStaleIncarnation; in the scope run, a
+\* RecoverRosterMemberRetiredStaleIncarnation, and a respawn's abandonment
+\* of an older generation replayed after a later incarnation ended, taking
+\* the stale arm; in the scope run, a
 \* Retiring incarnation that is still Current for the session its
 \* retirement releases, and a Current incarnation whose runtime is gone.
 \* With --mutants it drops one observation_monotonic guard and requires
@@ -146,7 +167,12 @@
 \* requires AuditMintClearsExecutionHealth to fail, and makes
 \* ObserveRuntimeDestroyed end the mob, leave its runtime live, and reset the
 \* mob's run count, and requires AuditRuntimeDestroyedRemovesOnlyItsRuntime to
-\* fail for each.
+\* fail for each, drops the RetireAbsentCompleted arm, and then only its
+\* identity_absent guard, and requires AuditRetireAbsentAnsweredInEveryPhase
+\* to fail for each, and drops the stale abandonment arm, and then only its
+\* later_generation_recorded guard (the arm then answers a marker of a
+\* generation the identity never reached), and requires
+\* AuditStaleAbandonmentAnsweredOnce to fail for each.
 \*
 \* Not covered:
 \*   states reachable only through BeginSpawnExec* (spawn phases, spawn
@@ -168,9 +194,10 @@
 \* member_lifecycle_audit.sh.
 EXTENDS model
 
-\* The positions of model_step_count and topology_epoch in the generated
-\* `vars` tuple; the runner reads them from model.tla.
-CONSTANTS AuditStepIndex, AuditEpochIndex
+\* The positions of model_step_count, topology_epoch and the identity life
+\* marker (identity_life_resets, identity_life_ends) in the generated `vars`
+\* tuple; the runner reads them from model.tla.
+CONSTANTS AuditStepIndex, AuditEpochIndex, AuditLifeResetsIndex, AuditLifeEndsIndex
 
 AuditIdentity == "agentidentity_1"
 AuditRuntimes == {"agentruntimeid_1", "agentruntimeid_2"}
@@ -257,6 +284,12 @@ AuditRetireStoppedNoBinding ==
 AuditRetireAbsent == RetireAbsentRunning(AuditIdentity)
 
 AuditRetireAbsentStopped == RetireAbsentStopped(AuditIdentity)
+
+\* The retire of an absent identity in a completed and a destroyed mob (the
+\* scope run reaches both phases).
+AuditRetireAbsentCompleted == RetireAbsentCompleted(AuditIdentity)
+
+AuditRetireAbsentDestroyed == RetireAbsentDestroyed(AuditIdentity)
 
 AuditRetireMember ==
     \E rid \in AuditRuntimes, fence \in AuditFences, s \in AuditSessions :
@@ -424,11 +457,11 @@ AuditRecoverRetiringReplay ==
 
 AuditRecoverRetired ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, p \in BOOLEAN, started \in BOOLEAN :
-        RecoverRosterMemberRetiredRunning(AuditIdentity, rid, g, p, started)
+        RecoverRosterMemberRetiredRunning(AuditIdentity, rid, g, p, started, TRUE, FALSE)
 
 AuditRecoverRetiredAlreadyAbsent ==
     \E rid \in AuditRuntimes, g \in AuditGenerations, p \in BOOLEAN, started \in BOOLEAN :
-        RecoverRosterMemberRetiredCurrentAlreadyAbsent(AuditIdentity, rid, g, p, started)
+        RecoverRosterMemberRetiredCurrentAlreadyAbsent(AuditIdentity, rid, g, p, started, TRUE, FALSE)
 
 AuditRecoverRetiredStaleGeneration ==
     \E rid \in AuditRuntimes : RecoverRosterMemberRetiredStaleGeneration(AuditIdentity, rid)
@@ -456,6 +489,13 @@ AuditRecoverRetirementStartedPeerOnly ==
 AuditRecoverAddressability ==
     \E rid \in AuditRuntimes, fence \in AuditFences, g \in AuditGenerations :
         RecoverRosterMemberAddressabilityRunning(AuditIdentity, rid, fence, g, AuditProfile, AuditMode, FALSE)
+
+\* The resume's replay of a respawn's abandonment row naming a generation
+\* the identity has moved past, after a later incarnation ended: the stale
+\* arm, a no-op. Every runtime id, fence and generation of the domains.
+AuditStaleAbandonmentReplay ==
+    \E rid \in AuditRuntimes, fence \in AuditFences, g \in AuditGenerations :
+        ObserveRespawnTopologyAbandonedStaleEndedSuccessor(AuditIdentity, rid, fence, g)
 
 AuditStop == StopRunning
 
@@ -513,6 +553,7 @@ AuditStepCountOnlyNext ==
     \/ AuditBindSessionAlreadyCurrent
     \/ AuditRecoverRetiringReplay
     \/ AuditRecoverAddressability
+    \/ AuditStaleAbandonmentReplay
 
 AuditNext ==
     \/ AuditLifecycleNext
@@ -535,6 +576,8 @@ AuditScopeNext ==
     \/ AuditAdmitDestroy
     \/ AuditComplete
     \/ AuditDestroy
+    \/ AuditRetireAbsentCompleted
+    \/ AuditRetireAbsentDestroyed
     \/ AuditRetireAtScopeCurrentRunning
     \/ AuditRetireAtScopeCurrentStopped
     \/ AuditRetireAtScopeNoCurrentIncarnationRunning
@@ -548,8 +591,10 @@ AuditScopeNext ==
 
 AuditScopeSpec == Init /\ [][AuditScopeNext]_vars
 
-\* Every state variable but the two counters (see the header).
-AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads (see the header):
+\* the two above and the identity life marker.
+AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 AuditObservationMonotonic ==
     [][\A id \in DOMAIN member_last_observed_at_ms :
@@ -675,6 +720,44 @@ AuditRetireAtScopeCoherent ==
                \/ AuditRetiring(rid)
                \/ rid \notin live_runtime_ids
 
+\* One RetireAbsent arm per phase answers the retire of the audit identity.
+AuditRetireAbsentEnabled ==
+    \/ ENABLED RetireAbsentRunning(AuditIdentity)
+    \/ ENABLED RetireAbsentStopped(AuditIdentity)
+    \/ ENABLED RetireAbsentCompleted(AuditIdentity)
+    \/ ENABLED RetireAbsentDestroyed(AuditIdentity)
+
+AuditRetireAbsentAnsweredInEveryPhase ==
+    AuditRetireAbsentEnabled <=> (AuditIdentity \notin DOMAIN identity_to_runtime)
+
+\* Every ObserveRespawnTopologyAbandoned arm, enabled or not, for the marker
+\* of generation g of the audit identity's runtime rid with fence `fence`.
+AuditAbandonmentArms(rid, fence, g) ==
+    <<ENABLED ObserveRespawnTopologyAbandonedRetiringFresh(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedRetiringAlreadyRecorded(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedTerminalFresh(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedTerminalAlreadyRecorded(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedTerminalRecoveredFresh(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedStaleSuccessor(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedStaleEndedSuccessor(AuditIdentity, rid, fence, g),
+      ENABLED ObserveRespawnTopologyAbandonedDestroyed(AuditIdentity, rid, fence, g)>>
+
+\* The identity has moved past generation g: no runtime holds it, and its
+\* recorded generation is later than g, so a later incarnation ended.
+AuditPastGeneration(g) ==
+    /\ AuditIdentity \notin DOMAIN identity_to_runtime
+    /\ AuditIdentity \in DOMAIN identity_runtime_generations
+    /\ identity_runtime_generations[AuditIdentity] > g
+
+\* A resume replays an abandonment row in the running mob: one of g's past
+\* generation is answered by exactly one arm, and the stale arm answers no
+\* other marker in any phase.
+AuditStaleAbandonmentAnsweredOnce ==
+    \A rid \in AuditRuntimes, fence \in AuditFences, g \in AuditGenerations :
+        IF phase = "Running" /\ AuditPastGeneration(g)
+        THEN Cardinality({i \in 1..8 : AuditAbandonmentArms(rid, fence, g)[i]}) = 1
+        ELSE ~ENABLED ObserveRespawnTopologyAbandonedStaleEndedSuccessor(AuditIdentity, rid, fence, g)
+
 \* Reachability goals, each checked as an expected violation of its negation:
 \* a state goal as an invariant, a step goal as an action property.
 \* A member is bound to a session.
@@ -713,6 +796,12 @@ AuditWitnessStaleIncarnationStep ==
     /\ \E rid \in AuditRuntimes, g \in AuditGenerations :
            /\ g < identity_runtime_generations[AuditIdentity]
            /\ RecoverRosterMemberRetiredStaleIncarnation(AuditIdentity, rid, g)
+\* A respawn's abandonment of an older generation replays after a later
+\* incarnation of the identity ended, and the stale arm answers it.
+AuditWitnessStaleAbandonmentStep ==
+    \E rid \in AuditRuntimes, fence \in AuditFences, g \in AuditGenerations :
+        /\ AuditPastGeneration(g)
+        /\ ObserveRespawnTopologyAbandonedStaleEndedSuccessor(AuditIdentity, rid, fence, g)
 
 \* Scope run: a Retiring incarnation whose session binding its retirement
 \* released is still Current for the scope that names that session.
@@ -737,4 +826,5 @@ NotAuditWitnessCurrentRuntimeGone == ~AuditWitnessCurrentRuntimeGone
 NotAuditWitnessObservationAdvances == [][~AuditWitnessObservationAdvancesStep]_vars
 NotAuditWitnessSuccessor == [][~AuditWitnessSuccessorStep]_vars
 NotAuditWitnessStaleIncarnation == [][~AuditWitnessStaleIncarnationStep]_vars
+NotAuditWitnessStaleAbandonment == [][~AuditWitnessStaleAbandonmentStep]_vars
 ====

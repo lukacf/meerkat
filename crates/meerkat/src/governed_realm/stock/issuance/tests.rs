@@ -312,6 +312,7 @@ fn refs(ids: &[&str]) -> Vec<GrantLineageRef> {
         .map(|id| {
             owner
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principals().operator,
                     EvidenceId::new(*id).unwrap(),
                     agent("a"),
@@ -816,6 +817,8 @@ async fn removing_the_last_bundle_operation_grant_revives_no_other_grant() {
     let issue = |id: &str| {
         owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                    .expect("the grant log's fence"),
                 &principals.operator,
                 EvidenceId::new(id).unwrap(),
                 agent_principal(DEFAULT_STOCK_AGENT),
@@ -1385,6 +1388,8 @@ async fn removing_the_last_target_never_resurrects_the_older_worker_grant() {
     let issue = |id: &str| {
         owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                    .expect("the grant log's fence"),
                 &principals.operator,
                 EvidenceId::new(id).unwrap(),
                 agent_principal(DEFAULT_STOCK_AGENT),
@@ -1467,6 +1472,8 @@ async fn revoking_the_last_target_of_an_older_mixed_selection_never_resurrects_i
     let issue = |id: &str| {
         owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                    .expect("the grant log's fence"),
                 &principals.operator,
                 EvidenceId::new(id).unwrap(),
                 agent_principal(DEFAULT_STOCK_AGENT),
@@ -1542,6 +1549,8 @@ async fn a_grant_still_selected_elsewhere_is_never_retired() {
     let owner = restore_owner(root, "governed").unwrap();
     let controller = owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                .expect("the grant log's fence"),
             &principals.operator,
             EvidenceId::new("controller").unwrap(),
             agent_principal(DEFAULT_STOCK_AGENT),
@@ -1674,6 +1683,8 @@ async fn the_older_selection_api_is_serialized_and_keeps_per_target_mode() {
     let issue = |id: &str| {
         owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                    .expect("the grant log's fence"),
                 &principals.operator,
                 EvidenceId::new(id).unwrap(),
                 agent_principal(DEFAULT_STOCK_AGENT),
@@ -1787,6 +1798,8 @@ async fn an_abandoned_selection_write_settles_before_a_later_writer() {
     let issue = |id: &str| {
         owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                    .expect("the grant log's fence"),
                 &principals.operator,
                 EvidenceId::new(id).unwrap(),
                 agent_principal(DEFAULT_STOCK_AGENT),
@@ -1825,9 +1838,10 @@ async fn an_abandoned_selection_write_settles_before_a_later_writer() {
     assert!(
         matches!(
             grant_stock_agent(&root, "governed", &principals, &beta).await,
-            Err(StockGrantError::Refused(_))
+            Err(StockGrantError::AdmissionInProgress)
         ),
-        "a later writer is refused while the abandoned write holds custody"
+        "a later writer is refused at the realm's fence, which the abandoned write's \
+         command keeps with its custody"
     );
 
     release.send(()).unwrap();
@@ -1838,7 +1852,7 @@ async fn an_abandoned_selection_write_settles_before_a_later_writer() {
                 granted = Some(outcome.issued);
                 break;
             }
-            Err(StockGrantError::Refused(_)) => {
+            Err(StockGrantError::Refused(_) | StockGrantError::AdmissionInProgress) => {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             Err(other) => panic!("{other:?}"),
@@ -2172,6 +2186,10 @@ async fn a_reviewed_installation_is_granted_only_while_it_is_unchanged() {
         )
         .unwrap();
     let operator = principals.operator.clone();
+    // The grant's window opens at its own issuance clock, read after
+    // `issued_after` and as much later as issuance took: check the bounds
+    // at that opening instant.
+    let opened_at_ms = resolved.restrictions().lifetime.not_before_ms;
     let covers = |op: &str| {
         resolved
             .restrictions()
@@ -2184,7 +2202,7 @@ async fn a_reviewed_installation_is_granted_only_while_it_is_unchanged() {
                 audience: &AudienceRef::Principal {
                     principal: operator.clone(),
                 },
-                now_ms: issued_after + 1,
+                now_ms: opened_at_ms,
             })
             .is_ok()
     };
@@ -2281,9 +2299,9 @@ async fn an_abandoned_reviewed_grant_settles_its_selection() {
     assert!(
         matches!(
             grant_stock_agent(&root, "governed", &principals, &beta).await,
-            Err(StockGrantError::Refused(_))
+            Err(StockGrantError::AdmissionInProgress)
         ),
-        "the command keeps custody while its write is held"
+        "the command keeps the realm's fence and its custody while its write is held"
     );
     release.send(()).unwrap();
     // The owned task publishes its selection before it releases the grant
@@ -2504,7 +2522,13 @@ async fn an_observation_reads_the_persisted_selection_through_the_grant_owner() 
         .try_controller_grant_mutation()
         .expect("the realm's grant custody");
     owner
-        .revoke(&principals.operator, &beta.issued, &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::try_acquire(owner.admission_fences())
+                .expect("the grant log's fence"),
+            &principals.operator,
+            &beta.issued,
+            &mut custody,
+        )
         .expect("revoked, still selected");
     drop(custody);
     drop(machine);
@@ -2672,4 +2696,170 @@ async fn an_open_realm_observes_its_retained_selection_through_its_own_owner() {
         "the owner refuses that lineage for the composition's executor"
     );
     drop(bundle);
+}
+
+// ---------------------------------------------------------------------------
+// The realm's admission fence: every stock command takes it first.
+// ---------------------------------------------------------------------------
+
+/// R of the governed fixture realm under `root`.
+fn fixture_fence(root: &Path) -> meerkat_core::AdmissionFence {
+    meerkat_core::AdmissionFence::realm(root, &realm()).expect("the realm's fence")
+}
+
+/// With no holder, a reviewed MCP installation's grant is issued and
+/// selected through the realm's fence, which the command releases when it
+/// settles: the fence is free again at once.
+#[tokio::test]
+async fn with_no_holder_reviewed_mcp_grant_issuance_succeeds() {
+    let tmp = governed_realm().await;
+    let root = tmp.path();
+    let reviewed = review(root, "alpha").await;
+    let outcome = grant_stock_agent_for_reviewed_installation(
+        &governed_storage(root),
+        &principals(),
+        &request("a", mcp("alpha", exact(&["read"]))),
+        &reviewed,
+    )
+    .await
+    .expect("issued and selected with no holder");
+    let selected = selection(root).await;
+    assert_eq!(
+        selected
+            .agents
+            .get("a")
+            .and_then(|refs| refs.get(&StockGrantSlot::Mcp("alpha".into()))),
+        Some(&outcome.issued)
+    );
+    meerkat_core::AdmissionGuard::try_acquire(vec![fixture_fence(root)])
+        .expect("the command released the realm's fence");
+}
+
+/// An admission's hold of the realm's fence (SHARED, as an admission holds
+/// it) refuses every stock grant command once its bound has passed, before
+/// any custody, typed: nothing is issued, selected or revoked. Once the
+/// hold ends the same commands run.
+#[tokio::test]
+async fn under_a_held_fence_issue_revoke_and_select_refuse_not_started() {
+    let tmp = governed_realm().await;
+    let root = tmp.path();
+    let principals = principals();
+    let alpha = grant_stock_agent(
+        root,
+        "governed",
+        &principals,
+        &request("a", mcp("alpha", exact(&["read"]))),
+    )
+    .await
+    .expect("granted with no holder");
+    let before = realm_state(root);
+    let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fixture_fence(root)])
+        .expect("an admission holds the realm's fence");
+
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        grant_stock_agent(
+            root,
+            "governed",
+            &principals,
+            &request("a", mcp("beta", exact(&["read"]))),
+        )
+        .await,
+        Err(StockGrantError::AdmissionInProgress)
+    ));
+    assert!(
+        started.elapsed() >= meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT,
+        "the grant waited its bound before it refused"
+    );
+    let reviewed = review(root, "beta").await;
+    assert!(matches!(
+        grant_stock_agent_for_reviewed_installation(
+            &governed_storage(root),
+            &principals,
+            &request("a", mcp("beta", exact(&["read"]))),
+            &reviewed,
+        )
+        .await,
+        Err(StockGrantError::AdmissionInProgress)
+    ));
+    assert!(matches!(
+        revoke_stock_agent(
+            root,
+            "governed",
+            &principals,
+            "a",
+            &StockGrantSlot::Mcp("alpha".into()),
+        )
+        .await,
+        Err(StockGovernanceError::AdmissionInProgress)
+    ));
+    assert_eq!(
+        realm_state(root),
+        before,
+        "nothing was issued, selected or revoked"
+    );
+
+    hold.release();
+    let revoked = revoke_stock_agent(
+        root,
+        "governed",
+        &principals,
+        "a",
+        &StockGrantSlot::Mcp("alpha".into()),
+    )
+    .await
+    .expect("revoked once the hold ended");
+    assert_eq!(revoked.revoked, alpha.issued);
+    assert_eq!(revoked.outcome, RevocationOutcome::Revoked);
+}
+
+/// Recording the operator's selection takes the realm's fence first: under
+/// an admission's hold it refuses, typed, with the selection unchanged, and
+/// records once the hold ends.
+#[tokio::test]
+async fn record_stock_grant_selection_refuses_under_a_held_fence() {
+    let tmp = governed_realm().await;
+    let root = tmp.path();
+    let principals = principals();
+    // Two of the owner's grants, issued for another agent, recorded as the
+    // default agent's older pair (the selection names references only).
+    let operation = grant_stock_agent(
+        root,
+        "governed",
+        &principals,
+        &request("other", StockGrantTarget::Catalog),
+    )
+    .await
+    .expect("a catalog grant")
+    .issued;
+    let controller = grant_stock_agent(
+        root,
+        "governed",
+        &principals,
+        &request("other", controller(&[route('a')])),
+    )
+    .await
+    .expect("a controller grant")
+    .issued;
+    let recorded = super::super::StockGrantSelection {
+        operation,
+        controller,
+    };
+    let before = realm_state(root);
+    let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fixture_fence(root)])
+        .expect("an admission holds the realm's fence");
+    assert!(matches!(
+        super::super::record_stock_grant_selection(root, "governed", &recorded).await,
+        Err(StockGovernanceError::AdmissionInProgress)
+    ));
+    assert_eq!(realm_state(root), before, "the selection is unchanged");
+
+    hold.release();
+    super::super::record_stock_grant_selection(root, "governed", &recorded)
+        .await
+        .expect("recorded once the hold ended");
+    let refs = selection(root).await;
+    let refs = refs.agents.get(DEFAULT_STOCK_AGENT).expect("the agent");
+    assert_eq!(refs.operation.as_ref(), Some(&recorded.operation));
+    assert_eq!(refs.controller.as_ref(), Some(&recorded.controller));
 }

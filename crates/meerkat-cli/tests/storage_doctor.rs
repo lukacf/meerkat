@@ -604,3 +604,98 @@ fn global_realm_config_writes_route_to_the_user_global_doc() {
         String::from_utf8_lossy(&get.stdout)
     );
 }
+
+/// Every regular file under `dir` with its length and modification time,
+/// SQLite's `-wal`/`-shm` sidecars left out: a read-only WAL open may touch
+/// those, never a database or any other file.
+#[cfg(feature = "mob")]
+fn file_facts(dir: &Path) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+    let mut facts = std::collections::BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if name.ends_with("-wal") || name.ends_with("-shm") {
+                continue;
+            }
+            let metadata = std::fs::metadata(&path).unwrap();
+            facts.insert(path, (metadata.len(), metadata.modified().unwrap()));
+        }
+    }
+    facts
+}
+
+/// Row (RED): `rkat storage doctor` reports, for each mob database of a
+/// realm that holds identity-store rows of schema version 2 or later, one
+/// Info `identity-store-rows` finding with the counts only (the identity
+/// census sample: 10 rows, 1 archived, 2 tombstones, 4 unreadable), and
+/// none for a mob database without such rows. Info alone, so the doctor
+/// exits 0, and it changes no file.
+///
+/// RED on the old tree: the doctor reports no identity-store rows.
+#[cfg(feature = "mob")]
+#[test]
+fn identity_store_rows_are_counted_per_mob_database() {
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("realms");
+    let paths = write_manifest(&state_root, "census");
+    let mobs = paths.root.join("mobs");
+    std::fs::create_dir_all(&mobs).unwrap();
+    let seeded = mobs.join("census.db");
+    meerkat_mob::seed_identity_census_rows_for_test(&seeded).unwrap();
+    let empty = mobs.join("empty.db");
+    drop(meerkat_mob::MobStorage::persistent(&empty).unwrap());
+    let before = file_facts(&state_root);
+
+    let output = run_doctor(
+        &temp,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "storage",
+            "doctor",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an Info finding never fails the doctor\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let rows = findings_with_code(&report, "identity-store-rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the database with such rows: {report:#}"
+    );
+    assert_eq!(rows[0]["severity"], "info");
+    assert_eq!(rows[0]["realm"], "census");
+    assert_eq!(rows[0]["path"], seeded.to_str().unwrap());
+    let message = rows[0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "10 identity-store row(s) of schema version 2 or later (1 archived, 2 \
+             tombstone(s), 4 unreadable)"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains(
+            "a downgrade of this mob to such a release is supported only through the downgrade \
+             cycle (export, purge, and import after the roll-forward), and not while any remain"
+        ),
+        "{message}"
+    );
+    assert_eq!(
+        file_facts(&state_root),
+        before,
+        "the doctor changes no file of the realm"
+    );
+}

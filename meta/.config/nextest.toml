@@ -1,0 +1,119 @@
+# nextest configuration.
+#
+# `heavy-runtime`: full-`UnifiedRuntime`-boot integration binaries that each
+# spin a complete mob (actors + comms + ephemeral sessions + background drain
+# tasks) and then tear it down. Run enough of them at once and the async
+# teardown — mob stop, event drain, RPC round-trips on tight (1-2s) timeouts —
+# gets starved of CPU on a loaded runner and times out, so the tests fail on
+# *teardown* assertions (e.g. list_runs.rs:257 `shutdown.mob_stop.is_ok()`)
+# despite the behavior under test being correct. They pass 1/1 in isolation.
+#
+# Two levers, because the starvation is driven by AGGREGATE suite load (the whole
+# ~28-binary integration suite competing for CPU), not just co-running group
+# members:
+#   1. max-threads caps how many of these heavyweight tests co-run.
+#   2. retries let a test that lost the teardown-timeout race under peak load
+#      re-run — by which point most of the suite has finished, so the retry runs
+#      near-alone and the teardown completes. This is the canonical nextest
+#      answer for a load-timeout flake that passes 1/1 in isolation, and it is
+#      scoped to THIS family only (via the override), so no non-family test's
+#      intermittent failure is ever masked.
+# Neither weakens an assertion or a production timeout. This replaces the per-PR
+# "triage the list_runs/contract_009/run_flow/projected_cursor flake by running
+# it standalone" ritual with a structural fix.
+
+# A test that waits on a condition its fixture can no longer produce does not
+# fail - it wedges. One such wait (an unbounded `wait_for_gated_upsert_failure`
+# on a reset that now refuses earlier) held the whole suite at 2150/2463 with no
+# verdict at all, indefinitely, because nothing here bounded it. There are ~10
+# unbounded `wait_for_*` calls across the suite and bounding each one by hand
+# only covers the ones that have already bitten, so the ceiling is structural:
+# any test still alive after 5 x 60s is killed and reported as a timeout.
+# This is deliberately far above every legitimate test, including the
+# heavy-runtime family under peak load, so it cannot mask a slow test - it only
+# converts "hangs forever, reports nothing" into "names itself".
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[test-groups]
+heavy-runtime = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = 'package(meerkat-meta) & (binary(routing_delivery) + binary(list_runs) + binary(list_flows_run_flow) + binary(mob_events_cursor_persistence) + binary(mob_events_query_ledger) + binary(mob_events_streaming) + binary(access_control) + binary(unified_console) + binary(repair_queue_carry) + binary(meta_gateway_bootstrap) + binary(gateway_concurrent_dispatch) + binary(gateway_schedule_lease_release) + binary(gateway_exit_reason))'
+test-group = 'heavy-runtime'
+retries = 2
+
+# `gateway_exit_reason` joined 2026-09-03: same shape as
+# `gateway_schedule_lease_release` (spawns BOTH real gateway binaries, waits
+# for `meta/init`, signals or closes stdin, then reads the exit-reason
+# lines off stderr), six process boots per run.
+
+# `gateway_concurrent_dispatch` joined 2026-08-25 alongside it, and it is the
+# literal example this group's comment already cites: it fails on a TEARDOWN
+# assertion, `mob_stop` reporting "failed" with identity_authority_release
+# skipped_mob_stop_failed, under peak load - and passes 9/9 standalone in 9.8s.
+#
+# Open gap that this does NOT fix and should not be mistaken for fixing: that
+# shutdown report names the phase that blocked and carries NO typed reason, by
+# deliberate design (no error Display on a wire that crosses the SDK). So nobody
+# can diagnose WHY mob_stop failed from the report itself - only that it did.
+# Surfacing a stable reason slug is the real fix and is tracked separately; this
+# override only stops aggregate-load starvation from manufacturing the symptom.
+
+# `meta_gateway_bootstrap` joined 2026-08-25: it SPAWNS A REAL GATEWAY PROCESS
+# and waits up to 45s for it to answer meta/init, which is the most
+# starvation-prone shape in the suite - more so than the members already listed,
+# because the bound covers process start AND bootstrap. Under full-suite load all
+# three of its process-spawning tests timed out at exactly 45s in one run while
+# unrelated tests that had failed the previous run passed; standalone, all 7 pass
+# in 42.7s total. That is the aggregate-load starvation this group exists for, and
+# the alternative - raising the 45s bound - would weaken a real timeout to hide a
+# scheduling problem.
+
+# `gateway_schedule_lease_release` joined 2026-08-29. Same shape as
+# `meta_gateway_bootstrap` above and strictly heavier: it spawns a real gateway
+# process, waits for `meta/init`, then polls a SQLite row across a SIGTERM. It
+# does that once per binary, for both gateways.
+#
+# Its bounds are sized against this profile's hard ceiling, not picked for
+# comfort. `slow-timeout = { period = "60s", terminate-after = 5 }` kills any test
+# at 300s and reports a nextest timeout, which would REPLACE the test's own
+# self-describing failure ("lease still held by Some(...)" / "never held the
+# lease") with a verdict that names nothing. So the worst-case path has to fit
+# underneath it with room:
+#
+#     init answer        90s   (bootstrap's 45s x2; that bound is what timed out
+#                               under load and drove it into this group)
+#     lease acquired     60s
+#     lease released     60s
+#     process exited     20s
+#                       ----
+#     worst case        230s   against a 300s kill
+#
+# Raising any one of these past that budget trades a legible failure for an
+# illegible one. If CI ever needs more time, the honest move is a per-binary
+# slow-timeout override, not a bigger poll that gets guillotined anyway.
+
+# `access_control` joined the family 2026-07-09: its tests each boot a full
+# reference-app runtime, and under peak suite load on 4-core CI runners two
+# consecutive runs ABORTED with SIGBUS (~test 1020/1624, different tests each
+# time, 119GB disk free, passes 1/1 isolated and in the sibling same-commit
+# run) — the same aggregate-load starvation family expressed as a crash
+# rather than a teardown timeout. Retries re-run in a fresh process near-alone;
+# a deterministic crash would still fail all three attempts.
+
+# `unified_console` joined 2026-07-10: its live-snapshot test SIG10-aborted
+# twice on loaded 16-core local full-suite runs (passes 1/1 isolated and in
+# its binary) — same aggregate-load crash family as access_control.
+
+# The idle CPU gate measures the gateway's CPU-time over real 30s windows;
+# sibling tests on the same runner inflate the reading (it failed 2x on
+# GitHub's shared 2-core runners inside the parallel suite while passing solo
+# every time, including once under deliberate local load). threads-required =
+# num-cpus makes nextest schedule it EXCLUSIVELY - the in-suite equivalent of
+# the solo-run disposition protocol - instead of weakening the CPU budget,
+# which is a real production assertion (it caught the 0.8.9 wave's O(document)
+# regression).
+[[profile.default.overrides]]
+filter = 'package(meerkat-meta) & test(converged_idle_gateway_consumes_near_zero_cpu)'
+threads-required = "num-cpus"

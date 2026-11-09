@@ -2,6 +2,33 @@ use crate::error::LlmError;
 use crate::types::{LlmDoneOutcome, LlmEvent, LlmStream};
 use futures::StreamExt;
 
+/// `stream` with the error it ends with (an `Err` item, or a `Done` whose
+/// outcome is an error) passed through `authorizer`'s
+/// [`meerkat_core::HttpAuthorizer::redact_response_diagnostic`]
+/// ([`LlmError::redact_diagnostics`]): the error keeps its class and loses
+/// any credential the provider echoed. Successful content is left as it is.
+/// Without an authorizer, `stream` is returned unchanged.
+pub fn redact_stream_diagnostics<'a>(
+    stream: LlmStream<'a>,
+    authorizer: Option<&'a dyn meerkat_core::HttpAuthorizer>,
+) -> LlmStream<'a> {
+    let Some(authorizer) = authorizer else {
+        return stream;
+    };
+    Box::pin(stream.map(move |mut item| {
+        match &mut item {
+            Err(error)
+            | Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => {
+                error.redact_diagnostics(|message| authorizer.redact_response_diagnostic(message));
+            }
+            Ok(_) => {}
+        }
+        item
+    }))
+}
+
 pub fn ensure_terminal_done(mut stream: LlmStream<'_>) -> LlmStream<'_> {
     Box::pin(async_stream::stream! {
         while let Some(item) = stream.next().await {
@@ -110,6 +137,181 @@ fn decode_stream_line(line: Vec<u8>) -> Result<String, LlmError> {
             error.utf8_error().valid_up_to()
         ),
     })
+}
+
+/// One step of an [`SseEventReader`]: a complete line that ended no event,
+/// or the data of an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SseStep {
+    /// A complete line that ended no event: a field line, a comment, or a
+    /// blank line with no `data` field before it.
+    Line,
+    /// The data of one event: the values of its `data` fields joined with
+    /// `\n`.
+    Event(String),
+}
+
+/// Reads a Server-Sent Events body as the format defines its events: an
+/// event is the lines up to a blank line, and its data is the values of its
+/// `data` fields joined with `\n` (each value without the one space that may
+/// follow the colon). A blank line with no `data` field before it ends no
+/// event. Comments (`:`) and other fields (`event`, `id`, `retry`) are read
+/// and end nothing.
+///
+/// Lines end with `\n`; whitespace around a line is ignored, which drops the
+/// `\r` of a `\r\n` (a lone `\r` does not end a line). Lines decode as strict
+/// UTF-8 ([`Utf8LineBuffer`]). Once the body ended ([`Self::end`]), its last
+/// line counts even without a line break, and an event whose blank line
+/// never came is still read.
+#[derive(Debug, Default)]
+pub struct SseEventReader {
+    lines: Utf8LineBuffer,
+    /// The data of the event being read, once it has a `data` field.
+    data: Option<String>,
+    ended: bool,
+}
+
+impl SseEventReader {
+    /// An empty reader with room for `capacity` bytes.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            lines: Utf8LineBuffer::with_capacity(capacity),
+            data: None,
+            ended: false,
+        }
+    }
+
+    /// Append one network chunk.
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.lines.push(chunk);
+    }
+
+    /// The body ended: [`Self::next_step`] then reads its last line and the event
+    /// still open.
+    pub fn end(&mut self) {
+        self.ended = true;
+    }
+
+    /// The next step, or `None` until more of the body arrives (after
+    /// [`Self::end`]: once everything is read). A line that is not valid
+    /// UTF-8 is a [`LlmError::StreamParseError`].
+    pub fn next_step(&mut self) -> Option<Result<SseStep, LlmError>> {
+        if let Some(line) = self.lines.next_line() {
+            return Some(line.map(|line| self.read_line(&line)));
+        }
+        if !self.ended {
+            return None;
+        }
+        match self.lines.finish() {
+            Err(error) => return Some(Err(error)),
+            Ok(Some(line)) => return Some(Ok(self.read_line(&line))),
+            Ok(None) => {}
+        }
+        self.data.take().map(|data| Ok(SseStep::Event(data)))
+    }
+
+    fn read_line(&mut self, line: &str) -> SseStep {
+        let line = line.trim();
+        if line.is_empty() {
+            return self.data.take().map_or(SseStep::Line, SseStep::Event);
+        }
+        if line.starts_with(':') {
+            return SseStep::Line;
+        }
+        let (field, value) = line.split_once(':').map_or((line, ""), |(field, value)| {
+            (field, value.strip_prefix(' ').unwrap_or(value))
+        });
+        if field == "data" {
+            match &mut self.data {
+                Some(data) => {
+                    data.push('\n');
+                    data.push_str(value);
+                }
+                None => self.data = Some(value.to_owned()),
+            }
+        }
+        SseStep::Line
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod sse_event_tests {
+    use super::*;
+
+    /// Every step of `body` read in chunks of `chunk_len` bytes, the end of
+    /// the body included.
+    fn read(body: &str, chunk_len: usize) -> Vec<SseStep> {
+        let mut reader = SseEventReader::with_capacity(8);
+        let mut steps = Vec::new();
+        for chunk in body.as_bytes().chunks(chunk_len) {
+            reader.push(chunk);
+            while let Some(step) = reader.next_step() {
+                steps.push(step.expect("a valid line"));
+            }
+        }
+        reader.end();
+        while let Some(step) = reader.next_step() {
+            steps.push(step.expect("a valid line"));
+        }
+        steps
+    }
+
+    fn events(steps: &[SseStep]) -> Vec<&str> {
+        steps
+            .iter()
+            .filter_map(|step| match step {
+                SseStep::Event(data) => Some(data.as_str()),
+                SseStep::Line => None,
+            })
+            .collect()
+    }
+
+    /// An event ends at its blank line; its `data` fields join with `\n`;
+    /// comments, other fields and a blank line with no data end nothing;
+    /// `\r\n` line ends read like `\n`. The chunking never matters.
+    #[test]
+    fn events_end_at_blank_lines_and_join_their_data_lines() {
+        let body =
+            ": keepalive\n\nevent: delta\ndata: {\"a\":\ndata:1}\n\nid: 7\r\ndata: [DONE]\r\n\r\n";
+        for chunk_len in 1..=body.len() {
+            let steps = read(body, chunk_len);
+            assert_eq!(
+                events(&steps),
+                vec!["{\"a\":\n1}", "[DONE]"],
+                "chunks of {chunk_len} bytes"
+            );
+            // One step per line, and nothing more: the body ends on a line
+            // break with no event open.
+            assert_eq!(steps.len(), body.matches('\n').count());
+        }
+    }
+
+    /// At the end of the body the last line counts without its line break,
+    /// and an event whose blank line never came is read.
+    #[test]
+    fn the_end_of_the_body_reads_the_last_line_and_the_open_event() {
+        assert_eq!(
+            events(&read("data: one\n\ndata: two", 4)),
+            vec!["one", "two"]
+        );
+        assert_eq!(events(&read("data: one\n", 4)), vec!["one"]);
+        assert_eq!(events(&read(": only a comment", 4)), Vec::<&str>::new());
+    }
+
+    /// An empty `data` field is an event with empty data; a line that is not
+    /// valid UTF-8 is a parse error.
+    #[test]
+    fn empty_data_is_an_event_and_invalid_utf8_is_an_error() {
+        assert_eq!(events(&read("data:\n\n", 3)), vec![""]);
+        let mut reader = SseEventReader::default();
+        reader.push(b"data: \xFF\n");
+        assert!(matches!(
+            reader.next_step(),
+            Some(Err(LlmError::StreamParseError { .. }))
+        ));
+    }
 }
 
 #[cfg(test)]

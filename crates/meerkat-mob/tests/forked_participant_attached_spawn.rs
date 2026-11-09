@@ -39,7 +39,7 @@ use support::{
     create_controlling_mob_with_customizer, wait_until,
 };
 
-const TTL: Duration = Duration::from_secs(600);
+const TTL: Duration = Duration::from_mins(10);
 
 fn identity(name: &str) -> AgentIdentity {
     AgentIdentity::from(name)

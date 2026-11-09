@@ -263,6 +263,10 @@ pub(super) struct ScriptedBuilder {
 impl SessionAgentBuilder for ScriptedBuilder {
     type Agent = FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.factory.session_comms_identity_root()
+    }
+
     async fn build_agent(
         &self,
         request: &CreateSessionRequest,
@@ -2381,6 +2385,7 @@ fn peer_message(body: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(PeerConvention::Message),
         content: body.into(),

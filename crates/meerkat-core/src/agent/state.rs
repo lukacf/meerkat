@@ -1157,6 +1157,49 @@ where
             .then(|| Arc::clone(controller.client()))
     }
 
+    /// `provider_params` under the session's provider-native tool policy:
+    /// `DisableAll` strips every provider-native tool from the request's own
+    /// copy, whichever attempt sends it (a turn's first request, a retry or a
+    /// fallback model's attempt), so no native tool rides any request.
+    fn provider_params_under_native_tool_policy(
+        &self,
+        provider_params: Option<ProviderParamsOverride>,
+    ) -> Option<ProviderParamsOverride> {
+        let mut provider_params = provider_params;
+        if matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) && let Some(params) = provider_params.as_mut()
+        {
+            params.clear_provider_native_tools();
+        }
+        provider_params
+    }
+
+    /// The per-call provider params of a compaction summary request. Under a
+    /// `DisableAll` provider-native tool policy, it is the session's provider
+    /// tag with every provider-native tool stripped, so the client's own
+    /// build-time tag (which may name native search) does not apply.
+    /// Otherwise `None`: the client uses its own.
+    fn compaction_provider_params(&self) -> Option<ProviderParamsOverride> {
+        if !matches!(
+            self.config.provider_native_tools,
+            crate::ProviderNativeToolPolicy::DisableAll
+        ) {
+            return None;
+        }
+        let tag = match self.config.provider_params.effective_params() {
+            Ok(params) => params.provider_tag,
+            Err(_) => self.config.provider_params.params.provider_tag.clone(),
+        }?;
+        let mut params = ProviderParamsOverride {
+            provider_tag: Some(tag),
+            ..ProviderParamsOverride::default()
+        };
+        params.clear_provider_native_tools();
+        Some(params)
+    }
+
     fn prepare_authorized_model_attempt(
         &self,
         messages: Arc<Vec<Message>>,
@@ -1166,6 +1209,7 @@ where
         provider_params: Option<ProviderParamsOverride>,
         authorization: Option<crate::LlmRequestAuthorization>,
     ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+        let provider_params = self.provider_params_under_native_tool_policy(provider_params);
         if authorization.as_ref().is_some_and(|authorization| {
             authorization.usage()
                 == crate::authorization::ModelAuthorizationUse::ControllerInference
@@ -1635,6 +1679,7 @@ where
                 }
                 self.latest_run_checkpoint_receipt = Some(next);
                 self.note_tail_carries_pending_compaction();
+                self.note_operator_instruction_checkpoint();
                 // The checkpoint moved the durable head over every rewrite the
                 // run made, so the live history retires to the retention now
                 // instead of at the next compaction. The boundary commit that
@@ -2168,6 +2213,7 @@ where
         }
         self.latest_run_checkpoint_receipt = Some(receipt);
         self.note_tail_carries_pending_compaction();
+        self.note_operator_instruction_checkpoint();
         self.round_commits.rewritten_since_base = false;
         self.round_commits.rebased = true;
         Ok(())
@@ -2310,6 +2356,9 @@ where
             })?;
         self.apply_llm_request_policy(pending.request_policy);
         self.active_model_profile = Some(pending.target_profile);
+        // A fallback witness is judged as the target's binding serves it:
+        // the operator-instruction lowering derives from it.
+        self.operator_instruction_lowering = None;
         self.session = pending.next_session;
         self.tool_application_observations
             .refresh(self.session.messages());
@@ -2891,6 +2940,9 @@ where
             }
             self.apply_llm_request_policy(switch.request_policy);
             self.active_model_profile = Some(switch.target_profile);
+            // A fallback witness is judged as the target's binding serves it:
+            // the operator-instruction lowering derives from it.
+            self.operator_instruction_lowering = None;
             self.session = next_session;
             self.tool_application_observations
                 .refresh(self.session.messages());
@@ -3877,14 +3929,19 @@ where
                     let reprepare = error.operation_refusal().is_some_and(|refusal| {
                         refusal.kind() == crate::OperationRefusalKind::ReprepareRequired
                     });
-                    // An owner change still in progress on this work's own
-                    // publication refuses every rebuild until it completes:
-                    // wait for it (bounded), then rebuild without spending
-                    // the one rebuild below. Nothing is decided meanwhile.
+                    // A refusal to rebuild is a stale read of this work's own
+                    // publication. An owner change still in progress refuses
+                    // every rebuild until it completes, and one that completed
+                    // while the request was prepared leaves it stale with none
+                    // in progress: wait after the stale read (bounded: for the
+                    // change, or with none one backoff step), then rebuild
+                    // without spending the one rebuild below. Nothing is
+                    // decided meanwhile.
                     if reprepare
                         && let Some(work) = self.tool_dispatch_context.work_authorization().cloned()
-                        && let Some(wait) = owner_change_churn
-                            .wait_for_settled_change(
+                    {
+                        let wait = owner_change_churn
+                            .wait_after_stale_read(
                                 work.authorization().as_ref(),
                                 self.budget.remaining_duration(),
                                 "model_request",
@@ -3892,8 +3949,7 @@ where
                                     .as_ref()
                                     .map(crate::LlmRequestAuthorization::operation_id),
                             )
-                            .await
-                    {
+                            .await;
                         if let Some(exceeded) = self.budget.observe().exceeded() {
                             return Err(exceeded.to_agent_error());
                         }
@@ -3958,9 +4014,15 @@ where
     }
 
     /// A resumed session whose active identity is a model-fallback target
-    /// re-admits that fallback before the next attempt. Synchronous and kept
-    /// out of line: the session-metadata decode and its temporaries never sit
-    /// in the retry loop's poll frame.
+    /// re-admits that fallback before the next attempt. It judges with the
+    /// active model profile. After a resumed build that is the catalog
+    /// witness the builder seeds, which names no binding, so its check of the
+    /// request's operator-instruction entry rows reads the model row's
+    /// lowering, not the one the target's backend serves. The resumed build
+    /// itself refuses, before its client is built, a session whose own entry
+    /// rows that backend cannot carry (`AgentFactory::build_agent`).
+    /// Synchronous and kept out of line: the session-metadata decode and its
+    /// temporaries never sit in the retry loop's poll frame.
     #[inline(never)]
     fn admit_fallback_origin_resume(
         &self,
@@ -4468,6 +4530,50 @@ where
         })
     }
 
+    /// A run's terminal effect (completed, failed or cancelled) ends the
+    /// run's run-scoped tool grants through the grant gate: the session's run
+    /// is over, so nothing may use them again. Best effort: a failure is
+    /// logged, and the grants still admit no use of a later run, whose first
+    /// use ends them.
+    async fn end_run_scoped_tool_grants(&self, effect: &TurnExecutionEffect) {
+        let Some(run_id) = Self::run_ended_by(effect) else {
+            return;
+        };
+        let Some(gate) = self.tool_grant_gate.as_ref() else {
+            return;
+        };
+        if let Err(refusal) = gate.end_run(run_id).await {
+            tracing::warn!(
+                error = %refusal,
+                "the run's end could not end its run-scoped tool grants"
+            );
+        }
+    }
+
+    /// Record the run a dropped run's terminal effect ended, whose
+    /// run-scoped tool grants the cancel's caller ends after it
+    /// ([`Self::end_dropped_run_tool_grants`]): the cancel that realizes the
+    /// effect is synchronous.
+    pub(super) fn owe_dropped_run_tool_grant_end(&mut self, effect: &TurnExecutionEffect) {
+        if self.tool_grant_gate.is_some()
+            && let Some(run_id) = Self::run_ended_by(effect)
+        {
+            self.dropped_run_tool_grants_owed = Some(run_id.clone());
+        }
+    }
+
+    /// The run a run's terminal effect (completed, failed or cancelled)
+    /// ends.
+    fn run_ended_by(effect: &TurnExecutionEffect) -> Option<&crate::RunId> {
+        let (TurnExecutionEffect::RunCompleted { run_id }
+        | TurnExecutionEffect::RunFailed { run_id, .. }
+        | TurnExecutionEffect::RunCancelled { run_id }) = effect
+        else {
+            return None;
+        };
+        Some(run_id)
+    }
+
     /// Charge one compaction summary call to the session and the budget, and
     /// to the run's request rows when a provider request backs it. Its
     /// accounting identity is routed, not repaired: the counters are charged
@@ -4527,6 +4633,52 @@ where
         Box::pin(self.execute_turn_effects_unboxed(transition, turn_count, event_tx))
     }
 
+    /// Consume a host's compaction request at the compaction check being
+    /// evaluated, and answer the run whose check consumed it.
+    ///
+    /// MeerkatMachine owns the request (`RequestCompaction`) and decides
+    /// whether this check consumes it (`ConsumeCompactionRequest`): only the
+    /// current run's check, while its turn calls the model. An agent with no
+    /// turn-state authority or no started run holds no request.
+    fn consume_compaction_request(&self) -> Result<Option<crate::lifecycle::RunId>, AgentError> {
+        let (Some(handle), Some(run_id)) = (
+            self.turn_state_handle.as_deref(),
+            self.runtime_started_run_id.clone(),
+        ) else {
+            return Ok(None);
+        };
+        let consumed = handle
+            .consume_compaction_request(run_id.clone())
+            .map_err(|err| {
+                AgentError::InternalError(format!(
+                    "runtime turn-state handle rejected ConsumeCompactionRequest: {err}"
+                ))
+            })?;
+        Ok(consumed.then_some(run_id))
+    }
+
+    /// Publish that the compaction check which consumed a host's compaction
+    /// request (for the run `run_id`) compacted nothing, and why, so the
+    /// host can tell its request was answered without a compaction.
+    async fn publish_requested_compaction_skipped(
+        &self,
+        run_id: crate::lifecycle::RunId,
+        reason: crate::event::RequestedCompactionSkipReason,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) {
+        if !crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx.as_ref(),
+            AgentEvent::RequestedCompactionSkipped { run_id, reason },
+        )
+        .await
+        {
+            tracing::warn!(
+                "compaction event stream receiver dropped before RequestedCompactionSkipped"
+            );
+        }
+    }
+
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects emitted on CallingLlm entry.
     ///
@@ -4539,14 +4691,16 @@ where
     async fn execute_turn_effects_unboxed(
         &mut self,
         transition: &TurnExecutionTransition,
-        // Retained in the signature as the turn context effects execute within;
-        // no longer consumed since compaction indexing stopped using the turn
-        // as a source-identity proxy (#152).
-        _turn_count: u32,
+        // The turn context effects execute within. A compaction reads it for
+        // one fact only: whether it runs before the run's first model
+        // response, where an operator-instruction fold may apply the
+        // recorded target.
+        turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<(), AgentError> {
         for effect in &transition.effects {
             self.execute_turn_terminal_effect(effect)?;
+            self.end_run_scoped_tool_grants(effect).await;
             if let TurnExecutionEffect::CheckCompaction = effect {
                 let Some(current_boundary_index) = self.pending_compaction_boundary_index.take()
                 else {
@@ -4644,9 +4798,32 @@ where
                                 Some(crate::agent::compact::CompactionScope::Whole)
                             )
                         });
-                    if compactor.should_compact(&ctx) {
+                    // A host's compaction request is consumed by this check:
+                    // the machine answers whether this check compacts at the
+                    // host's request, without asking the compactor's trigger
+                    // (its thresholds and cadence). The compaction's own
+                    // rules below still hold, and the session's first-ever
+                    // check has nothing to compact: a request it consumes
+                    // compacts nothing. A check that consumes a request and
+                    // compacts nothing publishes `RequestedCompactionSkipped`
+                    // with the reason; one that compacts publishes the
+                    // ordinary compaction events.
+                    let request_consumed_by = self.consume_compaction_request()?;
+                    let compact_on_request =
+                        request_consumed_by.is_some() && current_boundary_index > 0;
+                    if let Some(run_id) = request_consumed_by.as_ref() {
+                        tracing::info!(
+                            ?run_id,
+                            compacts = compact_on_request,
+                            "a compaction request of the session's host was consumed at this check"
+                        );
+                    }
+                    if compact_on_request || compactor.should_compact(&ctx) {
                         // A writer past its self-fence window sends no
-                        // summarization request either.
+                        // summarization request either. A host's request
+                        // this check consumed goes with a refusal here: the
+                        // run stops (or is suspended) at this check, and
+                        // nothing is compacted or published for it.
                         self.check_dispatch_fence().await?;
                         // A run in flight keeps its request and its newest
                         // round verbatim: the rows before it are folded
@@ -4662,6 +4839,17 @@ where
                                 run_id = ?self.runtime_started_run_id,
                                 "compaction skipped: nothing to fold outside the open run's request and newest round"
                             );
+                            // A host's request this check consumed is
+                            // answered first, so a failed cadence save below
+                            // still reports it: nothing was compacted.
+                            if let Some(run_id) = request_consumed_by {
+                                self.publish_requested_compaction_skipped(
+                                    run_id,
+                                    crate::event::RequestedCompactionSkipReason::NothingToFold,
+                                    event_tx,
+                                )
+                                .await;
+                            }
                             self.compaction_cadence
                                 .last_compaction_attempt_boundary_index =
                                 Some(current_boundary_index);
@@ -4749,6 +4937,15 @@ where
                                 }),
                             None => Ok(()),
                         };
+                        // The operator-instruction fold this rewrite carries.
+                        // It applies the recorded target only before the
+                        // first model response of a run that started fresh
+                        // (not from a run cursor); the session-document
+                        // authority decides.
+                        let instruction_fold_at_run_start =
+                            self.run_started_fresh && turn_count == 0;
+                        let instruction_lowering = self.operator_instruction_lowering();
+                        let instruction_run_id = self.runtime_started_run_id.clone();
                         let compaction_source = externalized.and_then(|()| {
                             self.session
                                 .transcript_content_digest()
@@ -4775,12 +4972,43 @@ where
                                         )
                                     }),
                             }
+                        })
+                        .and_then(|(revision, observations, prefix)| {
+                            self.session
+                                .authorize_instruction_fold(
+                                    instruction_fold_at_run_start,
+                                    instruction_lowering,
+                                    instruction_run_id,
+                                )
+                                .map(|fold| (revision, observations, prefix, fold))
+                                .map_err(|error| {
+                                    format!("operator instructions cannot be folded: {error}")
+                                })
+                        })
+                        // The superseded instruction activation bodies this
+                        // rewrite retires; the session-document authority
+                        // decides.
+                        .and_then(|(revision, observations, prefix, fold)| {
+                            self.session
+                                .authorize_activation_body_retirement()
+                                .map(|retirement| (revision, observations, prefix, fold, retirement))
+                                .map_err(|error| {
+                                    format!(
+                                        "superseded instruction activation bodies cannot be retired: {error}"
+                                    )
+                                })
                         });
                         // The summary request's own operation, so a refusal
                         // the host observes names what the audit records.
                         let summary_operation = crate::OperationId::new();
                         let outcome = match compaction_source {
-                            Ok((parent_revision, observation_source, prefix_messages)) => {
+                            Ok((
+                                parent_revision,
+                                observation_source,
+                                prefix_messages,
+                                instruction_fold,
+                                activation_retirement,
+                            )) => {
                                 // Compaction of the admitted controller's own
                                 // context is its housekeeping: it runs on the
                                 // retained controller client (still authorized
@@ -4819,6 +5047,7 @@ where
                                     request_pressure: provider_request_pressure,
                                     parent_revision,
                                     summarization_budget,
+                                    provider_params: self.compaction_provider_params(),
                                     wait_report: self.refusal_wait_report(
                                         self.tool_dispatch_context.run_id().cloned(),
                                         crate::authorization::OperationRefusalSurface::Compaction,
@@ -4840,6 +5069,8 @@ where
                                         ),
                                         _ => crate::agent::compact::FoldedCalls::default(),
                                     },
+                                    instruction_fold,
+                                    activation_retirement,
                                 };
                                 // The compactor's warnings (a bounded source,
                                 // a rewrite keeping no complete turn) name the
@@ -5005,16 +5236,46 @@ where
                                 );
                             }
                             let retention = compactor.transcript_history_retention();
+                            let instruction_fold = outcome.instruction_fold;
+                            let activation_retirement = outcome.activation_retirement;
                             let prepared_rewrite = compacted_session
                                 .replace_messages_for_compaction_internal(
                                     outcome.new_messages,
                                     &outcome.rewrite_authority,
                                 )
                                 .and_then(|commit| {
-                                    // Bound the graph in the same prepared
-                                    // value: retired bodies never reach a
-                                    // persisted document.
                                     if commit.is_some() {
+                                        // The operator-instruction fold's
+                                        // target state (its entry-sequence
+                                        // high-water, the pending bodies it
+                                        // applied) goes with the rewrite
+                                        // that inserted its snapshot.
+                                        if let Some(fold) = instruction_fold.as_ref() {
+                                            compacted_session
+                                                .record_instruction_fold(fold)
+                                                .map_err(|error| {
+                                                    crate::TranscriptEditError::HistoryStateMalformed(
+                                                        error.to_string(),
+                                                    )
+                                                })?;
+                                        }
+                                        // A rewrite that retired activation
+                                        // bodies records the envelope-5
+                                        // marker with it, so a release that
+                                        // cannot read a retired body refuses
+                                        // the document typed.
+                                        if let Some(retirement) = activation_retirement.as_ref() {
+                                            compacted_session
+                                                .record_activation_body_retirement(retirement)
+                                                .map_err(|error| {
+                                                    crate::TranscriptEditError::HistoryStateMalformed(
+                                                        error.to_string(),
+                                                    )
+                                                })?;
+                                        }
+                                        // Bound the graph in the same prepared
+                                        // value: retired bodies never reach a
+                                        // persisted document.
                                         compacted_session.retire_transcript_history(retention)?;
                                     }
                                     Ok(commit)
@@ -5179,6 +5440,12 @@ where
                                                             messages_after: outcome.messages_after,
                                                             summary_source: Some(outcome.summary_source),
                                                             estimated_history_tokens_after: history_tokens_after,
+                                                            // Observed when the runtime
+                                                            // commits the compaction, not now.
+                                                            instruction_snapshot: instruction_fold
+                                                                .as_ref()
+                                                                .and_then(crate::session::InstructionFold::snapshot)
+                                                                .and_then(|row| row.instruction_entry.clone()),
                                                         };
                                                         match compacted_session
                                                             .add_compaction_projection_intent(intent)
@@ -5420,8 +5687,43 @@ where
                                         "compaction event stream receiver dropped before CompactionCompleted"
                                     );
                                 }
+                                // The snapshot entry the fold inserted is in
+                                // the session's transcript now: observe it
+                                // when the rewrite is committed here (the
+                                // session's instruction read stays the
+                                // authority). A staged rewrite is observed
+                                // when the runtime commits it
+                                // (`finalize_committed_compaction_projections`),
+                                // so a rolled-back fold is never observed.
+                                if emit_completed_now
+                                    && let Some(entry) = instruction_fold
+                                        .as_ref()
+                                        .and_then(crate::session::InstructionFold::snapshot)
+                                        .and_then(|row| row.instruction_entry.as_ref())
+                                {
+                                    let _ = crate::event_tap::tap_emit(
+                                        &self.event_tap,
+                                        event_tx.as_ref(),
+                                        AgentEvent::operator_instructions_applied(
+                                            self.session.id().clone(),
+                                            entry,
+                                        ),
+                                    )
+                                    .await;
+                                }
                             }
                         }
+                    } else if let Some(run_id) = request_consumed_by {
+                        // The check consumed a host's request and, before the
+                        // session's first model request, has nothing to
+                        // compact: the request is answered without a
+                        // compaction.
+                        self.publish_requested_compaction_skipped(
+                            run_id,
+                            crate::event::RequestedCompactionSkipReason::FirstModelRequest,
+                            event_tx,
+                        )
+                        .await;
                     }
                 }
                 let cadence = self.compaction_cadence.clone();
@@ -5775,6 +6077,22 @@ where
                         }
                     )
                 });
+        // The order the compactions were staged in: the session lists its
+        // intents in that order, while the runtime store's outbox names their
+        // projections in its own (digest) order. Their completions, and the
+        // snapshots their folds inserted, publish in staging order, so the
+        // published entry sequences strictly increase.
+        let staging_order = self
+            .session
+            .compaction_projection_intents()
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to read the session's compaction projection intents: {error}"
+                ))
+            })?
+            .into_iter()
+            .map(|intent| intent.projection)
+            .collect::<Vec<_>>();
         let mut next_session = self.session.clone();
         let mut completed_intents = Vec::new();
         for projection in projections {
@@ -5799,6 +6117,12 @@ where
                 completed_intents.push(intent);
             }
         }
+        completed_intents.sort_by_key(|intent| {
+            staging_order
+                .iter()
+                .position(|projection| *projection == intent.projection)
+                .unwrap_or(usize::MAX)
+        });
         self.session = next_session;
         self.tool_application_observations
             .refresh(self.session.messages());
@@ -5830,6 +6154,16 @@ where
                     revision = intent.projection.revision(),
                     "compaction event stream receiver dropped before committed CompactionCompleted"
                 );
+            }
+            // The operator-instruction snapshot the compaction's fold
+            // inserted is in effect from this commit on.
+            if let Some(entry) = intent.instruction_snapshot.as_ref() {
+                let _ = crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    self.default_event_tx.as_ref(),
+                    AgentEvent::operator_instructions_applied(self.session.id().clone(), entry),
+                )
+                .await;
             }
         }
         let live_transaction_completed =
@@ -6545,15 +6879,22 @@ where
         // left by another run, so a stale request never leaks into this run.
 
         // --- Authority lifecycle: consume the generated primitive start ---
+        // A run id a run start reserved for its operator-instruction entry
+        // belongs to this run, whichever source names it: no later run
+        // adopts it.
+        let reserved_run_id = self.run_start_reserved_run_id.take();
         let run_id = if let Some(run_id) = self.started_primitive_run_from_authority()? {
             run_id
         } else {
             let run_id = match resumed.as_ref() {
                 Some(start) => start.cursor.run_id.clone(),
+                // The run its run start named in an operator-instruction
+                // entry, when it reserved one, then a new one.
                 None => self
                     .turn_state_handle
                     .as_deref()
                     .and_then(|handle| handle.snapshot().active_run_id)
+                    .or(reserved_run_id)
                     .unwrap_or_else(|| RunId(uuid::Uuid::new_v4())),
             };
             self.apply_turn_input(TurnExecutionInput::StartConversationRun {
@@ -6566,6 +6907,10 @@ where
             })?;
             run_id
         };
+        // The run started: an operator-instruction entry its run start
+        // applied names a run that ran. The entry's observation is published
+        // once the run's start is.
+        let operator_instructions_applied = self.note_operator_instruction_run_started();
         // A provisional receipt belongs to exactly one run. Clear any
         // zero-checkpoint predecessor synchronously once the fresh run
         // identity is known, before the first suspension point, so service
@@ -6589,6 +6934,10 @@ where
             }
         };
         self.runtime_started_run_id = Some(run_id.clone());
+        // A compaction before this run's first model response folds
+        // operator instructions at the run's start only when the run starts
+        // fresh, not from a run cursor.
+        self.run_started_fresh = resumed.is_none();
         self.tool_dispatch_context.bind_run_id(run_id.clone());
         match resumed.as_ref() {
             Some((cursor, _)) => self.resume_round_commits(cursor),
@@ -6634,6 +6983,12 @@ where
                     self.emit_run_started_event(input, event_tx.as_ref()).await;
                 }
             }
+        }
+        // The delta entry this run's start appended is in its model context
+        // from its first request: observe it (the session's instruction read
+        // stays the authority).
+        if let Some(applied) = operator_instructions_applied {
+            let _ = crate::event_tap::tap_emit(&self.event_tap, event_tx.as_ref(), *applied).await;
         }
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
@@ -7607,6 +7962,141 @@ where
         ctx.tool_call_count += 1;
         Ok(Some(async_ops))
     }
+    /// The boundary's extension of the grant gate: for every MCP server among
+    /// the dispatcher's tools that the gate gates and whose names it does not
+    /// all gate yet, gate them (`ExtendToolGrantGate`). Answers the view the
+    /// grants are adjudicated over (the machine's gated names after the
+    /// extension, and each gated server's names now, less those of a server
+    /// whose extension the owner refused) and the last refused server.
+    fn extend_tool_grant_gate_at_boundary(
+        &self,
+        dispatcher_tools: &[Arc<ToolDef>],
+    ) -> (crate::tool_grant::GatedToolView, Option<String>) {
+        let Ok(visibility_state) = self.tool_scope.visibility_state() else {
+            return (crate::tool_grant::GatedToolView::default(), None);
+        };
+        let mut server_names: BTreeMap<String, BTreeSet<crate::types::ToolName>> = BTreeMap::new();
+        for tool in dispatcher_tools {
+            let Some(provenance) = tool.provenance.as_ref() else {
+                continue;
+            };
+            if provenance.kind == crate::types::ToolSourceKind::Mcp
+                && visibility_state.tool_grant_gates_server(provenance.source_id.as_str())
+            {
+                server_names
+                    .entry(provenance.source_id.as_str().to_owned())
+                    .or_default()
+                    .insert(tool.name.clone());
+            }
+        }
+        let mut refused = None;
+        server_names.retain(|server, names| {
+            if names
+                .iter()
+                .all(|name| visibility_state.tool_grant_gated_names.contains(name))
+            {
+                return true;
+            }
+            match self
+                .tool_scope
+                .extend_tool_grant_gate(server, names.clone())
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        server = server.as_str(),
+                        "the visibility owner refused to gate a gated MCP server's tools"
+                    );
+                    refused = Some(server.clone());
+                    false
+                }
+            }
+        });
+        let gated = self
+            .tool_scope
+            .visibility_state()
+            .map(|visibility_state| visibility_state.tool_grant_gated_names)
+            .unwrap_or_default();
+        (
+            crate::tool_grant::GatedToolView::new(gated, server_names),
+            refused,
+        )
+    }
+
+    /// Boundary step: the grant gate gates the names each gated MCP server
+    /// provides now (`ExtendToolGrantGate`), then opens the gated names a
+    /// live grant admits now, in the run this boundary belongs to. An
+    /// extension the visibility owner refuses leaves that server's names out
+    /// of what the boundary opens (they stay hidden and gated by their
+    /// provenance) and warns. A gate that cannot read its grants, or whose
+    /// open set the visibility owner refuses, closes every gated name and
+    /// warns. The run goes on, and the next boundary tries again.
+    async fn apply_tool_grant_open_set_at_boundary(
+        &mut self,
+        ctx: &mut CallingLlmTurnCtx<'_>,
+        gate: &crate::tool_grant::ToolGrantGate,
+        dispatcher_tools: &[Arc<ToolDef>],
+    ) {
+        let (view, refused_extension) = self.extend_tool_grant_gate_at_boundary(dispatcher_tools);
+        let failure = match gate.open_names(&view, Some(ctx.run_id)).await {
+            Ok(open) => self
+                .tool_scope
+                .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
+                .err()
+                .map(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        "the visibility owner refused the tool grant open set"
+                    );
+                    "the tool grant open set was refused".to_string()
+                }),
+            Err(refusal) => {
+                tracing::warn!(
+                    error = %refusal,
+                    "tool grants could not be read at the model-request boundary"
+                );
+                Some(refusal.code().to_string())
+            }
+        };
+        let failure = match (failure, refused_extension) {
+            (Some(failure), _) => {
+                // The empty set is within every gate.
+                if let Err(error) = self.tool_scope.apply_tool_grant_open_set(BTreeSet::new()) {
+                    tracing::warn!(error = %error, "failed to close the tool grant gate");
+                }
+                failure
+            }
+            (None, Some(server)) => {
+                format!("the tool grant gate could not gate the MCP server '{server}'")
+            }
+            (None, None) => return,
+        };
+        let status_info = ToolConfigChangeStatus::warning_failed_closed(format!(
+            "tool grants unavailable ({failure}); tools available by grant stay closed"
+        ));
+        let payload = ToolConfigChangedPayload::new(
+            ToolConfigChangeOperation::Reload,
+            "tool_grants",
+            status_info,
+        )
+        .with_applied_at_turn(Some(ctx.turn_count))
+        .with_domain(Some(ToolConfigChangeDomain::ToolScope));
+        emit_phase_event!(
+            self,
+            ctx,
+            AgentEvent::ToolConfigChanged {
+                payload: payload.clone(),
+            }
+        );
+        self.session.push(synthetic_notice_block_message(
+            SystemNoticeKind::ToolScopeWarning,
+            "Tool grants could not be checked; tools available by grant stay closed until the next boundary."
+                .to_string(),
+            crate::types::SystemNoticeBlock::ToolConfig { payload },
+        ));
+    }
+
     /// Boundary step 4: apply tool scope staged updates atomically at
     /// the CallingLlm boundary and project the visible tool set.
     async fn apply_calling_llm_tool_scope(
@@ -7644,6 +8134,14 @@ where
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
+            // The grant gate gates each gated server's names and opens the
+            // gated names a live grant admits before the staged visibility
+            // promotes, so the projected set and its change event include
+            // them.
+            if let Some(gate) = self.tool_grant_gate.clone() {
+                self.apply_tool_grant_open_set_at_boundary(ctx, &gate, &dispatcher_tools)
+                    .await;
+            }
             let apply_result = match self.tool_scope.promote_staged_visibility() {
                 Ok(visibility_state) => {
                     if let Some(previous_visibility_state) = previous_visibility_state.as_ref() {
@@ -7707,17 +8205,51 @@ where
                         .iter()
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    let hidden_deferred_names = if matches!(catalog_mode, ToolCatalogMode::Deferred)
-                    {
-                        current_catalog
-                            .as_ref()
-                            .map(|catalog| {
-                                hidden_deferred_catalog_names(catalog.as_ref(), &visible_names_set)
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        BTreeSet::new()
-                    };
+                    let hidden_deferred_names: BTreeSet<crate::types::ToolName> =
+                        if matches!(catalog_mode, ToolCatalogMode::Deferred) {
+                            // A gated name its closed grant gate hides cannot
+                            // be loaded from the deferred catalog, so the
+                            // notice never offers it; it appears once a live
+                            // grant opens it. A tool of a gated MCP server is
+                            // gated by its provenance from the moment it
+                            // appears.
+                            let visibility_state = self.tool_scope.visibility_state().ok();
+                            current_catalog
+                                .as_ref()
+                                .map(|catalog| {
+                                    let closed_by_grant_gate: BTreeSet<crate::types::ToolName> =
+                                        visibility_state
+                                            .as_ref()
+                                            .map(|visibility_state| {
+                                                catalog
+                                                    .iter()
+                                                    .filter(|entry| {
+                                                        visibility_state
+                                                            .tool_is_closed_by_grant_gate(
+                                                                entry.tool.name.as_str(),
+                                                                entry.tool.provenance.as_ref(),
+                                                            )
+                                                    })
+                                                    .map(|entry| entry.tool.name.clone())
+                                                    .chain(
+                                                        visibility_state
+                                                            .closed_tool_grant_gated_names(),
+                                                    )
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                    hidden_deferred_catalog_names(
+                                        catalog.as_ref(),
+                                        &visible_names_set,
+                                    )
+                                    .into_iter()
+                                    .filter(|name| !closed_by_grant_gate.contains(name))
+                                    .collect()
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            BTreeSet::new()
+                        };
                     let pending_catalog_sources =
                         if matches!(catalog_mode, ToolCatalogMode::Deferred) {
                             current_pending_catalog_sources
@@ -9825,11 +10357,19 @@ where
                 continue;
             }
 
-            if let Err(error) = precheck_visible_tool_call(
-                tools_ref.as_ref(),
-                &visible_tool_names,
-                tc.name.as_str(),
-            ) {
+            // A gated name hidden only by its closed grant gate goes on to the
+            // dispatch gate, which adjudicates the grants and refuses it there:
+            // one refusal site, one error shape and one audit row.
+            let precheck = if self.call_reaches_tool_grant_gate(tc.name.as_str()) {
+                Ok(())
+            } else {
+                precheck_visible_tool_call(
+                    tools_ref.as_ref(),
+                    &visible_tool_names,
+                    tc.name.as_str(),
+                )
+            };
+            if let Err(error) = precheck {
                 if matches!(
                     error,
                     ToolError::AccessDenied { .. } | ToolError::NotFound { .. }
@@ -14230,6 +14770,111 @@ mod tests {
         assert_eq!(memory_store.aborted.lock().unwrap().len(), 1);
     }
 
+    /// Records the provider tag each request resolves to, as a provider
+    /// adapter does: the per-call params' tag, else the tag the client was
+    /// built with. Answers the compaction summary request with a summary.
+    #[cfg(feature = "workspace-tests")]
+    struct CompactionTagRecordingClient {
+        built_with: Option<crate::lifecycle::run_primitive::ProviderTag>,
+        seen: Mutex<Vec<(bool, Option<crate::lifecycle::run_primitive::ProviderTag>)>>,
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CompactionTagRecordingClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let compaction = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::User(user) => Some(user.text_content()),
+                    _ => None,
+                })
+                .is_some_and(|text| text == "COMPACT NOW");
+            let resolved = provider_params
+                .and_then(|params| params.provider_tag.clone())
+                .or_else(|| self.built_with.clone());
+            self.seen.lock().unwrap().push((compaction, resolved));
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: if compaction { "durable summary" } else { "ok" }.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                normalized_test_usage(self, Usage::default()),
+            ))
+        }
+
+        fn provider(&self) -> crate::provider::Provider {
+            crate::provider::Provider::OpenAI
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    /// A compaction summary request under a `DisableAll` provider-native
+    /// tool policy carries no native tool, though the session's provider
+    /// params, and the tag its client was built with, ask for native search:
+    /// the request gets a stripped per-call copy of the session's tag.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_compaction_request_under_disable_all_carries_no_native_search() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        let native_search = ProviderTag::OpenAi(OpenAiProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(
+                &serde_json::json!({"type": "web_search"}),
+            )),
+            ..Default::default()
+        });
+        let client = Arc::new(CompactionTagRecordingClient {
+            built_with: Some(native_search.clone()),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .budget(BudgetLimits::unlimited().with_max_tokens(2_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_params(ProviderParamsOverride {
+                provider_tag: Some(native_search),
+                ..Default::default()
+            })
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent.run("second".into()).await.unwrap();
+
+        let seen = client.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter().filter(|(compaction, _)| *compaction).count(),
+            1,
+            "one compaction summary request: {seen:?}"
+        );
+        for (compaction, tag) in &seen {
+            let web_search = match tag {
+                Some(ProviderTag::OpenAi(tag)) => tag.web_search.as_ref(),
+                _ => None,
+            };
+            assert!(
+                web_search.is_none(),
+                "no request carries native search (compaction request: {compaction}): {seen:?}"
+            );
+        }
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn compaction_projection_rejection_still_charges_summary_provider_usage() {
@@ -14419,6 +15064,243 @@ mod tests {
         );
     }
 
+    /// One operator-instruction write for the slot `app.example/tone`.
+    #[cfg(feature = "workspace-tests")]
+    fn tone_write(revision: u64, body: &str) -> crate::SessionInstructionWrite {
+        crate::SessionInstructionWrite {
+            slot: crate::InstructionSlot {
+                namespace: crate::types::InstructionNamespace::new("app.example").unwrap(),
+                key: crate::types::InstructionKey::new("tone").unwrap(),
+            },
+            revision: crate::InstructionRevision::new(revision).unwrap(),
+            change: crate::SessionInstructionChange::Activate {
+                body: body.to_string(),
+                content_sha256: None,
+            },
+        }
+    }
+
+    /// Every event the channel holds now.
+    #[cfg(feature = "workspace-tests")]
+    fn drain_events(
+        event_rx: &mut mpsc::Receiver<crate::event::AgentEvent>,
+    ) -> Vec<crate::event::AgentEvent> {
+        std::iter::from_fn(|| event_rx.try_recv().ok()).collect()
+    }
+
+    /// The operator-instruction observations among `events`, in order: each
+    /// entry's sequence and kind.
+    #[cfg(feature = "workspace-tests")]
+    fn instruction_observations(
+        events: &[crate::event::AgentEvent],
+    ) -> Vec<(u64, crate::InstructionEntryKind)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                crate::event::AgentEvent::OperatorInstructionsApplied {
+                    entry_sequence,
+                    kind,
+                    ..
+                } => Some((*entry_sequence, *kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A staged compaction's instruction snapshot is observed only when the
+    /// runtime commits the compaction. A run whose request after the
+    /// compaction fails rolls the compaction back with the snapshot entry its
+    /// fold inserted, so nothing observes that entry; the next entry (a run
+    /// start's delta) takes its sequence, and no sequence is observed twice.
+    /// RED before: the fold published the snapshot when it installed the
+    /// rewrite, and the next run's delta published the same sequence again
+    /// with other content.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_rolled_back_staged_fold_publishes_no_instruction_snapshot() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let client = Arc::new(CompactionTerminalLlmClient::new(
+            PostCompactionOutcome::Failure,
+        ));
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let (event_tx, mut event_rx) = mpsc::channel(4096);
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .budget(BudgetLimits::unlimited().with_max_tokens(1_000))
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .with_operator_instruction_lowering(crate::InstructionLowering::MidConversation)
+            .with_default_event_tx(event_tx)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        drain_events(&mut event_rx);
+        // A pending change: run two's first request compacts, and the fold
+        // applies the change in its snapshot; the request after the
+        // compaction fails, so the rewrite rolls back with the snapshot.
+        agent
+            .session_mut()
+            .set_session_instruction(tone_write(1, "Answer formally."))
+            .unwrap();
+        let error = agent.run("second".into()).await.unwrap_err();
+        assert!(error.to_string().contains("synthetic post-compaction"));
+        assert_eq!(
+            memory_store.aborted.lock().unwrap().len(),
+            1,
+            "the run's compaction was staged and rolled back"
+        );
+        let second = instruction_observations(&drain_events(&mut event_rx));
+        assert!(
+            second
+                .iter()
+                .all(|(_, kind)| *kind == crate::InstructionEntryKind::Delta),
+            "the rolled-back fold's snapshot is never observed: {second:?}"
+        );
+        assert!(
+            second.is_empty(),
+            "nothing of the rolled-back run is observed: {second:?}"
+        );
+
+        // The next change, applied at run three's start, is the next entry.
+        agent
+            .session_mut()
+            .set_session_instruction(tone_write(2, "Answer briefly."))
+            .unwrap();
+        agent
+            .apply_run_start_operator_instructions(crate::InstructionRunStart::FreshRun, None)
+            .expect("the run start applies the pending change");
+        agent.run("third".into()).await.unwrap();
+        let third = instruction_observations(&drain_events(&mut event_rx));
+        assert_eq!(
+            third.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+            vec![crate::InstructionEntryKind::Delta],
+            "the run start's delta is observed: {third:?}"
+        );
+        let mut sequences = second
+            .iter()
+            .chain(&third)
+            .map(|(sequence, _)| *sequence)
+            .collect::<Vec<_>>();
+        let observed = sequences.len();
+        sequences.sort_unstable();
+        sequences.dedup();
+        assert_eq!(
+            sequences.len(),
+            observed,
+            "no entry sequence is observed twice: {second:?}, then {third:?}"
+        );
+    }
+
+    /// A staged compaction's instruction snapshot is observed when the
+    /// runtime commits the compaction, right after the completion that commit
+    /// reports, with the identity of the snapshot row the fold inserted. RED
+    /// before: the fold published it when it installed the rewrite, before
+    /// the commit.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_committed_staged_fold_publishes_its_instruction_snapshot_after_the_completion() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let client = Arc::new(CompactionTerminalLlmClient::new(
+            PostCompactionOutcome::CallbackPending,
+        ));
+        let session = crate::Session::new();
+        let session_id = session.id().clone();
+        let (event_tx, mut event_rx) = mpsc::channel(4096);
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .compactor(Arc::new(DiscardingCompactor::new(1)))
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator { session_id }))
+            .with_operator_instruction_lowering(crate::InstructionLowering::MidConversation)
+            .with_default_event_tx(event_tx)
+            .build_standalone(
+                client,
+                Arc::new(CallbackPendingTools::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent
+            .session_mut()
+            .set_session_instruction(tone_write(1, "Answer formally."))
+            .unwrap();
+        let error = agent.run("second".into()).await.unwrap_err();
+        assert!(matches!(error, AgentError::CallbackPending { .. }));
+        let before_commit = instruction_observations(&drain_events(&mut event_rx));
+        assert!(
+            before_commit
+                .iter()
+                .all(|(_, kind)| *kind == crate::InstructionEntryKind::Delta),
+            "the staged fold's snapshot waits for the commit: {before_commit:?}"
+        );
+        let snapshot = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => system.instruction_entry.clone(),
+                _ => None,
+            })
+            .find(|entry| entry.kind() == crate::InstructionEntryKind::Snapshot)
+            .expect("the fold inserted a snapshot row");
+
+        let intents = agent
+            .session()
+            .validated_compaction_projection_intents()
+            .unwrap();
+        agent
+            .reconcile_runtime_compaction_projections(&intents)
+            .await
+            .expect("the runtime commit finalizes the staged compaction");
+        let at_commit = drain_events(&mut event_rx);
+        let completed = at_commit
+            .iter()
+            .position(|event| matches!(event, crate::event::AgentEvent::CompactionCompleted { .. }))
+            .expect("the commit reports the completion");
+        let applied = at_commit
+            .iter()
+            .enumerate()
+            .filter_map(|(position, event)| match event {
+                crate::event::AgentEvent::OperatorInstructionsApplied {
+                    session_id,
+                    entry_sequence,
+                    kind,
+                    run_id,
+                    active,
+                    changes,
+                } => Some((
+                    position,
+                    session_id.clone(),
+                    *entry_sequence,
+                    *kind,
+                    run_id.clone(),
+                    active.clone(),
+                    changes.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            applied.len(),
+            1,
+            "the commit observes the snapshot once: {at_commit:?}"
+        );
+        let (position, session_id, entry_sequence, kind, run_id, active, changes) =
+            applied[0].clone();
+        assert!(
+            position > completed,
+            "the observation follows the completion"
+        );
+        assert_eq!(&session_id, agent.session().id());
+        assert_eq!(entry_sequence, snapshot.entry_sequence());
+        assert_eq!(kind, crate::InstructionEntryKind::Snapshot);
+        assert_eq!(run_id.as_ref(), snapshot.run_id());
+        assert_eq!(active.as_slice(), snapshot.active());
+        assert!(changes.is_empty(), "a snapshot carries no changes");
+    }
+
     /// A run resumed from a provisional tail that carries an earlier
     /// rewrite's intent compacts again before its boundary. The new
     /// compaction opens its own transaction while the session already
@@ -14490,6 +15372,97 @@ mod tests {
             "both stages are finalized: {finalized:?}"
         );
         assert!(finalized.contains(&carried));
+    }
+
+    /// Two staged compactions commit together, and the runtime store's
+    /// outbox names their projections in its own order (by digest), not in
+    /// the order they were staged. The session publishes each completion and
+    /// its operator-instruction snapshot in staging order, so the published
+    /// entry sequences strictly increase. RED before: the finalize published
+    /// them in the order the outbox named them.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn staged_compactions_publish_their_snapshots_in_staging_order() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut session = crate::Session::new();
+        let session_id = session.id().clone();
+        let snapshot = |sequence: u64| -> crate::session::InstructionEntryIdentity {
+            serde_json::from_value(serde_json::json!({
+                "render_version": 1,
+                "origin_session_id": session_id,
+                "entry_sequence": sequence,
+                "kind": "snapshot",
+                "target_generation": sequence,
+            }))
+            .unwrap()
+        };
+        let first = append_test_projection(&mut session, "first", Some(snapshot(1)));
+        let second = append_test_projection(&mut session, "second", Some(snapshot(2)));
+        memory_store
+            .staged
+            .lock()
+            .unwrap()
+            .extend([first.clone(), second.clone()]);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator {
+                session_id: session_id.clone(),
+            }))
+            .with_default_event_tx(event_tx)
+            .build_standalone(
+                Arc::new(CompactionTerminalLlmClient::new(
+                    PostCompactionOutcome::CallbackPending,
+                )),
+                Arc::new(CallbackPendingTools::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut intents = agent
+            .session()
+            .validated_compaction_projection_intents()
+            .unwrap();
+        assert_eq!(
+            intents
+                .iter()
+                .map(|intent| intent.projection.clone())
+                .collect::<Vec<_>>(),
+            vec![first, second],
+            "the session lists the intents in staging order"
+        );
+        let staged_messages_before = intents
+            .iter()
+            .map(|intent| intent.messages_before)
+            .collect::<Vec<_>>();
+        // The outbox names them in its own order: here, the reverse.
+        intents.reverse();
+
+        agent
+            .reconcile_runtime_compaction_projections(&intents)
+            .await
+            .expect("both staged compactions commit");
+        let events = drain_events(&mut event_rx);
+        assert_eq!(
+            instruction_observations(&events)
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the snapshots publish in staging order, their entry sequences strictly increasing"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::event::AgentEvent::CompactionCompleted {
+                        messages_before, ..
+                    } => Some(*messages_before),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            staged_messages_before,
+            "the completions publish in staging order"
+        );
     }
 
     /// A run checkpoint wrote a pending compaction's rewrite and intent into
@@ -14707,6 +15680,18 @@ mod tests {
         session: &mut crate::Session,
         label: &str,
     ) -> crate::memory::CompactionProjectionId {
+        append_test_projection(session, label, None)
+    }
+
+    /// A staged compaction of the session's whole transcript, labelled
+    /// `label`, whose intent carries `instruction_snapshot` as the snapshot
+    /// entry its fold inserted (a fixture identity: no row of the rewrite
+    /// carries it).
+    fn append_test_projection(
+        session: &mut crate::Session,
+        label: &str,
+        instruction_snapshot: Option<crate::session::InstructionEntryIdentity>,
+    ) -> crate::memory::CompactionProjectionId {
         session.push(Message::User(UserMessage::text(format!(
             "verbose context {label} one"
         ))));
@@ -14750,6 +15735,7 @@ mod tests {
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
+                instruction_snapshot,
             })
             .unwrap();
         projection
@@ -21648,6 +22634,7 @@ mod tests {
                     model: "new-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(ProviderParamsOverride {
                         temperature: Some(0.2),
                         ..Default::default()
@@ -21721,6 +22708,7 @@ mod tests {
                     model: "new-model".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: Some(ProviderTag::OpenAi(OpenAiProviderTag {
                         web_search: Some(OpaqueProviderBody::from_value(
@@ -21750,6 +22738,120 @@ mod tests {
         }
     }
 
+    /// A build whose grant gate covers `web_search` disables provider-native
+    /// tools (the factory's rule). A turn's provider params reach the agent as
+    /// the request policy of its LLM reconfigure; when they ask for native
+    /// search again, the narrow-only policy keeps it disabled. Native search
+    /// never rides a request, from the session's params or a turn's, so the
+    /// gated `web_search` tool stays the only search path.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_turns_native_search_params_are_stripped_under_a_grant_gated_web_search() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let native_search = || ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                web_search: Some(OpaqueProviderBody::from_value(
+                    &serde_json::json!({"type": "web_search"}),
+                )),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let gate = crate::tool_grant::gate_over_names(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            &["web_search"],
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(RecordingLlmClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+            .provider_params(native_search())
+            .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        agent
+            .run(
+                "the session's params ask for native search"
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .expect("the request reaches the LLM");
+
+        agent
+            .replace_client_with_request_policy(
+                client.clone(),
+                crate::SessionLlmRequestPolicy {
+                    model: "turn-model".to_string(),
+                    credential_identity: None,
+                    provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
+                    provider_params: Some(native_search()),
+                    provider_tool_defaults: None,
+                },
+            )
+            .expect("the turn's request policy is admitted");
+        agent
+            .run("a turn's params ask for it again".to_string().into())
+            .await
+            .expect("the request reaches the LLM");
+
+        let seen_params = client.seen_params();
+        assert_eq!(seen_params.len(), 2);
+        for params in seen_params {
+            let Some(ProviderTag::OpenAi(openai)) = params.and_then(|params| params.provider_tag)
+            else {
+                panic!("expected typed OpenAI provider parameters");
+            };
+            assert!(
+                openai.web_search.is_none(),
+                "native search never rides a request under a gated web_search"
+            );
+        }
+    }
+
     fn explicit_hot_swap_identity(model: &str) -> crate::SessionLlmIdentity {
         crate::SessionLlmIdentity {
             model: model.to_string(),
@@ -21765,6 +22867,7 @@ mod tests {
             model: model.to_string(),
             credential_identity: None,
             provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+            operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
             provider_params: None,
             provider_tool_defaults: None,
         }
@@ -22780,7 +23883,7 @@ mod tests {
     #[tokio::test]
     async fn tool_owned_deadline_obeys_an_operator_per_tool_override() {
         let tools_config = crate::config::ToolsConfig {
-            default_timeout: std::time::Duration::from_secs(600),
+            default_timeout: std::time::Duration::from_mins(10),
             tool_timeouts: std::collections::HashMap::from([(
                 "slow_tool".to_string(),
                 std::time::Duration::from_millis(20),
@@ -23582,6 +24685,893 @@ mod tests {
                 None,
             )
             .await;
+        }
+    }
+
+    /// An agent's grant gate lets a closed gated name through its visibility
+    /// precheck to the dispatcher, the gated name's one refusal site. A
+    /// dispatcher that does not adjudicate tool grants would run the call's
+    /// tool instead, so the build refuses the pair; the same gate over a
+    /// grant-adjudicating dispatcher builds.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_grant_gate_over_a_dispatcher_that_does_not_adjudicate_grants_is_refused() {
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let gate = crate::tool_grant::gate_over_names(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            &["deploy"],
+        );
+
+        let refused = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate.clone())
+            .try_build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::agent::builder::AgentBuildPolicyError::ToolGrantGateWithoutAdjudication)
+            ),
+            "a gate over a dispatcher that does not adjudicate grants is refused"
+        );
+
+        let adjudicating = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        assert!(
+            with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(explicit_test_visibility_owner())
+                .with_tool_grant_gate(gate)
+                .try_build_standalone(Arc::new(StaticLlmClient), adjudicating, Arc::new(NoopStore))
+                .await
+                .is_ok(),
+            "the same gate over a grant-adjudicating dispatcher builds"
+        );
+    }
+
+    /// The agent reads its grants in the run it serves: each model-request
+    /// boundary passes its run to the grant gate, and the end of each run
+    /// ends that run's run-scoped grants through the gate, once.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_agent_passes_its_run_to_the_grant_gate_and_ends_it_at_the_run_terminal() {
+        /// A session's grants that record the runs they are asked about.
+        #[derive(Default)]
+        struct RecordingGrants {
+            boundary_runs: Mutex<Vec<Option<crate::RunId>>>,
+            ended_runs: Mutex<Vec<crate::RunId>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for RecordingGrants {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.boundary_runs.lock().unwrap().push(run_id.cloned());
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(
+                &self,
+                run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.ended_runs.lock().unwrap().push(run_id.clone());
+                Ok(())
+            }
+        }
+
+        let grants = Arc::new(RecordingGrants::default());
+        let gate = crate::tool_grant::gate_over_table(
+            grants.clone() as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(Arc::new(StaticLlmClient), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent
+            .run("the first run".to_string().into())
+            .await
+            .expect("the first run completes");
+        agent
+            .run("the second run".to_string().into())
+            .await
+            .expect("the second run completes");
+
+        let boundary_runs = grants.boundary_runs.lock().unwrap().clone();
+        let ended_runs = grants.ended_runs.lock().unwrap().clone();
+        assert_eq!(
+            ended_runs.len(),
+            2,
+            "each run's end is signalled once: {ended_runs:?}"
+        );
+        assert_ne!(ended_runs[0], ended_runs[1], "two runs, two ends");
+        assert!(!boundary_runs.is_empty(), "every run reads its grants");
+        for run_id in &boundary_runs {
+            let run_id = run_id.as_ref().expect("every boundary is inside a run");
+            assert!(
+                ended_runs.contains(run_id),
+                "the boundary's run {run_id:?} is a run that ended"
+            );
+        }
+    }
+
+    /// A hard interrupt drops the run future in its model call, and the
+    /// session cancels the dropped run (`cancel_dropped_run`), which is
+    /// synchronous. The run's end still ends its run-scoped grants: the
+    /// session's task ends them through the gate right after the cancel
+    /// (`end_dropped_run_tool_grants`), once. Before a dropped run ended,
+    /// that ends nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_dropped_run_ends_its_run_scoped_grants() {
+        /// A session's grants that record the runs they are asked about.
+        #[derive(Default)]
+        struct RecordingGrants {
+            boundary_runs: Mutex<Vec<Option<crate::RunId>>>,
+            ended_runs: Mutex<Vec<crate::RunId>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for RecordingGrants {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.boundary_runs.lock().unwrap().push(run_id.cloned());
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(
+                &self,
+                run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.ended_runs.lock().unwrap().push(run_id.clone());
+                Ok(())
+            }
+        }
+
+        let grants = Arc::new(RecordingGrants::default());
+        let gate = crate::tool_grant::gate_over_table(
+            grants.clone() as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(NeverAnsweringLlmClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(Arc::clone(&client), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent.end_dropped_run_tool_grants().await;
+        assert!(
+            grants.ended_runs.lock().unwrap().is_empty(),
+            "no run was dropped yet"
+        );
+        {
+            let run = agent.run("the dropped run".to_string().into());
+            tokio::pin!(run);
+            let in_call = async {
+                while client.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = &mut run => panic!("the model call never answers"),
+                () = in_call => {}
+            }
+        }
+        let _ = agent.cancel_dropped_run();
+        agent.end_dropped_run_tool_grants().await;
+        agent.end_dropped_run_tool_grants().await;
+
+        let boundary_runs = grants.boundary_runs.lock().unwrap().clone();
+        let ended_runs = grants.ended_runs.lock().unwrap().clone();
+        let run_id = boundary_runs
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .expect("the dropped run read its grants at its boundary");
+        assert_eq!(
+            ended_runs,
+            vec![run_id],
+            "the dropped run's end ends its run-scoped grants, once: boundaries \
+             {boundary_runs:?}"
+        );
+    }
+
+    /// A model call naming a gated tool that its closed gate hides passes the
+    /// visibility precheck to the dispatch gate, the gated name's one refusal
+    /// site. The grants are adjudicated exactly once, and that adjudication
+    /// is where the runtime's grant service appends the refusal's audit row.
+    /// The call is refused as `policy_denied` with `tool_grant_required`, its
+    /// body never runs, and its ungated sibling still executes.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_call_to_a_closed_gated_name_is_refused_once_by_the_gate_and_audited() {
+        /// A session with no live grant. It records every boundary read and
+        /// every call it adjudicates.
+        struct NoLiveGrant {
+            boundaries: Mutex<u32>,
+            adjudicated: Mutex<Vec<(String, String)>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                *self.boundaries.lock().unwrap() += 1;
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.adjudicated
+                    .lock()
+                    .unwrap()
+                    .push((call.call_id.to_string(), call.name.to_string()));
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        struct RecordingDispatcher {
+            tools: Arc<[Arc<ToolDef>]>,
+            dispatched: Mutex<Vec<(String, String)>>,
+        }
+
+        #[async_trait]
+        impl AgentToolDispatcher for RecordingDispatcher {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                Arc::clone(&self.tools)
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                self.dispatched
+                    .lock()
+                    .unwrap()
+                    .push((call.id.to_string(), call.name.to_string()));
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls the hidden gated tool and an ungated sibling, then ends.
+        struct GatedCallClient {
+            call_count: Mutex<u32>,
+            observed_messages: Mutex<Vec<Vec<Message>>>,
+            observed_tools: Mutex<Vec<Vec<String>>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for GatedCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.observed_messages
+                    .lock()
+                    .unwrap()
+                    .push(messages.to_vec());
+                self.observed_tools
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                let mut calls = self.call_count.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        ["call-deploy", "call-open"]
+                            .into_iter()
+                            .zip(["deploy", "open_tool"])
+                            .map(|(id, name)| AssistantBlock::ToolUse {
+                                id: id.to_string(),
+                                name: name.into(),
+                                args: serde_json::value::RawValue::from_string("{}".to_string())
+                                    .expect("static raw value should parse"),
+                                meta: None,
+                            })
+                            .collect(),
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        let inner = Arc::new(RecordingDispatcher {
+            tools: ["deploy", "open_tool"]
+                .into_iter()
+                .map(|name| {
+                    Arc::new(ToolDef::new(
+                        name,
+                        format!("{name} fixture"),
+                        serde_json::json!({ "type": "object" }),
+                    ))
+                })
+                .collect(),
+            dispatched: Mutex::new(Vec::new()),
+        });
+        let grants = Arc::new(NoLiveGrant {
+            boundaries: Mutex::new(0),
+            adjudicated: Mutex::new(Vec::new()),
+        });
+        let gate = crate::tool_grant::gate_over_names(
+            Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            &["deploy"],
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::clone(&inner),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(GatedCallClient {
+            call_count: Mutex::new(0),
+            observed_messages: Mutex::new(Vec::new()),
+            observed_tools: Mutex::new(Vec::new()),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+            .await;
+
+        let (tx, mut rx) = mpsc::channel(256);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.run_with_events("deploy it".to_string().into(), tx),
+        )
+        .await
+        .expect("run must complete promptly after the refusal")
+        .expect("a refused gated call is operation-local feedback");
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(result.turns, 2);
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *grants.adjudicated.lock().unwrap(),
+            [("call-deploy".to_string(), "deploy".to_string())],
+            "the dispatch gate adjudicates the gated call exactly once"
+        );
+        assert_eq!(
+            *inner.dispatched.lock().unwrap(),
+            [("call-open".to_string(), "open_tool".to_string())],
+            "only the ungated sibling enters a tool body"
+        );
+        assert!(
+            *grants.boundaries.lock().unwrap() >= 2,
+            "every model-request boundary reads the grants"
+        );
+        for tools in client.observed_tools.lock().unwrap().iter() {
+            assert!(
+                tools.iter().all(|name| name != "deploy"),
+                "the closed gated name is hidden from every model request"
+            );
+            assert!(tools.iter().any(|name| name == "open_tool"));
+        }
+
+        let observations = client.observed_messages.lock().unwrap();
+        let follow_up_results = observations[1]
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResults { results, .. } => Some(results),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            follow_up_results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            ["call-deploy", "call-open"],
+            "the next model request receives both results in call order"
+        );
+        let refused = follow_up_results[0];
+        let expected = crate::ops::terminal_tool_outcome_for_error(
+            "call-deploy",
+            crate::tool_grant::ToolGrantRefusal::Required.into_tool_error("deploy"),
+        );
+        assert!(refused.is_error);
+        assert_eq!(refused.content, expected.result.content);
+        let payload: serde_json::Value =
+            serde_json::from_str(&crate::types::text_content(&refused.content))
+                .expect("a grant refusal uses the canonical feedback envelope");
+        assert_eq!(payload["error"], "policy_denied");
+        assert_eq!(payload["data"]["code"], "tool_grant_required");
+        assert!(!follow_up_results[1].is_error);
+    }
+
+    /// A generated visibility owner that refuses every extension of the grant
+    /// gate and applies everything else as its inner owner does.
+    #[cfg(feature = "workspace-tests")]
+    struct ExtendRefusingOwner(Arc<dyn crate::ToolVisibilityOwner>);
+
+    #[cfg(feature = "workspace-tests")]
+    impl crate::ToolVisibilityOwner for ExtendRefusingOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.0.visibility_state()
+        }
+
+        fn replace_visibility_state(
+            &self,
+            visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_visibility_state(visibility_state)
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            filter: crate::ToolFilter,
+            witnesses: std::collections::BTreeMap<
+                crate::types::ToolName,
+                crate::ToolVisibilityWitness,
+            >,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.0.stage_persistent_filter(filter, witnesses)
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            names: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.0.stage_requested_deferred_names(names)
+        }
+
+        fn request_deferred_tools(
+            &self,
+            authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.0.request_deferred_tools(authorities)
+        }
+
+        fn replace_deferred_tool_authority_catalog(
+            &self,
+            catalog: std::collections::BTreeMap<
+                crate::types::ToolName,
+                crate::ToolVisibilityWitness,
+            >,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_deferred_tool_authority_catalog(catalog)
+        }
+
+        fn replace_filter_tool_authority_catalog(
+            &self,
+            catalog: std::collections::BTreeMap<
+                crate::types::ToolName,
+                crate::ToolVisibilityWitness,
+            >,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_filter_tool_authority_catalog(catalog)
+        }
+
+        fn set_turn_overlay(
+            &self,
+            allow: Option<std::collections::BTreeSet<crate::types::ToolName>>,
+            deny: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::tool_scope::ToolScopeTurnOverlay, crate::ToolScopeStageError> {
+            self.0.set_turn_overlay(allow, deny)
+        }
+
+        fn clear_turn_overlay(
+            &self,
+        ) -> Result<crate::tool_scope::ToolScopeTurnOverlay, crate::ToolScopeStageError> {
+            self.0.clear_turn_overlay()
+        }
+
+        fn replace_tool_grant_gate(
+            &self,
+            gate: crate::tool_grant::InstalledToolGrantGate,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_tool_grant_gate(gate)
+        }
+
+        fn extend_tool_grant_gate(
+            &self,
+            _server: &str,
+            _gated: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            Err(crate::ToolScopeApplyError::Owner {
+                message: "the fixture refuses every extension".to_string(),
+            })
+        }
+
+        fn apply_tool_grant_open_set(
+            &self,
+            open: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.apply_tool_grant_open_set(open)
+        }
+
+        fn requires_filter_witnesses(&self) -> bool {
+            self.0.requires_filter_witnesses()
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.0.boundary_applied()
+        }
+    }
+
+    /// A model-request boundary gates the names a gated MCP server provides
+    /// now before it adjudicates the grants: the grants see the extended gate
+    /// and the server's names, and a server grant opens them for that same
+    /// request. An extension the visibility owner refuses leaves the server's
+    /// names out of what the boundary opens: its tools stay hidden, a call is
+    /// refused at the dispatch gate by its provenance, and the boundary warns
+    /// failed-closed; the run goes on.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_boundary_gates_a_gated_servers_names_before_it_adjudicates() {
+        /// Grants of the server `tickets`, when `granted`. It records the
+        /// view of each boundary.
+        struct ServerGrant {
+            granted: bool,
+            views: Mutex<Vec<crate::tool_grant::GatedToolView>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for ServerGrant {
+            async fn open_names(
+                &self,
+                view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.views.lock().unwrap().push(view.clone());
+                Ok(if self.granted {
+                    view.covered_by(&crate::tool_grant::ToolGrantTarget::McpServer {
+                        server: "tickets".to_string(),
+                        tools: None,
+                    })
+                    .into_iter()
+                    .map(|name| name.to_string())
+                    .collect()
+                } else {
+                    crate::types::ToolNameSet::new()
+                })
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                if self.granted && call.server == Some("tickets") {
+                    Ok(())
+                } else {
+                    Err(crate::tool_grant::ToolGrantRefusal::Required)
+                }
+            }
+        }
+
+        struct TicketTools;
+
+        #[async_trait]
+        impl AgentToolDispatcher for TicketTools {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                vec![
+                    Arc::new(
+                        ToolDef::new(
+                            "open_ticket",
+                            "open a ticket",
+                            serde_json::json!({ "type": "object" }),
+                        )
+                        .with_provenance(crate::types::ToolProvenance {
+                            kind: crate::types::ToolSourceKind::Mcp,
+                            source_id: "tickets".into(),
+                            artifact: None,
+                        }),
+                    ),
+                    Arc::new(ToolDef::new(
+                        "read_file",
+                        "read a file",
+                        serde_json::json!({ "type": "object" }),
+                    )),
+                ]
+                .into()
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls `open_ticket` once, then ends; records each request's tools.
+        struct TicketCallClient {
+            calls: Mutex<u32>,
+            offered: Mutex<Vec<Vec<String>>>,
+            results: Mutex<Vec<String>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for TicketCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.offered
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                // The call's result, which a boundary's warning notice may
+                // follow in the request.
+                if let Some(results) = messages.iter().rev().find_map(|message| match message {
+                    Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                }) {
+                    self.results.lock().unwrap().extend(
+                        results
+                            .iter()
+                            .map(|result| crate::types::text_content(&result.content)),
+                    );
+                }
+                let mut calls = self.calls.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "call-ticket".to_string(),
+                            name: "open_ticket".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("static raw value should parse"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        for (granted, refusing) in [(true, false), (false, true)] {
+            let grants = Arc::new(ServerGrant {
+                granted,
+                views: Mutex::new(Vec::new()),
+            });
+            let gate = crate::tool_grant::gate_over_install(
+                Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+                crate::tool_grant::InstalledToolGrantGate {
+                    gated_servers: std::collections::BTreeSet::from(["tickets".to_string()]),
+                    ..Default::default()
+                },
+            );
+            let dispatcher = Arc::new(
+                crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::new(TicketTools),
+                    crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+                )
+                .with_tool_grant_gate(gate.clone()),
+            );
+            let owner = if refusing {
+                let inner: Arc<dyn crate::ToolVisibilityOwner> =
+                    Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+                crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::new(
+                    ExtendRefusingOwner(inner),
+                ))
+            } else {
+                explicit_test_visibility_owner()
+            };
+            let client = Arc::new(TicketCallClient {
+                calls: Mutex::new(0),
+                offered: Mutex::new(Vec::new()),
+                results: Mutex::new(Vec::new()),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(owner)
+                .with_tool_grant_gate(gate)
+                .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+                .await;
+            let (tx, mut rx) = mpsc::channel(256);
+            let result = agent
+                .run_with_events("open a ticket".to_string().into(), tx)
+                .await
+                .expect("the run goes on");
+            assert_eq!(result.text, "done");
+            let mut warned = false;
+            while let Ok(event) = rx.try_recv() {
+                if let crate::event::AgentEvent::ToolConfigChanged { payload } = event {
+                    warned |= payload.target == "tool_grants"
+                        && payload
+                            .status_text()
+                            .contains("could not gate the MCP server 'tickets'");
+                }
+            }
+
+            let views = grants.views.lock().unwrap();
+            let offered = client.offered.lock().unwrap();
+            let results = client.results.lock().unwrap();
+            if granted {
+                assert!(
+                    views[0].is_gated("open_ticket"),
+                    "the grants see the extended gate: {views:?}"
+                );
+                assert!(
+                    offered[0].iter().any(|name| name == "open_ticket"),
+                    "the grant opens the server's names at that boundary: {offered:?}"
+                );
+                assert_eq!(results.as_slice(), ["ok"], "the call runs");
+                assert!(!warned);
+            } else {
+                assert!(!views[0].is_gated("open_ticket"), "{views:?}");
+                assert!(
+                    offered
+                        .iter()
+                        .all(|tools| tools.iter().all(|name| name != "open_ticket")),
+                    "{offered:?}"
+                );
+                assert!(
+                    results[0].contains("tool_grant_required"),
+                    "the dispatch gate refuses it by its provenance: {results:?}"
+                );
+                assert!(warned, "the refused extension warns failed-closed");
+            }
         }
     }
 
@@ -27568,6 +29558,103 @@ mod tests {
         );
     }
 
+    /// The deferred catalog notice never offers a gated name its closed grant
+    /// gate hides: such a name cannot be loaded until a live grant opens it,
+    /// so the boundary lists only the loadable deferred tools.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn deferred_catalog_notice_never_offers_a_closed_gated_name() {
+        /// A session with no live grant.
+        struct NoLiveGrant;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
+            async fn open_names(
+                &self,
+                _view: &crate::tool_grant::GatedToolView,
+                _run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn end_run(
+                &self,
+                _run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Ok(())
+            }
+
+            async fn admit_call(
+                &self,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+        }
+
+        let gate = crate::tool_grant::gate_over_names(
+            Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            &["deferred_tool_two"],
+        );
+        let tools = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(DeferredLoadDispatcher::new()),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(DeferredLoadVisibilityClient::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            client.seen_tools(),
+            vec![
+                vec!["tool_catalog_load".to_string()],
+                vec!["deferred_tool".to_string(), "tool_catalog_load".to_string()],
+            ]
+        );
+
+        let deferred_notices = agent
+            .session()
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::SystemNotice(notice)
+                    if notice.kind == SystemNoticeKind::ToolScope
+                        && notice.body.as_deref().is_some_and(|body| {
+                            body.starts_with("Deferred catalog changed at turn boundary:")
+                        }) =>
+                {
+                    notice.body.clone()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deferred_notices.first().map(String::as_str),
+            Some(
+                "Deferred catalog changed at turn boundary: new deferred tools available: \
+                 deferred_tool"
+            ),
+            "{deferred_notices:?}"
+        );
+        assert!(
+            deferred_notices
+                .iter()
+                .all(|body| !body.contains("deferred_tool_two")),
+            "the closed gated name is never offered: {deferred_notices:?}"
+        );
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn direct_builder_exact_catalog_without_control_plane_keeps_deferred_tools_inline() {
@@ -30332,7 +32419,7 @@ mod tests {
         });
 
         let error = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             agent.run("keep going".to_string().into()),
         )
         .await
@@ -30498,11 +32585,11 @@ mod tests {
     #[test]
     fn compute_retry_delay_uses_hint_when_greater_than_computed() {
         let (delay, floor_applied) = select_retry_delay(
-            Some(Duration::from_secs(60)),
+            Some(Duration::from_mins(1)),
             Duration::from_millis(500),
             true,
         );
-        assert_eq!(delay, Duration::from_secs(60));
+        assert_eq!(delay, Duration::from_mins(1));
         assert!(!floor_applied);
     }
 
@@ -30520,7 +32607,7 @@ mod tests {
     #[test]
     fn compute_retry_delay_uses_computed_when_greater_than_hint() {
         let (delay, floor_applied) =
-            select_retry_delay(Some(Duration::from_secs(60)), Duration::from_secs(90), true);
+            select_retry_delay(Some(Duration::from_mins(1)), Duration::from_secs(90), true);
         assert_eq!(delay, Duration::from_secs(90));
         assert!(!floor_applied);
     }
@@ -30990,6 +33077,7 @@ mod tests {
                 model: "backup".to_string(),
                 credential_identity: None,
                 provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                 provider_params: None,
                 provider_tool_defaults: None,
             },
@@ -31730,6 +33818,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -32040,6 +34129,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(
                         crate::lifecycle::run_primitive::ProviderParamsOverride {
                             temperature: Some(0.37),
@@ -32261,6 +34351,7 @@ mod tests {
                     model: "backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: None,
                     provider_tool_defaults: None,
                 },
@@ -32640,7 +34731,7 @@ mod tests {
                 max_delay: Duration::from_millis(1),
                 multiplier: 1.0,
                 call_timeout: Some(Duration::from_millis(50)),
-                stream_inactivity_timeout: Some(Duration::from_secs(3600)),
+                stream_inactivity_timeout: Some(Duration::from_hours(1)),
             })
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
@@ -32694,7 +34785,7 @@ mod tests {
             Duration::from_millis(60),
         ));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .retry_policy(stall_window_policy(Some(Duration::from_secs(3600))))
+            .retry_policy(stall_window_policy(Some(Duration::from_hours(1))))
             .with_model_defaults_resolver(Arc::new(StallWindowResolver(Some(
                 Duration::from_millis(30),
             ))))
@@ -32719,10 +34810,10 @@ mod tests {
     async fn explicit_stream_inactivity_override_wins_over_the_model_window() {
         let client = Arc::new(StallThenSucceedClient::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .retry_policy(stall_window_policy(Some(Duration::from_secs(3600))))
-            .with_model_defaults_resolver(Arc::new(StallWindowResolver(Some(Duration::from_secs(
-                3600,
-            )))))
+            .retry_policy(stall_window_policy(Some(Duration::from_hours(1))))
+            .with_model_defaults_resolver(Arc::new(StallWindowResolver(Some(
+                Duration::from_hours(1),
+            ))))
             .with_stream_inactivity_timeout_override(crate::config::CallTimeoutOverride::Value(
                 Duration::from_millis(30),
             ))
@@ -34387,6 +36478,9 @@ mod tests {
         call_count: std::sync::atomic::AtomicUsize,
         mismatched_fallback_tag: bool,
         reject_target_compile: bool,
+        /// Fail the first call (retryable) and answer the second: a plain
+        /// turn whose first request falls back to the target model.
+        fail_first_call: bool,
         target_profile: crate::ModelProfileWitness,
         seen_max_tokens: Mutex<Vec<u32>>,
         seen_provider_params:
@@ -34428,6 +36522,7 @@ mod tests {
                 call_count: std::sync::atomic::AtomicUsize::new(0),
                 mismatched_fallback_tag: false,
                 reject_target_compile: false,
+                fail_first_call: false,
                 target_profile,
                 seen_max_tokens: Mutex::new(Vec::new()),
                 seen_provider_params: Mutex::new(Vec::new()),
@@ -34512,6 +36607,28 @@ mod tests {
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
+
+            if self.fail_first_call {
+                return match call {
+                    1 => Err(AgentError::llm(
+                        "openai",
+                        crate::error::LlmFailureReason::ProviderError(
+                            crate::error::LlmProviderError::retryable(
+                                crate::error::LlmProviderErrorKind::ServerOverloaded,
+                                serde_json::json!({"message": "primary retryable failure"}),
+                            ),
+                        ),
+                        "primary retryable failure",
+                    )),
+                    2 => Ok(normalized_test_result(
+                        self,
+                        text_response("fallback answer"),
+                    )),
+                    _ => Err(AgentError::InternalError(
+                        "ExtractionFallbackOverrideClient: unexpected extra call".to_string(),
+                    )),
+                };
+            }
 
             match call {
                 1 => Ok(normalized_test_result(self, text_response("main answer"))),
@@ -34601,6 +36718,7 @@ mod tests {
                     model: "claude-backup".to_string(),
                     credential_identity: None,
                     provider_native_tools: crate::ProviderNativeToolPolicy::Inherit,
+                    operator_instruction_lowering: crate::InstructionLowering::LeadingPrefixOnly,
                     provider_params: Some(ProviderParamsOverride {
                         provider_tag: Some(if self.mismatched_fallback_tag {
                             ProviderTag::OpenAi(OpenAiProviderTag::default())
@@ -34978,6 +37096,75 @@ mod tests {
                 );
             }
             other => panic!("expected Anthropic fallback extraction params, got {other:?}"),
+        }
+    }
+
+    /// A model fallback attempt under a `DisableAll` provider-native tool
+    /// policy carries no native tool, though the fallback target's request
+    /// policy asks for native search: every attempt is prepared through the
+    /// strip, the fallback's and the retries' included.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_fallback_attempt_under_disable_all_carries_no_native_search() {
+        use crate::lifecycle::run_primitive::ProviderTag;
+        use crate::retry::RetryPolicy;
+
+        let registry = Arc::new(extraction_fallback_registry());
+        let target_profile = registry
+            .profile_witness_for_provider(crate::Provider::Anthropic, "claude-backup")
+            .expect("same-registry fallback profile");
+        let client = Arc::new(ExtractionFallbackOverrideClient {
+            fail_first_call: true,
+            ..ExtractionFallbackOverrideClient::with_target_profile(target_profile)
+        });
+        let visibility_owner: Arc<dyn crate::ToolVisibilityOwner> =
+            Arc::new(RecordingFallbackVisibilityOwner::default());
+        let generated_visibility_owner =
+            crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::clone(
+                &visibility_owner,
+            ));
+        let model_routing = Arc::new(RecordingModelRoutingHandle::new(visibility_owner));
+        let mut agent = with_test_turn_state_handle_for_session(
+            AgentBuilder::new().max_tokens_per_turn(1024),
+            explicit_hot_swap_session("gpt-primary"),
+        )
+        .provider_native_tool_policy(crate::ProviderNativeToolPolicy::DisableAll)
+        .with_effective_model_registry(Arc::clone(&registry))
+        .with_tool_visibility_owner(generated_visibility_owner)
+        .with_model_routing_handle(model_routing)
+        .retry_policy(RetryPolicy {
+            max_retries: 1,
+            initial_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            multiplier: 1.0,
+            call_timeout: None,
+            stream_inactivity_timeout: None,
+        })
+        .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+        .await;
+
+        let result = agent
+            .run("answer after a fallback".to_string().into())
+            .await
+            .expect("the fallback attempt answers");
+        assert_eq!(result.text, "fallback answer");
+
+        let seen_params = client.seen_provider_params();
+        assert_eq!(
+            seen_params.len(),
+            2,
+            "expected the failed primary call and the fallback attempt"
+        );
+        match seen_params[1]
+            .as_ref()
+            .and_then(|params| params.provider_tag.as_ref())
+        {
+            Some(ProviderTag::Anthropic(tag)) => assert_eq!(
+                tag.web_search, None,
+                "the fallback attempt must not carry the target policy's native search"
+            ),
+            None => {}
+            other => panic!("expected Anthropic fallback params, got {other:?}"),
         }
     }
 
@@ -37325,6 +39512,10 @@ mod tests {
                     Err(OperationRefused::new(OperationRefusalKind::MalformedFacts).into())
                 }
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         struct FixtureClient {
@@ -37717,9 +39908,16 @@ mod tests {
                             boundary,
                             RefusalBoundary::Stream | RefusalBoundary::ProviderStream
                         );
+                    // ReprepareRequired from the request's stream is a stale
+                    // read: the first preparation, one per free rebuild after
+                    // it, then the one ordinary rebuild.
                     assert_eq!(
                         alternate.preparations.load(Ordering::Relaxed),
-                        if bounded_reprepare { 2 } else { 1 }
+                        if bounded_reprepare {
+                            2 + usize::from(crate::authorization::OWNER_CHANGE_FREE_REBUILDS)
+                        } else {
+                            1
+                        }
                     );
                     assert_eq!(controller.requests.lock().unwrap().len(), 2);
                     assert!(
@@ -37767,6 +39965,9 @@ mod tests {
             },
             /// Refuse `ReprepareRequired` for a change that already completed.
             Stale,
+            /// Refuse `Denied`, with no change in progress: the owners'
+            /// answer once a change revoked the work's authority.
+            Deny,
             /// An owner change begins and this preparation refuses `Denied`;
             /// the change completes after `settle`.
             DenyDuringChange {
@@ -37862,6 +40063,9 @@ mod tests {
                     }
                     ChurnStep::Stale => {
                         Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into())
+                    }
+                    ChurnStep::Deny => {
+                        Err(OperationRefused::new(OperationRefusalKind::Denied).into())
                     }
                     ChurnStep::DenyDuringChange { settle } => {
                         self.begin_change(Some(settle));
@@ -38063,7 +40267,7 @@ mod tests {
             let (tx, events) = mpsc::channel(1024);
             let started = tokio::time::Instant::now();
             let result = tokio::time::timeout(
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
                 agent.run_with_events_and_work_authorization(
                     "attempt the requested action".to_string().into(),
                     vec![],
@@ -38305,25 +40509,82 @@ mod tests {
             assert_eq!(policy.prepares(), 1, "nothing prepares after the drop");
         }
 
-        /// A `ReprepareRequired` refusal with no change in progress takes its
-        /// ordinary path at once: one rebuild, then the controller feedback.
+        /// A `ReprepareRequired` refusal for a change that already completed
+        /// is a stale read: the model request pauses one backoff step and
+        /// rebuilds under the same operation, as one of its free rebuilds,
+        /// with no refusal notice and no controller feedback request, here
+        /// after two such reads in a row. When the change that completed
+        /// revoked the work's authority, the rebuild meets the owners'
+        /// current refusal (`Denied`), which goes to the controller as
+        /// before.
+        ///
+        /// RED on the base: after one rebuild with no wait, the second stale
+        /// read went to the controller as a refusal notice, and the host saw
+        /// a rebuild instead of a wait.
         #[cfg(feature = "workspace-tests")]
         #[tokio::test(start_paused = true)]
-        async fn a_refusal_without_a_change_in_progress_rebuilds_at_once() {
+        async fn a_stale_read_after_a_completed_change_rebuilds_after_one_pause() {
             let policy = ChurnPolicy::new([ChurnStep::Stale, ChurnStep::Stale, ChurnStep::Allow]);
             let client = ChurnClient::new(std::time::Duration::ZERO);
             let mut run = run_churn(&policy, &client, None).await;
 
-            run.result
-                .expect("the controller feedback attempt is authorized");
-            assert_eq!(policy.prepares(), 3);
-            assert_eq!(run.notices, 1);
-            assert_eq!(run.elapsed, std::time::Duration::ZERO, "nothing waited");
+            assert_eq!(
+                run.notices, 0,
+                "no refusal reached the transcript: {:?}",
+                run.result
+            );
+            let result = run
+                .result
+                .expect("the rebuild after the stale reads is authorized");
+            assert_eq!(result.text, "answered after the owner change");
+            assert_eq!(policy.prepares(), 3, "two stale reads, then one more");
+            assert!(
+                run.elapsed >= std::time::Duration::from_millis(2)
+                    && run.elapsed < crate::authorization::OWNER_CHANGE_WAIT_BOUND,
+                "one backoff step before each rebuild: {:?}",
+                run.elapsed
+            );
             let operations = client.operations();
             assert_eq!(operations.len(), 3);
-            assert_eq!(operations[0], operations[1]);
-            assert_ne!(operations[2], operations[0]);
+            assert!(
+                operations.iter().all(|id| *id == operations[0]),
+                "every rebuild keeps its operation"
+            );
             assert_completed_without_failure(&mut run.events);
+
+            // The change that completed revoked the work's authority.
+            let policy = ChurnPolicy::new([ChurnStep::Stale, ChurnStep::Deny, ChurnStep::Allow]);
+            let client = ChurnClient::new(std::time::Duration::ZERO);
+            let observer = Arc::new(RecordingObserver::default());
+            let run = run_churn_observed(&policy, &client, None, Some(Arc::clone(&observer))).await;
+            run.result
+                .expect("the controller feedback attempt is authorized");
+            assert_eq!(run.notices, 1, "the denial reached the controller");
+            let observed: Vec<_> = observer
+                .observed()
+                .iter()
+                .map(|observation| (observation.outcome(), observation.disposition()))
+                .collect();
+            assert!(
+                matches!(
+                    observed.as_slice(),
+                    [
+                        (
+                            first,
+                            crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                                settled: true,
+                                ..
+                            }
+                        ),
+                        (
+                            last,
+                            crate::authorization::OperationRefusalDisposition::ControllerFeedback
+                        ),
+                    ] if *first == reprepare_outcome()
+                        && *last == OperationRefused::new(OperationRefusalKind::Denied).into()
+                ),
+                "a wait after the stale read, then the owners' current refusal: {observed:?}"
+            );
         }
 
         /// Only `ReprepareRequired` waits: a denial with a change in progress
@@ -38447,6 +40708,126 @@ mod tests {
             ));
         }
 
+        /// A compaction summary refused for a change that already completed
+        /// is a stale read: it pauses one backoff step and asks again under
+        /// the same operation, and the compaction completes. When that change
+        /// revoked the work's authority, the summary meets the owners'
+        /// current refusal (`Denied`) and the compaction is skipped as
+        /// before, under that refusal.
+        ///
+        /// RED on the base: the stale read skipped the compaction at once.
+        #[cfg(feature = "workspace-tests")]
+        #[tokio::test(start_paused = true)]
+        async fn a_compaction_summary_rebuilds_after_a_stale_read_whose_change_completed() {
+            for revoked in [false, true] {
+                // The first run answers; the second compacts first, and its
+                // summary reads stale after a change that completed.
+                let policy = if revoked {
+                    ChurnPolicy::new([
+                        ChurnStep::Allow,
+                        ChurnStep::Stale,
+                        ChurnStep::Deny,
+                        ChurnStep::Allow,
+                    ])
+                } else {
+                    ChurnPolicy::new([ChurnStep::Allow, ChurnStep::Stale, ChurnStep::Allow])
+                };
+                let client = ChurnClient::new(std::time::Duration::ZERO);
+                let observer = Arc::new(RecordingObserver::default());
+                let mut agent =
+                    with_test_turn_state_handle(AgentBuilder::new().model("fixture-model"))
+                        .compactor(Arc::new(DiscardingCompactor::new(1)))
+                        .with_operation_refusal_observer(Arc::clone(&observer) as _)
+                        .build_standalone(
+                            Arc::clone(&client),
+                            Arc::new(IndeterminateDispatcher),
+                            Arc::new(NoopStore),
+                        )
+                        .await;
+                let work = WorkAuthorizationContext::new(
+                    Arc::clone(&policy) as Arc<dyn WorkAuthorization>,
+                    crate::exact_operation::OperationExecutionScope::Domain,
+                )
+                .with_controller_client(crate::ControllerModelClient::new(
+                    fixture_controller_selection(),
+                    Arc::clone(&client) as Arc<dyn AgentLlmClient>,
+                ))
+                .unwrap();
+                let mut completed = 0;
+                for prompt in ["first retained input", "second input"] {
+                    let (tx, mut rx) = mpsc::channel(1024);
+                    agent
+                        .run_with_events_and_work_authorization(
+                            prompt.to_string().into(),
+                            vec![],
+                            vec![],
+                            None,
+                            tx,
+                            Some(work.clone()),
+                        )
+                        .await
+                        .expect("governed run");
+                    while let Ok(event) = rx.try_recv() {
+                        if matches!(event, crate::AgentEvent::CompactionCompleted { .. }) {
+                            completed += 1;
+                        }
+                    }
+                }
+                let summaries = client.summaries.lock().unwrap().clone();
+                assert_eq!(
+                    summaries.len(),
+                    2,
+                    "revoked={revoked}: one stale summary, one more"
+                );
+                assert_eq!(
+                    summaries[0], summaries[1],
+                    "revoked={revoked}: the same compaction operation"
+                );
+                let observed: Vec<_> = observer
+                    .observed()
+                    .iter()
+                    .map(|observation| {
+                        (
+                            observation.surface().clone(),
+                            observation.outcome(),
+                            observation.disposition(),
+                        )
+                    })
+                    .collect();
+                let compaction = crate::authorization::OperationRefusalSurface::Compaction;
+                let waited = matches!(
+                    observed.first(),
+                    Some((
+                        surface,
+                        outcome,
+                        crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                            settled: true,
+                            ..
+                        },
+                    )) if *surface == compaction && *outcome == reprepare_outcome()
+                );
+                assert!(
+                    waited,
+                    "revoked={revoked}: a wait after the stale read: {observed:?}"
+                );
+                if revoked {
+                    assert_eq!(completed, 0, "the revoked summary skips the compaction");
+                    assert_eq!(
+                        observed.get(1),
+                        Some(&(
+                            compaction,
+                            OperationRefused::new(OperationRefusalKind::Denied).into(),
+                            crate::authorization::OperationRefusalDisposition::CompactionSkipped,
+                        )),
+                        "the owners' current refusal: {observed:?}"
+                    );
+                } else {
+                    assert_eq!(completed, 1, "the compaction completed");
+                    assert_eq!(observed.len(), 1, "{observed:?}");
+                }
+            }
+        }
+
         /// The host's operation refusal observer sees the model request's
         /// wait for an owner change, with the refused operation, its run and
         /// session, and how long it waited; the rebuild that follows was
@@ -38489,14 +40870,23 @@ mod tests {
             assert_completed_without_failure(&mut run.events);
         }
 
-        /// Without a change in progress the refusal rebuilds once and then
-        /// goes to the controller: the host sees both decisions, for the
-        /// refused operation, and nothing for the feedback request that was
-        /// authorized.
+        /// Stale reads that keep coming with no change in progress are each
+        /// waited after, as the call's free rebuilds; once those are spent,
+        /// the refusal rebuilds once and then goes to the controller. The
+        /// host sees every decision, for the refused operation, and nothing
+        /// for the feedback request that was authorized.
         #[cfg(feature = "workspace-tests")]
         #[tokio::test(start_paused = true)]
         async fn the_host_observes_the_rebuild_and_the_controller_feedback() {
-            let policy = ChurnPolicy::new([ChurnStep::Stale, ChurnStep::Stale, ChurnStep::Allow]);
+            use crate::authorization::OperationRefusalDisposition as Disposition;
+            let policy = ChurnPolicy::new([
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Stale,
+                ChurnStep::Allow,
+            ]);
             let client = ChurnClient::new(std::time::Duration::ZERO);
             let observer = Arc::new(RecordingObserver::default());
             let run = run_churn_observed(&policy, &client, None, Some(Arc::clone(&observer))).await;
@@ -38509,28 +40899,33 @@ mod tests {
                 .observed()
                 .iter()
                 .map(|observation| {
-                    (
-                        observation.operation_id().cloned(),
-                        observation.surface().clone(),
-                        observation.outcome(),
-                        observation.disposition(),
-                    )
+                    assert_eq!(
+                        observation.surface(),
+                        &crate::authorization::OperationRefusalSurface::ModelRequest
+                    );
+                    assert_eq!(observation.outcome(), reprepare_outcome());
+                    let disposition = match observation.disposition() {
+                        Disposition::WaitedForOwnerChange { settled: true, .. } => "waited",
+                        Disposition::WaitedForOwnerChange { settled: false, .. } => "not settled",
+                        Disposition::Rebuilt => "rebuilt",
+                        Disposition::ControllerFeedback => "controller feedback",
+                        other => panic!("{other:?}"),
+                    };
+                    (observation.operation_id().cloned(), disposition)
                 })
                 .collect();
             assert_eq!(
                 observed,
                 [
-                    crate::authorization::OperationRefusalDisposition::Rebuilt,
-                    crate::authorization::OperationRefusalDisposition::ControllerFeedback,
+                    "waited",
+                    "waited",
+                    "waited",
+                    "not settled",
+                    "rebuilt",
+                    "not settled",
+                    "controller feedback",
                 ]
-                .map(|disposition| {
-                    (
-                        Some(refused.clone()),
-                        crate::authorization::OperationRefusalSurface::ModelRequest,
-                        reprepare_outcome(),
-                        disposition,
-                    )
-                })
+                .map(|disposition| (Some(refused.clone()), disposition))
             );
         }
 
@@ -40098,6 +42493,10 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         /// The R3 action, whose review its dispatcher consumes at entry; it
@@ -40219,7 +42618,7 @@ mod tests {
                     approvals.clone(),
                     std::time::Duration::from_secs(30),
                 )
-                .with_human_consent(route.clone(), std::time::Duration::from_secs(4 * 60 * 60)),
+                .with_human_consent(route.clone(), std::time::Duration::from_hours(4)),
             );
             let observer = Arc::new(RecordingObserver::default());
             let tools = Arc::new(ConsentedAction::default());
@@ -40585,6 +42984,10 @@ mod tests {
                     }
                     Ok(())
                 }
+
+                fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                    Ok(())
+                }
             }
 
             /// The two restricted actions, whose leaf spends the reviewed
@@ -40657,7 +43060,7 @@ mod tests {
                         crate::ToolDeadlineChain::new(vec![
                             crate::ToolDeadlineContributor::finite(
                                 crate::ToolDeadlineOwner::Dispatcher,
-                                std::time::Duration::from_secs(60),
+                                std::time::Duration::from_mins(1),
                             ),
                         ])?
                     } else {
@@ -40741,7 +43144,7 @@ mod tests {
                         approvals.clone(),
                         std::time::Duration::from_secs(30),
                     )
-                    .with_human_consent(route.clone(), std::time::Duration::from_secs(4 * 60 * 60)),
+                    .with_human_consent(route.clone(), std::time::Duration::from_hours(4)),
                 );
                 let agent = agent_over(&review, model, tools).await;
                 Host {
@@ -42401,6 +44804,10 @@ mod tests {
                         }
                         _ => Ok(()),
                     }
+                }
+
+                fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                    Ok(())
                 }
             }
 

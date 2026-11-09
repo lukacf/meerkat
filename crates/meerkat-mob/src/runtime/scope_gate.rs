@@ -47,6 +47,18 @@ pub(super) enum ScopeAdmission {
     Denied,
 }
 
+/// How the agent lane's own rules answer a command
+/// ([`MobCommand::agent_lane_admission`]).
+pub(super) enum AgentLaneAdmission<'a> {
+    /// The command addresses no member the rules name: admitted.
+    Unaddressed,
+    /// A member command addressed to these members: refused when one of
+    /// them is an identity entry (MobMachine's agent-lane member admission).
+    Members(Vec<&'a crate::ids::AgentIdentity>),
+    /// A host verb the agent lane never runs: refused.
+    HostOnly,
+}
+
 /// One wall-clock read per enforcement DECISION (DEC-P5P-6): UNIX epoch ms,
 /// read at the seam and passed to `ResolvedControlPolicy::resolve` as data.
 /// Saturates to u64::MAX on a pre-epoch clock: a broken clock must FAIL
@@ -85,6 +97,12 @@ impl MobCommand {
             | Self::SpawnAttachedForkedParticipant { .. }
             // Releasing a host's run-start hold lets the member start runs.
             | Self::ReleaseMemberRunStarts { .. }
+            // Retrying a build preparation the host asked to retry lets the
+            // member's next wake be built.
+            | Self::ResolveMemberBuildPreparation { .. }
+            // A compaction request changes how the member's next model
+            // request is made: the authority class of driving the member.
+            | Self::RequestMemberCompaction { .. }
             // A dormant seat creates members (and spawns the fresh ones that
             // owe a kickoff): the authority class of a spawn.
             | Self::PlanDormantSeats { .. }
@@ -105,6 +123,8 @@ impl MobCommand {
             | Self::ForceCancel { .. }
             | Self::HardCancelMember { .. }
             | Self::StopMemberRun { .. }
+            // Settling a member's retained run ends that run's work.
+            | Self::SettleMemberRetainedRun { .. }
             // Revoking a capability terminalizes outstanding delegated work
             // authority without retiring any member.
             | Self::RevokeForkedParticipant { .. }
@@ -129,6 +149,9 @@ impl MobCommand {
             //    lifecycle mutations classify as the destructive class).
             //    Respawn = destroy+recreate ⇒ its most privileged half. ──
             Self::Retire { .. }
+            // The retire of an identity the roster lists no incarnation of:
+            // the same verb, answered by MobMachine's RetireAbsent.
+            | Self::RetireAbsent { .. }
             | Self::RetireAll { .. }
             | Self::Respawn { .. }
             // Reload replaces the member's runtime registration in place; it
@@ -151,7 +174,19 @@ impl MobCommand {
             | Self::StartMemberRotation { .. }
             | Self::AdoptMemberIdentityDeclaration { .. }
             | Self::ApplyMemberToolDeclaration { .. }
-            | Self::ResolveIdentityConvergenceBlock { .. } => Some(ControlScope::Retire),
+            | Self::ResolveIdentityConvergenceBlock { .. }
+            // Adopting a legacy member as an identity entry changes the
+            // member's standing: no worker reconcile or agent-lane command
+            // acts on it afterwards.
+            | Self::AdoptLegacyIdentityEntry { .. }
+            // A store-owned identity change creates, changes or ends
+            // identities, the declared apply's class.
+            | Self::IdentityChange(_)
+            // The declared apply decides identity entries' standing and its
+            // seal retires the members of unlisted ones.
+            | Self::DeclareIdentityEntries { .. }
+            | Self::SealDeclaredRoster { .. }
+            | Self::OpenDeclaredApply { .. } => Some(ControlScope::Retire),
 
             // ── WireTopology: trust/topology configuration ──
             Self::Wire { .. }
@@ -160,12 +195,19 @@ impl MobCommand {
             | Self::DriveRouteInstalls { .. }
             | Self::DeclareMemberOutboundTaint { .. } => Some(ControlScope::WireTopology),
 
-            // ── AdminHost: host-plane administration (A9: exactly
-            //    bind/revoke hosts; supervisor authority is host-plane). ──
+            // ── AdminHost: host-plane administration (A9: bind/revoke
+            //    hosts; supervisor authority is host-plane) and the host's
+            //    operator instructions for the mob's members. ──
             Self::BindHost { .. }
             | Self::IssueHostBindingDescriptor { .. }
             | Self::RevokeHost { .. }
-            | Self::RotateSupervisor { .. } => Some(ControlScope::AdminHost),
+            | Self::RotateSupervisor { .. }
+            | Self::SetOperatorInstruction { .. }
+            | Self::RevokeOperatorInstruction { .. } => Some(ControlScope::AdminHost),
+            // A scoped tool grant to a member identity is the host's
+            // administration of what the member may run.
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => Some(ControlScope::AdminHost),
 
             // ── SubscribeEvents: the mob event journal surface ──
             Self::PollEvents { .. } | Self::ReplayAllEvents { .. } => {
@@ -216,8 +258,11 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             // An owed edge repair is the actor's own timer.
             | Self::RepairOwedEdge { .. }
+            // The release of a held member is the actor's own self-send.
+            | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
             | Self::ResumeLifecycleReadinessResolved { .. }
             | Self::ResumeLifecyclePreparationResolved { .. }
@@ -251,6 +296,10 @@ impl MobCommand {
             | Self::CommitFlowFrameStorePlan { .. }
             | Self::ProjectMachineInput { .. }
             | Self::ApplyMachineInputEffects { .. }
+            // A fork seat's dispatch admission: the handle's fork paths drive
+            // both after their own admission (`admit_fork_member`).
+            | Self::ObserveForkSourceDispatchLineage { .. }
+            | Self::ResolveSeatDispatchAdmission { .. }
             | Self::ValidateCommandAuthority { .. }
             | Self::PruneStaleMemberOperatorRequests { .. }
             | Self::ReserveRemoteTurnObligation { .. }
@@ -285,9 +334,18 @@ impl MobCommand {
             | Self::EnsureMemberEventTap { .. }
             // Provenance recording is informational, never enforcement.
             | Self::RecordOperatorActionProvenance { .. }
+            // The operator-instruction delivery owner's preparation and
+            // feedback: the write it realizes was admitted at its verb.
+            | Self::PrepareMemberInstructionDelivery { .. }
+            | Self::SettleMemberInstructionDeliveries { .. }
             // Builder/test config seam; no principal caller today —
             // reclassify the moment a surface exposes it.
             | Self::SetSpawnPolicy { .. }
+            // The close of a declared apply's open fact: the hygiene of the
+            // lease the actor made in the step that opened it, which alone
+            // sends it. No grant refuses it, so a caller whose grant ends
+            // mid-apply never leaves the mob's applies refused.
+            | Self::CloseDeclaredApply { .. }
             | Self::Shutdown { .. } => None,
 
             #[cfg(feature = "runtime-adapter")]
@@ -306,6 +364,8 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::OwedMemberWakeRetryArmedForTest { .. }
+            | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
             | Self::SpawnLiveMutationAwaitingActorForTest { .. }
@@ -381,6 +441,266 @@ impl MobCommand {
         }
     }
 
+    /// How the agent lane's own rules answer this command, on the agent lane
+    /// and on the console lane acting for an agent. A member command names
+    /// the members it addresses: MobMachine's agent-lane member admission
+    /// (`ResolveAgentLaneMemberAdmission`) answers for each, and an identity
+    /// entry among them refuses the command with
+    /// [`MobError::IdentityMember`]. The agent lane does not retire, respawn,
+    /// rotate, release, reload, cancel or wire an entry's member, nor release
+    /// its host's run-start hold; the legacy identity entry adoption is a
+    /// host verb it never runs. Spawns and seats address no member: their own
+    /// admission refuses an entry's name to a request without entry custody,
+    /// and an agent-lane request never carries it. Reads, work deliveries,
+    /// wakes, live sessions, objectives and the mob's own lifecycle address
+    /// no member either. Exhaustive (no wildcard), as
+    /// [`Self::required_control_scope`] is, so a new command is classified
+    /// here too.
+    pub(super) fn agent_lane_admission(&self) -> AgentLaneAdmission<'_> {
+        use super::handle::PeerTarget;
+        use super::state::ScopeAdmissionSubject;
+        match self {
+            Self::Retire { agent_identity, .. }
+            | Self::RetireAbsent { agent_identity, .. }
+            | Self::Respawn { agent_identity, .. }
+            | Self::ReleaseMember { agent_identity, .. }
+            | Self::ReloadMemberRegistration { agent_identity, .. }
+            | Self::ReleaseMemberRunStarts { agent_identity, .. }
+            | Self::ForceCancel { agent_identity, .. }
+            | Self::HardCancelMember { agent_identity, .. }
+            | Self::StopMemberRun { agent_identity, .. }
+            | Self::SettleMemberRetainedRun { agent_identity, .. }
+            | Self::RequestMemberCompaction { agent_identity, .. } => {
+                AgentLaneAdmission::Members(vec![agent_identity])
+            }
+            Self::CancelAllWork { runtime_id, .. } => {
+                AgentLaneAdmission::Members(vec![&runtime_id.identity])
+            }
+            Self::PlanMemberRotation { spec, .. } => AgentLaneAdmission::Members(vec![&spec.identity]),
+            Self::StartMemberRotation { candidate, .. } => {
+                AgentLaneAdmission::Members(vec![&candidate.agent_identity])
+            }
+            Self::Wire { local, target, .. } | Self::Unwire { local, target, .. } => {
+                AgentLaneAdmission::Members(match target {
+                    PeerTarget::Local(peer) => vec![local, peer],
+                    PeerTarget::ExternalName(_)
+                    | PeerTarget::ExternalBinding(_)
+                    | PeerTarget::External(_) => vec![local],
+                })
+            }
+            Self::WireMembersBatch { edges, .. } => AgentLaneAdmission::Members(
+                edges
+                    .iter()
+                    .flat_map(|(local, peer)| [local, peer])
+                    .collect(),
+            ),
+            Self::AdmitControlScope { subject, .. } => match subject {
+                // External work addresses no member the lane rules name,
+                // as SubmitWork does: MobMachine's admission answers it.
+                ScopeAdmissionSubject::Mob | ScopeAdmissionSubject::ExternalWork(_) => {
+                    AgentLaneAdmission::Unaddressed
+                }
+                ScopeAdmissionSubject::Member(member)
+                | ScopeAdmissionSubject::MemberHost(member) => {
+                    AgentLaneAdmission::Members(vec![member])
+                }
+                ScopeAdmissionSubject::LegacyAdoption(_) | ScopeAdmissionSubject::DeclaredApply => {
+                    AgentLaneAdmission::HostOnly
+                }
+            },
+            Self::AdoptLegacyIdentityEntry { .. }
+            | Self::IdentityChange(_)
+            | Self::DeclareIdentityEntries { .. }
+            | Self::SealDeclaredRoster { .. }
+            | Self::OpenDeclaredApply { .. }
+            // Operator instructions are the host's; no agent writes them.
+            | Self::SetOperatorInstruction { .. }
+            | Self::RevokeOperatorInstruction { .. }
+            // The build preparation the host asked to retry is the host's.
+            | Self::ResolveMemberBuildPreparation { .. } => AgentLaneAdmission::HostOnly,
+            // No agent grants a member tools.
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => AgentLaneAdmission::HostOnly,
+
+            // Spawns, seats, work, flows, objectives and forked participants.
+            Self::Spawn { .. }
+            | Self::SubmitWork { .. }
+            | Self::SendPeerMessage { .. }
+            | Self::PreviewRunFlowAdmission { .. }
+            | Self::RunFlow { .. }
+            | Self::ConcludeObjective { .. }
+            | Self::BindObjectiveOwner { .. }
+            | Self::CreateForkedParticipant { .. }
+            | Self::AttachForkedParticipant { .. }
+            | Self::SpawnAttachedForkedParticipant { .. }
+            | Self::PlanDormantSeats { .. }
+            | Self::CommitDormantSeats { .. }
+            | Self::CancelFlow { .. }
+            | Self::RevokeForkedParticipant { .. }
+            | Self::ReleaseForkedParticipant { .. }
+            // Reads and live sessions.
+            | Self::MemberHistory { .. }
+            | Self::MemberLiveOpen { .. }
+            | Self::MemberLiveClose { .. }
+            | Self::MemberLiveStatus { .. }
+            | Self::MemberLiveControl { .. }
+            // The mob's own lifecycle, which the principal's grants gate.
+            | Self::RetireAll { .. }
+            | Self::Stop { .. }
+            | Self::CloseIfIdle { .. }
+            | Self::CloseAdmission { .. }
+            | Self::ResumeLifecycle { .. }
+            | Self::Complete { .. }
+            | Self::Destroy { .. }
+            | Self::Reset { .. }
+            // Identity intents (host adoption), which their own requests gate.
+            | Self::AdoptMemberIdentityDeclaration { .. }
+            | Self::ApplyMemberToolDeclaration { .. }
+            | Self::ResolveIdentityConvergenceBlock { .. }
+            | Self::DriveRouteInstalls { .. }
+            | Self::DeclareMemberOutboundTaint { .. }
+            | Self::BindHost { .. }
+            | Self::IssueHostBindingDescriptor { .. }
+            | Self::RevokeHost { .. }
+            | Self::RotateSupervisor { .. }
+            | Self::PollEvents { .. }
+            | Self::ReplayAllEvents { .. }
+            | Self::FlowStatus { .. }
+            | Self::ProjectMemberStatus { .. }
+            | Self::ProjectMemberList { .. }
+            | Self::GetIdentityIntent { .. }
+            | Self::GetIdentityConvergenceStatus { .. }
+            | Self::MemberMachineProjection { .. }
+            | Self::QueryPhase { .. }
+            | Self::GrantScopes { .. }
+            | Self::RevokeScopes { .. }
+            | Self::Grants { .. }
+            // Internal and machine-authority plumbing.
+            | Self::CloseDeclaredApply { .. }
+            | Self::PrepareMemberInstructionDelivery { .. }
+            | Self::SettleMemberInstructionDeliveries { .. }
+            | Self::SpawnProvisioned { .. }
+            | Self::SpawnPreparationSettled { .. }
+            | Self::MemberTurnAdmissionSettled { .. }
+            | Self::SpawnActivationStageSettled { .. }
+            | Self::SpawnCleanupSettled { .. }
+            | Self::PendingSpawnAnchorSettled { .. }
+            | Self::PolicySpawnSettled { .. }
+            | Self::ReviveMemberLiveMaterialization { .. }
+            | Self::WakeMember { .. }
+            | Self::MemberWakeTimedOut { .. }
+            | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. }
+            | Self::StartupMemberRecovered { .. }
+            | Self::ResumeLifecycleReadinessResolved { .. }
+            | Self::ResumeLifecyclePreparationResolved { .. }
+            | Self::AutonomousMemberStopsResolved { .. }
+            | Self::AutonomousStopInterruptSettled
+            | Self::ShutdownTeardownResolved { .. }
+            | Self::ResumeLifecycleMemberObserved { .. }
+            | Self::ResumeLifecycleMemberReady { .. }
+            | Self::ResumeLifecycleMemberSettled { .. }
+            | Self::ResumeLifecycleMemberReadinessResolved { .. }
+            | Self::ResumeLifecycleMemberCleanupHeld { .. }
+            | Self::ResumeLifecycleMemberUnproven { .. }
+            | Self::ResumeLifecycleBootMemberSettled { .. }
+            | Self::ResumeLifecycleBootMembersPrepared { .. }
+            | Self::ResumeLifecycleRollbackStep { .. }
+            | Self::ResumeLifecycleRollbackFinalized { .. }
+            | Self::ResumePostCommitMemberCompleted { .. }
+            | Self::CompleteAttachedForkedParticipantSpawn { .. }
+            | Self::CompleteHostForkedParticipantSpawn { .. }
+            | Self::RevivePlacedMember { .. }
+            | Self::HostStatusPollCompleted { .. }
+            | Self::HostRuntimeIncarnationObserved { .. }
+            | Self::HostOrphanReleaseCompleted { .. }
+            | Self::PlacedBehaviorCompleted { .. }
+            | Self::ProjectMemberStatusObserved { .. }
+            | Self::CommitFlowRunCommand { .. }
+            | Self::CommitFlowTerminalization { .. }
+            | Self::CommitFlowFrameStorePlan { .. }
+            | Self::ProjectMachineInput { .. }
+            | Self::ApplyMachineInputEffects { .. }
+            // A fork seat's dispatch admission: the handle's fork paths drive
+            // both after their own admission (`admit_fork_member`).
+            | Self::ObserveForkSourceDispatchLineage { .. }
+            | Self::ResolveSeatDispatchAdmission { .. }
+            | Self::ValidateCommandAuthority { .. }
+            | Self::PruneStaleMemberOperatorRequests { .. }
+            | Self::ReserveRemoteTurnObligation { .. }
+            | Self::CommitRemoteTurnReceipt { .. }
+            | Self::CloseRemoteTurnAfterTrackedCancel { .. }
+            | Self::EnsureRemoteTurnRecord { .. }
+            | Self::FinalizeRemoteTurnPrivacyCleanup { .. }
+            | Self::ConvergeRecoveredFlowRun { .. }
+            | Self::ResolveRemoteTurnOutcome { .. }
+            | Self::AcknowledgeRemoteTurnOutcome { .. }
+            | Self::RequestPlacedCompletionCancellation { .. }
+            | Self::ResolvePlacedCompletionOutcome { .. }
+            | Self::ClosePlacedCompletionOutcome { .. }
+            | Self::AcknowledgePlacedCompletionOutcome { .. }
+            | Self::ResolvePlacedKickoffOutcome { .. }
+            | Self::ResolvePlacedKickoffCancelled { .. }
+            | Self::AcknowledgePlacedKickoffOutcome { .. }
+            | Self::RejectPlacedKickoffBeforeAdmission { .. }
+            | Self::PreviewMachineInput { .. }
+            | Self::QueryMachineState { .. }
+            | Self::ApplyExternalPeerReciprocalTrust { .. }
+            | Self::ProjectMachineSignal { .. }
+            | Self::RecordMissingMemberBridgeSession { .. }
+            | Self::FlowFinished { .. }
+            | Self::FlowCanceledCleanup { .. }
+            | Self::StartupKickoffSnapshot { .. }
+            | Self::EnsureMemberEventPump { .. }
+            | Self::EnsureMemberEventTap { .. }
+            | Self::RecordOperatorActionProvenance { .. }
+            | Self::SetSpawnPolicy { .. }
+            | Self::Shutdown { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(feature = "openai-live")]
+            Self::StartLiveBridgeOperation { .. }
+            | Self::ValidateLiveBridgeMemberEligibility { .. }
+            | Self::ValidateLiveDurableSourceAvailability { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(feature = "runtime-adapter")]
+            Self::ResumeTopologyAuthority { .. }
+            | Self::ResumeTopologyCompleted { .. }
+            | Self::ResumeTopologyEffectHeld { .. }
+            | Self::DrainRunsSnapshot { .. }
+            | Self::KickoffOutcomeResolved { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(any(test, feature = "test-support"))]
+            Self::CrashStopPreservingDurableWorkForTest { .. }
+            | Self::RebindMemberSessionForTest { .. }
+            | Self::SpawnHeldLiveMutationForTest { .. } => AgentLaneAdmission::Unaddressed,
+
+            #[cfg(test)]
+            Self::AuthorizeMemberTrustCleanupForTest { .. }
+            | Self::StagePendingSpawnForRetireTest { .. }
+            | Self::FlowTrackerCounts { .. }
+            | Self::OrchestratorSnapshot { .. }
+            | Self::LifecycleSnapshot { .. }
+            | Self::LifecycleNotificationBurst { .. }
+            | Self::ParkActorForObservationTest { .. }
+            | Self::OwedMemberWakeRetryArmedForTest { .. }
+            | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
+            | Self::QueueRoutedEffectForTest { .. }
+            | Self::WakeMemberFromEffectForTest { .. }
+            | Self::SpawnLiveMutationAwaitingActorForTest { .. }
+            | Self::HonourCompletionForTest { .. }
+            | Self::SpawnLiveMutationSendingCompletionForTest { .. }
+            | Self::SpawnActivationCustodyProbe { .. }
+            | Self::SpawnPreparationProbe { .. }
+            | Self::BeginStopQuiesceForTest { .. }
+            | Self::FailNextResumeReadinessForTest { .. }
+            | Self::BindPeerOnlyMembersForTest { .. }
+            | Self::MemberStatusLaneProbe { .. }
+            | Self::DslT2Snapshot { .. } => AgentLaneAdmission::Unaddressed,
+        }
+    }
+
     pub(super) fn reject_scope_denied(self, denial: ScopeDenial) {
         self.reject_with_error(MobError::ScopeDenied(denial));
     }
@@ -394,6 +714,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Retire { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::RetireAbsent { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Respawn { reply_tx, .. } => {
@@ -418,7 +741,9 @@ impl MobCommand {
             }
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
-            | Self::RepairOwedEdge { .. } => {}
+            | Self::RetryMemberBuildPreparation { .. }
+            | Self::RepairOwedEdge { .. }
+            | Self::ReleaseHeldMember { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -471,6 +796,9 @@ impl MobCommand {
             Self::ReleaseMemberRunStarts { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::ResolveMemberBuildPreparation { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
             Self::PlanDormantSeats { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -481,6 +809,22 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::CommitDormantSeats { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::AdoptLegacyIdentityEntry { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::IdentityChange(command) => (*command).reply_error(error),
+            Self::DeclareIdentityEntries { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SealDeclaredRoster { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::OpenDeclaredApply { reply_tx } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CloseDeclaredApply { reply_tx } => {
                 let _ = reply_tx.send(Err(error));
             }
             // Settling closes the waiter set; the actor's in-flight map prunes
@@ -546,6 +890,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::StopMemberRun { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SettleMemberRetainedRun { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::RequestMemberCompaction { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberHistory { reply_tx, .. } => {
@@ -618,6 +968,22 @@ impl MobCommand {
             Self::Grants { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::SetOperatorInstruction { reply_tx, .. }
+            | Self::RevokeOperatorInstruction { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error.into()));
+            }
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(super::member_grant_gate::MemberToolGrantError::Mob(
+                    error,
+                )));
+            }
+            Self::PrepareMemberInstructionDelivery { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SettleMemberInstructionDeliveries { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
             // Fenced remote-upcall handles also route their machine admission
             // and other actor-serialized queries through this gate. Preserve
             // the typed stale-authority error on every Result-bearing internal
@@ -636,6 +1002,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ApplyMachineInputEffects { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ObserveForkSourceDispatchLineage { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveSeatDispatchAdmission { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ValidateCommandAuthority { reply_tx } => {
@@ -687,6 +1059,14 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]
@@ -803,6 +1183,7 @@ mod tests {
                 agent_identity: crate::ids::AgentIdentity::from("m"),
                 initial_message: None,
                 successor_spec: None,
+                same_session: None,
                 reply_tx: tx,
             }
             .required_control_scope(),
@@ -843,6 +1224,7 @@ mod tests {
         assert_eq!(
             MobCommand::AdmitControlScope {
                 required: ControlScope::Cancel,
+                subject: crate::runtime::state::ScopeAdmissionSubject::Mob,
                 reply_tx: tx,
             }
             .required_control_scope(),
@@ -858,6 +1240,25 @@ mod tests {
             .required_control_scope(),
             Some(ControlScope::AdminGrants),
         );
+        // Operator instructions are the host's: AdminHost, and the agent
+        // lane never runs them.
+        let (tx, _rx) = oneshot::channel();
+        let revoke = MobCommand::RevokeOperatorInstruction {
+            slot: meerkat_core::InstructionSlot {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("tone").unwrap(),
+            },
+            revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+            reply_tx: tx,
+        };
+        assert_eq!(
+            revoke.required_control_scope(),
+            Some(ControlScope::AdminHost)
+        );
+        assert!(matches!(
+            revoke.agent_lane_admission(),
+            super::AgentLaneAdmission::HostOnly
+        ));
         // ADJ-P5-18 prerequisite landed: the projection trio is List-scoped
         // with typed Result reply channels.
         let (tx, _rx) = oneshot::channel();
@@ -1089,7 +1490,7 @@ mod tests {
         let (admission_tx, _admission_rx) = tokio::sync::watch::channel(false);
         let cmd = MobCommand::Retire {
             agent_identity: identity.clone(),
-            redrive: false,
+            redrive: super::super::state::RetirementRedrive::Plain,
             target: super::super::state::RetireTarget::Exact(
                 super::super::state::RetireMemberIncarnation {
                     agent_identity: identity.clone(),
@@ -1132,6 +1533,48 @@ mod tests {
                 assert!(denial.presented.is_empty());
             }
             other => panic!("expected embedded ScopeDenied, got {other:?}"),
+        }
+    }
+
+    // The handle's retire of an identity its roster lists no incarnation of
+    // is the retire verb: Retire-scoped, addressed to the member on the agent
+    // lane, still answered while admission is closed (it revives nothing),
+    // and denied typed on its own reply channel.
+    #[tokio::test]
+    async fn retire_absent_classifies_as_a_member_retire() {
+        let identity = crate::ids::AgentIdentity::from("m");
+        let (tx, _rx) = oneshot::channel();
+        let command = MobCommand::RetireAbsent {
+            agent_identity: identity.clone(),
+            reply_tx: tx,
+        };
+        assert_eq!(command.required_control_scope(), Some(ControlScope::Retire));
+        assert!(
+            !command.refused_while_admission_closed(),
+            "a closed mob still answers the retire of an absent identity"
+        );
+        assert!(
+            matches!(
+                command.agent_lane_admission(),
+                AgentLaneAdmission::Members(members) if members == vec![&identity]
+            ),
+            "the agent lane meets the retire as a command addressed to the member"
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        MobCommand::RetireAbsent {
+            agent_identity: identity,
+            reply_tx,
+        }
+        .reject_scope_denied(ScopeDenial {
+            required: ControlScope::Retire,
+            presented: BTreeSet::new(),
+        });
+        match reply_rx.await {
+            Ok(Err(MobError::ScopeDenied(denial))) => {
+                assert_eq!(denial.required, ControlScope::Retire);
+            }
+            other => panic!("expected typed ScopeDenied reply, got {other:?}"),
         }
     }
 }

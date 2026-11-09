@@ -1,5 +1,5 @@
 Covers: Meerkat 0.9 API surface changes: JSON-RPC methods and REST routes
-added or renamed since 0.8.40; the full `ErrorCode` table (-32001 to -32037)
+added or renamed since 0.8.40; the full `ErrorCode` table (-32001 to -32039)
 with HTTP status, input readiness kinds (`original_admission_pending`), and
 real `rkat` exit codes; Python, TypeScript and Web SDK changes (RunInput,
 CONNECTION_CLOSED stderr tail, wasm stack, 0.9.4 `run_failed` content-filtered
@@ -65,6 +65,8 @@ with the resumable session identity in `details`.
 | `APPROVAL_COMMIT_UNKNOWN` | -32035 | 500 | Approval commit unknown; reconcile (0.9.0) |
 | `STALE_DELIVERY_SCOPE` | -32036 | 409 | Member session rotated; re-capture the delivery scope (0.9.0) |
 | `FORK_INSTRUCTION_REFUSED` | -32037 | 422 | A fork refused before commit by the fork instruction policy; `data.fork_instruction_refusal` names the cause and keys; CLI exit 57 (0.9.4) |
+| `ADMISSION_IN_PROGRESS` | -32038 | 409 | A realm admission fence the config write needs is held; nothing written; retryable once the hold ends; CLI exit 58 (0.9.11) |
+| `ADMISSION_FENCE_UNAVAILABLE` | -32039 | 503 | A realm admission fence the config write needs could not be used; nothing written; CLI exit 59 (0.9.11) |
 | `INVALID_PARAMS` | -32602 | 400 | Invalid request |
 | `INTERNAL_ERROR` | -32603 | 500 | Unexpected failure |
 
@@ -299,7 +301,7 @@ installs all four, and the SDKs download `rkat-rpc` from the same assets.
   methods listed in `references/providers_and_auth_credentials.md`.
 
 ```bash
-cargo install rkat --locked              # Rust 1.94 or newer
+cargo install rkat --locked              # Rust 1.97 or newer
 cargo install meerkat-rpc --locked       # installs rkat-rpc; likewise meerkat-rest, meerkat-mcp-server
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 cargo install rkat --locked \
   --config 'profile.release.package.meerkat-machine-schema.opt-level=0'   # small hosts
@@ -327,13 +329,24 @@ CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 cargo install rkat --locked
   overrides it for diagnosis only. They start one worker per available CPU;
   `RKAT_WORKER_THREADS` (then Tokio's `TOKIO_WORKER_THREADS`) sets the count,
   which a container whose pids limit is below its CPU count needs.
+- Since 0.9.9 the turns of mob members and of the sessions an RPC
+  `SessionRuntime` serves run on the host's runtime (a member's on the
+  runtime of the task that provisions it, an RPC session's on the runtime the
+  `SessionRuntime` is built on), as directly created sessions' turns did, so
+  size that runtime's worker stacks for the tools you compose (a default
+  Tokio runtime gives 2 MiB). Core's two process-wide runtimes
+  (`meerkat-machine-cleanup`, `meerkat-runtime-serving`) keep the cleanup and
+  runtime-loop work, on 16 MiB threads when `RKAT_WORKER_STACK_BYTES` is
+  unset. A host runtime that stops mid-turn ends the turn as a crash would:
+  its inputs stay pending and the next start resumes them.
 
 ## Embedding the Rust crates
 
 - Since 0.8.42 every workspace crate lives under `crates/<name>`, and test
   crates and fixtures under `tests/`. Directory names equal package names
-  except `crates/meerkat-cli`, which publishes as `rkat`. `xtask`,
-  `meerkat-machine-codegen` and `meerkat-web-runtime` are not published.
+  except `crates/meerkat-cli`, which publishes as `rkat`. `xtask` and
+  `meerkat-web-runtime` are not published; `meerkat-machine-codegen` is
+  published since 0.9.9.
 - Pin every `meerkat*` crate to the same exact version as your binaries and
   SDKs (`meerkat = "=0.9.0"`); the family is released and tested as one set.
 - To build against a checkout, point path dependencies or `[patch.crates-io]`
@@ -477,7 +490,13 @@ Rust host API changes in 0.9.4 (hosts that embed the crates):
   attachment, an actor materialization), so compare uses for equality only;
   `observe_unregister_session_registration_if_use_unchanged` starts or joins
   the exact unregister only while the use is unchanged
-  (`RuntimeSessionUnregisterUseAdmission`: `Admitted`, `Changed`);
+  (`RuntimeSessionUnregisterUseAdmission`: `Admitted`, `Changed`); since
+  0.9.9 `RuntimeSessionUnregisterObserver::queued_inputs` reads the
+  disposition the machine recorded for the unregister (a joined one keeps
+  its own; a keep is recorded as a stop for a registration that served live
+  work), and
+  `unregister_session_registration_until_terminal_reporting_queued_inputs_if_current`
+  answers it on completion;
   `reload_required_registration_settlement_if_current`
   (`ReloadRequiredRegistrationUseSettlement`: `NotCurrent`, `NotDegraded`,
   `Discarded { successor, successor_use }`, `Changed`) discards a

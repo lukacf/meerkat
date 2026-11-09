@@ -9,6 +9,20 @@ XTASK_TREE_KEY := $(shell printf '%s' "$(CURDIR)" | shasum | cut -c1-12)
 XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target-$(XTASK_TREE_KEY)
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 CARGO ?= ./scripts/repo-cargo
+# Core's whole-workspace lanes select Core's members only: `--workspace` and an
+# `--exclude` for every package of the other products (Meta, Connect), derived
+# on each use by scripts/core-workspace-args.mjs from ci/products.json and cargo
+# metadata. Cargo unifies features across the packages of one invocation, so a
+# bare `--workspace` would compile Core's crates with the products' features.
+# Each product's own lanes select its packages (`--product NAME`).
+CORE_WORKSPACE = $(shell node scripts/core-workspace-args.mjs)
+# A lane that builds test targets without --all-features also passes the
+# selected members' test features (their [package.metadata.meerkat.standalone-tests]
+# features and `workspace-tests`): no dev-dependency turns them on, and a test
+# build without them fails to compile here. CORE_WORKSPACE_TESTS is Core's
+# whole workspace, $(call TEST_PACKAGES,-p NAME ...) the named packages.
+CORE_WORKSPACE_TESTS = $(shell node scripts/core-workspace-args.mjs --tests)
+TEST_PACKAGES = $(shell node scripts/core-workspace-args.mjs --tests $(1))
 # Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
 # hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
 # PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
@@ -27,7 +41,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-mobkit release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit audit-generated-headers semver-breaks protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
+.PHONY: all install-build-deps build test test-unit test-mob-dense-topology test-mcp-confinement-positive test-int e2e-fast e2e-build e2e-system e2e-live e2e-copilot-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-web test-sdk-suites wasm-check lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor buildbuddy-install buildbuddy-generate buildbuddy-lock-update buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-smoke-turbo-s buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-doctor release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk release-prebuild publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web release-dry-run release-dry-run-smoke clean doc docs-check docs-only-contract-gate docs-sync-meta release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory sync-meerkat-dogma-skill-docs verify-version-parity verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment verify-sdk-wrapper-freshness verify-machine-poster-coverage verify-fixture-mint-generator check-rust-release-config check-crate-license-files check-published-crates-standalone-guard published-crates-standalone-selftest test-feature-canary-selftest published-crates-standalone-census check-rust-release-packaging check-rust-release-packaging-contract verify-lock-consistency verify-bazel-locks verify-bazel-locks-strict verify-bazel-module-lock-inputs verify-bazel-release-features release-test-code-guards-selftest check-published-facade-link bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-verify-deep-compositions machine-verify-full machine-check-drift machine-authority-docs-gate mobpack-docs-contract-gate runtime-authority-bypass storage-ambient-gate seam-inventory rmat-audit rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict audit-generated-headers semver-breaks semver-breaks-meta protocol-codegen protocol-check-drift semver-breaks-selftest path-classifier-selftest stack-budget-release turbo-s-oracle-gate
 
 # Default target
 all: ci
@@ -44,7 +58,7 @@ build:
 # Build release version
 release:
 	@echo "$(GREEN)Building release version...$(NC)"
-	$(CARGO) build --workspace --release
+	$(CARGO) build $(CORE_WORKSPACE) --release
 
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
@@ -60,7 +74,7 @@ test-unit:
 # neighboring tests and opts the Linux-hosted case back in explicitly.
 test-mob-dense-topology:
 	@echo "$(GREEN)Running dense Mob topology stress lane...$(NC)"
-	$(CARGO) nextest run --profile mob-dense-topology -p meerkat-mob --lib --run-ignored all --no-tests=fail
+	$(CARGO) nextest run --profile mob-dense-topology $(call TEST_PACKAGES,-p meerkat-mob) --lib --run-ignored all --no-tests=fail
 
 # Linux positive confinement acceptance. These cases need a host whose kernel
 # policy allows the native backend, so on Linux they are ignored in ordinary
@@ -75,8 +89,8 @@ CONFINEMENT_MCP_POSITIVE := test(/^connection::process_confinement_tests::suppor
 CONFINEMENT_MCP_POSITIVE_COUNT := 9
 CONFINEMENT_HOOK_POSITIVE := test(=process_custody::tests::required_command_hook_enters_only_with_its_durable_custody_record) | test(=required_command_hook_enters_with_exact_argv_cwd_environment_and_custody)
 CONFINEMENT_HOOK_POSITIVE_COUNT := 2
-CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
-CONFINEMENT_SANDBOX_POSITIVE_COUNT := 21
+CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_a_reaping_host_is_left_nothing_of_an_ended_launch) | test(=linux_command_starts_with_sigpipe_at_its_default_action) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_host_that_refuses_the_procfs_still_launches_without_proc) | test(=linux_init_reaps_orphans_while_the_command_runs) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_killing_the_custody_pid_ends_every_process_of_the_launch) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_launch_network_namespace_follows_its_ip_access) | test(=linux_launch_procfs_is_read_only_and_shows_no_host_state) | test(=linux_launch_reports_the_commands_own_exit_status) | test(=linux_launch_resolves_its_own_executable_through_its_procfs) | test(=linux_launch_runs_under_a_minimal_init_of_its_own_pid_namespace) | test(=linux_missing_confined_program_is_a_typed_spawn_error) | test(=linux_processes_the_command_leaves_running_end_with_it) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_resolves_a_host_name_through_a_symlinked_resolv_conf) | test(=linux_rust_program_spawns_through_std_with_and_without_ip) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
+CONFINEMENT_SANDBOX_POSITIVE_COUNT := 35
 CONFINEMENT_SHELL_POSITIVE := test(/^builtin::shell::confinement_tests::platform::/)
 CONFINEMENT_SHELL_POSITIVE_COUNT := 4
 
@@ -202,11 +216,14 @@ test-sdk-web:
 		npm test && \
 		npm run test:packed)
 
-# WASM runtime compile and lint gate
+# WASM runtime compile and lint gate. `cargo clippy` checks every crate
+# `cargo check` does (clippy-driver runs the compiler's checks before its
+# lints), so a separate `cargo check` of the same targets compiled the web
+# runtime's closure twice: 5m20s-7m18s of the CI lane on pull request runs
+# 40399556131, 40402047748 and 40411814108, whose changes missed the cache.
 wasm-check:
 	@echo "$(GREEN)Running WASM runtime check...$(NC)"
 	@rustup target add wasm32-unknown-unknown
-	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
 	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
 
 # Combined SDK test suites
@@ -221,7 +238,7 @@ test-minimal:
 	$(CARGO) check -p meerkat-tools --no-default-features
 	$(CARGO) check -p meerkat --no-default-features
 	$(CARGO) check -p rkat --no-default-features
-	$(CARGO) nextest run -p meerkat-core
+	$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat-core)
 
 # Library crate feature combinations
 test-feature-matrix-lib:
@@ -242,7 +259,7 @@ test-feature-matrix-lib:
 	$(CARGO) check -p meerkat-mob --no-default-features --features runtime-adapter
 	MEERKAT_MCP_TEST_SERVER="$$(scripts/mcp-test-server-fixture)" && \
 		export MEERKAT_MCP_TEST_SERVER && \
-		$(CARGO) nextest run -p meerkat --features all-providers,comms,mcp
+		$(CARGO) nextest run $(call TEST_PACKAGES,-p meerkat) --features all-providers,comms,mcp
 
 # Surface crate feature combinations
 test-feature-matrix-surface:
@@ -301,10 +318,19 @@ fmt:
 	@echo "$(GREEN)Fixing formatting...$(NC)"
 	$(CARGO) fmt --all
 
-# Security audit using cargo-deny
+# Security audit using cargo-deny, over every feature set the releases ship:
+# the whole workspace with default features (each of Core's four binaries
+# builds its own package with its defaults), Meta's gateways (meta-release.yml
+# builds them with `--features openai-live`; meta/deny.toml, which cargo-deny
+# reads beside meerkat-meta's manifest, audits every Meta feature) and
+# Connect's binaries (connect/scripts/connect-candidate.py builds them with
+# `--features console,toolkit-mobkit/native-host`; the root deny.toml). A
+# default-feature audit alone never sees the crates those features bring in.
 audit:
 	@echo "$(GREEN)Running security audit...$(NC)"
 	$(CARGO) deny check
+	$(CARGO) deny --manifest-path meta/crates/meerkat-meta/Cargo.toml check
+	$(CARGO) deny --manifest-path connect/crates/meerkat-connect/Cargo.toml --features console,toolkit-mobkit/native-host check
 
 # Alternative audit using cargo-audit (if cargo-deny not available)
 audit-alt:
@@ -333,15 +359,14 @@ ci-lanes-selftest:
 	@scripts/test-ci-non-rust-readers.sh
 	@scripts/test-ci-clippy-sccache-wrapper.sh
 	@scripts/test-setup-sccache-ci.sh
-	@echo "$(GREEN)Checking that CI runs what the pre-push hook no longer runs...$(NC)"
-	@scripts/test-pre-push-ratchets.sh
 
 .PHONY: native-cost-analysis-selftest
 native-cost-analysis-selftest:
 	@$(PYTHON) scripts/test_analyze_native_cost.py
 
 # Path classifiers (machine-authority-changed, buildbuddy-edge-changes,
-# cargo-agent-gate) and gate wiring contracts. Pure shell, no cargo build.
+# the local affected-test selection) and gate wiring contracts. Pure shell
+# and Node, no cargo build.
 path-classifier-selftest:
 	@echo "$(GREEN)Self-testing path classifiers and gate wiring...$(NC)"
 	@bash scripts/tests/xtask_scripts_dogma_gates.sh
@@ -355,22 +380,7 @@ path-classifier-selftest:
 	@node scripts/buildbuddy-edge-changes-selftest.mjs
 	@node scripts/rust-source-text-selftest.mjs
 	@node scripts/precommit-build-hook-selftest.mjs
-
-cargo-agent-gate: rust-lane-doctor
-	@echo "$(GREEN)Running Cargo agent changed-path gate...$(NC)"
-	@scripts/cargo-agent-gate $(AGENT_GATE_ARGS)
-
-agent-gate: SHELL := /bin/bash
-agent-gate:
-	@set -e; . ./scripts/build-backend-env; \
-	if meerkat_buildbuddy_enabled; then \
-		$(MAKE) buildbuddy-doctor; \
-	else \
-		$(MAKE) rust-lane-doctor; \
-	fi
-	@$(MAKE) docs-check
-	@printf '%b\n' "$(GREEN)Running agent changed-path gate...$(NC)"
-	@scripts/agent-gate $(AGENT_GATE_ARGS)
+	@node scripts/affected-tests-selftest.mjs
 
 buildbuddy-install:
 	@echo "$(GREEN)Installing pinned BuildBuddy CLI...$(NC)"
@@ -551,10 +561,15 @@ machine-codegen: xtask-build
 # documented over-budget composition skips (meerkat_mob_seam,
 # adaptive_mob_bundle full ci.cfg sweeps) plus the bounded adaptive witness
 # proof; a bare `machine-verify --all` runs the full mob-seam sweep, which
-# does not fit any local or CI budget.
+# does not fit any local or CI budget. MACHINE_VERIFY_PART runs one part of
+# the lane: machine-verify (the bounded adaptive witness, then
+# `machine-verify --all` with those skips) or one audit shard
+# (audits-a..audits-o, audits-q..audits-y); without it every part runs.
+# Nightly runs the machine-verify part, and ci.yml's tlc-audits job runs the
+# audit shards on every machine-authority change.
 machine-verify: xtask-build
 	@echo "$(GREEN)Running machine-verify (canonical TLC lane)...$(NC)"
-	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN)
+	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN) $(if $(MACHINE_VERIFY_PART),--part $(MACHINE_VERIFY_PART))
 
 # Deep-profile TLC (deep.cfg, -coverage 1, every witness with its completion
 # proof, and the zero-hit route/scheduler audit) over the compositions whose
@@ -620,10 +635,25 @@ storage-ambient-gate:
 
 # RMAT structural seam audit: protocol coverage, feedback constraints,
 # terminal mapping, ownership-ledger drift, and structural authority hygiene checks.
+# The three audits each read the tree on one thread and write nothing, so
+# once xtask is built they run concurrently, each one's output printed whole
+# when it ends: on a hosted 4-vCPU runner (run 40434437174) they took 50 s
+# (effect-authority), 112 s (ownership-ledger) and 270 s (rmat-audit) one
+# after another. The target fails when any of them fails.
+RMAT_AUDIT_PARTS := rmat-audit-effect-authority rmat-audit-ownership-ledger rmat-audit-strict
+
 rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
+	$(CARGO) build -p xtask
+	@$(MAKE) --no-print-directory -j3 --output-sync=target $(RMAT_AUDIT_PARTS)
+
+rmat-audit-effect-authority:
 	$(CARGO) run -p xtask -- effect-authority
+
+rmat-audit-ownership-ledger:
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
+
+rmat-audit-strict:
 	bash -lc 'ulimit -s unlimited 2>/dev/null || ulimit -s 65520; exec "$$@"' _ $(CARGO) run -p xtask -- rmat-audit --strict
 
 # Seam inventory (strict): every Local/External effect must have an
@@ -643,35 +673,36 @@ audit-generated-headers:
 # Generate documentation
 doc:
 	@echo "$(GREEN)Generating documentation...$(NC)"
-	$(CARGO) doc --workspace --no-deps --all-features
+	$(CARGO) doc $(CORE_WORKSPACE) --no-deps --all-features
 
 docs-check:
 	@echo "$(GREEN)Checking Mintlify docs...$(NC)"
 	@$(PYTHON) scripts/validate-mintlify-docs.py
 	@$(PYTHON) scripts/test_validate_mintlify_docs.py
-	@$(PYTHON) scripts/test_sync_mobkit_docs.py
-	@$(PYTHON) scripts/test_publish_mobkit_docs.py
-	@$(PYTHON) scripts/test_report_mobkit_docs_publication_failure.py
-	@$(PYTHON) scripts/test_check_mobkit_docs_lag.py
+	@$(PYTHON) scripts/test_sync_meta_docs.py
+	@$(PYTHON) scripts/test_publish_meta_docs.py
+	@$(PYTHON) scripts/test_report_meta_docs_publication_failure.py
+	@$(PYTHON) scripts/test_check_meta_docs_lag.py
 	@$(PYTHON) scripts/test_usage_accounting_docs.py
 
-MOBKIT_REPO ?= ../meerkat-mobkit
-MOBKIT_REF ?= main
+# Meta's docs source: meta/ in this repository (a standalone meerkat-meta
+# checkout still works). The mirror tracks main; no release tag is involved.
+META_DOCS_SOURCE ?= meta
+META_DOCS_REF ?= main
 
-# The MobKit docs mirror tracks MobKit main; no release tag is involved.
-docs-sync-mobkit:
-	@echo "$(GREEN)Syncing MobKit docs from $(MOBKIT_REPO) ($(MOBKIT_REF))...$(NC)"
-	@$(PYTHON) scripts/sync-mobkit-docs.py "$(MOBKIT_REPO)" --source-ref "$(MOBKIT_REF)" --require-clean
+docs-sync-meta:
+	@echo "$(GREEN)Syncing Meta docs from $(META_DOCS_SOURCE) ($(META_DOCS_REF))...$(NC)"
+	@$(PYTHON) scripts/sync-meta-docs.py "$(META_DOCS_SOURCE)" --source-ref "$(META_DOCS_REF)" --require-clean
 
 # Open documentation in browser
 doc-open:
 	@echo "$(GREEN)Opening documentation...$(NC)"
-	$(CARGO) doc --workspace --no-deps --all-features --open
+	$(CARGO) doc $(CORE_WORKSPACE) --no-deps --all-features --open
 
 # Test coverage using cargo-tarpaulin
 coverage:
 	@echo "$(GREEN)Generating test coverage...$(NC)"
-	$(CARGO) tarpaulin --workspace --all-features --timeout 120 --out Html
+	$(CARGO) tarpaulin $(CORE_WORKSPACE) --all-features --timeout 120 --out Html
 
 # Clean build artifacts
 clean:
@@ -716,7 +747,7 @@ outdated:
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	$(CARGO) bench --workspace
+	$(CARGO) bench $(CORE_WORKSPACE_TESTS)
 
 # ── Version parity & release targets ────────────────────────────────────────
 
@@ -795,7 +826,15 @@ check-published-crates-standalone-guard:
 published-crates-standalone-selftest:
 	@$(PYTHON) scripts/test_published_crates_standalone.py
 
-STANDALONE_CENSUS_OUT ?= target/published-crates-standalone
+# The test-feature canary in each Core crate's lib.rs trips a test binary
+# built without the crate's test features and nothing else: a fixture crate
+# with the same canary, built on the pinned toolchain in a scratch directory.
+test-feature-canary-selftest:
+	@scripts/test-feature-canary-selftest.sh
+
+# Outside the repository: the standalone builds run in it, and must not read
+# the repository's Cargo configuration (the census refuses such a directory).
+STANDALONE_CENSUS_OUT ?= $(or $(TMPDIR),/tmp)/meerkat-published-crates-standalone
 published-crates-standalone-census:
 	@$(PYTHON) scripts/published_crates_standalone.py census --out $(STANDALONE_CENSUS_OUT) $(STANDALONE_CENSUS_ARGS)
 
@@ -871,6 +910,7 @@ regen-schemas:
 release-doctor:
 	@echo "$(GREEN)Checking release environment...$(NC)"
 	@scripts/test-release-npm-publish-preflight.sh
+	@$(PYTHON) -I scripts/test_release_registry_preflight.py
 	@scripts/test-release-doctor-workflow-contract.sh
 	@scripts/test-release-find-prebuild.sh
 	@scripts/test-release-require-standalone-green.sh
@@ -887,6 +927,14 @@ release-doctor:
 semver-breaks:
 	@echo "$(GREEN)Checking public-API breaks vs published baselines...$(NC)"
 	@scripts/check-semver-breaks.sh
+
+# The same gate for Meta's release line: meta-extension-state and
+# meerkat-meta (scripts/release-meta-crates.sh) against Meta's newest
+# crates.io release, with the breaks named in meta/CHANGELOG.md and the
+# baseline tag meta-v<version>.
+semver-breaks-meta:
+	@echo "$(GREEN)Checking Meta public-API breaks vs published Meta baselines...$(NC)"
+	@MEERKAT_SEMVER_PRODUCT=meta scripts/check-semver-breaks.sh
 
 # The analyser and immutable-tag recovery verifier, unit-tested without the
 # cargo-semver-checks tool so they can run on every PR. A parser that has
@@ -1057,7 +1105,7 @@ publish-dry-run:
 verify-version:
 	@echo "$(GREEN)Verifying version...$(NC)"
 	@VERSION=$$($(CARGO) metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "meerkat") | .version'); \
-	TAG=$$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//'); \
+	TAG=$$(git describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null | sed 's/^v//'); \
 	if [ -z "$$TAG" ]; then \
 		echo "$(YELLOW)No tag found on current commit$(NC)"; \
 	elif [ "$$VERSION" != "$$TAG" ]; then \
@@ -1098,8 +1146,6 @@ help:
 	@echo "  $(GREEN)fmt-check$(NC)     - Check code formatting"
 	@echo "  $(GREEN)audit$(NC)         - Run security audit (cargo-deny)"
 	@echo "  $(GREEN)rust-lane-doctor$(NC)- Check Rust lane isolation and filtered test lanes"
-	@echo "  $(GREEN)agent-gate$(NC)    - Run Cargo or MEERKAT_BUILDBUDDY=1 BuildBuddy changed gate (AGENT_GATE_ARGS=...)"
-	@echo "  $(GREEN)cargo-agent-gate$(NC)- Run Cargo gate for changed agent files"
 	@echo "  $(GREEN)buildbuddy-install$(NC)- Install pinned optional BuildBuddy CLI"
 	@echo "  $(GREEN)buildbuddy-generate$(NC)- Regenerate optional Bazel BUILD files"
 	@echo "  $(GREEN)buildbuddy-lock-update$(NC)- Refresh Bazel module lockfile"
@@ -1129,7 +1175,7 @@ help:
 	@echo "  $(GREEN)check$(NC)         - Quick compilation check"
 	@echo "  $(GREEN)doc$(NC)           - Generate documentation"
 	@echo "  $(GREEN)docs-check$(NC)    - Validate Mintlify docs navigation and links"
-	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai from a clean MobKit main checkout"
+	@echo "  $(GREEN)docs-sync-meta$(NC) - Refresh docs.rkat.ai's Meta mirror from a clean meta/docs"
 	@echo "  $(GREEN)coverage$(NC)      - Generate test coverage report"
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"

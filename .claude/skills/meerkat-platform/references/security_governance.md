@@ -144,20 +144,27 @@ denial. Since 0.9.4:
 - A model request, a governed tool dispatch (at its prepared entry, its body
   entry and the call-level policy gate), the `web_search` helper's model
   request and a compaction summary wait for a change in progress to complete,
-  then rebuild under the same operation. Each wait state allows at most 2 s
-  (less when the run's budget or the tool's remaining time is shorter) and 3
-  free rebuilds; a reviewed tool call has at most 3 wait states (6 s, 9
-  rebuilds), inside the tool's timeout. Past those bounds the refusal takes its
-  ordinary path: one rebuild, then `operation_refused` feedback to the model
-  (a compaction summary still fails its compaction). A run whose budget runs
-  out while waiting ends with the time-budget terminal. Owner changes while a
-  session runs therefore no longer turn ordinary calls into refusals.
+  then rebuild under the same operation. Since 0.9.10 they, and a review's
+  currentness check after its verdict, also rebuild when the change that made
+  their read stale had already completed: with no change in progress they
+  pause 1 ms and rebuild, as one of the free rebuilds. Each wait state allows
+  at most 2 s (less when the run's budget or the tool's remaining time is
+  shorter) and 3 free rebuilds; a reviewed tool call has at most 3 wait states
+  (6 s, 9 rebuilds), inside the tool's timeout. Past those bounds the refusal
+  takes its ordinary path: one rebuild, then `operation_refused` feedback to
+  the model (a compaction summary still fails its compaction). A run whose
+  budget runs out while waiting ends with the time-budget terminal. Owner
+  changes while a session runs therefore no longer turn ordinary calls into
+  refusals.
 - A grant resolution that meets an owner change is a stale read everywhere: a
   preparation rebuilds once; a prompt's controller admission, and the
   admission of a scoped original (its own mandate and each named
-  contributor's liveness), are refused as not ready
-  (`ControllerReadinessUnavailable`, reason `PolicyChanged`), so resubmit the
-  input; a retained resume answers the same and stays retryable, and
+  contributor's liveness), first read once more in place when the change they
+  met has completed (0.9.10), and are otherwise refused as not ready
+  (`ControllerReadinessUnavailable`, reason `PolicyChanged`). Admission never
+  waits, so under back-to-back changes wait outside your own locks with a
+  bounded `OwnerChangeChurn::wait_after_stale_read`, then resubmit the input
+  once; a retained resume answers the same and stays retryable, and
   `require_source_original_live` outside an exclusion of owner changes
   answers readiness `PolicyChanged`; a review read refuses as stale
   (`operation_refused`, `ReprepareRequired`) and a fresh attempt reads again;
@@ -371,6 +378,23 @@ route. A `person_authenticated` rule therefore refuses that operator.
    when the run closes it is parked or withdrawn, and a restored row is
    history only.
 
+Since 0.9.9 a pending or approved consent is kept across unrelated
+authorization changes and past its decision's own validity window. It is
+withdrawn as `context_changed` when its binding, review tier or presented
+material changes, as `authority_changed` when its owners refuse the operation
+or its approver was revoked or forbidden by policy since deciding, and
+otherwise only when it expires, when its run closes with no resumed run to
+take it, or when the notice input that carries it into a resumed run ends. An
+owner change still in progress, or an owner that cannot say now, decides
+nothing: reads return the consent unchanged, a decision is refused retryable
+with nothing recorded, and an attempt keeps the consent. A consent notice
+waits in the queue lane for the session's next turn, so a graceful requeue
+stop no longer ends it. Rust hosts: approval reads and decisions call the
+host's authorization `prepare` and `review_operation_context` (and the
+route's eligibility) on the caller's thread, outside the approval owner's
+locks, so never hold a lock your owners take while reading or deciding
+approvals.
+
 The pipe's authority ends at EOF. SDKs receive notices with Python
 `on_consent_notice` (`parse_consent_notice`) and TypeScript `onConsentNotice`
 (`parseConsentNotice`); they have no consent-decision wrapper, so send
@@ -508,10 +532,13 @@ of this.
 - Whether the tool ran (0.9.4): `RefusalDispatch` (`NotDispatched`,
   `Unknown`; non-exhaustive) and `OperationRefused::dispatch`. The fenced
   dispatch (and a retained consent attempt) certifies `NotDispatched` for a
-  refusal it meets before it invokes the dispatcher, and the execution policy
-  gate for one before its inner dispatcher; every other refusal is `Unknown`,
-  which makes no claim. A dispatcher layer that runs tool code of its own
-  before delegating forwards `OperationRefused::new(refusal.kind())`.
+  refusal it meets before it invokes the dispatcher, the execution policy
+  gate for one before its inner dispatcher, and a leaf's effect entry
+  (`enter_reviewed_effect`) for one before the body it guards while no
+  effect of the call entered; every other refusal is `Unknown`, which makes
+  no claim. A dispatcher layer that runs tool code of its own before
+  delegating (a leaf that runs an effect before its effect entry included)
+  forwards `OperationRefused::new(refusal.kind())`.
   `OperationRefused` equality now includes the dispatch fact, so compare
   `kind()` and `dispatch()` instead of `OperationRefused::new(kind)`.
 - Audit types (0.9.4): `AuditObservation` is `#[non_exhaustive]`,
@@ -591,6 +618,21 @@ keeps names but shows `<redacted>` for values:
 `Serialize` and equality are unchanged, so config files, wire payloads and
 anything you serialize still contain the values. Rust hosts can reuse
 `meerkat_core::redact::REDACTED` and `RedactedUrl` for their own types.
+
+Since 0.9.9 credential header values are marked sensitive on every OpenAI
+Responses, Chat Completions and Anthropic Messages request: the values a
+dynamic authorizer supplies and a static API key's (`Authorization`,
+`api-key`, `x-api-key`; the Gemini client's are not marked). A value that is
+not a valid header value fails the request as an authentication failure
+before it is sent. Those clients pass what they read from a text generation
+response (rejection bodies, stream errors, unparsable data lines, logged
+provider error fields) through `HttpAuthorizer::redact_response_diagnostic`
+before it reaches a caller or a log. The GitHub Copilot authorizer redacts
+the last four bearers its account signed with (shown as `<redacted>`); other
+authorizers change nothing unless they implement it, and nothing redacts a
+static API key a gateway echoes back. Only a verbatim echo is caught: an
+echo a provider or gateway truncated, re-encoded or otherwise transformed
+can keep part of a credential.
 
 ## Common questions
 

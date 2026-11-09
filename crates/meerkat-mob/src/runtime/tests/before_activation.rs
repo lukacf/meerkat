@@ -234,3 +234,52 @@ async fn before_activation_retained_resume_handle_observes_live_lifecycle() {
         assert_eq!(preview.status_observation_snapshot(), MobState::Destroyed);
     }
 }
+
+/// A resume that fails after its pre-activation hook ran never starts an
+/// actor: the handle the hook kept reads as a mob that stopped, never as a
+/// live one, so a host binding that refuses to replace a live mob's binding
+/// admits a later resume of the same store.
+#[tokio::test]
+async fn before_activation_retained_handle_of_a_failed_resume_reads_stopped() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let handle = MobBuilder::new(definition_for_hook_test("failed-resume"), storage.clone())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create predecessor");
+    crash_stop_and_release_routes(handle).await;
+    let retained = Arc::new(RwLock::new(None));
+    let observed = Arc::clone(&retained);
+    let hook: MobBeforeActivation = Arc::new(move |handle| {
+        let observed = Arc::clone(&observed);
+        Box::pin(async move {
+            *observed.write().await = Some(handle);
+            Err(MobError::Internal("restore binding refused".into()))
+        })
+    });
+    let result = MobBuilder::for_resume(storage.clone())
+        .with_session_service(service.clone())
+        .before_activation(hook)
+        .resume()
+        .await;
+    assert!(
+        matches!(result, Err(MobError::Internal(message)) if message == "restore binding refused")
+    );
+    let preview = retained.read().await.clone().expect("host retained handle");
+    let observation = preview.lifecycle_observation();
+    assert_eq!(observation.phase, MobState::Running);
+    assert!(
+        observation.failure.is_some(),
+        "the retained handle of a resume that failed before its actor ran reads as stopped"
+    );
+
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect("a later resume of the same store");
+    assert_eq!(resumed.status().await.unwrap(), MobState::Running);
+    resumed.shutdown().await.expect("shutdown resumed mob");
+}

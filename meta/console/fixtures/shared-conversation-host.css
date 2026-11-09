@@ -1,0 +1,18 @@
+html, body, #root { margin: 0; height: 100%; }
+body { background: #17191f; color: #e7e8ed; font-family: system-ui, sans-serif; }
+.acceptance-host { display: flex; flex-direction: column; height: 100%; }
+.acceptance-host > header { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 12px 18px; border-bottom: 1px solid #393d48; }
+.acceptance-host > header :is(button, select), .acceptance-host form :is(button, textarea) { color: inherit; background: #252932; border: 1px solid #666d7d; border-radius: 6px; padding: 8px; font: inherit; }
+.acceptance-host > header :is(button, select):focus-visible, .acceptance-host form :is(button, textarea):focus-visible { outline: 2px solid #9cbdff; outline-offset: 2px; }
+.acceptance-host form button:disabled { opacity: .5; }
+.acceptance-host > aside { flex: 0 1 auto; min-height: 0; max-height: 34vh; overflow: auto; padding: 0 18px; border-bottom: 1px solid #393d48; }
+.acceptance-host .cc-conversation-quote { margin: 6px 18px; }
+.acceptance-host .cc-context-chips { margin: 0 18px; }
+.acceptance-host .cc-conversation-pane__footer > p { padding-inline: 18px; }
+.acceptance-panes { display: flex; flex: 1; min-height: 0; }
+.acceptance-panes > section { display: flex; flex: 1; min-width: 0; min-height: 0; border-right: 1px solid #393d48; }
+.acceptance-panes .cc-conversation-pane { flex: 1; min-width: 0; }
+.acceptance-host form { display: flex; align-items: flex-end; gap: 12px; padding: 14px 18px; }
+.acceptance-host form label { display: flex; flex: 1; flex-direction: column; gap: 6px; }
+.acceptance-host textarea { resize: vertical; min-height: 54px; max-height: 240px; }
+.acceptance-host [role=alert] { padding: 8px 18px; }

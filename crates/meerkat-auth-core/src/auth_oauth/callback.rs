@@ -1188,7 +1188,7 @@ mod ownership_tests {
             .await
             .unwrap();
         let task = pending.server.task.as_ref().unwrap().abort_handle();
-        let wait = tokio::spawn(pending.wait(Duration::from_secs(300)));
+        let wait = tokio::spawn(pending.wait(Duration::from_mins(5)));
         wait.abort();
         assert!(wait.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1224,7 +1224,7 @@ mod ownership_tests {
         assert!(
             timeout(
                 Duration::from_millis(50),
-                handle.wait_until(after(Duration::from_secs(300)))
+                handle.wait_until(after(Duration::from_mins(5)))
             )
             .await
             .is_err()
@@ -1307,7 +1307,7 @@ mod ownership_tests {
         assert_eq!(drained.try_recv(), Ok(true));
         // A later deadline does not renew the window or deliver the callback.
         assert!(matches!(
-            handle.wait_until(after(Duration::from_secs(300))).await,
+            handle.wait_until(after(Duration::from_mins(5))).await,
             Err(OAuthError::Timeout)
         ));
         let closed = handle.close().await.unwrap();
@@ -1396,7 +1396,7 @@ mod ownership_tests {
         // reports its retirement, with no graceful phase in between.
         let retirement = OAuthError::from(CallbackRetirementFailed).to_string();
         let waited = failing_handle()
-            .wait(Duration::from_secs(300))
+            .wait(Duration::from_mins(5))
             .await
             .unwrap_err();
         assert_eq!(waited.to_string(), retirement);
@@ -1488,7 +1488,7 @@ mod ownership_tests {
         let task = handle.server.task.as_ref().unwrap().abort_handle();
         let end = handle
             .wait_or_cancel(
-                after(Duration::from_secs(300)),
+                after(Duration::from_mins(5)),
                 tokio::time::sleep(Duration::from_millis(50)),
             )
             .await;
@@ -1506,7 +1506,7 @@ mod ownership_tests {
             .unwrap();
         let task = handle.server.task.as_ref().unwrap().abort_handle();
         let wait = tokio::spawn(
-            handle.wait_or_cancel(after(Duration::from_secs(300)), std::future::pending()),
+            handle.wait_or_cancel(after(Duration::from_mins(5)), std::future::pending()),
         );
         wait.abort();
         assert!(wait.await.unwrap_err().is_cancelled());

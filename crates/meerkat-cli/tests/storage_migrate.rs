@@ -1710,3 +1710,70 @@ fn adopt_root_refuses_when_the_comparison_is_inconclusive() {
     assert!(root_a.join("team").is_dir());
     assert!(root_b.join("team").is_dir());
 }
+
+#[test]
+fn storage_migrate_archive_refuses_a_held_copy() {
+    let temp = TempDir::new().unwrap();
+    let root_a = temp.path().join("root-a");
+    let root_b = temp.path().join("root-b");
+    create_healthy_realm(&root_a, "team");
+    create_healthy_realm(&root_b, "team");
+
+    // An admission holds the realm fence of the copy the archive would
+    // move: the resolution takes every copy's fence first, without waiting,
+    // so it refuses before any comparison or archive.
+    let fence = meerkat_core::realm_admission::AdmissionFence::realm(
+        &root_b,
+        &meerkat_core::connection::RealmId::parse("team").unwrap(),
+    )
+    .unwrap();
+    fence.ensure_exists().unwrap();
+    let mut hold = meerkat_core::realm_admission::AdmissionHold::try_acquire(vec![fence.clone()])
+        .expect("an admission holds the copy's fence");
+    let apply = [
+        "storage",
+        "migrate",
+        "--apply",
+        "--json",
+        "--root",
+        root_a.to_str().unwrap(),
+        "--root",
+        root_b.to_str().unwrap(),
+        "--adopt-root",
+        root_a.to_str().unwrap(),
+        "--fence-wait-secs",
+        "0",
+    ];
+    let output = run_rkat(&temp, &apply);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a held admission fence must refuse the archive\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse_json(&output);
+    let split = report["split_brain"].as_array().expect("split_brain array");
+    assert_eq!(split[0]["resolution"]["kind"], "refused", "{report:#}");
+    let reason = split[0]["resolution"]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("admission fence"),
+        "the refusal names the admission fence: {reason}"
+    );
+    assert!(split[0]["sessions"].as_array().unwrap().is_empty());
+    assert!(split[0]["files"].as_array().unwrap().is_empty());
+    assert!(root_a.join("team").is_dir());
+    assert!(root_b.join("team").is_dir(), "nothing was archived");
+    assert!(fence.path().exists(), "admission.lock stays in place");
+
+    hold.release();
+    let resolved = run_rkat(&temp, &apply);
+    assert_success(
+        &resolved,
+        "migrate --apply --adopt-root once the hold ended",
+    );
+    let report = parse_json(&resolved);
+    let split = report["split_brain"].as_array().expect("split_brain array");
+    assert_eq!(split[0]["resolution"]["kind"], "archived", "{report:#}");
+    assert!(!root_b.join("team").exists(), "the copy was archived");
+}

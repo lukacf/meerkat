@@ -103,6 +103,7 @@ Use `rkat models` for every supported ID and its current limits.
     | `gpt-6-astra` | 1.05M | 128K | Default OpenAI/global model; separate 922K input ceiling |
     | `gpt-6-sol` | 1.05M | 128K | GPT-6 coding and agentic tier; separate 922K input ceiling |
     | `gpt-6.1-sol` | 1.05M | 128K | Near-Astra performance at lower cost; separate 922K input ceiling |
+    | `gpt-6.1-terra` | 1.05M | 128K | Fast, efficient visual reasoning, computer use and writing; separate 922K input ceiling |
     | `gpt-6-luna` | 1.05M | 128K | GPT-6 efficient high-volume tier; separate 922K input ceiling |
     | `gpt-5.6-sol` | 1.05M | 128K | GPT-5.6 catalog variant |
     | `gpt-5.6-terra` | 1.05M | 128K | GPT-5.6 catalog variant |
@@ -254,7 +255,7 @@ OpenAI has separate backend/auth pairs:
 | `openai_api` | `api_key`, `static_bearer`, or host authorizer | Public OpenAI API organization/project |
 | `chatgpt_backend` | `managed_chatgpt_oauth` or host-supplied ChatGPT tokens | ChatGPT/Codex subscription and workspace |
 | `azure_openai` | `azure_api_key` | Azure deployment |
-| `copilot` | `github_copilot_oauth` | GitHub Copilot account |
+| `copilot` | `github_copilot_oauth` or `github_copilot_token` | GitHub Copilot account, through the device sign-in or an operator GitHub token |
 
 These are not interchangeable credential paths. A model ID available to an API
 organization may be unavailable to a ChatGPT workspace, and vice versa.
@@ -265,7 +266,11 @@ Copilot is also available beneath the Anthropic and Gemini provider families.
 Those routes share one account-scoped credential while preserving the model's
 provider identity and selecting the account-advertised wire dialect. Model
 entitlement is therefore an account observation, never a fixed property of the
-Meerkat model registry.
+Meerkat model registry. `[realm.<realm>.copilot]` configures the account and
+its three routes once, from one credential source; a model only the account
+lists runs on the route of the protocol its listed endpoints name, never one
+chosen by its vendor (see
+[GitHub Copilot configured once](/guides/auth#github-copilot-configured-once)).
 
 See [Auth](/guides/auth) for the full backend/auth compatibility matrix.
 
@@ -281,9 +286,17 @@ name prefixes.
   `default_model` wins when the model is omitted.
 - Otherwise Meerkat checks compatible configured defaults and then the
   provider/global catalog default.
-- A known provider/model mismatch fails before agent construction.
+- A known provider/model mismatch fails before agent construction. The
+  exception is a binding on a credential account that also has a route of
+  the model's provider (a GitHub Copilot account's routes): a request that
+  names such a binding and no provider moves to the account's route of the
+  model's provider.
 - An uncataloged model needs an explicit typed provider/binding owner; a name
   that merely begins with `gpt-` or `claude-` is never guessed.
+- On a route of a GitHub Copilot account, a model the registry does not define
+  is defined for that build by the account's model list: its provider is the
+  family of the protocol its listed endpoints name, and its limits are the
+  account's. A model the account does not offer is refused, typed.
 
 All public session-creation surfaces use the same resolver. Inherited bindings
 retain the realm that owns their config.
@@ -293,11 +306,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.8", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.11", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -347,6 +360,40 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     above `high` effort are refused when the agent is built and again before
     each request, never sent to Anthropic. A generic `temperature` is omitted
     for models that reject sampling parameters.
+
+    Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a replayed
+    thinking block only while the system prompt, the tools and the earlier
+    messages it was produced under are unchanged, and accounts created on or
+    after 2026-08-31 refuse a request that replays one after a change.
+    Meerkat changes the tools mid-session as MCP servers connect, so it asks
+    Anthropic to drop such blocks instead
+    (`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`, with
+    the `thinking-binding-controls-2026-08-01` beta): beside configured
+    `adaptive` thinking, and beside the model's own default,
+    `{"type": "adaptive"}`, when thinking is omitted, since these models
+    think by default. A model id with no catalog row (a dated snapshot, a
+    proxy alias, a `[models.<id>]` entry) gets the control beside
+    configured `adaptive` or `enabled` thinking, on every request; with
+    thinking omitted it gets none, since no catalog row names its default.
+    The control is never sent beside `between_tools` or `disabled`, and only on the
+    Anthropic API, Vertex and Foundry: Amazon Bedrock and the Copilot route
+    do not send it. A request to one of these models, or to a model id with
+    no catalog row, that carries no control replays the thinking blocks of
+    the turn in progress only, never those of completed turns, which
+    Anthropic allows (a completed turn's server compaction block stays).
+    When a change within the turn (a tool loaded or a server connected
+    while it runs) still gets such a request refused with a 400, Meerkat
+    sends it once more without any thinking block, and without manual
+    `enabled` thinking, which needs one, logs a warning with the number of
+    blocks it removed, and returns the first error if that request fails
+    too, or the resend's own error when it is one Meerkat retries (a rate
+    limit, an overload, a server or network error). A request that forces
+    a tool call with thinking omitted is sent as before, without the
+    control: Meerkat refuses a forced tool call beside explicit thinking,
+    and a forced call skips thinking on the models that accept one. The
+    model answers that turn without the dropped reasoning and the prompt
+    cache restarts at the first dropped block; Meerkat logs a warning
+    naming each dropped block.
 
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,
@@ -583,7 +630,7 @@ The `generate_image` builtin routes independently of the active chat model:
 
 | Provider | Default image target |
 |----------|----------------------|
-| OpenAI | `gpt-image-2` |
+| OpenAI | `gpt-image-2.6-sunburst` |
 | Gemini | `gemini-nano-banana-2.1` |
 
 Generated bytes are stored as realm blobs and can be fetched through CLI,
@@ -595,7 +642,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.8", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.11", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

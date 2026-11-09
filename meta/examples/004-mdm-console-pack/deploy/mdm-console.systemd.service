@@ -1,0 +1,19 @@
+[Unit]
+Description=Meta MDM mob console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/mdm-console/mdm-console.env
+WorkingDirectory=/opt/meerkat-meta/examples
+ExecStart=/usr/bin/env npx tsx 004-mdm-console-pack/run.ts --wait --targets ${MDM_REMOTE_TARGETS_FILE}
+Restart=always
+RestartSec=5
+User=mdm-console
+Group=mdm-console
+StateDirectory=mdm-console
+ReadWritePaths=/opt/meerkat-meta/examples/004-mdm-console-pack/.state
+
+[Install]
+WantedBy=multi-user.target

@@ -310,6 +310,7 @@ async fn resume_settled(
     let issue = |label: &str| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 executor.clone(),
@@ -353,6 +354,7 @@ async fn resume_settled(
     let issue_to = |label: &str, grantee: PrincipalRef, subject: Option<PrincipalRef>| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 grantee,
@@ -542,7 +544,12 @@ async fn resume_settled(
         DuringWait::RevokeControllerGrant => {
             let controller = &claims.controller_grant_lineage[0];
             grants
-                .revoke(&controller.root_authority, controller, &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &controller.root_authority,
+                    controller,
+                    &mut AnyCustody,
+                )
                 .expect("the controller grant is revoked during the wait");
         }
         DuringWait::ReleaseOriginal => custody.release_all(),
@@ -560,13 +567,23 @@ async fn resume_settled(
         DuringWait::RevokeContributorGrant => {
             let (_, lineages) = contributor.as_ref().expect("a named contributor");
             grants
-                .revoke(&root, &lineages[0], &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &root,
+                    &lineages[0],
+                    &mut AnyCustody,
+                )
                 .expect("the contributor's grant is revoked during the wait");
         }
         DuringWait::RevokeContributorSetupReport => {
             let (_, lineages) = contributor.as_ref().expect("a targeted contributor");
             grants
-                .revoke(&root, &lineages[1], &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &root,
+                    &lineages[1],
+                    &mut AnyCustody,
+                )
                 .expect("the setup-report lineage is revoked during the wait");
             assert!(
                 grants
@@ -578,7 +595,12 @@ async fn resume_settled(
         DuringWait::RevokeOwnBasis => {
             for grant in &own_grants {
                 grants
-                    .revoke(&root, grant, &mut AnyCustody)
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &root,
+                        grant,
+                        &mut AnyCustody,
+                    )
                     .expect("the original's own lineage is revoked during the wait");
             }
         }
@@ -903,6 +925,7 @@ impl DirectResume {
         let issue = |label: &str| {
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new(label).expect("id"),
                     executor.clone(),

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "telegram-frontend-setup",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "telegram-frontend-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Telegram agent frontend setup",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://core.telegram.org/bots/api",
+        "source_revision": "sha256:4771d0186e63ec7b03571bf02c840ba5a3defc9b4d5dcc4f42a407f8d784eb6d",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "research_skill",
+          "instructions": "Create or select a bot through the provider-supported route. Choose one polling or webhook receipt owner. The adapter must retain update identity, conversation/thread identity and per-part outbound delivery results. Bind verified senders, allowed audiences and an existing agent through application-owned admission. Keep replay, media retries and uncertain delivery in their existing owners.",
+          "sources": [
+            "https://core.telegram.org/bots/api"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "No retained Toolkit frontend adapter artifact supplies admission and delivery contracts yet.",
+            "Bot API access alone does not establish caller isolation or durable interaction conformance."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "telegram-frontend-setup.frontend",
+          "role": "agent_frontend",
+          "description": "Telegram agent frontend setup; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:4771d0186e63ec7b03571bf02c840ba5a3defc9b4d5dcc4f42a407f8d784eb6d",
+          "assessed_at_unix_ms": 1790773047120,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "telegram",
+              "revision": "sha256:4771d0186e63ec7b03571bf02c840ba5a3defc9b4d5dcc4f42a407f8d784eb6d"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,296 @@
+---
+title: "Forge concepts"
+description: "Setups and the guide, blueprints, agent teams and custom applications, checks and trials, installations, updates and recovery."
+icon: "diagram-project"
+---
+
+This page explains what Forge saves, what it builds and checks, and how an
+installation is kept, changed and recovered.
+
+## Setups and the guide
+
+A **setup** is one saved guided conversation and the proposal it produced.
+After your first message, Forge saves the conversation in **Your setups** as
+you go. Unsent text and selected choices are browser drafts, separate from the
+saved history, and nothing reaches the guide until you send it. Long guide
+turns continue after the browser leaves; returning reconnects to the saved
+work instead of sending the request again.
+
+The **guide** is Forge's own setup team: a durable team of four agents
+(deployment architect, integration specialist, systems reviewer and
+visualization programmer) running on Meta. Only the architect publishes plan
+and interview changes; the others provide specialist help. **Guide console**
+opens their native Console in a new tab, where you can inspect their
+identities, conversations, tools and memory.
+
+The guide first explores the job, its audience and scale, how people will
+interact with it, operational reliability and deployment. It narrows down
+tools and connectors once that context is clear, and it keeps undecided
+choices labeled as undecided.
+
+You can attach existing notes, skills, reference data or documents to a
+message with **Attach files**:
+
+- up to four files per message, at most 8 MiB each and 16 MiB together;
+- UTF-8 text, Markdown, CSV and JSON, PNG, JPEG, WebP and GIF images;
+- when PDF is offered, unencrypted PDF files with extractable text, at most
+  100 pages and one million extracted characters. PDF reading does not
+  perform OCR.
+
+The application builder and the independent reviewer can read the original
+attachments. Reading an attachment does not copy it into the generated
+application; say so explicitly if the application must keep particular
+material.
+
+## The proposal and its animation
+
+The right side of Forge animates the current proposal: named agents, messages
+along workflow dependencies, parallel work, tool access and shared knowledge.
+Select an agent to inspect its responsibilities, exact grants and
+collaborators, or use **Explore identities** to browse a large team.
+
+The animation is a program that the visualization programmer writes for the
+current proposal. It runs in an isolated worker with network access blocked.
+It describes the proposed system; it does not run it, and runnable animation
+code is not proof that the picture is accurate. **Refine animation** asks for
+a clearer drawing of the same proposal.
+
+For direct control, **Adjust details** and the **Advanced editor** edit the
+design itself. Returning to the guide sends your concrete changes back for its
+next recommendation.
+
+## The blueprint
+
+The design is a versioned blueprint, saved as `blueprint.json` in every
+package. Its main parts:
+
+| Part | Meaning |
+| --- | --- |
+| Agent classes | Reusable roles with instructions, a provider and model, an instance count and tool grants. Classes compile into exact instance profiles and a durable identity roster. |
+| Named members | Give each person, domain or entity a stable key and individual instructions. |
+| Tool grants | Workspace file reading, SQLite notes (none, read or write), knowledge access, MCP connections with optional exact tool allowlists, builtins, shell, memory, WorkGraph and scheduling. Every fresh or resumed session receives its class's grants. |
+| MCP connections | stdio or Streamable HTTP servers, found through live search of the official MCP Registry or imported from standard `mcpServers` JSON. Secrets stay in local environment references. Unassigned connections are never started. |
+| Topology | Who may talk to whom: hub, mesh, pipeline or manually selected edges, with one entrypoint identity. |
+| Workflows | Native flows: steps that target exact identities, with prompts, dependencies, parallel branches and timeouts. Forge validates each flow as a dependency graph; the native flow engine runs it. |
+| Knowledge | An optional knowledge service: an existing endpoint, or a local service the package sets up. |
+| Destination | `mac`, `linux` or `gcp`. |
+
+Identities are named after their class: `writer:main` for a class with one
+instance, `writer:1` to `writer:3` for three, or `writer:alice` for a named
+member. A class with zero instances keeps a reusable profile with no initial
+identity. The [reference](/forge/reference#blueprint-fields) lists every field
+and limit.
+
+## Accepting the plan
+
+When the design fits and no necessary decisions remain open, **Use this plan**
+records your explicit acceptance of the current proposal and its proposed
+defaults. Accepting creates no infrastructure, and remaining implementation or
+connection work stays visible.
+
+Package availability is checked separately from acceptance. A plan that needs
+a connection setup helper shows **Accepted design - package preparation
+pending**: its choices are saved, but new packages and builds wait for
+installation support. Keep the design for later, or choose **Revise with
+guide** to discuss alternatives. Any deliberate reduction in scope is an
+explicit revised proposal that you review before accepting.
+
+## Agent teams and custom applications
+
+### Agent team
+
+An agent team package contains the compiled agents, the native Console, the
+configured tools and permitted notes. Forge compiles it directly, without an
+application builder.
+
+The package installs the published Meta release it pins, not the runtime
+Forge selected for its own applications. In Forge 0.3.0 that is Meta 0.9.6:
+the `meerkat-meta` SDK from PyPI by its fixed SHA-256, and the official
+`meta-rpc-gateway` and `meta-gateway` archives, each checked against the
+release's published checksums. A model that release does not list is refused
+before export or installation, and the message names models it does list.
+
+An installed agent team keeps the definition it was installed with. To change
+instructions, classes or flows, build the changed team and install it into a
+new folder; that folder starts its own state. Connector prerequisites, such as
+the commands a stdio MCP server needs, must already exist on the destination.
+
+### Custom application
+
+A custom application adds ordinary application code to the generated host.
+The builder works in a separate private project. Compiler-owned host,
+configuration and deployment files are read-only to it, and it cannot deploy,
+read Forge's credentials, access your files, install dependencies or control
+devices. Its Python modules live in `application/` and `tests/`, and extra
+dependencies go in an optional `requirements.application.txt`.
+
+Executable checks run on a fresh snapshot in a scrubbed environment, inside
+macOS `sandbox-exec` or verified Linux bubblewrap isolation, with network and
+home-folder access denied. At least one executed, non-skipped test and all
+passing checks are required for a host-signed receipt bound to the exact
+source bytes.
+
+An independent reviewer then reads the original brief and the frozen source,
+writes protected counterexample tests outside the builder's workspace and
+assesses each requested outcome. Its findings can trigger up to two automatic
+repair rounds. A completed review, passing protected tests and current
+source-bound acceptance are required before a checked package can be
+installed.
+
+Feedback continues in a new build without overwriting earlier source or
+history. Changes to the proposal or the source invalidate the previous
+package's download until a new build is checked; a conversation revision alone
+does not.
+
+## Runtimes
+
+Forge keeps three runtime selections apart:
+
+| Runtime | Used for | Forge 0.3.0 |
+| --- | --- | --- |
+| Guide runtime | Forge's own setup team | Meta 0.9.3 with Core 0.9.3 |
+| Application runtime | Custom applications built by this Forge package | Meta 0.9.7 and Toolkit 0.9.5 (Linux package); Meta 0.9.4 and Toolkit 0.9.4 (macOS package) |
+| Agent team runtime | Every agent team package | The published Meta 0.9.6 release |
+
+Toolkit is Connect's Python SDK. Applications without a connection setup
+helper use the Meta RPC gateway included in the package. Updating Forge does
+not upgrade an installed application or choose its gateway, so keep using the
+Forge copy that installed it. The package's `README.md` names its exact
+selections, and Forge's local `/api/capabilities` endpoint reports its own
+version and the runtimes it builds on.
+
+## Trials
+
+Trials are optional and live under **Try with sample data (optional)**:
+
+- An **Agent design** trial starts the exact proposed identities, roles and
+  peer edges in separate native state. Granted workspace and notes tools use
+  only the sample data you supply; external services, application adapters,
+  shell and hardware are unavailable. It is a design rehearsal, not an
+  application test.
+- A **Built application** trial runs the checked application's actual
+  callbacks in a separate offline sandbox. Suggested sample jobs come from the
+  package's `application/trial.json`.
+
+A conversation trial stays open for follow-ups through **Continue this trial**
+and ends with **End trial**. A trial allows at most ten turns, five minutes
+waiting for a follow-up and ten minutes in total. **Fix this trial** and
+**Improve from this trial** send recorded failures or your feedback back to
+the builder, and the result needs fresh checks and independent acceptance.
+
+## Installations
+
+Forge installs on this computer when the package's destination matches it.
+Other destinations receive the package and their own installation steps.
+
+**Private settings.** The installation form asks for a project folder, a
+Console port and the settings the application declares, such as provider keys
+and connector credentials. Secret values have no defaults in source, never
+enter model prompts or browser storage, and are written directly to the
+installation's mode-600 `.env`. Reusing the provider keys you gave Forge is an
+explicit choice in the form. If setup asks for a **Console user**, that is the
+local identity for this installation; the **Console password** opens its
+private Console and is separate from your provider keys. Applications Forge
+builds have named Console accounts: the operator adds one account per further
+person on the deployment computer, so each person signs in as themselves. A
+single shared Console password, as in applications built earlier, lets
+everyone who knows it chat, but approves nothing; such an installation moves
+to named accounts at its next update, whose Build declares them, except on
+the older ordinary route and the MobKit runtime.
+
+**Readiness.** Forge reports an installation ready when the application
+reports startup, the expected identities exist and its loopback Console is
+available. That proves availability, not a useful transaction or a live
+integration.
+
+**Product applications.** A custom application built on the release's
+selected Meta and Toolkit runtime installs with **Install application**,
+which verifies the runtime and leaves the application stopped for its own
+setup. When offered, **Prepare application setup** and then **Set up and
+start application** complete it; **Start installed application** returns to a
+completed setup after a clean stop. Its exported `install.sh` and `start.sh`
+refuse to run, so install, update and recover it only through Forge.
+
+**Interactive or background.** The installation form offers **While Forge is
+open**, the default: Forge supervises the application, closing the browser
+leaves it running, and stopping Forge stops it. When the installation supports
+it, **Run in the background** installs an owned macOS LaunchAgent or Linux
+systemd user service that survives closing Forge, and a new Forge process
+reconnects to it. On macOS it runs after login and stops at logout, and it is
+unavailable while the Forge folder or the installation folder is in Desktop,
+Documents, Downloads, iCloud Drive, a cloud storage folder or another volume.
+On Linux, operation after logout depends on user lingering.
+
+**Folders and backups.** An installation's native state is in its project
+folder's `.mobkit/state`, and its agents' communication identity keys are in
+`.mobkit/home`. Back up the complete stopped project folder, including
+`.mobkit/`, `data/` and `workspace/`. **Download installed package** keeps a
+copy of the exact installed package, without private settings or application
+records.
+
+**Using it.** **Use your application** shows the installed application's
+links and first-task suggestions. Use the application's own interface for
+everyday work when it has one. Otherwise open the native Console, sign in if
+asked and select the conversation owner Forge names.
+
+## Updates and recovery
+
+Custom applications update from a checked build:
+
+1. **Stage accepted update** compares the independently accepted package with
+   the installed source before changing anything, and shows why an update is
+   blocked.
+2. Stop the application when prompted and wait for confirmed cleanup, then
+   choose **Apply and verify update** and wait for its checks.
+3. If the application stays stopped, choose **Start installed application**.
+   If that start fails, **Restore previous application** returns to the
+   previous source when offered. If **Recover this application** appears, use
+   **Retry current application** or **Recover previous application** only when
+   offered, and wait for the checked result before an ordinary start.
+
+After Forge restarts, use **Continue setup** or **Start installed application**
+once before you stage or apply an update. Updates keep the project folder,
+private settings and native history.
+Changes to native definitions, session instructions, arbitrary dependencies,
+protected host files or private setup fields need a supported migration and
+stay blocked; install such a build into a new empty folder instead.
+**Preview update compatibility** explains compatibility without changing the
+installation.
+
+A stopped local background application can also offer **Review update** and
+**Apply support update** under **Installation support**. They refresh only the
+service support files and keep the application stopped. Do this before you
+stage an application update.
+
+Agent teams have no in-place update path. Tell the guide what should change,
+review the revised plan and install the new team into a new folder.
+
+Each installed application keeps the Meta release it was installed with.
+Moving an application from an earlier release to Meta 0.9.4 or later needs a
+one-way offline state migration that Forge does not run: such an update is
+staged as blocked and nothing changes. See
+[Upgrading to Meta 0.9.4](/guides/upgrading-to-0-9-4) before you migrate, and
+keep using the Forge copy and state folder that installed the application.
+
+## Organization context
+
+An operator can install a Python plugin that supplies starting examples and
+guide context for an organization, and select it with
+`META_FORGE_ORGANIZATION`. The examples replace the stock opening
+suggestions, and choosing one only fills an editable draft. Each new setup
+keeps a copy of the context it started with, and the builder passes it on to
+the application agent, which can hand it to Connect's setup agent when it
+needs a connection. The plugin installs nothing, grants no access and is not
+an authorization boundary. See the
+[plugin contract](/forge/reference#organization-plugins).
+
+## Where Forge keeps its data
+
+Forge keeps its saved setups, drafts, provider settings and its setup team's
+native state in its state folder: `.studio` in the Forge folder, or the folder
+named by `META_FORGE_HOME`. Keep the same Forge folder and state folder when
+you return.
+
+Each installed application keeps its own state in its project folder. Its data
+stays local except for the requests it sends to its selected model providers
+and connected external services.

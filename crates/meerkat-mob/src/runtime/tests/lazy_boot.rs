@@ -9,7 +9,7 @@ use crate::machines::mob_machine as dsl;
 use crate::runtime::dormant_seat::fresh_seat_session_id;
 use crate::runtime::{DormantSeatOutcome, MemberRestorePolicy, MobBootSetBasis};
 
-const LAZY_STEP: Duration = Duration::from_secs(60);
+const LAZY_STEP: Duration = Duration::from_mins(1);
 
 fn worker(index: usize) -> AgentIdentity {
     AgentIdentity::from(format!("lazy-{index:02}"))
@@ -1188,7 +1188,7 @@ fn seat_machine_facts(
                 state.member_seat_session_unborn.contains(&id),
                 state.member_peer_endpoints.contains_key(&id),
                 state.member_peer_ids.contains_key(&id),
-                state.member_host_preparation_pending.contains(&id),
+                state.member_host_preparation_causes.contains_key(&id),
                 state.member_boot_obligation_owed.get(&id),
                 state.member_wake_attempts.get(&id),
                 state.member_profile_names.get(&id),
@@ -1361,8 +1361,10 @@ async fn a_seat_chunk_answers_each_entry_as_seating_its_spec_alone_does() {
     );
 }
 
-/// A seat needs the members' comms transport: without it every spec is
-/// refused typed and nothing is written.
+/// A seat needs the members' comms transport: with none declared and no
+/// durable root the session service reports (this mock reports `NotKept`
+/// while no root is bound to it), every spec is refused typed, naming the
+/// report, and nothing is written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seat_without_a_comms_identity_source_is_refused_and_writes_nothing() {
     let (handle, service, events) = seat_mob("seat-no-identity-source", |builder| builder).await;
@@ -1384,9 +1386,9 @@ async fn a_seat_without_a_comms_identity_source_is_refused_and_writes_nothing() 
         matches!(
             &outcomes[0],
             DormantSeatOutcome::Refused {
-                error: MobError::WiringError(_),
+                error: MobError::WiringError(reason),
                 ..
-            }
+            } if reason.contains("keeps no durable session comms identity")
         ),
         "{outcomes:?}"
     );
@@ -1516,6 +1518,247 @@ async fn a_fresh_seat_creates_nothing_and_its_first_wake_creates_its_session_onc
         "the create is a registered member build"
     );
     assert!(!seat_session_unborn(&handle, &identity));
+}
+
+/// The peer id and transport key of the endpoint MobMachine records for
+/// `identity`.
+fn recorded_comms_identity(handle: &MobHandle, identity: &AgentIdentity) -> (PeerId, String) {
+    let state = handle.machine_state_watch_rx.borrow();
+    let endpoint = state
+        .member_peer_endpoints
+        .get(&dsl::AgentIdentity::from_domain(identity))
+        .unwrap_or_else(|| panic!("MobMachine records no endpoint for {identity}"));
+    (
+        PeerId::parse(&endpoint.peer_id.0).expect("a canonical peer id"),
+        meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string(),
+    )
+}
+
+/// The comms identity (peer id and transport key) every roster and
+/// member-list read shows for `identity`, by read.
+async fn read_comms_identities(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> Vec<(&'static str, Option<PeerId>, Option<String>)> {
+    let entries = [
+        (
+            "get_member",
+            handle.get_member(identity).await.expect("read the member"),
+        ),
+        (
+            "read_handle get_member",
+            handle
+                .read_handle()
+                .get_member(identity)
+                .await
+                .expect("read the member"),
+        ),
+        ("roster", handle.roster().await.get(identity).cloned()),
+        (
+            "list_all_members",
+            handle
+                .list_all_members()
+                .await
+                .into_iter()
+                .find(|entry| &entry.agent_identity == identity),
+        ),
+    ];
+    let lists = [
+        ("list_members", handle.list_members().await),
+        (
+            "list_members_including_retiring",
+            handle.list_members_including_retiring().await,
+        ),
+        (
+            "list_members_observation_snapshot",
+            handle.list_members_observation_snapshot().await,
+        ),
+        (
+            "list_members_matching",
+            handle
+                .list_members_matching(crate::runtime::MemberFilter::default())
+                .await
+                .expect("list the members"),
+        ),
+    ];
+    let mut reads = Vec::new();
+    for (read, entry) in entries {
+        let entry = entry.unwrap_or_else(|| panic!("{read} holds {identity}"));
+        reads.push((
+            read,
+            entry.peer_id(),
+            entry.transport_public_key().map(str::to_owned),
+        ));
+    }
+    for (read, members) in lists {
+        let entry = members
+            .into_iter()
+            .find(|entry| &entry.agent_identity == identity)
+            .unwrap_or_else(|| panic!("{read} lists {identity}"));
+        reads.push((read, entry.peer_id, entry.transport_public_key));
+    }
+    reads
+}
+
+/// A fresh seat reads like a live member: every roster and member-list read
+/// shows the peer id and transport key of the endpoint its seat recorded in
+/// MobMachine (the key pair its first build loads), the endpoint
+/// `member_peer_endpoint` answers, and no read wakes it: it stays Dormant
+/// with its session unborn, and nothing is created, registered or attached
+/// for it. Its first wake presents that same peer id, which the reads keep.
+///
+/// RED: project the roster's own comms identity for a member that is not
+/// materialized (drop the machine arm of `projected_member_comms_identity`):
+/// every read shows the fresh seat with no peer id until its first wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_seat_reads_with_its_recorded_peer_id_and_no_read_wakes_it() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, service, _events) = seat_mob("seat-peer-id", |builder| {
+        builder.with_member_comms_identity_root(keys.path())
+    })
+    .await;
+    let identity = worker(0);
+    let outcomes = handle
+        .seat_dormant_members(vec![turn_driven(&identity)])
+        .await
+        .expect("the batch answers");
+    assert!(
+        matches!(&outcomes[0], DormantSeatOutcome::Seated { .. }),
+        "{outcomes:?}"
+    );
+    let (peer_id, transport_public_key) = recorded_comms_identity(&handle, &identity);
+    let endpoint = handle
+        .member_peer_endpoint(&identity)
+        .await
+        .expect("read the member's endpoint")
+        .expect("the seat recorded the member's endpoint");
+    assert_eq!(endpoint.descriptor.peer_id, peer_id);
+
+    for (read, read_peer_id, read_key) in read_comms_identities(&handle, &identity).await {
+        assert_eq!(
+            (read_peer_id, read_key.as_deref()),
+            (Some(peer_id), Some(transport_public_key.as_str())),
+            "{read} shows the fresh seat with the comms identity its seat recorded"
+        );
+    }
+    assert_eq!(
+        phase_of(&handle, &identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "no read woke the seat"
+    );
+    assert!(
+        seat_session_unborn(&handle, &identity),
+        "no read created its session"
+    );
+    assert!(
+        service.recorded_create_requests().await.is_empty(),
+        "no read built or registered the member"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "no read attached a live session"
+    );
+
+    handle
+        .ensure_member_live(&identity)
+        .await
+        .expect("the first wake materializes the seat");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("a session-bound member");
+    let live_peer_id = service
+        .comms_runtime(&session)
+        .await
+        .expect("the woken member's comms runtime")
+        .peer_id()
+        .expect("the woken member's peer id");
+    assert_eq!(
+        live_peer_id, peer_id,
+        "the woken member presents the peer id the reads showed while it was Dormant"
+    );
+    for (read, read_peer_id, _) in read_comms_identities(&handle, &identity).await {
+        assert_eq!(
+            read_peer_id,
+            Some(peer_id),
+            "{read} keeps the peer id once the member is live"
+        );
+    }
+}
+
+/// A member's same-session successor (`respawn_member`, seated Dormant at
+/// the next generation on the member's own session) reads with the comms
+/// identity the member read with live: MobMachine keeps the member's
+/// endpoint for it, and every roster and member-list read shows that
+/// endpoint's peer id and transport key while the successor stays Dormant.
+///
+/// RED: project the roster's own comms identity for a member that is not
+/// materialized (drop the machine arm of `projected_member_comms_identity`):
+/// the successor's new roster entry reads with no peer id until its first
+/// wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dormant_same_session_successor_reads_with_the_members_peer_id() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, _service, _events) = seat_mob("successor-peer-id", |builder| {
+        builder.with_member_comms_identity_root(keys.path())
+    })
+    .await;
+    let identity = worker(0);
+    handle
+        .spawn_spec(turn_driven(&identity))
+        .await
+        .expect("spawn the member");
+    let live = handle
+        .get_member(&identity)
+        .await
+        .expect("read the member")
+        .expect("a member");
+    let peer_id = live.peer_id().expect("the live member's peer id");
+    let transport_public_key = live
+        .transport_public_key()
+        .expect("the live member's transport key")
+        .to_owned();
+
+    tokio::time::timeout(
+        LAZY_STEP,
+        handle.respawn_member(identity.clone(), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned on its own session");
+    assert_eq!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("read the member")
+            .map(|entry| entry.generation),
+        Some(crate::ids::Generation::new(1)),
+        "the successor is seated"
+    );
+    assert_eq!(
+        phase_of(&handle, &identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "the successor is seated Dormant"
+    );
+    assert_eq!(
+        recorded_comms_identity(&handle, &identity),
+        (peer_id, transport_public_key.clone()),
+        "MobMachine keeps the member's endpoint for its successor"
+    );
+
+    for (read, read_peer_id, read_key) in read_comms_identities(&handle, &identity).await {
+        assert_eq!(
+            (read_peer_id, read_key.as_deref()),
+            (Some(peer_id), Some(transport_public_key.as_str())),
+            "{read} shows the Dormant successor with the member's comms identity"
+        );
+    }
+    assert_eq!(
+        phase_of(&handle, &identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "no read woke the successor"
+    );
 }
 
 /// A seat whose journal append failed wrote and created nothing; its retry
@@ -2065,7 +2308,7 @@ async fn ten_thousand_dormant_members_restart_without_materializing_any() {
         MEMBERS
     );
     assert!(
-        elapsed < Duration::from_secs(60),
+        elapsed < Duration::from_mins(1),
         "the restart took {elapsed:?}"
     );
 }
@@ -2427,7 +2670,7 @@ async fn seating_a_thousand_then_ten_thousand_identities_reports_each_phase() {
         largest.seat
     );
     assert!(
-        largest.restart < Duration::from_secs(60),
+        largest.restart < Duration::from_mins(1),
         "the restart over {} seated identities took {:?}",
         largest.members,
         largest.restart
@@ -2460,7 +2703,7 @@ async fn seating_ten_thousand_identities_wired_to_a_live_orchestrator_stays_unde
         run.seat
     );
     assert!(
-        run.restart < Duration::from_secs(60),
+        run.restart < Duration::from_mins(1),
         "the restart over {} seated, wired identities took {:?}",
         run.members,
         run.restart
@@ -2469,19 +2712,31 @@ async fn seating_ten_thousand_identities_wired_to_a_live_orchestrator_stays_unde
         .orchestrator_wake
         .expect("the run woke the orchestrator after the restart");
     assert!(
-        wake < Duration::from_secs(60),
+        wake < Duration::from_mins(1),
         "the orchestrator's wake over {} edges took {wake:?}, over the 60 s bound",
         run.members
     );
 }
 
-/// A crash after a rotation's retirement durably started and
-/// before its terminal batch. The restart finds the incarnation Retiring
-/// with no rotation intent; the host passes the identity as host-pending (so
-/// the plain retirement cannot complete it) and calls `rotate_member` again,
-/// which records the rotation on that retirement and seats the next
-/// incarnation on the same name-based session the interrupted rotation
-/// targeted. The journal never holds the retirement without the re-seat.
+/// A crash after a rotation's retirement durably started and before its
+/// terminal batch, under a host that keeps its own record of the rotation
+/// (as Meta 0.9.6 does): it passes the identity as host-pending and
+/// re-issues `rotate_member` after the restart. The retirement's start row
+/// records the rotation, so the restart records it again, and the start
+/// holds the host-pending identity's FreshSession rotation for the host: it
+/// does not re-drive it, and it records the retirement stuck at admission
+/// with a cause that names the wait, before the restart answers. The
+/// identity keeps its retiring generation, Retiring, until the host's
+/// re-issue re-drives the rotation, once, and seats the next incarnation on
+/// the same name-based session the interrupted rotation targeted. The
+/// journal never holds the retirement without the re-seat, and the rotation
+/// never runs twice.
+///
+/// RED: let the start re-drive the host-pending identity's rotation (drop
+/// the hold in the builder's recovered retirements): no retirement is held
+/// stuck for the host at the restart, the start finishes the rotation
+/// itself, and the host's re-issue rotates the member again onto the
+/// generation-2 session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rotation_interrupted_after_its_retirement_started_completes_on_redrive() {
     let definition = with_unique_mob_id(sample_definition(), "rotation-crash");
@@ -2539,23 +2794,66 @@ async fn a_rotation_interrupted_after_its_retirement_started_completes_on_redriv
     .await
     .expect("the restart answers")
     .expect("the restart succeeds");
-    // The restart's own re-drive of the retirement cannot complete it while
-    // the identity is host-pending; the host's re-issued rotation does.
-    let deadline = tokio::time::Instant::now() + LAZY_STEP;
-    let session = loop {
-        match resumed.rotate_member(turn_driven(&identity)).await {
-            Ok(session) => break session,
-            Err(MobError::LifecycleOperationPending { .. })
-                if tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(error) => panic!("the re-issued rotation fails: {error}"),
-        }
-    };
+    // The start held the host-pending identity's rotation for the host
+    // before it answered: the retirement is recorded stuck at admission,
+    // naming the wait, and the identity keeps its retiring generation,
+    // Retiring, with its FreshSession rotation standing.
+    let held = resumed
+        .retirement_settlement(&identity)
+        .expect("the start records the held rotation's retirement")
+        .current();
+    assert!(
+        matches!(
+            &held,
+            crate::runtime::RetirementSettlement::Stuck { cause, .. }
+                if matches!(
+                    cause.as_ref(),
+                    MobError::LifecycleOperationPending { intent } if intent.contains("rotate_member")
+                )
+        ),
+        "the start holds the rotation for the host's re-issue: {held:?}"
+    );
+    assert_eq!(
+        resumed
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .map(|entry| entry.generation),
+        Some(crate::ids::Generation::INITIAL)
+    );
+    {
+        let state = resumed.machine_state_watch_rx.borrow();
+        let dsl_identity = dsl::AgentIdentity::from_domain(&identity);
+        let runtime = state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .cloned()
+            .expect("the identity stays seated");
+        assert_eq!(
+            state.member_state_markers.get(&runtime),
+            Some(&dsl::MobMemberState::Retiring)
+        );
+        assert_eq!(
+            state.member_rotation_targets.get(&dsl_identity),
+            Some(&dsl::RotationTarget::FreshSession)
+        );
+    }
+    // The host's re-issue re-drives the same rotation, once.
+    let session = tokio::time::timeout(LAZY_STEP, resumed.rotate_member(turn_driven(&identity)))
+        .await
+        .expect("the re-issue answers")
+        .expect("the re-issued rotation finishes");
     assert_eq!(
         session, target,
-        "the re-drive targets the interrupted rotation's session"
+        "the re-issue re-drives the interrupted rotation's session"
+    );
+    assert_eq!(
+        resumed
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .map(|entry| entry.generation),
+        Some(crate::ids::Generation::new(1))
     );
     assert_eq!(
         resumed.resolve_bridge_session_id(&identity).await,
@@ -3947,4 +4245,93 @@ async fn a_mob_whose_last_owner_left_answers_not_owned_for_its_dormant_members_s
         crate::MobAdmissionCloseReason::LastOwnerReleased,
     )
     .await;
+}
+
+/// A Dormant member whose wake fails because its build fails with
+/// structured data (a session builder's typed refusal of its own kind, and
+/// a provider-auth refusal): the restore failure the wake answers keeps that
+/// data beside its reason (`MemberRestoreFailed`'s `cause_data`), and so
+/// does a later wake's, answered from the member's record while Core holds
+/// it Broken. The provider-auth data still reads as meerkat's typed
+/// provider-auth failure.
+///
+/// RED before the restore failure kept it: the wake flattened the build's
+/// error into the reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_whose_build_fails_with_structured_data_keeps_it_on_the_restore_failure() {
+    let cases: [(&str, fn() -> SessionError); 2] = [
+        ("wake-host-build-refusal", host_build_refusal),
+        ("wake-provider-auth-refusal", provider_auth_build_refusal),
+    ];
+    for (label, refusal) in cases {
+        let mob = DormantMemberMob::new(label).await;
+        mob.service
+            .set_create_session_failure_error(&mob.session, refusal)
+            .await;
+        let expected = refusal().structured_data();
+        assert!(
+            expected.is_some(),
+            "{label}: the refusal carries structured data"
+        );
+        let mut kept = None;
+        for wake in ["the first wake", "a later wake"] {
+            let woken =
+                tokio::time::timeout(LAZY_STEP, mob.handle.ensure_member_live(&mob.identity))
+                    .await
+                    .expect("the wake answers");
+            let Err(error) = woken else {
+                panic!("{label}: {wake} fails");
+            };
+            assert!(
+                matches!(error, MobError::MemberRestoreFailed { .. }),
+                "{label}: {wake} answers the member's restore failure: {error:?}"
+            );
+            kept = restore_failure_cause_data(&error);
+            assert_eq!(
+                kept, expected,
+                "{label}: {wake}'s restore failure keeps the build's structured data"
+            );
+        }
+        if label == "wake-provider-auth-refusal" {
+            let read = SessionError::FailedWithData {
+                message: String::new(),
+                data: kept.expect("the kept data"),
+            }
+            .provider_auth_failure_data();
+            assert_eq!(
+                read,
+                Some(provider_auth_build_refusal_failure()),
+                "the kept data reads as meerkat's typed provider-auth failure"
+            );
+        }
+    }
+}
+
+/// A Dormant member whose wake fails because its build fails without
+/// structured data (the only form a restore failure had before it kept its
+/// cause's data): the restore failure carries none. A pin, on both sides of
+/// that change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_whose_build_fails_without_structured_data_carries_none() {
+    let mob = DormantMemberMob::new("wake-unstructured-build-failure").await;
+    mob.service
+        .set_create_session_failure_error(&mob.session, || {
+            SessionError::Unsupported("the member's build is not supported here".to_string())
+        })
+        .await;
+    let woken = tokio::time::timeout(LAZY_STEP, mob.handle.ensure_member_live(&mob.identity))
+        .await
+        .expect("the wake answers");
+    let Err(error) = woken else {
+        panic!("the wake fails");
+    };
+    assert!(
+        matches!(error, MobError::MemberRestoreFailed { .. }),
+        "the wake answers the member's restore failure: {error:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&error),
+        None,
+        "a failure without structured data leaves none"
+    );
 }

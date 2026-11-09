@@ -10,6 +10,9 @@ pub enum GoogleAuthMethod {
     GoogleOauth,
     ComputeAdc,
     GitHubCopilotOauth,
+    /// An operator-supplied GitHub token sent as the Copilot API credential
+    /// (no device sign-in). Stored, when stored, as a static bearer secret.
+    GitHubCopilotToken,
 }
 
 impl GoogleAuthMethod {
@@ -22,6 +25,7 @@ impl GoogleAuthMethod {
         Self::GoogleOauth,
         Self::ComputeAdc,
         Self::GitHubCopilotOauth,
+        Self::GitHubCopilotToken,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -34,6 +38,7 @@ impl GoogleAuthMethod {
             "google_oauth" => Some(Self::GoogleOauth),
             "compute_adc" => Some(Self::ComputeAdc),
             "github_copilot_oauth" => Some(Self::GitHubCopilotOauth),
+            "github_copilot_token" => Some(Self::GitHubCopilotToken),
             _ => None,
         }
     }
@@ -47,6 +52,7 @@ impl GoogleAuthMethod {
             Self::GoogleOauth => "google_oauth",
             Self::ComputeAdc => "compute_adc",
             Self::GitHubCopilotOauth => "github_copilot_oauth",
+            Self::GitHubCopilotToken => "github_copilot_token",
         }
     }
 
@@ -62,6 +68,7 @@ impl GoogleAuthMethod {
             Self::GoogleOauth => Some(PersistedAuthMode::GoogleOauth),
             Self::ExternalAuthorizer | Self::Adc | Self::ComputeAdc => None,
             Self::GitHubCopilotOauth => Some(PersistedAuthMode::GithubCopilotOauth),
+            Self::GitHubCopilotToken => Some(PersistedAuthMode::StaticBearer),
         }
     }
 }
@@ -77,6 +84,21 @@ mod tests {
             let v = *v;
             assert_eq!(GoogleAuthMethod::parse(v.as_str()), Some(v));
         }
+    }
+
+    /// The operator-token method is a wire member of the matrix and stores an
+    /// operator-supplied secret, never an OAuth-login token.
+    #[test]
+    fn github_copilot_token_is_a_static_bearer_wire_method() {
+        let method = GoogleAuthMethod::parse("github_copilot_token");
+        assert_eq!(
+            method.map(GoogleAuthMethod::as_str),
+            Some("github_copilot_token")
+        );
+        assert_eq!(
+            method.and_then(GoogleAuthMethod::persisted_auth_mode),
+            Some(crate::auth::token_store::PersistedAuthMode::StaticBearer)
+        );
     }
 
     #[test]
@@ -99,6 +121,14 @@ mod tests {
             (GoogleAuthMethod::ExternalAuthorizer, None),
             (GoogleAuthMethod::Adc, None),
             (GoogleAuthMethod::ComputeAdc, None),
+            (
+                GoogleAuthMethod::GitHubCopilotOauth,
+                Some(PersistedAuthMode::GithubCopilotOauth),
+            ),
+            (
+                GoogleAuthMethod::GitHubCopilotToken,
+                Some(PersistedAuthMode::StaticBearer),
+            ),
         ];
         for (method, expected) in cases {
             assert_eq!(

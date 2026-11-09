@@ -1,0 +1,25 @@
+.my-deployments {
+  width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 40px);
+  box-sizing: border-box; overflow: auto; border: 1px solid #d6ddd8;
+  border-radius: 20px; padding: 28px; color: #243a30; background: #f9fbf8;
+  box-shadow: 0 24px 80px #13281e33; font: inherit;
+}
+.my-deployments::backdrop { background: #14261e66; }
+.my-deployments-header { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
+.my-deployments h1 { margin: 6px 0 12px; font-size: 28px; overflow-wrap: anywhere; }
+.my-deployments > p { line-height: 1.6; max-width: 76ch; }
+.my-deployments .deployment-actions { flex-wrap: wrap; }
+.my-deployment-card, .my-deployments-empty { border: 1px solid #d6ddd8; border-radius: 14px; background: white; padding: 20px; margin: 20px 0; }
+.my-deployment-card h2 { margin: 0 0 14px; font-size: 20px; overflow-wrap: anywhere; }
+.my-deployment-card ul { list-style: none; padding: 0; margin: 0; }
+.my-deployment-card li { display: grid; gap: 6px; border-top: 1px solid #e6ebe7; padding: 14px 0; }
+.my-deployment-card code { overflow-wrap: anywhere; white-space: normal; font-size: 12px; }
+.my-deployment-card p { margin: 0; line-height: 1.5; color: #52665b; }
+.my-deployment-status { font-size: 14px; }
+.my-deployments .deployment-panel { margin-top: 20px; }
+.my-deployments button:focus-visible { outline: 3px solid #347554; outline-offset: 3px; }
+@media (max-width: 600px) {
+  .my-deployments { padding: 18px; width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 14px; }
+  .my-deployments h1 { font-size: 23px; }
+  .my-deployment-card { padding: 14px; }
+}

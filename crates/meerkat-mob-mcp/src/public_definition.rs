@@ -152,6 +152,9 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
         model: input.model,
         provider: input.provider,
         self_hosted_server_id: input.self_hosted_server_id,
+        // Host-set: the public profile contract names no auth binding, so a
+        // caller's profile leaves its members on their realm's binding.
+        auth_binding: None,
         image_generation_provider: input.image_generation_provider,
         auto_compact_threshold: input.auto_compact_threshold,
         resume_overrides: input
@@ -175,6 +178,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             mcp_servers: vec![],
             rust_bundles: Vec::new(),
             bundles,
+            grant_gated: input.tools.grant_gated.into(),
         },
         peer_description: input.peer_description,
         external_addressable: input.external_addressable,

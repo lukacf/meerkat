@@ -123,7 +123,7 @@ default_timeout = "10m"
 max_concurrent = 10
 
 [tools.tool_timeouts]
-shell = { secs = 120, nanos = 0 }
+shell = "2m"
 ```
 
 <Note>
@@ -137,8 +137,12 @@ for the current supported profiles and [native governed embedding](/rust/native-
 for Rust setup.
 </Note>
 
-`default_timeout` accepts humantime strings; per-tool timeout values use
-Serde's duration representation with `secs` and `nanos`.
+`default_timeout` and each per-tool timeout in `[tools.tool_timeouts]` accept
+humantime strings such as `"30s"`, `"2m"` or `"1h 2m"`. A per-tool timeout
+also accepts Serde's duration table, `shell = { secs = 120, nanos = 0 }`,
+which is the form Meerkat writes when it saves a config, a `config patch` that
+sets a string included. Releases before 0.9.10 read only that table form: on
+them, a per-tool timeout string written by hand fails the config load.
 
 `tools.mcp_servers` is also accepted in runtime config, although the CLI's
 user/project MCP convention files are managed separately as described below.
@@ -391,11 +395,15 @@ Important files:
 - `blobs/` (realm blob objects)
 - `artifacts/` (stable artifact records)
 - `<store_path>/approvals.json` (RPC approval-record sidecar when the persistence bundle exposes a store path)
+- `<store_path>/approval_decisions.sqlite3` (durable decisions, created by the first hold)
+- `<store_path>/approval_decisions.executor.lock` and `<store_path>/approval_decisions.executor.<kind>.lock` (the decision executors' OS locks, one per decision kind, created when an executor starts; they hold no data)
 - `mobs/` (per-mob `<mob_id>.db` SQLite storage plus `realm_profiles.db`)
 
 `<store_path>/approvals.json` is not an eighth `RealmStorageProvider` durability domain.
 The current `storage doctor` and `storage migrate` commands do not inventory or
-migrate this RPC-owned sidecar.
+migrate this RPC-owned sidecar. They do cover `approval_decisions.sqlite3`
+(schema domain `approval-decisions`), at the realm root and under
+`sessions_jsonl/`.
 For built-in SQLite and named memory realms, `store_path` is the realm root;
 for the JSONL backend, it is the `sessions_jsonl/` directory.
 
@@ -482,6 +490,8 @@ check made by the CLI itself, exits 1.
 | 55 | Approval commit outcome unknown (`APPROVAL_COMMIT_UNKNOWN`) |
 | 56 | Mob delivery scope is stale |
 | 57 | Fork refused by the host's fork instruction policy (`FORK_INSTRUCTION_REFUSED`, since 0.9.4) |
+| 58 | A write refused because a [realm admission fence](/concepts/realm-admission) it needs is held: a config write, `realm govern`, `realm grant`, `realm revoke-grant` or `realm delete`; nothing was written or removed (`ADMISSION_IN_PROGRESS`, since 0.9.11) |
+| 59 | A write refused because a realm admission fence it needs could not be used: a config write, `realm govern`, `realm grant`, `realm revoke-grant` or `realm delete`; nothing was written or removed (`ADMISSION_FENCE_UNAVAILABLE`, since 0.9.11) |
 
 A mob error with a typed console detail (codes 45-48 and 56) also prints one
 `detail:` line with that detail as JSON. Inspect the diagnostic or an

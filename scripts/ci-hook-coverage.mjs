@@ -5,13 +5,18 @@
 // under the feature set they build it with? The push runs these rows; a
 // pull-request plan runs none and is checked against its push's rows.
 //
-// The hook builds every workspace test binary in one invocation,
-//   cargo nextest list --workspace -E 'kind(lib) or kind(test)'
-// so each member is compiled with the features the whole workspace unifies on
-// it (cargo metadata's resolve graph; on 8e1f4f21, 18 of the 53 members get
-// more than their package-scoped build, meerkat-mcp's test-support among
-// them), and a test target whose required-features are outside that set is
-// not built at all. It then runs its lanes over those binaries, and
+// The hook builds every test binary of Core's members in one invocation,
+//   cargo nextest list --workspace --exclude <every other product's package>
+//     -E 'kind(lib) or kind(test)'
+// (scripts/core-workspace-args.mjs derives the selection from
+// ci/products.json), so each Core member is compiled with the features
+// Core's whole workspace unifies on it (`cargo tree`'s roots for that
+// selection; on 8e1f4f21, 18 of the 53 members got more than their
+// package-scoped build, meerkat-mcp's test-support among them), and a test
+// target whose required-features are outside that set is not built at all.
+// The other products' packages are out of the hook: their test binaries run
+// in rows that select exactly that product's packages (`-p` each), which
+// compile them as the product's own workspace did. It then runs its lanes over those binaries, and
 // HeadCanonical from its own package-scoped build. The lanes are read from
 // the hook script itself (hookModel), not copied: every nextest command in it
 // must have one of the shapes below, or the check fails closed.
@@ -28,11 +33,15 @@
 // the hook's own feature set, and every row Cargo would refuse. The planner
 // calls it on its own result and fails the plan on any gap.
 //
-// Only a row that selects the whole workspace (`--workspace`) is credited:
-// Cargo then resolves every crate's features exactly as the hook's workspace
-// build does, so the row compiles the hook's own units (a package-scoped row
-// compiles its dependencies with fewer features and is not the hook's
-// build). HeadCanonical is credited for its own, package-scoped command.
+// Only a row that selects Core's whole workspace (`--workspace` and an
+// `--exclude` for exactly every other product's package) is credited for a
+// hook binary: Cargo then resolves every crate's features exactly as the
+// hook's build does, so the row compiles the hook's own units (a
+// package-scoped row compiles its dependencies with fewer features and is not
+// the hook's build). A bare `--workspace` row is refused: it would mix the
+// products. A product's test binary is credited only to a row that selects
+// exactly that product's packages. HeadCanonical is credited for its own,
+// package-scoped command.
 // A row that runs one count partition (`partition: count:K/N`, the
 // nested-Cargo canaries' rows) credits nothing alone: rows of one exact
 // selection are credited together, and only when they hold every partition
@@ -57,7 +66,15 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { readMetadata, root, workspacePackages } from "./rust-test-selector.mjs";
+import {
+  CORE,
+  coreWorkspaceArgs,
+  loadProducts,
+  productPackageArgs,
+  testFeatureArgs,
+  workspaceMembersByProduct,
+} from "./ci-products.mjs";
+import { readMetadata, readSelectionFeatures, root, workspacePackages } from "./rust-test-selector.mjs";
 
 export const HOOK_SCRIPT = "scripts/pre-push-unit.sh";
 export const WORKFLOW = ".github/workflows/ci.yml";
@@ -201,7 +218,7 @@ export function hookModel(text) {
   const lanes = [];
   const unknown = [];
   for (const line of lines) {
-    let match = line.match(/^"\$CARGO" nextest list --workspace --list-type binaries-only --message-format json -E '([^']+)' >"\$workspace_binaries_metadata"$/);
+    let match = line.match(/^"\$CARGO" nextest list "\$\{core_workspace\[@\]\}" --list-type binaries-only --message-format json -E '([^']+)' >"\$workspace_binaries_metadata"$/);
     if (match) {
       build.push(match[1]);
       continue;
@@ -219,7 +236,9 @@ export function hookModel(text) {
     unknown.push(line);
   }
   if (unknown.length > 0) throw new Error(`${HOOK_SCRIPT} runs nextest in a shape the coverage model does not read: ${unknown.join(" | ")}`);
-  if (build.length !== 1) throw new Error(`${HOOK_SCRIPT}: expected one workspace build inventory, found ${build.length}`);
+  if (build.length !== 1) {
+    throw new Error(`${HOOK_SCRIPT}: expected one build inventory over Core's members ("\${core_workspace[@]}"), found ${build.length}`);
+  }
   if (headBuild.length !== 1) throw new Error(`${HOOK_SCRIPT}: expected one HeadCanonical build, found ${headBuild.length}`);
   const headLanes = lanes.filter((lane) => lane.inventory === "headcanonical");
   if (headLanes.length !== 1) throw new Error(`${HOOK_SCRIPT}: expected one HeadCanonical lane, found ${headLanes.length}`);
@@ -400,14 +419,82 @@ function sameSet(a, b) {
   return a.size === b.size && [...a].every((item) => b.has(item));
 }
 
-// Reads `-p NAME`, `--features LIST` and `--no-default-features` the way
-// Cargo does for a multi-package invocation: a feature must name its package
-// unless exactly one package is selected.
-function parsePackageFlags(flags, byName, unified) {
+// The lane selections of the workspace: Core's (`--workspace` and an
+// `--exclude` for every other product's package) and each other product's
+// (`-p` each of its packages). A test row passes the selection's test
+// features too (`testArgs`, `testFlags`: every selected member's test
+// features, ci-products.mjs testFeatureArgs), and `features` holds what each
+// member is compiled with in that test build (`cargo tree`'s roots for
+// exactly those arguments, dev-dependencies included). `args` and `flags`
+// are the bare selection, for a build that compiles no test target.
+export function laneSelections(metadata, { products = loadProducts(), selectionFeatures = readSelectionFeatures } = {}) {
+  const byProduct = workspaceMembersByProduct(metadata, products);
+  const productOf = new Map();
+  for (const [product, names] of byProduct) for (const name of names) productOf.set(name, product);
+  const byName = new Map(workspacePackages(metadata).map((pkg) => [pkg.name, pkg]));
+  const selections = new Map();
+  for (const [product, names] of byProduct) {
+    if (names.length === 0) continue;
+    const args = product === CORE ? coreWorkspaceArgs(byProduct) : productPackageArgs(byProduct, product);
+    const testArgs = [...args, ...testFeatureArgs(names.map((name) => byName.get(name)))];
+    const resolved = selectionFeatures(testArgs);
+    const features = new Map(names.map((name) => [name, new Set(resolved.get(name) ?? [])]));
+    selections.set(product, {
+      product,
+      args,
+      flags: args.join(" "),
+      testArgs,
+      testFlags: testArgs.join(" "),
+      packages: [...names],
+      features,
+    });
+  }
+  if (!selections.has(CORE)) throw new Error("the workspace has no Core member");
+  return { byProduct, productOf, selections };
+}
+
+// The test features a lane selection passes (`package/feature` names), from
+// its test arguments.
+function selectionTestFeatures(selection) {
+  const extra = selection.testArgs.slice(selection.args.length);
+  return extra.length === 2 && extra[0] === "--features" ? extra[1].split(",") : [];
+}
+
+// Reads a row's package flags the way Cargo does. `--workspace` must come
+// with an `--exclude` for exactly every other product's package and then
+// exactly Core's test features (Core's test selection, the hook's own
+// resolution); `-p NAME`, `--features LIST` and `--no-default-features` as
+// for a multi-package invocation (a feature must name its package unless
+// exactly one package is selected), where exactly one product's test
+// selection (`-p` each of its packages and their test features) is that
+// product's selection.
+function parsePackageFlags(flags, byName, selections) {
   const tokens = flags.split(/\s+/).filter(Boolean);
-  if (tokens.length === 1 && tokens[0] === "--workspace") {
-    // Every member, each with the features the workspace build resolves.
-    return { packages: [...byName.keys()].sort(), enabled: new Map(unified), workspace: true };
+  if (tokens[0] === "--workspace") {
+    const excluded = new Set();
+    let index = 1;
+    for (; index < tokens.length && tokens[index] !== "--features"; index += 2) {
+      if (tokens[index] !== "--exclude" || !tokens[index + 1]) {
+        throw new Error(`a whole-workspace row takes only --exclude NAME pairs and Core's test features after --workspace: ${JSON.stringify(flags)}`);
+      }
+      excluded.add(tokens[index + 1]);
+    }
+    const others = [...selections.productOf].filter(([, product]) => product !== CORE).map(([name]) => name).sort();
+    if (!sameSet(excluded, new Set(others))) {
+      throw new Error(
+        `a whole-workspace row must exclude exactly the other products' packages (${others.join(", ") || "none"}), ` +
+          `not ${[...excluded].sort().join(", ") || "none"}: ${JSON.stringify(flags)}`,
+      );
+    }
+    const core = selections.selections.get(CORE);
+    const coreTestFeatures = core.testArgs.slice(core.args.length);
+    if (JSON.stringify(tokens.slice(index)) !== JSON.stringify(coreTestFeatures)) {
+      throw new Error(
+        `a whole-workspace row must pass exactly Core's test features (${coreTestFeatures.join(" ") || "none"}) ` +
+          `after its --exclude pairs: ${JSON.stringify(flags)}`,
+      );
+    }
+    return { packages: [...core.packages], enabled: new Map(core.features), selection: CORE };
   }
   const packages = [];
   const requested = [];
@@ -429,6 +516,18 @@ function parsePackageFlags(flags, byName, unified) {
   for (const name of packages) {
     if (!byName.has(name)) throw new Error(`row selects unknown package ${name}`);
   }
+  if (packages.length > 0 && defaults) {
+    const owner = selections.productOf.get(packages[0]);
+    const selection = selections.selections.get(owner);
+    if (
+      owner !== CORE &&
+      selection &&
+      sameSet(new Set(packages), new Set(selection.packages)) &&
+      sameSet(new Set(requested), new Set(selectionTestFeatures(selection)))
+    ) {
+      return { packages: [...packages].sort(), enabled: new Map(selection.features), selection: owner };
+    }
+  }
   const explicit = new Map(packages.map((name) => [name, new Set(defaults ? ["default"] : [])]));
   for (const feature of requested) {
     const [owner, name] = feature.includes("/") ? feature.split("/", 2) : [null, feature];
@@ -446,19 +545,33 @@ function parsePackageFlags(flags, byName, unified) {
     if (!Object.hasOwn(pkg.features ?? {}, "default")) features.delete("default");
     enabled.set(name, featureClosure(pkg, features));
   }
-  return { packages, enabled, workspace: false };
+  return { packages, enabled, selection: null };
+}
+
+// The nextest filter that leaves planned test exclusions (the planner's
+// HOSTED_RUNNER_EXCLUDED_TESTS entries, `{ binary, tests }`) of `binaries`
+// out of a row, or null when none of them has any.
+export function excludedTestsFilter(binaries, entries) {
+  const parts = entries
+    .filter((entry) => binaries.includes(entry.binary))
+    .map((entry) => `(binary_id(${entry.binary}) & (${entry.tests.map((test) => `test(=${test})`).join(" | ")}))`);
+  return parts.length > 0 ? `not (${parts.join(" | ")})` : null;
 }
 
 // The binaries a row runs: Cargo's target selection (with its
 // required-features refusal for named targets), then the profile's
-// default-filter and the row's own filter, as its bound step runs them.
-function rowBinaries(row, spec, byName, nextestText, unified) {
-  const { packages, enabled, workspace } = parsePackageFlags(row.package_flags, byName, unified);
+// default-filter and the row's own filter, as its bound step runs them. A
+// row filter that is exactly the row's planned test exclusions leaves named
+// tests out, never a binary (the job's binary check holds the names), so it
+// selects every binary.
+function rowBinaries(row, spec, byName, nextestText, selections, excludedTests = []) {
+  const { packages, enabled, selection } = parsePackageFlags(row.package_flags, byName, selections);
   const targetTokens = spec.targets ?? (row.test_flags ?? "").split(/\s+/).filter(Boolean);
   const profile = spec.profile ?? row.profile;
   if (!profile) throw new Error(`row ${row.name} names no nextest profile`);
   const profileFilterFn = parseFilter(profileFilter(nextestText, profile));
-  const rowFilterFn = row.filter ? parseFilter(row.filter) : () => true;
+  const plannedExclusions = excludedTestsFilter(row.binaries ?? [], excludedTests);
+  const rowFilterFn = row.filter && row.filter !== plannedExclusions ? parseFilter(row.filter) : () => true;
   const selected = [];
   const errors = [];
   const add = (pkg, target) => selected.push({ pkg, target });
@@ -507,19 +620,28 @@ function rowBinaries(row, spec, byName, nextestText, unified) {
     const binary = { kind: nextestKind(target), binary: target.name, package: pkg.name };
     return profileFilterFn(binary) && rowFilterFn(binary);
   });
-  return { packages, enabled, workspace, runs, errors, profile };
+  return { packages, enabled, selection, runs, errors, profile };
 }
 
 // The hook's selection for the plan's test scope, and the CI rows that cover
 // it.
-export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText, workflowText, hookText } = {}) {
+export function checkHookCoverage(
+  plan,
+  { metadata = readMetadata(), nextestText, workflowText, hookText, products, selectionFeatures } = {},
+) {
   const nextest = nextestText ?? readFileSync(resolve(root, ".config/nextest.toml"), "utf8");
   const workflow = workflowText ?? readFileSync(resolve(root, WORKFLOW), "utf8");
   const errors = bindRowSteps(workflow);
   const hook = hookModel(hookText ?? readFileSync(resolve(root, HOOK_SCRIPT), "utf8"));
   const packages = workspacePackages(metadata);
   const byName = new Map(packages.map((pkg) => [pkg.name, pkg]));
-  const unified = workspaceFeatures(metadata, packages);
+  const selections = laneSelections(metadata, {
+    products: products ?? loadProducts(),
+    selectionFeatures: selectionFeatures ?? readSelectionFeatures,
+  });
+  const productOf = (name) => selections.productOf.get(name) ?? CORE;
+  // The hook's build: Core's members, with Core's own resolution.
+  const unified = selections.selections.get(CORE).features;
   const scope = [...(plan.test_scope ?? [])].sort();
   for (const name of scope) {
     if (!byName.has(name)) errors.push(`test scope names unknown package ${name}`);
@@ -541,7 +663,7 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
   }
   const expected = new Map();
   const retained = new Map();
-  for (const name of scope.filter((candidate) => byName.has(candidate))) {
+  for (const name of scope.filter((candidate) => byName.has(candidate) && productOf(candidate) === CORE)) {
     const pkg = byName.get(name);
     for (const target of pkg.targets) {
       // `test = false` targets get no test binary; unmet required-features
@@ -561,14 +683,35 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
       else expected.set(key, { lane: lane.label, package: name });
     }
   }
+  // The other products' test binaries in scope: every tests/*.rs target the
+  // product's own build builds (its selection's features) that the hook's
+  // integration lane would select, credited only to a row that selects that
+  // product's packages. Their lib tests run in the main unit lane's product
+  // rows, as Core's retained lib lane's do.
+  const productExpected = new Map();
+  for (const name of scope.filter((candidate) => byName.has(candidate) && productOf(candidate) !== CORE)) {
+    const product = productOf(name);
+    const features = selections.selections.get(product).features.get(name) ?? new Set();
+    for (const target of byName.get(name).targets) {
+      if (target.test === false || !(target.kind.length === 1 && target.kind[0] === "test")) continue;
+      if (!(target["required-features"] ?? []).every((feature) => features.has(feature))) continue;
+      const binary = { kind: "test", binary: target.name, package: name };
+      const lane = lanes.find((candidate) => candidate.filter(binary) && candidate.profileFilter(binary));
+      if (!lane) continue;
+      productExpected.set(`${name}::test::${target.name}`, { lane: lane.label, package: name, product });
+    }
+  }
   const hc = hook.headCanonical;
   const headCanonicalExpected = scope.includes(hc.package);
   if (headCanonicalExpected && !byName.get(hc.package)?.targets.some((target) => target.kind.includes("test") && target.name === hc.test)) {
     errors.push(`HeadCanonical target ${hc.test} is missing from ${hc.package}`);
   }
 
-  // What the planned rows run under the hook's feature set.
+  // What the planned rows run under the hook's feature set (a Core binary,
+  // from a row with Core's selection) or under its product's own selection
+  // (a product's binary, from a row with that product's selection).
   const covered = new Map();
+  const credits = (selection, key) => selection !== null && selection === productOf(key.split("::", 1)[0]);
   // A partitioned row runs one count partition (`--partition count:K/N`) of
   // its selection. It credits nothing alone: a group of rows with one exact
   // selection credits its binaries only when it holds every partition 1..N
@@ -583,7 +726,7 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
       }
       let read;
       try {
-        read = rowBinaries(row, spec, byName, nextest, unified);
+        read = rowBinaries(row, spec, byName, nextest, selections, plan.hosted_runner_excluded_tests ?? []);
       } catch (error) {
         errors.push(`row ${row.name} (${spec.job}): ${error.message}`);
         continue;
@@ -606,7 +749,7 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
           continue;
         }
         const selection = [spec.job, row.package_flags, row.test_flags, row.profile, row.filter ?? "", listed.join(" ")].join("\n");
-        const group = partitionGroups.get(selection) ?? { counts: new Set(), indices: [], names: [], keys, workspace: read.workspace, spec };
+        const group = partitionGroups.get(selection) ?? { counts: new Set(), indices: [], names: [], keys, selection: read.selection, spec };
         group.counts.add(Number(part[2]));
         group.indices.push(Number(part[1]));
         group.names.push(row.name);
@@ -614,7 +757,7 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
         continue;
       }
       for (const key of keys) {
-        if (read.workspace && !covered.has(key)) {
+        if (credits(read.selection, key) && !covered.has(key)) {
           covered.set(key, `${spec.job}: ${row.name}`);
         }
       }
@@ -640,14 +783,25 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
       continue;
     }
     for (const key of group.keys) {
-      if (group.workspace && !covered.has(key)) {
+      if (credits(group.selection, key) && !covered.has(key)) {
         covered.set(key, `${group.spec.job}: ${group.names.join(", ")}`);
       }
     }
   }
 
   const headKey = `HeadCanonical::${hc.package}::${hc.test}`;
-  const missing = [...expected.keys()].filter((key) => !covered.has(key)).sort();
+  // A binary no hosted runner can judge (HOSTED_RUNNER_EXCLUDED_BINARIES in
+  // scripts/ci-cargo-lanes.mjs) is named by the plan instead of run by a row.
+  const excludedKeys = new Set((plan.hosted_runner_excluded ?? []).map(({ binary }) => {
+    const [name, test] = String(binary).split("::");
+    return `${name}::test::${test}`;
+  }));
+  for (const key of excludedKeys) {
+    if (covered.has(key)) errors.push(`${key} is excluded from hosted runners but a row runs it (${covered.get(key)})`);
+  }
+  const missing = [...expected.keys(), ...productExpected.keys()]
+    .filter((key) => !covered.has(key) && !excludedKeys.has(key))
+    .sort();
   if (headCanonicalExpected && !headCanonical) missing.push(headKey);
   const byLane = {};
   for (const { lane } of [...expected.values(), ...retained.values()]) byLane[lane] = (byLane[lane] ?? 0) + 1;
@@ -656,13 +810,16 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
     scope_packages: scope.length,
     hook_binaries: expected.size + retained.size + (headCanonicalExpected ? 1 : 0),
     hook_retained: retained.size,
+    product_binaries: productExpected.size,
     by_lane: byLane,
     missing,
     errors,
     map: Object.fromEntries([
-      ...[...expected.keys(), ...retained.keys()].sort().map((key) => [
+      ...[...expected.keys(), ...retained.keys(), ...productExpected.keys()].sort().map((key) => [
         key,
-        covered.get(key) ?? (retained.has(key) ? `unit lanes (main, nightly): ${retained.get(key).lane}` : null),
+        covered.get(key)
+          ?? (retained.has(key) ? `unit lanes (main, nightly): ${retained.get(key).lane}` : null)
+          ?? (excludedKeys.has(key) ? "no hosted runner (hosted_runner_excluded)" : null),
       ]),
       ...(headCanonicalExpected ? [[headKey, headCanonical]] : []),
     ]),
@@ -687,6 +844,7 @@ function main() {
     scope_packages: report.scope_packages,
     hook_binaries: report.hook_binaries,
     hook_retained: report.hook_retained,
+    product_binaries: report.product_binaries,
     by_lane: report.by_lane,
     missing: report.missing,
     errors: report.errors,

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gmail-api-setup",
+  "version": "0.2.0",
+  "description": "Two explicit service-connector strategies with separate coverage and host prerequisites; no automatic fallback.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "gmail-api-setup",
+        "version": "0.2.0"
+      },
+      "display_name": "Gmail: hosted MCP preview or Toolkit REST operations",
+      "description": "Two explicit service-connector strategies with separate coverage and host prerequisites; no automatic fallback.",
+      "provenance": {
+        "source": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+        "source_revision": "sha256:2e93fef80c81b17fa9eff8c0232d894596f12e26157eeafe0b442e6cf5e84e81",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored metadata. Google documentation states CC BY 4.0 for prose and Apache-2.0 for samples; hosted services retain their own terms. No provider implementation is copied.",
+        "notices": [
+          "Authored by Meerkat Toolkit, not Google. Documentation hashes identify observed bytes, not the hosted implementation.",
+          "This additive version preserves 0.1.0 and the gmail-api-setup.service export identity. Select the exact version and library digest.",
+          "An endpoint or local operation library is not account readiness, authorization or an activated service export. Current owner-authenticated account, schema and role receipts remain required."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "hosted-mcp-preview",
+          "kind": "remote_mcp",
+          "instructions": "Explicitly select the Google-hosted Gmail Developer Preview for its documented search/thread, draft and label operations. The documented tools do not include sending mail; draft creation leaves sending to Gmail. Use the retained Streamable HTTP endpoint only with the host-owned OAuth binding. Observe the actual current tool schemas and bind only authorized operations. If this route is unavailable or denied, report that result; do not silently switch to REST.",
+          "sources": [
+            "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+            "https://developers.google.com/workspace/preview",
+            "https://developers.google.com/workspace/guides/configure-mcp-security"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "Preview eligibility, account consent, host client registration, current schemas and owner-authenticated readiness are not established by this bundle.",
+            "The hosted implementation is mutable. No Toolkit/Google live operation, revocation, isolation or deployment support assessment is claimed."
+          ]
+        },
+        {
+          "id": "toolkit-rest",
+          "kind": "configuration_recipe",
+          "instructions": "Explicitly select the repository Gmail operation library in sdk/python or sdk/typescript for one-page message listing, selected message retrieval and an authorized MIME send. Read the matching GMAIL.md and this version's SUPPORT.md for exact local artifact availability and transport contracts; do not assume a public package release. The host supplies the selected authenticated client, API base and account. Preserve opaque pagination and nested message data. Send the exact approved MIME bytes once; an uncertain result is not permission to retry. This is a separately selected REST strategy, never a fallback from MCP refusal. Compose the existing activation and credential owners before publishing agent tools.",
+          "sources": [
+            "https://developers.google.com/workspace/gmail/api/quickstart/python",
+            "https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list",
+            "https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/get",
+            "https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "A host adapter must bind the selected local SDK artifact, account, operations, schemas and lifecycle to the existing service-connector export. The operation libraries are not an activated agent tool surface.",
+            "The host must supply its own authenticated client, OAuth registration and credential lifecycle, scoped authorization and any send approval/reconciliation. This recipe supplies none of those owners.",
+            "Only repository source and recorded local build artifacts are available here; no public PyPI/npm release or live Gmail conformance is established."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "gmail-api-setup.service",
+          "role": "service_connector",
+          "description": "Selected Gmail account operations; MCP preview and REST have different coverage. Only owner-verified operations may be published."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and official documentation inspection. Local SDK protocol tests do not establish host activation, authenticated Google access or live service readiness.",
+          "source_revision": "sha256:2e93fef80c81b17fa9eff8c0232d894596f12e26157eeafe0b442e6cf5e84e81",
+          "assessed_at_unix_ms": 1790828499454,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-mcp",
+              "revision": "sha256:2e93fef80c81b17fa9eff8c0232d894596f12e26157eeafe0b442e6cf5e84e81"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-preview",
+              "revision": "sha256:eeeb9525e90d4f2dfeadd9c1e1860e5af8b578c4ced8602b8ce81149115dfd45"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-security",
+              "revision": "sha256:16bc6e53da942d3c45d31c86b955efc9ca9ce020cd831d56d26761ca830b69ca"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-quickstart",
+              "revision": "sha256:407f943124fa42c730dd710cf038b8351725069e43f7f45e4e506df955245b2a"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-list",
+              "revision": "sha256:0dcced42220ba661c158b7ca6f05698f6a7af599e4109c39bdee39d3c18e37bc"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-get",
+              "revision": "sha256:9ef30a31b80e59d460fb92ef5b56d4dab2687d694771bd9b9442071b141c9e03"
+            },
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "gmail-send",
+              "revision": "sha256:75832a61ec7ecb555215ff746d5f7136344a8f641c20ebc1fe063b8d2486d5bf"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

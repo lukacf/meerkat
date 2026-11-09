@@ -418,6 +418,7 @@ fn a_release_invalidates_an_operation_prepared_under_the_held_original() {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -776,6 +777,7 @@ fn a_re_presented_pending_contributor_makes_operations_unavailable_not_denied() 
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -942,6 +944,7 @@ async fn a_helper_work_item_is_admitted_only_while_its_child_original_is_current
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -1175,6 +1178,7 @@ async fn a_pending_retained_ancestor_makes_the_helper_admission_unavailable() {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -1387,6 +1391,7 @@ async fn a_retained_ancestor_grant_bounds_the_setup_operation() {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -1398,7 +1403,14 @@ async fn a_retained_ancestor_grant_bounds_the_setup_operation() {
     // grants: permissive, restrictive and later revoked.
     let issue = |name: &str, restrictions: ExecutionRestrictions| {
         grants
-            .issue_root(&root, id(name), principal("executor"), None, restrictions)
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &root,
+                id(name),
+                principal("executor"),
+                None,
+                restrictions,
+            )
             .expect("issued")
     };
     let permissive = issue("permissive", ExecutionRestrictions::unrestricted());
@@ -1553,7 +1565,12 @@ async fn a_retained_ancestor_grant_bounds_the_setup_operation() {
     }
 
     grants
-        .revoke(&root, &permissive, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &root,
+            &permissive,
+            &mut NoController,
+        )
         .expect("revoked");
     let (result, ran) = run_within(&["p"]);
     assert!(
@@ -1639,6 +1656,7 @@ fn each_original_resolves_under_its_own_ingress_and_unavailable_stays_typed() {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -1794,6 +1812,7 @@ fn a_review_tier_change_after_the_entry_check_refuses_inside_the_exclusion() {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: tier.clone(),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(
@@ -1931,6 +1950,7 @@ fn the_held_decision_cutoff_bounds_the_entry_after_two_clock_divergence() {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Records),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = Arc::new(GrantBackedWorkPolicy::new(

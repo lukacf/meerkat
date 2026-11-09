@@ -1187,7 +1187,7 @@ async fn gateway_sigkill_mid_tool_is_recovered_before_new_work() {
     let started = {
         let fifo = fifo.clone();
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
         )
         .await
@@ -1631,7 +1631,7 @@ async fn start_unshared_host(
             }
             panic!("host role {role} exited before it reported ({status}); stderr:\n{stderr}");
         }
-        () = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
+        () = tokio::time::sleep(std::time::Duration::from_mins(2)) => {
             let _ = host.start_kill();
             let _ = host.wait().await;
             let stderr = collect_stderr(stderr_task).await;
@@ -1697,19 +1697,31 @@ async fn a_host_in_another_pid_namespace_is_proven_ended_by_its_lock() {
     let error = ProcessCustody::recover_and_open(root.path(), scope.clone())
         .await
         .expect_err("a live foreign host owns its records");
-    assert!(
-        matches!(
-            error,
-            ProcessCustodyError::ForeignPidNamespace {
-                liveness: ForeignIncarnationLiveness::Running,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
+    let foreign = match error {
+        ProcessCustodyError::ForeignPidNamespace {
+            incarnation,
+            liveness: ForeignIncarnationLiveness::Running,
+            ..
+        } => incarnation,
+        other => panic!("{other:?}"),
+    };
 
-    // Tear the namespace down with its host.
+    // Tear the namespace down with its host. Killing unshare(1) reaps only
+    // unshare: the kernel ends the namespace's processes after it, and until
+    // the host among them has exited its lock is held and custody rightly
+    // refuses its records as running. Wait, within a bound, until the lock
+    // is free (taken and dropped at once, as custody's own probe does), then
+    // open custody once.
     host.child.kill().await.unwrap();
+    let lock = incarnation_lock_path(root.path(), foreign);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    while try_incarnation_lock(&lock).unwrap().is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the ended namespace's host still holds its incarnation lock after 30 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let (_custody, report) = ProcessCustody::recover_and_open(root.path(), scope)
         .await
         .unwrap();

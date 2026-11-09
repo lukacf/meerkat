@@ -71,11 +71,11 @@ fn live_delegation_worker_binding_matches(
 /// under the channel's current exact binding, or (mirroring the generated
 /// `ResolveLiveDelegationWorkerStart` guards) once the operation's own channel
 /// carries no runtime, fence, or generation binding at all, because it closed
-/// after the start was authorized (Turbo S S104 R7). Every open mints a fresh
-/// channel id, so a retired channel id never aliases a later incarnation; a
-/// still-bound channel with a different fence or generation is refused as
-/// before.
-fn live_delegation_worker_start_binding_admits(
+/// after the start was authorized (Turbo S S104 R7), while its session is
+/// still registered. Every open mints a fresh channel id, so a retired
+/// channel id never aliases a later incarnation; a still-bound channel with a
+/// different fence or generation is refused as before.
+pub(super) fn live_delegation_worker_start_binding_admits(
     state: &crate::meerkat_machine::dsl::MeerkatMachineState,
     runtime_id: &crate::identifiers::LogicalRuntimeId,
     fence_token: u64,
@@ -105,6 +105,7 @@ fn live_delegation_worker_start_binding_admits(
         && !state
             .live_execution_generation_by_channel
             .contains_key(&channel)
+        && state.session_id.is_some()
         && state
             .live_delegation_channel_by_operation
             .get(&operation_id)
@@ -11096,7 +11097,7 @@ impl MeerkatMachine {
     }
 
     /// Retire a transport-free context fixture through generated close.
-    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[cfg(all(any(test, feature = "test-support"), feature = "live"))]
     #[doc(hidden)]
     pub async fn __test_close_live_context_channel(
         &self,
@@ -11825,6 +11826,53 @@ impl MeerkatMachine {
             .copied())
     }
 
+    /// Every live delegation the session's machine holds, with its generated
+    /// schedule state and whether a worker is bound to it. Unlike
+    /// [`Self::live_delegation_recovery_snapshots`], this includes operations
+    /// that never bound a worker (an admitted delegation still queued, or one
+    /// cancelled before its worker started), so a live harness can tell a
+    /// delegation that ended without a worker from one still running.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __test_live_delegation_schedule_states(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Vec<(
+            meerkat_core::OperationId,
+            crate::live_execution::LiveDelegationScheduleState,
+            bool,
+        )>,
+        RuntimeDriverError,
+    > {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        state
+            .live_delegation_schedule_state_by_operation
+            .iter()
+            .map(|(dsl_operation_id, schedule_state)| {
+                let operation_id: meerkat_core::OperationId =
+                    serde_json::from_str(&dsl_operation_id.0).map_err(|error| {
+                        RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "live delegation operation identity is corrupt: {error}"
+                            ),
+                        }
+                    })?;
+                Ok((
+                    operation_id,
+                    *schedule_state,
+                    state
+                        .live_delegation_worker_identity_by_operation
+                        .contains_key(dsl_operation_id),
+                ))
+            })
+            .collect()
+    }
+
     /// Return a blocked live delegation, or one whose worker start failed
     /// before anything physical existed, to `Created` so the same exact
     /// operation may bind a fresh worker.
@@ -11951,6 +11999,56 @@ impl MeerkatMachine {
                     .to_string(),
             ))
         }
+    }
+
+    /// Close a channel's delegation intake under its exact binding: from
+    /// then on no delegation is admitted on the channel. Delegations admitted
+    /// before keep their custody and still start, run and settle after the
+    /// close. Closing again changes nothing.
+    pub async fn close_live_delegation_intake(
+        &self,
+        binding: &crate::live_execution::LiveDelegationRuntimeBinding,
+    ) -> Result<(), RuntimeDriverError> {
+        let session_id = binding.session_id();
+        let _mutation_guard = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        self.apply_session_dsl_input(
+            session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CloseLiveDelegationIntake {
+                channel_id: binding.channel_id().to_string(),
+                runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                    binding.runtime_id(),
+                ),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from_domain(
+                    binding.fence_token(),
+                ),
+                generation: crate::meerkat_machine::dsl::Generation::from_domain(
+                    binding.generation(),
+                ),
+            },
+            "CloseLiveDelegationIntake",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Whether a channel's delegation intake is closed: the machine admits
+    /// no delegation on it any more.
+    pub async fn live_delegation_intake_closed(
+        &self,
+        session_id: &SessionId,
+        channel_id: &meerkat_core::LiveChannelId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        Ok(state
+            .live_delegation_intake_closed_channels
+            .contains(&channel_id.to_string()))
     }
 
     /// Mint the one-use authority for a templated executor-state narration.
@@ -16818,8 +16916,7 @@ impl MeerkatMachine {
             witness,
             held_mutation_gate,
             boundary_handle,
-            expected_run_id,
-            projected_effect,
+            dispatch,
             pending_dispatch,
             dispatch_generation,
             dispatch_lifecycle_phase,
@@ -16997,8 +17094,11 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::NotReady { state });
                 }
             };
+            // The machine decided the dispatch: the runtime-loop effect with
+            // no run current, or the exact-run cancel bound to the current
+            // run, which only the exact-run boundary handle delivers.
             let projection =
-                crate::effect::runtime_effect_projection_optional_from_dsl_effects(&staged.effects);
+                crate::effect::boundary_cancel_dispatch_optional_from_dsl_effects(&staged.effects);
             #[cfg(test)]
             let projection = if self
                 .test_fail_next_boundary_cancel_effect_projection
@@ -17008,8 +17108,8 @@ impl MeerkatMachine {
             } else {
                 projection
             };
-            let projected_effect = match projection {
-                Ok(projected_effect) => projected_effect,
+            let dispatch = match projection {
+                Ok(dispatch) => dispatch,
                 Err(error) => {
                     let dispatch_generation = staged
                         .committed_snapshot
@@ -17026,10 +17126,10 @@ impl MeerkatMachine {
                     ));
                 }
             };
-            let Some(projected_effect) = projected_effect else {
+            let Some(dispatch) = dispatch else {
                 // Machine-owned convergence: a boundary-cancel dispatch is
                 // already outstanding, so the machine took the typed
-                // AlreadyPending arm (no RuntimeEffectFact). The request is
+                // AlreadyPending arm (no dispatch effect). The request is
                 // satisfied by the outstanding dispatch — and this bound is
                 // what stops a boundary handle that re-enters
                 // `cancel_after_boundary` from recursing unboundedly.
@@ -17041,18 +17141,12 @@ impl MeerkatMachine {
                 });
                 if !already_pending {
                     return Err(RuntimeDriverError::Internal(
-                        "CancelAfterBoundary emitted neither a RuntimeEffectFact nor BoundaryCancelAlreadyPending"
+                        "CancelAfterBoundary emitted no boundary-cancel dispatch and no BoundaryCancelAlreadyPending"
                             .to_string(),
                     ));
                 }
                 return Ok(true);
             };
-            let expected_run_id = staged
-                .committed_snapshot
-                .state()
-                .current_run_id
-                .as_ref()
-                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl);
             let dispatch_generation = staged
                 .committed_snapshot
                 .state()
@@ -17137,8 +17231,7 @@ impl MeerkatMachine {
                 },
                 held_mutation_gate,
                 entry.boundary_handle(),
-                expected_run_id,
-                projected_effect,
+                dispatch,
                 pending_dispatch,
                 dispatch_generation,
                 dispatch_lifecycle_phase,
@@ -17157,8 +17250,7 @@ impl MeerkatMachine {
                 boundary_handle,
                 member_authority,
                 pending_dispatch,
-                expected_run_id.as_ref(),
-                projected_effect,
+                dispatch,
                 dispatch_generation,
                 dispatch_lifecycle_phase,
                 requested_run_id.is_some(),
@@ -18012,7 +18104,17 @@ impl MeerkatMachine {
     ///
     /// Returns `true` when the exact input was observed (including already
     /// terminal) and `false` when its runtime attachment is gone or the input
-    /// is absent.
+    /// is absent. An observation carries across the passes of one call: a
+    /// pass that finds no row for the input in the live ledger answers `true`
+    /// when an earlier pass of the same call read the input there, since a
+    /// row leaves that ledger only when its input's terminal is archived
+    /// after its durable commit (an interrupted run can finalize and archive
+    /// its input before the next pass reads). Both reads go through the
+    /// driver captured at the start of the call, still the session's driver,
+    /// under the session mutation gate. An input no pass of the call
+    /// observed answers `false` when absent, as does a row the ledger keeps
+    /// without its generated lifecycle state, and a missing, destroyed or
+    /// replaced attachment answers `false` whatever an earlier pass observed.
     pub async fn cancel_input_if_present(
         &self,
         session_id: &SessionId,
@@ -18072,9 +18174,19 @@ impl MeerkatMachine {
             };
             Arc::downgrade(&entry.driver)
         };
+        // Whether a pass of this call has read the exact input in the live
+        // ledger. A pass reads the ledger only while it holds the session
+        // mutation gate for the captured driver, after finding that driver
+        // still the session's, so only such a pass sets or consults it.
+        let mut observed = false;
+        let mut pass: u32 = 0;
         loop {
             enum Action {
-                Missing,
+                // `ledger_row`: the live ledger still holds the input's row,
+                // whose generated lifecycle state is gone.
+                Missing {
+                    ledger_row: bool,
+                },
                 Settled,
                 DrainTerminal {
                     completions: crate::meerkat_machine::driver::SharedCompletionRegistry,
@@ -18092,6 +18204,7 @@ impl MeerkatMachine {
                 CancelRun(meerkat_core::RunId),
                 Retry,
             }
+            pass += 1;
 
             let Some(driver) = attached_driver.upgrade() else {
                 return Ok(false);
@@ -18132,8 +18245,12 @@ impl MeerkatMachine {
                 // Subscribed under the driver before the read: a lifecycle
                 // step committed after it is a change on this receiver.
                 let input_transitions = driver_guard.subscribe_input_transitions();
-                let action = match driver_guard.as_driver().stored_input_state(input_id) {
-                    None => Action::Missing,
+                let stored = driver_guard.as_driver().stored_input_state(input_id);
+                observed |= stored.is_some();
+                let action = match stored {
+                    None => Action::Missing {
+                        ledger_row: driver_guard.ledger().get(input_id).is_some(),
+                    },
                     Some(stored) if stored.seed.terminal_outcome.is_some() => {
                         // A read that starts after the settle deadline (the
                         // one after a wait that reached it) waits for
@@ -18183,7 +18300,26 @@ impl MeerkatMachine {
             };
 
             match action {
-                Action::Missing => return Ok(false),
+                Action::Missing { ledger_row } => {
+                    // A row leaves the live ledger only when its input's
+                    // terminal is archived after its durable commit. An
+                    // input an earlier pass observed and whose row is gone
+                    // therefore reached its terminal: the cancellation met
+                    // its exact input. An input no pass observed is absent,
+                    // and a row kept without its generated state was not
+                    // archived.
+                    let answer = observed && !ledger_row;
+                    tracing::debug!(
+                        %session_id,
+                        %input_id,
+                        pass,
+                        observed,
+                        ledger_row,
+                        answer,
+                        "exact-input cancellation found no live input state"
+                    );
+                    return Ok(answer);
+                }
                 Action::Settled => return Ok(true),
                 Action::DrainTerminal {
                     completions,

@@ -4,8 +4,19 @@ use syn::Error;
 
 use crate::ast::*;
 
-const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
+// Native helpers of every machine: a machine's DSL calls them without
+// declaring them, and each has a hand-written body in the executors of the
+// machine that calls it.
+const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "runtime_delivery_recipient_outcomes_after_set",
+    // SessionDocumentMachine: one session's slot map with one slot set, the
+    // body bytes of a slot set's Active slots, the entries of a slot map
+    // whose slot is Active, and the activation rows a retirement leaves
+    // retired per key.
+    "session_document_instruction_slot_after_set",
+    "session_document_instruction_active_bytes",
+    "session_document_instruction_active_slots",
+    "session_document_activation_retired_after",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",
@@ -52,6 +63,10 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_wiring_edge_a",
     "mob_machine_wiring_edge_b",
     "mob_machine_wiring_edge_contains_identity",
+    // MobMachine owned edges (0.9.11): an edge's end other than an
+    // identity, and the owned edge map without an identity's edges.
+    "mob_machine_wiring_edge_other",
+    "mob_machine_owned_edges_without_identity",
     "mob_machine_wiring_contains_pair",
     "mob_machine_wiring_edge_matches_members",
     "mob_machine_wiring_edges_without_identity",
@@ -80,6 +95,8 @@ const NATIVE_MOB_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_optional_u64_is_exact_successor",
     "mob_machine_members_to_spawn",
     "mob_machine_members_to_retire",
+    // A destroy's abandoned rotation sessions: the FreshSession rotations'.
+    "mob_machine_fresh_rotation_sessions",
     "mob_machine_placed_cleanup_absent_for_identity",
     "mob_machine_placed_cleanup_obligation",
     "mob_machine_placed_carrier_binding_active",
@@ -618,7 +635,7 @@ fn validate_expr(
         ExprDef::Call { helper, .. } => {
             let helper_name = helper.to_string();
             if !helpers.contains(&helper_name)
-                && !NATIVE_MOB_MACHINE_HELPERS.contains(&helper_name.as_str())
+                && !NATIVE_MACHINE_HELPERS.contains(&helper_name.as_str())
             {
                 errors.push(Error::new(
                     helper.span(),

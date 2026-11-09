@@ -18,7 +18,7 @@ use crate::runtime::builder::restore_pass_probe::{self, RestorePassEvent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Bound for one step; it only turns a hang into a failure.
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 const MEMBERS: usize = 8;
 
@@ -161,6 +161,10 @@ struct HeldRestoreBuilder {
 #[async_trait]
 impl SessionAgentBuilder for HeldRestoreBuilder {
     type Agent = PersistentMockAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        PersistentMockBuilder.session_comms_identity_root()
+    }
 
     async fn build_agent(
         &self,
@@ -1366,6 +1370,52 @@ async fn a_cold_resume_repoints_a_member_to_its_successor_while_other_members_ho
             resumed.resolve_bridge_session_id(peer).await.as_ref(),
             Some(session),
             "{peer} is back on its own session"
+        );
+    }
+    resumed.shutdown().await.expect("shut the resume down");
+}
+
+/// On a service that keeps no durable sessions, a member a resume left
+/// Dormant is recreated on a new session at its wake. A session builder
+/// that refuses that create with structured data (a typed refusal of its
+/// own kind) fails the wake's plan, and the restore failure the wake
+/// answers keeps that data, as a later wake's does, answered from the
+/// member's record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_whose_new_session_create_fails_with_structured_data_keeps_it() {
+    let mob = RecreatableMob::spawn(1).await;
+    let resumed = tokio::time::timeout(
+        STEP,
+        Box::pin(
+            MobBuilder::for_resume(mob.storage.clone())
+                .with_session_service(mob.service.clone())
+                .allow_ephemeral_sessions(true)
+                .notify_orchestrator_on_resume(false)
+                .resume(),
+        ),
+    )
+    .await
+    .expect("the resume answers")
+    .expect("the resume succeeds");
+    let (identity, _) = mob.sessions[0].clone();
+    mob.service
+        .fail_session_mints_with(host_build_refusal)
+        .await;
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+    for wake in ["the first wake", "a later wake"] {
+        let error = tokio::time::timeout(STEP, resumed.ensure_member_live(&identity))
+            .await
+            .expect("the wake answers")
+            .expect_err("the wake fails");
+        assert!(
+            matches!(error, MobError::MemberRestoreFailed { .. }),
+            "{wake}: {error:?}"
+        );
+        assert_eq!(
+            restore_failure_cause_data(&error),
+            expected,
+            "{wake}: the restore failure keeps the create's structured data"
         );
     }
     resumed.shutdown().await.expect("shut the resume down");

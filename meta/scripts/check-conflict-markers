@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Refuse committed merge-conflict markers.
+
+A web squash-merge bypasses the local `check-merge-conflict` pre-commit hook,
+and on 2026-09-03 `CHANGELOG.md` on `main` carried a `<<<<<<< HEAD` /
+`=======` / `>>>>>>> codex/...` block for several merges with nothing red.
+This gate scans every tracked file (or the paths given as arguments).
+
+A file fails when it contains BOTH a line starting with `<<<<<<< ` and a
+line starting with `>>>>>>> `. A bare `=======` line is never a hit on its
+own: Markdown setext headings use it legitimately.
+
+Exit 0 when clean, 1 with one line per marker when not.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+OPEN = "<<<<<<< "
+CLOSE = ">>>>>>> "
+
+
+def tracked_files() -> list[Path]:
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], check=True, capture_output=True
+    ).stdout
+    return [Path(p) for p in out.decode().split("\0") if p]
+
+
+def marker_lines(path: Path) -> list[tuple[int, str]]:
+    if path.is_symlink():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return []
+    hits = [
+        (n, line)
+        for n, line in enumerate(text.splitlines(), start=1)
+        if line.startswith(OPEN) or line.startswith(CLOSE)
+    ]
+    has_open = any(line.startswith(OPEN) for _, line in hits)
+    has_close = any(line.startswith(CLOSE) for _, line in hits)
+    return hits if has_open and has_close else []
+
+
+def main(argv: list[str]) -> int:
+    paths = [Path(a) for a in argv] or tracked_files()
+    me = Path(__file__).resolve()
+    failed = False
+    for path in paths:
+        if path.resolve() == me:
+            continue
+        for n, line in marker_lines(path):
+            print(f"{path}:{n}: committed conflict marker: {line[:40]}")
+            failed = True
+    if failed:
+        print("conflict markers found; resolve the merge and re-commit", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -19,7 +19,7 @@ use crate::provider_runtime::catalog::ProviderRuntimeCatalog;
 use crate::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
-use crate::provider_runtime::runtime::ProviderRuntime;
+use crate::provider_runtime::runtime::{AccountModelLookup, ProviderRuntime};
 use crate::{ImageGenerationExecutor, LlmClient};
 
 // Provider runtimes live in per-provider crates. Callers (typically the
@@ -66,6 +66,10 @@ pub struct ResolverEnvironment {
     provider_auth_persistence: Option<meerkat_core::auth::ProviderAuthPersistence>,
     #[cfg(not(target_arch = "wasm32"))]
     host_launch_guard: Option<HostLaunchGuard>,
+    /// See [`Self::admitting_pending_account_limits`]. Native only, like the
+    /// two fields above, so the struct keeps every field public on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
+    admits_pending_account_limits: bool,
 }
 
 impl ResolverEnvironment {
@@ -82,6 +86,8 @@ impl ResolverEnvironment {
             provider_auth_persistence: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_launch_guard: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            admits_pending_account_limits: false,
         }
     }
 
@@ -98,6 +104,8 @@ impl ResolverEnvironment {
             provider_auth_persistence: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_launch_guard: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            admits_pending_account_limits: false,
         }
     }
 
@@ -171,6 +179,43 @@ impl ResolverEnvironment {
     {
         self.env_lookup = Arc::new(lookup);
         self
+    }
+
+    /// Let this resolution succeed while a temporary outage keeps the
+    /// provider from obtaining the account's derived credential, and with it
+    /// the account's stated limits (its model list and output limits); the
+    /// first request then obtains it. Set this only for a build that reads
+    /// none of those limits, for example one whose output budget is fixed
+    /// before resolution. Off by default: a resolution fails during such an
+    /// outage.
+    ///
+    /// On wasm32 it changes nothing: the environment is returned as it is,
+    /// and [`Self::admits_pending_account_limits`] is always false. No
+    /// provider that reads it is built for wasm32.
+    #[must_use]
+    pub fn admitting_pending_account_limits(self) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut env = self;
+            env.admits_pending_account_limits = true;
+            env
+        }
+        #[cfg(target_arch = "wasm32")]
+        self
+    }
+
+    /// Whether this resolution may succeed while the account's stated limits
+    /// are pending (see [`Self::admitting_pending_account_limits`]). Always
+    /// false on wasm32.
+    pub fn admits_pending_account_limits(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.admits_pending_account_limits
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
     }
 }
 
@@ -286,6 +331,23 @@ impl ProviderRuntimeRegistry {
             .get(&validated.provider())
             .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider()))?;
         runtime.observe_credential_readiness(&validated, env).await
+    }
+
+    /// What the account behind `connection` states about `model`, through
+    /// the runtime of the connection's provider
+    /// ([`ProviderRuntime::account_model`]):
+    /// [`AccountModelLookup::NotReported`] when no runtime is registered for
+    /// it.
+    pub fn account_model(
+        &self,
+        connection: &ResolvedConnection,
+        model: &str,
+    ) -> AccountModelLookup {
+        self.runtimes
+            .get(&connection.provider)
+            .map_or(AccountModelLookup::NotReported, |runtime| {
+                runtime.account_model(connection, model)
+            })
     }
 
     /// Build a client from a resolved connection through the matching

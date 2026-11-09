@@ -1105,7 +1105,7 @@ fn persistent_auth_authorities_for_key(
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     let oauth_flows = Arc::new(
         crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
+            std::time::Duration::from_mins(10),
             Arc::clone(&auth_lease),
             store,
         ),
@@ -1196,7 +1196,7 @@ pub use controller_custody::NativeControllerGrantMutation;
 pub use local_authorization::{
     AgentConfiguredMcpProvider, AgentInstallationGrant, ConfiguredMcpAttachmentProvider,
     ConfiguredMcpConjuncts, NativeGrantWorkConfiguration, NativeIngressCheck,
-    NativeRetainedResumeCheck,
+    NativeKeptOriginalCheck, NativeRetainedResumeCheck,
 };
 #[cfg(feature = "local-authorization")]
 mod scoped_original;
@@ -1218,8 +1218,10 @@ pub use scoped_retained_resume::{
 mod agent_mandate;
 mod boot_obligations;
 pub use boot_obligations::{
-    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved,
+    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved, SessionDurableWork,
+    SessionWorkState,
 };
+mod compaction_request;
 pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;
@@ -1256,6 +1258,7 @@ mod predecessor_settlement;
 mod session_management;
 mod session_mutation_gate;
 mod terminal_receipt;
+mod tool_grants;
 mod traits;
 mod visibility;
 
@@ -1513,8 +1516,8 @@ pub enum RuntimeSessionUnregisterAdmission {
 /// unregister always has. [`Self::Requeue`] keeps each eligible queued input
 /// (a durable prompt in the Queue lane that is neither directed nor bound to
 /// an objective) durably queued instead, marked for the runtime's next start,
-/// which runs it unless it is older than `max_age` by then. Its waiter is
-/// answered
+/// which runs it unless more than `max_age` has passed since the stop by
+/// then. Its waiter is answered
 /// [`CompletionWaitError::RequeuedAcrossStop`](crate::completion::CompletionWaitError::RequeuedAcrossStop).
 /// [`Self::Keep`] keeps every non-terminal input the registration recovered
 /// from the store exactly as the store holds it, for the next registration
@@ -1531,8 +1534,11 @@ pub enum UnregisterQueuedInputs {
     Stop,
     /// Keep eligible queued inputs durably queued for the next start.
     Requeue {
-        /// The age, measured from admission, past which the next start ends
-        /// a kept input as expired instead of running it.
+        /// How long after the stop a kept input still runs: the next start
+        /// ends an input the stop kept as expired instead of running it once
+        /// more than this has passed since the stop. The age counts from the
+        /// stop that kept the input, not from its admission, so it bounds the
+        /// outage, however long before the stop the input was admitted.
         max_age: std::time::Duration,
     },
     /// Keep every input the registration recovered from the store, exactly
@@ -2489,6 +2495,17 @@ pub enum RunStartHoldReason {
     MobStop,
     /// A restored member waits until its host has published its tools.
     ToolsNotPublished,
+    /// A mob member whose host preparation is owed (a role move its mob
+    /// holds) starts no run until its mob releases it.
+    HostPreparation,
+    /// The session's host holds it while it recovers it (for example while
+    /// it settles a run a crash left open, with
+    /// [`MeerkatMachine::settle_retained_run`]): it starts no run until its
+    /// host releases this hold. No mob or Meta code stages or releases this
+    /// reason; only the host that staged it does. A mob that retires or
+    /// destroys the member drops what the host staged for the member's
+    /// session.
+    HostRecovery,
 }
 
 impl RunStartHoldReason {
@@ -2496,6 +2513,8 @@ impl RunStartHoldReason {
         match self {
             Self::MobStop => dsl::RunStartHoldReason::MobStop,
             Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
+            Self::HostPreparation => dsl::RunStartHoldReason::HostPreparation,
+            Self::HostRecovery => dsl::RunStartHoldReason::HostRecovery,
         }
     }
 }
@@ -3518,6 +3537,26 @@ impl MeerkatMachine {
         self.native_work_authorization_host.get().is_some()
     }
 
+    /// The realm's terminal close: end the custody of the grant owner this
+    /// machine's realm open restored, after the realm's last legitimate
+    /// change (its session service's terminal shutdown calls it). From then
+    /// on that owner refuses every change and use, whoever still holds this
+    /// machine, and its store's lease is handed back, so a same-process
+    /// successor restores the realm's grant owner at once. Without such an
+    /// owner (an ordinary realm, or a grant owner a host supplied, whose own
+    /// close ends its custody) nothing changes. A second call changes
+    /// nothing.
+    pub fn release_realm_custody(&self) {
+        #[cfg(feature = "local-authorization")]
+        if let Some(grants) = self.realm_grant_custody.get()
+            && grants.release_custody().is_err()
+        {
+            tracing::warn!(
+                "the realm's grant owner is poisoned: its lease ends when its last reference drops"
+            );
+        }
+    }
+
     /// Install the trusted host's binder of governed peer deliveries
     /// ([`crate::input_authority::PeerIngressBinder`]): from now on a peer
     /// delivery whose sender the transport established is offered to it
@@ -3981,17 +4020,17 @@ impl std::fmt::Debug for PendingRuntimeExecutorAttachment {
 /// run's carriers and retrying its terminal while its attachment comes to
 /// serve: one deadline for the whole detached task.
 const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
-    std::time::Duration::from_secs(60);
+    std::time::Duration::from_mins(1);
 
 /// The runtime-termination reason a kept run settled past its stop's max age
 /// carries to its interaction terminals.
-const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
+pub(crate) const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
     "a kept run outlived the stop's max age and was settled instead of resumed";
 
-/// The runtime-termination reason a kept governed input with no way back to
-/// its controller client, or a kept run it is the first input of, carries to
-/// its interaction terminals.
-const KEPT_GOVERNED_INPUT_TERMINATION_REASON: &str =
+/// The runtime-termination reason a kept governed input whose host supplies
+/// no controller client again, or a kept run it is the first input of,
+/// carries to its interaction terminals.
+pub(crate) const KEPT_GOVERNED_INPUT_TERMINATION_REASON: &str =
     "a kept governed input's controller cannot be supplied again without a fresh authentication";
 
 impl PendingRuntimeExecutorAttachment {
@@ -4240,24 +4279,24 @@ impl PendingRuntimeExecutorAttachment {
     }
 
     /// End, before this attachment can serve, every input an earlier
-    /// graceful stop kept queued that is now older than that stop's max age
-    /// (`crate::input_state::stop_requeue_expired` at `now`). Each is
-    /// abandoned through the machine's `AbandonInput` with the typed
-    /// [`crate::input_state::InputAbandonReason::RequeueExpired`], durably
-    /// committed with its payload retired, so it never runs. The retained
-    /// mutation guard and the pending (non-serving) slot keep the input set
-    /// complete. Every attachment passes here before its serving gate, so no
-    /// path serves a kept input that has not been checked. Returns the
-    /// expired inputs.
+    /// graceful stop kept queued for which more than that stop's max age has
+    /// passed since the stop (`crate::input_state::stop_requeue_expired` at
+    /// `now`). Each is abandoned through the machine's `AbandonInput` with
+    /// the typed [`crate::input_state::InputAbandonReason::RequeueExpired`],
+    /// durably committed with its payload retired, so it never runs. The
+    /// retained mutation guard and the pending (non-serving) slot keep the
+    /// input set complete. Every attachment passes here before its serving
+    /// gate, so no path serves a kept input that has not been checked.
+    /// Returns the expired inputs.
     ///
     /// A run the same stop kept open (marked resumable again by this
     /// registration, its inputs still bound to it) is checked first, as a
-    /// whole: when any of its inputs is over the stop's max age, the run is
-    /// settled with the same reason (`DriverEntry::settle_resumable_run`)
-    /// instead of resumed, or as cancelled when its stop was asked since
-    /// this registration marked it, as every settlement of a stopped run
-    /// is. Its inputs are Staged or Applied, never queued, so the per-input
-    /// sweep would not see them.
+    /// whole: when the stop's max age has passed for any of its inputs, the
+    /// run is settled with the same reason
+    /// (`DriverEntry::settle_resumable_run`) instead of resumed, or as
+    /// cancelled when its stop was asked since this registration marked it,
+    /// as every settlement of a stopped run is. Its inputs are Staged or
+    /// Applied, never queued, so the per-input sweep would not see them.
     pub(crate) async fn settle_expired_stop_requeued_inputs(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
@@ -4444,18 +4483,20 @@ impl PendingRuntimeExecutorAttachment {
         Ok(expired)
     }
 
-    /// End, before this attachment can serve, every kept governed input with
-    /// no way back to its controller client: an input this registration
+    /// End, before this attachment can serve, every kept governed input whose
+    /// host supplies no controller client again: an input this registration
     /// recovered from the store that was admitted with an authority
     /// association of its own (a governed prompt, for example), not as a
-    /// resume of retained work, whose host is asked for the client again. A
-    /// controller client never survives the store, and the host contract can
-    /// supply such an input's client again only with a fresh authentication
-    /// of its caller, so it could never run: each run of it would fail before
-    /// the model is called until its attempts ran out, and while it waited
-    /// the whole machine would refuse controller grant changes, credential
-    /// publications and auth lease releases. Each queued one is abandoned
-    /// through the machine's `AbandonInput` as a refused resume
+    /// resume of retained work. A controller client never survives the
+    /// store; the registration's recovery asked the installed host for it
+    /// with the input's stored association
+    /// (`NativeWorkAuthorizationHost::authenticate_kept_original`). An input
+    /// whose client was pinned runs; one whose host cannot say yet is held by
+    /// the machine and waits for a later answer. One the host refused
+    /// definitely (or that no installed host answers for) could never run:
+    /// each run of it would fail before the model is called until its
+    /// attempts ran out. Each queued one is abandoned through the machine's
+    /// `AbandonInput` as a refused resume
     /// ([`crate::input_state::InputAbandonReason::ResumeRefused`]), in its own
     /// durable commit with the runless runtime-termination carrier it is owed.
     ///
@@ -6806,8 +6847,7 @@ struct RuntimeAcceptedBoundaryCancelPlan {
     witness: RuntimeEffectDispatchAttachmentWitness,
     boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
     pending_dispatch: PendingBoundaryCancelDispatchGuard,
-    expected_run_id: RunId,
-    projected_effect: crate::effect::ProjectedRuntimeEffect,
+    dispatch: crate::effect::BoundaryCancelDispatch,
     dispatch_generation: u64,
     dispatch_lifecycle_phase: dsl::MeerkatPhase,
 }
@@ -8057,6 +8097,60 @@ impl MeerkatMachine {
         let armed = {
             let mut hook = self
                 .test_runtime_loop_before_terminal_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
+    /// Deterministically pause the next retained-run settle of `session_id`
+    /// ([`Self::settle_retained_run`]) once the waiters it registered were
+    /// answered, before it takes the session's mutation gate again to read
+    /// what the settlement committed. The first receiver resolves when the
+    /// settle reaches the pause; sending on (or dropping) the returned sender
+    /// lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_retained_run_settle_before_gate_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_retained_run_settle_before_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "retained-run settle gate test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_retained_run_settle_before_gate_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_retained_run_settle_before_gate
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if hook
@@ -9442,8 +9536,7 @@ impl MeerkatMachine {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         member_authority: Option<RuntimeEffectDispatchMemberAuthority>,
         pending_dispatch: PendingBoundaryCancelDispatchGuard,
-        expected_run_id: Option<&RunId>,
-        projected_effect: crate::effect::ProjectedRuntimeEffect,
+        dispatch: crate::effect::BoundaryCancelDispatch,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: dsl::MeerkatPhase,
         allow_during_unregister_drain: bool,
@@ -9452,7 +9545,6 @@ impl MeerkatMachine {
         let cleanup_spawner = MachineCleanupTaskSpawner::acquire()?;
         let machine = self.clone();
         let session_id = session_id.clone();
-        let expected_run_id = expected_run_id.cloned();
         let context = context.to_string();
         let completion = cleanup_spawner.spawn(async move {
             machine
@@ -9463,8 +9555,7 @@ impl MeerkatMachine {
                     boundary_handle,
                     member_authority,
                     pending_dispatch,
-                    expected_run_id.as_ref(),
-                    projected_effect,
+                    dispatch,
                     dispatch_generation,
                     dispatch_lifecycle_phase,
                     allow_during_unregister_drain,
@@ -9490,8 +9581,7 @@ impl MeerkatMachine {
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
         member_authority: Option<RuntimeEffectDispatchMemberAuthority>,
         mut pending_dispatch: PendingBoundaryCancelDispatchGuard,
-        expected_run_id: Option<&RunId>,
-        projected_effect: crate::effect::ProjectedRuntimeEffect,
+        dispatch: crate::effect::BoundaryCancelDispatch,
         dispatch_generation: u64,
         dispatch_lifecycle_phase: dsl::MeerkatPhase,
         allow_during_unregister_drain: bool,
@@ -9502,13 +9592,10 @@ impl MeerkatMachine {
         // prove that neither the logical session nor attachment incarnation
         // changed before the queued effect is published.
         drop(held_mutation_gate);
+        let expected_run_id = dispatch.run_id().cloned();
+        let expected_run_id = expected_run_id.as_ref();
         let live_dispatch_result = self
-            .dispatch_cancel_after_boundary_live_handle(
-                boundary_handle,
-                expected_run_id,
-                &projected_effect,
-                context,
-            )
+            .dispatch_cancel_after_boundary_live_handle(boundary_handle, &dispatch, context)
             .await;
         #[cfg(any(test, feature = "test-support"))]
         if live_dispatch_result.is_ok() {
@@ -9518,14 +9605,17 @@ impl MeerkatMachine {
 
         // Reserve bounded-channel capacity without M. A wedged executor may
         // delay this process-owned transaction, but it cannot retain the
-        // session mutation authority or block teardown/replacement.
+        // session mutation authority or block teardown/replacement. Only the
+        // loop dispatch publishes a runtime-loop effect; the exact-run dispatch
+        // is complete once its boundary handle delivered it.
         let pre_reserve_state = Self::classify_dsl_boundary_cancel_dispatch(
             &witness.dsl_authority,
             dispatch_generation,
             &dispatch_lifecycle_phase,
             expected_run_id,
         );
-        let effect_permit = if live_dispatch_result.is_ok()
+        let effect_permit = if matches!(dispatch, crate::effect::BoundaryCancelDispatch::Loop(_))
+            && live_dispatch_result.is_ok()
             && pre_reserve_state == BoundaryCancelDispatchState::Current
         {
             Some(witness.effect_tx.clone().reserve_owned().await)
@@ -9635,16 +9725,18 @@ impl MeerkatMachine {
         }
 
         debug_assert!(witness.effect_tx.same_channel(&current_effect_tx));
-        let effect_permit = effect_permit
-            .ok_or_else(|| RuntimeDriverError::StaleAuthority {
-                reason: format!(
-                    "{context}: boundary-cancel dispatch became current after capacity reservation was skipped"
-                ),
-            })?
-            .map_err(|_| RuntimeDriverError::NotReady {
-                state: RuntimeState::Idle,
-            })?;
-        let _effect_tx = effect_permit.send(projected_effect.into_effect());
+        if let crate::effect::BoundaryCancelDispatch::Loop(projected_effect) = dispatch {
+            let effect_permit = effect_permit
+                .ok_or_else(|| RuntimeDriverError::StaleAuthority {
+                    reason: format!(
+                        "{context}: boundary-cancel dispatch became current after capacity reservation was skipped"
+                    ),
+                })?
+                .map_err(|_| RuntimeDriverError::NotReady {
+                    state: RuntimeState::Idle,
+                })?;
+            let _effect_tx = effect_permit.send(projected_effect.into_effect());
+        }
         pending_dispatch.disarm();
         Ok(gate_guard)
     }
@@ -9779,8 +9871,7 @@ impl MeerkatMachine {
                     cancel_plan.boundary_handle,
                     None,
                     cancel_plan.pending_dispatch,
-                    Some(&cancel_plan.expected_run_id),
-                    cancel_plan.projected_effect,
+                    cancel_plan.dispatch,
                     cancel_plan.dispatch_generation,
                     cancel_plan.dispatch_lifecycle_phase,
                     false,
@@ -9804,16 +9895,20 @@ impl MeerkatMachine {
     async fn dispatch_cancel_after_boundary_live_handle(
         &self,
         boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
-        expected_run_id: Option<&RunId>,
-        projected_effect: &crate::effect::ProjectedRuntimeEffect,
+        dispatch: &crate::effect::BoundaryCancelDispatch,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        let reason = projected_effect.reason().to_string();
-        // The cloneable live handle is exact-run authority. Attached runtimes
-        // legitimately have no run yet; their generated CancelAfterBoundary
-        // dispatch still goes through the in-loop executor effect below, but
-        // must not fabricate an ID for this live callback.
-        if let (Some(boundary_handle), Some(expected_run_id)) = (boundary_handle, expected_run_id) {
+        let reason = dispatch.reason().to_string();
+        // The cloneable live handle is exact-run authority, and the exact-run
+        // dispatch's only delivery: the machine binds it to the run current
+        // when it admitted the cancel. A loop dispatch has no run (the
+        // runtime is attached with none current); its generated effect goes
+        // to the runtime loop instead, and no ID is fabricated for this
+        // callback. Without a handle, a cancel the exact-run input admitted
+        // is still held by the run's turn state (`cancel_after_boundary`)
+        // until the run's first boundary.
+        if let (Some(boundary_handle), Some(expected_run_id)) = (boundary_handle, dispatch.run_id())
+        {
             boundary_handle
                 .cancel_after_boundary(expected_run_id, reason)
                 .await
@@ -11420,6 +11515,14 @@ impl Drop for RunStartHoldInFlightForTest<'_> {
 #[doc(hidden)]
 pub struct MeerkatMachineShared {
     native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
+    /// The grant owner this machine's realm open restored, installed by that
+    /// composition before any session is registered. The realm's terminal
+    /// close ends its custody ([`MeerkatMachine::release_realm_custody`]).
+    /// Empty for a grant owner a host supplied: that host's own close ends
+    /// its custody.
+    #[cfg(feature = "local-authorization")]
+    realm_grant_custody:
+        std::sync::OnceLock<Arc<meerkat_authorization::grants::LocalGrantAuthority>>,
     /// Source of [`RuntimeSessionRegistrationUse`] stamps: one machine-wide
     /// sequence, so no two stamps this machine hands out are equal.
     registration_use_sequence: std::sync::atomic::AtomicU64,
@@ -11486,6 +11589,13 @@ pub struct MeerkatMachineShared {
     execution_custody: Option<Arc<crate::store::RuntimeStoreExecutionClaim>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
+    /// The scoped tool grant service over this machine's store (a
+    /// process-local in-memory store when it has none). Shell composition,
+    /// NOT machine state: each grant's lifecycle is its own
+    /// `ToolGrantLifecycleMachine` row.
+    tool_grant_service: Arc<crate::tool_grant::ToolGrantService>,
+    /// The deadline driver of this machine's served sessions' grants.
+    tool_grant_deadlines: crate::tool_grant::ToolGrantDeadlines,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
     /// Shared readiness flag mirroring `llm_reconfigure_host.is_some()`.
@@ -11688,6 +11798,26 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// Deterministic test gate in an until-changed switch-turn after it
+    /// released the session mutation gate for its reconfigure, before the
+    /// reconfigure runs. One-shot: the next switch-turn to get there takes it.
+    #[cfg(test)]
+    test_switch_turn_reconfigure_gap_hold: StdMutex<
+        Option<(
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    /// Deterministic test gate in an until-changed switch-turn after its
+    /// reconfigure returned, before it takes the session mutation gate again.
+    /// One-shot: the next switch-turn to get there takes it.
+    #[cfg(test)]
+    test_switch_turn_post_reconfigure_hold: StdMutex<
+        Option<(
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// Deterministic test gate in a durable steer's live-boundary work after
     /// its wait for an earlier durable steer ended, before it retakes the
     /// session mutation gate. One-shot: the first waiter to get there takes it.
@@ -11752,6 +11882,18 @@ pub struct MeerkatMachineShared {
     /// commit.
     #[cfg(any(test, feature = "test-support"))]
     test_runtime_loop_before_terminal_commit: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    /// One-shot deterministic gate in a retained-run settle, after the
+    /// waiters it registered were answered and before it takes the session's
+    /// mutation gate again: a test replaces the registration (a reload)
+    /// while the settle waits there.
+    #[cfg(any(test, feature = "test-support"))]
+    test_retained_run_settle_before_gate: StdMutex<
         Option<(
             SessionId,
             crate::tokio::sync::oneshot::Sender<()>,
@@ -13603,16 +13745,24 @@ impl MeerkatMachine {
 
     /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
     pub fn ephemeral() -> Self {
+        // Without a store, scoped tool grants last for the process.
+        let tool_grant_service = Arc::new(crate::tool_grant::ToolGrantService::new(Arc::new(
+            crate::store::InMemoryRuntimeStore::new(),
+        )));
+        let tool_grant_deadlines =
+            crate::tool_grant::ToolGrantDeadlines::new(Arc::clone(&tool_grant_service));
         let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
         #[cfg(not(target_arch = "wasm32"))]
         let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(10 * 60),
+            std::time::Duration::from_mins(10),
             Arc::clone(&auth_lease),
         ));
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "local-authorization")]
+                realm_grant_custody: std::sync::OnceLock::new(),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
                 peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -13631,6 +13781,8 @@ impl MeerkatMachine {
                 store: None,
                 execution_custody: None,
                 blob_store: None,
+                tool_grant_service,
+                tool_grant_deadlines,
                 llm_reconfigure_host: StdRwLock::new(None),
                 reconfigure_host_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 member_observation_host: StdRwLock::new(None),
@@ -13695,6 +13847,10 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_accepted_boundary_work_hold: StdMutex::new(None),
                 #[cfg(test)]
+                test_switch_turn_reconfigure_gap_hold: StdMutex::new(None),
+                #[cfg(test)]
+                test_switch_turn_post_reconfigure_hold: StdMutex::new(None),
+                #[cfg(test)]
                 test_durable_steer_relock_hold: StdMutex::new(None),
                 #[cfg(test)]
                 test_accepted_boundary_work_outcomes: StdMutex::new(None),
@@ -13721,6 +13877,8 @@ impl MeerkatMachine {
                 ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_retained_run_settle_before_gate: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -13866,9 +14024,15 @@ impl MeerkatMachine {
                 .with_execution_custody(execution_custody.clone()),
         );
         let auth_lease = generated_runtime_auth_lease_handle(auth_lease);
+        let tool_grant_service =
+            Arc::new(crate::tool_grant::ToolGrantService::new(Arc::clone(&store)));
+        let tool_grant_deadlines =
+            crate::tool_grant::ToolGrantDeadlines::new(Arc::clone(&tool_grant_service));
         Ok(Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "local-authorization")]
+                realm_grant_custody: std::sync::OnceLock::new(),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
                 peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -13884,6 +14048,8 @@ impl MeerkatMachine {
                 pending_session_archive_lease_preparations: StdMutex::new(HashMap::new()),
                 pending_predecessor_settlements: StdMutex::new(HashMap::new()),
                 pending_direct_member_bind_admissions: StdMutex::new(HashMap::new()),
+                tool_grant_service,
+                tool_grant_deadlines,
                 store: Some(store),
                 execution_custody,
                 blob_store: Some(blob_store.unwrap_or_else(|| Arc::new(UnavailableBlobStore))),
@@ -13951,6 +14117,10 @@ impl MeerkatMachine {
                 #[cfg(test)]
                 test_accepted_boundary_work_hold: StdMutex::new(None),
                 #[cfg(test)]
+                test_switch_turn_reconfigure_gap_hold: StdMutex::new(None),
+                #[cfg(test)]
+                test_switch_turn_post_reconfigure_hold: StdMutex::new(None),
+                #[cfg(test)]
                 test_durable_steer_relock_hold: StdMutex::new(None),
                 #[cfg(test)]
                 test_accepted_boundary_work_outcomes: StdMutex::new(None),
@@ -13977,6 +14147,8 @@ impl MeerkatMachine {
                 ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_retained_run_settle_before_gate: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -14180,7 +14352,7 @@ impl MeerkatMachine {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *oauth_slot =
                     Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                        std::time::Duration::from_secs(10 * 60),
+                        std::time::Duration::from_mins(10),
                         handle.clone(),
                     ));
                 *auth_slot = generated_runtime_auth_lease_handle(handle.clone());
@@ -14909,6 +15081,9 @@ mod commit_deadline_tests;
 #[cfg(test)]
 mod lost_admission_ack_tests;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod retained_run_fence_tests;
+
 #[cfg(all(test, feature = "live", feature = "test-support"))]
 mod live_bridge_original_work_tests;
 
@@ -14925,6 +15100,8 @@ impl Drop for MeerkatMachineShared {
             entry.tool_surface_gate.retire();
             entry.mcp_observation.retire();
         }
+        // No session of this owner is served any longer.
+        self.tool_grant_deadlines.close();
     }
 }
 

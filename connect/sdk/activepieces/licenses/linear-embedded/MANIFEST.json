@@ -1,0 +1,350 @@
+{
+  "schema_version": 1,
+  "sdk": "@linear/sdk@7.0.1",
+  "tag_commit": "3452ce144ee6dae8e8c6dccbdcc312e6dde95b72",
+  "scope": "Embedded dependencies visible in published SDK source map. Exact source-map to tarball identity is reported separately from dependency version selected by the tagged yarn.lock. The source map and complete original SDK are retained with EFFECT-SDK-PORTS. tr46 uses the exact first upstream license addition because its published tarball omitted license text.",
+  "packages": [
+    {
+      "name": "graphql",
+      "version": "15.8.0",
+      "tarball_url": "https://registry.npmjs.org/graphql/-/graphql-15.8.0.tgz",
+      "tarball_sha256": "22f15b27268a28f9907c1b462131424fae9641978076f71b5e8707fe2e875f8c",
+      "integrity": "sha512-5gghUc24tP9HRznNpV2+FIoq3xKkj5dTQqf4v0CpdPbFVwFkWoxOM+o+2OC9ZSvjEMTjfmG9QT+gcvggTwW1zw==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/graphql/15.8.0/LICENSE",
+          "sha256": "35a11da7e877009ddc57405844209908cfc567adda0ec1daf410368c9f5b0d01"
+        },
+        {
+          "path": "licenses/linear-embedded/graphql/15.8.0/package.json",
+          "sha256": "59f5f10e7d544cb835b2027818af7de6801257de77066fb9be9327ba8f0a8794"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/graphql/jsutils/nodejsCustomInspectSymbol.mjs",
+          "source_sha256": "cf1435aaec7feb96314907f521d7831cbb50f284f90ea8c0fccaa17abacd3491",
+          "tarball_path": "package/jsutils/nodejsCustomInspectSymbol.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "cf1435aaec7feb96314907f521d7831cbb50f284f90ea8c0fccaa17abacd3491"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/jsutils/inspect.mjs",
+          "source_sha256": "4abca747d5b9c88a61e43b535ce2c2f568c7c44b62edf38844c410078baad040",
+          "tarball_path": "package/jsutils/inspect.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "4abca747d5b9c88a61e43b535ce2c2f568c7c44b62edf38844c410078baad040"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/jsutils/invariant.mjs",
+          "source_sha256": "f44cd1da4cfffe42b0b3907981fbb36bcdb5336add3038b3baa371ba4972d379",
+          "tarball_path": "package/jsutils/invariant.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "f44cd1da4cfffe42b0b3907981fbb36bcdb5336add3038b3baa371ba4972d379"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/jsutils/defineInspect.mjs",
+          "source_sha256": "86abd416edf6eb694c93969bda97e1da242b280ca41dbebcbedb804779e3f46b",
+          "tarball_path": "package/jsutils/defineInspect.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "86abd416edf6eb694c93969bda97e1da242b280ca41dbebcbedb804779e3f46b"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/language/ast.mjs",
+          "source_sha256": "4870e51dcc83f7338ea06eb9ce72da387a1e2bd5702223fda4e771d20aa7ecbe",
+          "tarball_path": "package/language/ast.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "4870e51dcc83f7338ea06eb9ce72da387a1e2bd5702223fda4e771d20aa7ecbe"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/language/visitor.mjs",
+          "source_sha256": "35bf27d51b4d9d3b915f21a426331efc642c376884522c96187a2ef72b97e2f1",
+          "tarball_path": "package/language/visitor.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "35bf27d51b4d9d3b915f21a426331efc642c376884522c96187a2ef72b97e2f1"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/language/blockString.mjs",
+          "source_sha256": "739bfc9adffc20b5fba162d4338a4a3b062f504f22a2b51451fa2e1e37a88542",
+          "tarball_path": "package/language/blockString.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "739bfc9adffc20b5fba162d4338a4a3b062f504f22a2b51451fa2e1e37a88542"
+        },
+        {
+          "source_map_path": "../../../node_modules/graphql/language/printer.mjs",
+          "source_sha256": "cb1cf8a83f56a688c049424a153f0b9975baecc0d04e5214a7354467d8e412ba",
+          "tarball_path": "package/language/printer.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "cb1cf8a83f56a688c049424a153f0b9975baecc0d04e5214a7354467d8e412ba"
+        }
+      ]
+    },
+    {
+      "name": "isomorphic-unfetch",
+      "version": "3.1.0",
+      "tarball_url": "https://registry.npmjs.org/isomorphic-unfetch/-/isomorphic-unfetch-3.1.0.tgz",
+      "tarball_sha256": "88f36d9bd37640334fb9b210155cc699cb6a8ba38613ec740c2c698b56ffaa6f",
+      "integrity": "sha512-geDJjpoZ8N0kWexiwkX8F9NkTsXhetLPVbZFQ+JTW239QNOwvB0gniuR1Wc6f0AMTn7/mFGyXvHTifrCp/GH8Q==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/isomorphic-unfetch/3.1.0/package.json",
+          "sha256": "c1b61b78761bce00442169c5e661f7b7895733d47fe4164008954d5942c1f71b"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/isomorphic-unfetch/index.js",
+          "source_sha256": "89a02badfc0e23f1f2e2801de680702a5993b9e611f530eb537fa1ba2a8b1446",
+          "tarball_path": "package/index.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "89a02badfc0e23f1f2e2801de680702a5993b9e611f530eb537fa1ba2a8b1446"
+        }
+      ]
+    },
+    {
+      "name": "node-fetch",
+      "version": "2.6.12",
+      "tarball_url": "https://registry.npmjs.org/node-fetch/-/node-fetch-2.6.12.tgz",
+      "tarball_sha256": "00c47fe03fc62a2e3c0b8a87d3bdadd4316fea24f66bc0bbfa737d2b7efb5277",
+      "integrity": "sha512-C/fGU2E8ToujUivIO0H+tpQ6HWo4eEmchoPIoXtxCrVghxdKq+QOHqEZW7tuP3KlV3bC8FRMO5nMCC7Zm1VP6g==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/node-fetch/2.6.12/package.json",
+          "sha256": "4327b4ec29b37a3c3a8808f5eafef888c060cb0dcc317661aede012c81d1c3fc"
+        },
+        {
+          "path": "licenses/linear-embedded/node-fetch/2.6.12/LICENSE.md",
+          "sha256": "84eaa985e1ef71b8c630e8aba73404c219ff425c6fdb45c62e998b58d4fbdc8e"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/node-fetch/lib/index.mjs",
+          "source_sha256": "c3cd6f2c6340eca8a0576629e16fe7741b40c6b77182e09833c22b946a44e214",
+          "tarball_path": "package/lib/index.mjs",
+          "exact_tarball_match": true,
+          "tarball_sha256": "c3cd6f2c6340eca8a0576629e16fe7741b40c6b77182e09833c22b946a44e214"
+        }
+      ]
+    },
+    {
+      "name": "punycode",
+      "version": "2.3.0",
+      "tarball_url": "https://registry.npmjs.org/punycode/-/punycode-2.3.0.tgz",
+      "tarball_sha256": "4fdb884e86fb0dd7b2258899554f1959735e07ba22820e58dced8dfbac4d846c",
+      "integrity": "sha512-rRV+zQD8tVFys26lAGR9WUuS4iUAngJScM+ZRSKtvl5tKeZ2t5bvdNFdNHBW9FWR4guGHlgmsZ1G7BSm2wTbuA==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/punycode/2.3.0/package.json",
+          "sha256": "b14d30caddb5dedaeffd3444a7c7b727f4ede3eddac8b30b58bcb49c35569c4a"
+        },
+        {
+          "path": "licenses/linear-embedded/punycode/2.3.0/LICENSE-MIT.txt",
+          "sha256": "483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/punycode/punycode.js",
+          "source_sha256": "609cf2288fc973d4b3ef5f4f95d48aa2c57f8c9678ed027f31adc836bbd076db",
+          "tarball_path": "package/punycode.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "609cf2288fc973d4b3ef5f4f95d48aa2c57f8c9678ed027f31adc836bbd076db"
+        }
+      ]
+    },
+    {
+      "name": "tr46",
+      "version": "0.0.3",
+      "tarball_url": "https://registry.npmjs.org/tr46/-/tr46-0.0.3.tgz",
+      "tarball_sha256": "164ae1eb32cea353551bbc7f9358dcaae4ffabbe65ec37a92ca464a9570a2a0a",
+      "integrity": "sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/tr46/0.0.3/package.json",
+          "sha256": "615087f58ee138fd35c2b414c355b72e36e5919725b8aecc1c34f6a5585b9779"
+        },
+        {
+          "path": "licenses/linear-embedded/tr46/0.0.3/tr46-LICENSE.md",
+          "sha256": "eeed1ca176eebad5c73870e233cfff03981fecd319c969475dfa3633036c336b"
+        },
+        {
+          "path": "licenses/linear-embedded/tr46/0.0.3/upstream-license-history.json",
+          "sha256": "5cd581c6a4b3e20cf316e436a233c1fc36f51c2bb0e7d0ce7caa02c9bc8c6a44"
+        },
+        {
+          "path": "licenses/linear-embedded/tr46/0.0.3/tr46-license-source.json",
+          "sha256": "7cb3b41df01ff70452570b74e43343f6f0a92c3ef6e9b80a9be4fa92be8198ce"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/tr46/index.js",
+          "source_sha256": "8194f9425ce9ab06ea9aebcd64a85ec064d95d61bb349f8f1c98762ad256638e",
+          "tarball_path": "package/index.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "8194f9425ce9ab06ea9aebcd64a85ec064d95d61bb349f8f1c98762ad256638e"
+        }
+      ]
+    },
+    {
+      "name": "tslib",
+      "version": "2.6.1",
+      "tarball_url": "https://registry.npmjs.org/tslib/-/tslib-2.6.1.tgz",
+      "tarball_sha256": "5701cb573f4f790521e325d81962441e0ba2216bff7d3fcf11a5c509d827fd4e",
+      "integrity": "sha512-t0hLfiEKfMUoqhG+U1oid7Pva4bbDPHYfJNiB7BiIjRkj1pyC++4N3huJfqY6aRH6VTB0rvtzQwjM4K6qpfOig==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/tslib/2.6.1/package.json",
+          "sha256": "4a067ef7e88d0fc40e4818e41215dbe295619da6924120d93835566b0d08bcee"
+        },
+        {
+          "path": "licenses/linear-embedded/tslib/2.6.1/CopyrightNotice.txt",
+          "sha256": "da16ddb65f8ca390998fb99223d0112498b56b45784d00afd77ff8ce1ac4de8b"
+        },
+        {
+          "path": "licenses/linear-embedded/tslib/2.6.1/LICENSE.txt",
+          "sha256": "210b19e543130388c68654b7497e967119ce17145f66ab7d85688fbd70f08751"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/tslib/tslib.es6.js",
+          "source_sha256": "b74907674e7f2e855c38f90d22bbe5969f27009982129fe71e1b09e3b1cf0725",
+          "tarball_path": "package/tslib.es6.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "b74907674e7f2e855c38f90d22bbe5969f27009982129fe71e1b09e3b1cf0725"
+        }
+      ]
+    },
+    {
+      "name": "unfetch",
+      "version": "4.2.0",
+      "tarball_url": "https://registry.npmjs.org/unfetch/-/unfetch-4.2.0.tgz",
+      "tarball_sha256": "2ab70f1cd25c0d26a1968bcd635b1f83a591b6a8efd7a3d832f19b944c1884dc",
+      "integrity": "sha512-F9p7yYCn6cIW9El1zi0HI6vqpeIvBsr3dSuRO6Xuppb1u5rXpCPmMvLSyECLhybr9isec8Ohl0hPekMVrEinDA==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/unfetch/4.2.0/package.json",
+          "sha256": "3adf15ce55825e731d03b0137b34da667014331245f8a7b7b4ffe9a33dda3b31"
+        },
+        {
+          "path": "licenses/linear-embedded/unfetch/4.2.0/LICENSE.md",
+          "sha256": "48847c33de7ee90f023d97dd90055cb8fe1e54edb7b956c90e19db852773ce18"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/unfetch/dist/unfetch.module.js",
+          "source_sha256": "af93be5426fc365a9626c573fa8d5deb8810ee7a7771c0b6f53c971d3b64ec4f",
+          "tarball_path": "package/dist/unfetch.module.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "af93be5426fc365a9626c573fa8d5deb8810ee7a7771c0b6f53c971d3b64ec4f"
+        }
+      ]
+    },
+    {
+      "name": "webidl-conversions",
+      "version": "3.0.1",
+      "tarball_url": "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-3.0.1.tgz",
+      "tarball_sha256": "e4dfc34b40947c2cf0038cd95fa6de21f4dac93224a7ad8e169205f5c2e22da8",
+      "integrity": "sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/webidl-conversions/3.0.1/package.json",
+          "sha256": "e26568c06b82596d754c7490fd568b4b3f970b3b97c55020d42f65990d0c86af"
+        },
+        {
+          "path": "licenses/linear-embedded/webidl-conversions/3.0.1/LICENSE.md",
+          "sha256": "a889cc4dbee2ae172c179856b25d75b0b7a5a136e1b97109b9b590b2ff1a879c"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/webidl-conversions/lib/index.js",
+          "source_sha256": "0b29621626c38ddda2a8e20787c32d09db10dd031ea743c5e270b59d46754a84",
+          "tarball_path": "package/lib/index.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "0b29621626c38ddda2a8e20787c32d09db10dd031ea743c5e270b59d46754a84"
+        }
+      ]
+    },
+    {
+      "name": "whatwg-url",
+      "version": "5.0.0",
+      "tarball_url": "https://registry.npmjs.org/whatwg-url/-/whatwg-url-5.0.0.tgz",
+      "tarball_sha256": "b09dc471f573a876eeac3902b8c1da62af5cdbbca2c6fba4a06f119f89cb7ed3",
+      "integrity": "sha512-saE57nupxk6v3HY35+jzBwYa0rKSy0XR8JSxZPwgLr7ys0IBzhGviA1/TUGJLmSVqs8pb9AnvICXEuOHLprYTw==",
+      "integrity_in_tag_lock": true,
+      "notices": [
+        {
+          "path": "licenses/linear-embedded/whatwg-url/5.0.0/package.json",
+          "sha256": "05a015c4176246f051bbaa3a543ed82480a4a4d85360283e049f159ba014b008"
+        },
+        {
+          "path": "licenses/linear-embedded/whatwg-url/5.0.0/LICENSE.txt",
+          "sha256": "6b7a1792144374d84dc5ed3655b8bbe2754d06f4f1f64a9fb8b9de2d6f448b85"
+        }
+      ],
+      "source_bindings": [
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/whatwg-url/lib/utils.js",
+          "source_sha256": "96b941934b9050815f9397bc6796ea8611bfa00c5886587d81da64a23841e3b9",
+          "tarball_path": "package/lib/utils.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "96b941934b9050815f9397bc6796ea8611bfa00c5886587d81da64a23841e3b9"
+        },
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/whatwg-url/lib/url-state-machine.js",
+          "source_sha256": "e038db71d8a2313d7d20ad6dd1116a2fcb34b41e39f7a2364c70ff1aff548850",
+          "tarball_path": "package/lib/url-state-machine.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "e038db71d8a2313d7d20ad6dd1116a2fcb34b41e39f7a2364c70ff1aff548850"
+        },
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/whatwg-url/lib/URL-impl.js",
+          "source_sha256": "e60103ff74b8bfc4001f5c05eea482f554de610cb5fc4e7ccbfc5aef9e443706",
+          "tarball_path": "package/lib/URL-impl.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "e60103ff74b8bfc4001f5c05eea482f554de610cb5fc4e7ccbfc5aef9e443706"
+        },
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/whatwg-url/lib/URL.js",
+          "source_sha256": "3bd67335fc72b50924fa35523c2b0b73dce9cb814f6bae82644ccb1f22560706",
+          "tarball_path": "package/lib/URL.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "3bd67335fc72b50924fa35523c2b0b73dce9cb814f6bae82644ccb1f22560706"
+        },
+        {
+          "source_map_path": "../../../node_modules/node-fetch/node_modules/whatwg-url/lib/public-api.js",
+          "source_sha256": "0cbda6401c6179c4fb2ef0cebeccfb127485fee6f0ed5c129a8a539d4cd29018",
+          "tarball_path": "package/lib/public-api.js",
+          "exact_tarball_match": true,
+          "tarball_sha256": "0cbda6401c6179c4fb2ef0cebeccfb127485fee6f0ed5c129a8a539d4cd29018"
+        }
+      ]
+    }
+  ],
+  "tag_source": [
+    {
+      "path": "licenses/linear-embedded/tag-source/yarn.lock",
+      "sha256": "272bc464b7da1bc7a903aac48b6a91cf8dec1f49660d840f272d42265127604b"
+    },
+    {
+      "path": "licenses/linear-embedded/tag-source/packages/sdk/package.json",
+      "sha256": "14ae309388042e584d57284b64e9eb5e429660abf978c9b81606c17641af2d28"
+    },
+    {
+      "path": "licenses/linear-embedded/tag-source/packages/sdk/rollup.config.js",
+      "sha256": "e22f8f3f7d441ef78249c8cc3194c4b1b694a5578e8405d8e7e2222f117db5d4"
+    }
+  ]
+}

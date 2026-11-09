@@ -293,7 +293,7 @@ async fn batched_autonomous_deliveries_report_one_shared_run_and_their_batch() {
     assert_eq!(x_view.source, y_view.source);
     assert_eq!(x_view.run_id, y_view.run_id, "one run answered both");
     let mut expected_batch = vec![x_input.clone(), y_input.clone()];
-    expected_batch.sort_by(|a, b| a.0.cmp(&b.0));
+    expected_batch.sort_by_key(|a| a.0);
     assert_eq!(x_view.recipients, expected_batch.as_slice());
     assert_eq!(y_view.recipients, expected_batch.as_slice());
     let batch_answer = format!("executor-answer-{}", requests_before + 2);

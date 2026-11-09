@@ -2278,12 +2278,8 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
-    let mobs = mob_state.mob_list().await.map_err(err_mob)?;
-    let rows: Vec<meerkat_contracts::MobStatusResult> = mobs
-        .into_iter()
-        .map(|(id, observation)| meerkat_mob_mcp::wire_mob_status_row(&id, &observation))
-        .collect();
-    let result = meerkat_contracts::MobListResult { mobs: rows };
+    let inventory = mob_state.mob_inventory().await.map_err(err_mob)?;
+    let result = meerkat_mob_mcp::wire_mob_list_result(&inventory);
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2678,6 +2674,19 @@ pub async fn mob_append_system_context(
 
     let (mob_state, session_service) =
         with_runtime_state(|state| Ok((state.mob_state.clone(), state.session_service.clone())))?;
+    // The append acts on the member's session as its host: an identity
+    // entry, or a member whose name is reserved unreadable, is reached only
+    // with AdminHost, which this runtime's owner console holds.
+    mob_state
+        .handle_for(&mob_id_typed)
+        .await
+        .map_err(err_mob)?
+        .admit_member_host_door(
+            meerkat_mob::ControlScope::SendCommand,
+            &agent_identity_typed,
+        )
+        .await
+        .map_err(err_mob)?;
     let bridge_session_id =
         resolve_mob_member_bridge_session_id(&mob_state, &mob_id_typed, &agent_identity_typed)
             .await?;
@@ -3544,6 +3553,7 @@ capabilities = [{capability_values}]
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

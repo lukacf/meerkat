@@ -39,6 +39,34 @@
     )
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-mob`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(test, not(feature = "test-support")))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-mob: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-mob --features test-support` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
+
 /// ATIF trajectory export vocabulary, for hosts that assemble mob member
 /// trajectories into one document. Gated because nothing in this crate consumes
 /// it (feature `atif`).
@@ -81,6 +109,7 @@ pub mod launch;
 pub mod machines;
 pub mod member_creation;
 mod mob_machine;
+pub mod operator_instruction;
 mod portable_profile;
 pub mod profile;
 pub mod provenance;
@@ -117,8 +146,8 @@ pub use coordination::{
     WorkIntentStatus,
 };
 pub use definition::{
-    MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind, ParsedMobDefinition,
-    UnknownProfileKeys,
+    DefinitionWiring, MobDefinition, MobDefinitionSourceIdentity, MobDefinitionSourceKind,
+    ParsedMobDefinition, UnknownProfileKeys,
 };
 pub use error::{
     FlowRoleTargetRefusal, FlowStepDispatchRejectKind, ForkSourceUnavailableCause,
@@ -127,42 +156,55 @@ pub use error::{
     MemberCustodyDeferralCause, MemberCustodyRestore, MemberProvisionFailureCause,
     MemberRegistrationHookCall, MemberRuntimeDetachment, MemberSendIdempotencyRefusal,
     MemberWakeRefusal, MobDefinitionProjectionMismatchKind, MobError, MobFailureClass,
-    OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
+    MobQuarantineClass, OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
 };
 pub use event::{
-    AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberWireEdge, MobEvent, MobEventKind,
-    NewMobEvent, detached_outcome_digest,
+    AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberRetiredFacts, MemberWireEdge,
+    MobEvent, MobEventKind, NewMobEvent, detached_outcome_digest,
 };
 pub use forked_participant::ForkedParticipantSourceRuntime;
 pub use identity::{
     AdoptMemberIdentityDeclaration, AdoptMemberIdentityDeclarationResult,
-    ApplyMemberToolDeclaration, ApplyMemberToolDeclarationResult, CallbackToolSetDeclaration,
-    DesiredExecution, DesiredExternalAddress, DesiredIdentityEdge, DesiredInitialDelivery,
-    DesiredLocalCallbackTool, DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec,
-    DesiredSessionAuthorityPolicy, DesiredSessionTarget, IdentityActuationPermit,
-    IdentityActuatorTarget, IdentityAdoptionId, IdentityAdoptionOutcome,
+    ApplyMemberToolDeclaration, ApplyMemberToolDeclarationResult, CREATED_IDENTITY_SCHEMA_VERSION,
+    CallbackToolSetDeclaration, CreatedIdentityObservation, CreatedIdentityPresence,
+    CreatedIdentityProvenance, CreatedIdentityRecord, CreatedIdentitySpec, DesiredExecution,
+    DesiredExternalAddress, DesiredIdentityEdge, DesiredInitialDelivery, DesiredLocalCallbackTool,
+    DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec, DesiredProfileSource,
+    DesiredSessionAuthorityPolicy, DesiredSessionTarget, IDENTITY_CHANGE_BATCH_MAX,
+    IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
+    IdentityAddressability, IdentityAdoptedFrom, IdentityAdoptionId, IdentityAdoptionOutcome,
     IdentityAdoptionPrecondition, IdentityAdoptionReceipt, IdentityAuthorityCondition,
+    IdentityChangeConsent, IdentityChangeEntryOutcome, IdentityChangeKind, IdentityChangeReceipt,
+    IdentityChangeReceiptEntry, IdentityChangeReceiptObservation, IdentityChangeRequester,
     IdentityConvergenceCondition, IdentityConvergenceDirective, IdentityConvergenceMode,
     IdentityConvergenceResolutionId, IdentityConvergenceResolutionOutcome,
     IdentityConvergenceResolutionReceipt, IdentityConvergenceStatus, IdentityDeclarationScopeId,
-    IdentityExternalCeremonyCondition, IdentityExternalTrustCondition,
+    IdentityEntered, IdentityExternalCeremonyCondition, IdentityExternalTrustCondition,
     IdentityInitialDeliveryCondition, IdentityIntent, IdentityIntentError,
     IdentityIntentMutationReceipt, IdentityIntentRecord, IdentityLeaseClaim,
     IdentityLeaseClaimOutcome, IdentityLeaseCondition, IdentityLeaseRecord, IdentityOperationKind,
     IdentityOperationReceipt, IdentityOperationReceiptInsertOutcome,
     IdentityOperationReceiptPayload, IdentityOperationSlot, IdentityOperationSubject,
-    IdentityProfileMemberDeclaration, IdentityReceiptCondition, IdentityReconcileDecision,
-    IdentityReconcileFacts, IdentityResourceCondition, IdentityResourceObservation,
+    IdentityPolicyOutcome, IdentityPreparationMode, IdentityProfileMemberDeclaration,
+    IdentityReceiptCondition, IdentityReconcileDecision, IdentityReconcileFacts,
+    IdentityRemovalRecord, IdentityResourceCondition, IdentityResourceObservation,
     IdentityRetirementPlan, IdentitySessionCondition, IdentitySessionObservation,
-    IdentitySessionStoreAuthority, IdentityStoredObservation, IdentityTargetObservationVersion,
-    MemberToolAccessConstraint, MemberToolAccessDeclaration, MemberToolCommitOutcome,
-    MemberToolDeclaration, MemberToolMutationId, ResolveIdentityConvergenceBlock,
-    ResolveIdentityConvergenceBlockResult, classify_identity_reconciliation,
+    IdentitySessionStoreAuthority, IdentitySourceEvidence, IdentityStoredObservation,
+    IdentityTargetObservationVersion, MemberToolAccessConstraint, MemberToolAccessDeclaration,
+    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedEdgeAdmission,
+    OwnedIdentityEdge, PendingRoleMigration, ResolveIdentityConvergenceBlock,
+    ResolveIdentityConvergenceBlockResult, classify_created_identity_row,
+    classify_identity_reconciliation,
+};
+// The downgrade cycle's export (0.9.11).
+pub use identity::{
+    CREATED_IDENTITY_SET_SCHEMA, CreatedIdentitySetExport, ExportedIdentity,
+    ExportedSessionReference, ExportedSessionState, UnreadableIdentityRow,
 };
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
-    StepId, WorkOrigin, WorkRef, WorkSpec,
+    SenderLabel, StepId, WorkOrigin, WorkRef, WorkSpec,
 };
 pub use launch::{ForkContext, MemberLaunchMode};
 #[doc(hidden)]
@@ -175,6 +217,18 @@ pub use mob_machine::{
     canonical_mob_machine_runtime_internal_classifications,
     canonical_mob_machine_runtime_internal_input_variant_manifest,
     canonical_mob_machine_runtime_internal_manifest,
+};
+pub use operator_instruction::{
+    MemberInstructionBlockReason, MemberInstructionDelivery, MemberInstructionDeliveryState,
+    MemberInstructionDeliveryStatus, MemberInstructionEffectiveRead,
+    MemberInstructionEffectiveSlot, MemberInstructionPendingReason, MemberInstructionRelease,
+    MemberInstructionResidency, MemberInstructionSlotState, MemberInstructionSlotStatus,
+    MemberInstructionSlotView, MemberInstructionStatus, MemberInstructionTargetsRecordedEvent,
+    OPERATOR_INSTRUCTION_STATUS_DEFAULT_LIMIT, OPERATOR_INSTRUCTION_STATUS_MAX_LIMIT,
+    OperatorInstructionCommittedEvent, OperatorInstructionDisposition, OperatorInstructionError,
+    OperatorInstructionReceipt, OperatorInstructionRecordStatus, OperatorInstructionStatusPage,
+    OperatorInstructionStatusQuery, OperatorInstructionTarget, OperatorInstructionWrite,
+    RecordedMemberInstructionTarget,
 };
 pub use provenance::MobProvenance;
 pub use storage::{
@@ -221,6 +275,13 @@ pub mod machine_schema_exports {
                 crate::machines::forked_participant_lifecycle::ForkedParticipantLifecycleMachineState::schema(),
             )
     }
+
+    pub fn mob_store_restore_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::mob_store_restore_lifecycle_schema_metadata()
+            .attach_to(
+                crate::machines::mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema(),
+            )
+    }
 }
 
 #[doc(hidden)]
@@ -254,6 +315,7 @@ pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
 pub use runtime::HeldSpawnDeadline;
+pub use runtime::MemberGrantGate;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;
@@ -283,7 +345,7 @@ pub use runtime::stop_report::{
     MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport, NotHoldableReason,
     StopOptions,
 };
-pub use runtime::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
+pub use runtime::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,
@@ -310,23 +372,23 @@ pub use runtime::{
     LiveDurableSourceObservation, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
     MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain, MemberInputAdmission,
-    MemberLiveStatusDomain, MemberOperatorAuthorityCeiling, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
-    MemberRunState, MemberSessionActivity, MemberShutdownOutcome, MemberStatusSessionView,
-    MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
-    MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState, MobActorTaskWait,
-    MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal, MobDestroyReport,
-    MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig,
-    MobHandle, MobMachineStateChanges, MobMemberEndpointOwner, MobMemberEndpointStatus,
-    MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobSessionService, MobShutdownReport, MobSpawnManyFailure, MobState,
-    MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt,
-    PeerTarget, PreviousMemberCleanupReport, QueuedInputsOnShutdown, RequeueMaxAge,
-    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, ResumedMemberView,
-    RetirementSettlement, RetirementSettlementWatch, RetirementStage, SessionResumeAuthority,
-    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, ShutdownOptions, ShutdownOptionsError,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    MemberLifecycleSettlement, MemberLiveStatusDomain, MemberOperatorAuthorityCeiling,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal,
+    MemberRespawnReceipt, MemberRunState, MemberSessionActivity, MemberShutdownOutcome,
+    MemberStatusSessionView, MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender,
+    MemberTurnHandle, MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState,
+    MobActorTaskWait, MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal,
+    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
+    MobEventsSubscriptionConfig, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
+    MobMemberEndpointStatus, MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobShutdownReport,
+    MobSpawnManyFailure, MobState, MobUnreachablePeer, MobWireMembersBatchReport,
+    OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    QueuedInputsOnShutdown, RequeueMaxAge, ResumeRejectionKind, ResumeSessionLoad,
+    ResumeVerdictTerminality, ResumedMemberView, RetirementSettlement, RetirementSettlementWatch,
+    RetirementStage, SessionResumeAuthority, SessionResumeLifecycle, SessionResumeMaterialization,
+    SessionResumePreparationReceipt, SessionResumeRejection, SessionResumeVerdict, ShutdownOptions,
+    ShutdownOptionsError, SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
     SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
     SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
     SpawnToolAdmission, SupervisorRotationReport, WithheldToolBundle, WorkBoundedTurnResult,
@@ -335,7 +397,25 @@ pub use runtime::{
     observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
     stored_realm_profile_to_wire,
 };
+pub use runtime::{
+    AdoptionSource, CreatedIdentityRequest, IdentityAdoption, IdentityArchiveChange,
+    IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome, IdentityChangeRefusal,
+    IdentityChangeRequesterInput, IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest,
+    IdentityImport, IdentityImportMode, IdentityNameHolder, IdentityOperation, IdentityRemoval,
+    IdentityRosterChange, IdentityRowsPurge, IdentityUpdateOutcome, MemberGrantMint,
+    MemberGrantMintRequest, NotAdoptableReason, OwnedEdgeEndOutcome, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
+pub use runtime::{
+    ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
+    IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
+};
+pub use runtime::{
+    DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
+};
 #[cfg(feature = "openai-live")]
 pub use runtime::{
     DEFAULT_LIVE_BRIDGE_OUTPUT_BYTES, DurableMemberLiveBridgeOperationExecutor,
@@ -362,6 +442,15 @@ pub use runtime::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::{DurableResumeGate, DurableResumeRequest, DurableResumeVerdict};
+pub use runtime::{
+    EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
+    IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
+    IdentityLife, IdentityRecordCensus, IdentityRecordRows, IdentityRecordRowsReadError,
+    IdentityTombstonePage, LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent,
+    MemberLifecyclePage, MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor,
+    RetiredRotation, SeatRotation, SeatedMember, UnseatedEntryCause, UnseatedEntryCounts,
+    WorkerMember,
+};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,
@@ -386,6 +475,9 @@ pub use runtime::{
 pub use runtime::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook,
 };
+pub use runtime::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::{MemberToolGrant, MemberToolGrantError};
 pub use runtime::{MobBeforeActivation, MobLifecycleObservation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};
@@ -415,7 +507,10 @@ pub use store::{
 };
 #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
 #[doc(hidden)]
-pub use store::{ParkedStoreReadForTest, StoreReadReleaseForTest, park_next_store_read_for_test};
+pub use store::{
+    IDENTITY_CENSUS_TEST_MOB, IDENTITY_CENSUS_TEST_OTHER_MOB, ParkedStoreReadForTest,
+    StoreReadReleaseForTest, park_next_store_read_for_test, seed_identity_census_rows_for_test,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{
     SqliteMobEventStore, SqliteMobObserverDrain, SqliteMobObserverDrainRefused,

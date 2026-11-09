@@ -84,6 +84,22 @@ fn web_search_inherits(web_search: &ToolCategoryOverride) -> bool {
 }
 
 impl SeatBuildInputs {
+    /// The inputs `spec` names, read without taking them out of it: what a
+    /// declared role migration's successor builds with
+    /// ([`super::MemberRespawn`]).
+    pub(crate) fn of_spec(spec: &super::handle::SpawnMemberSpec) -> Self {
+        Self {
+            context: spec.context.clone(),
+            additional_instructions: spec.additional_instructions.clone(),
+            system_prompt_override: spec.system_prompt_override.clone(),
+            budget_limits: spec.budget_limits.clone(),
+            tool_access_policy: spec.tool_access_policy.clone(),
+            application_tool_policy: spec.application_tool_policy.clone(),
+            auth_binding: spec.auth_binding.clone(),
+            web_search: spec.tool_category_overrides.web_search,
+        }
+    }
+
     /// Whether the seat carries none of these inputs.
     pub(crate) fn is_empty(&self) -> bool {
         self == &Self::default()
@@ -330,6 +346,70 @@ pub(crate) enum MemberSeatEndpointSource {
     Network,
 }
 
+/// Why a seat has no endpoint source: the host declared none, and the
+/// mob's session service reports no durable session comms identity root.
+/// Every seat is then refused typed, and nothing of it is written: a seat
+/// never takes another root than the one the service's builds use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberSeatEndpointsUnavailable {
+    /// The service's builds keep no durable session comms identity
+    /// ([`meerkat_core::SessionCommsIdentityRoot::NotKept`]).
+    NotKept,
+    /// The service's root could not be resolved: the reason
+    /// ([`meerkat_core::SessionCommsIdentityRoot::Unresolved`]).
+    Unresolved(String),
+}
+
+impl MemberSeatEndpointsUnavailable {
+    /// The typed refusal of the seat of `agent_identity`.
+    fn refusal(&self, agent_identity: &AgentIdentity) -> MobError {
+        let reported = match self {
+            Self::NotKept => {
+                "the mob's session service keeps no durable session comms identity".to_string()
+            }
+            Self::Unresolved(reason) => format!(
+                "the mob's session service cannot resolve its session comms identity root \
+                 ({reason})"
+            ),
+        };
+        MobError::WiringError(format!(
+            "seating '{agent_identity}' dormant needs the members' comms identity source: \
+             {reported}, and none was declared. A session service or agent builder that wraps \
+             another must forward session_comms_identity_root to it; otherwise declare the \
+             source (MobBuilder::with_member_comms_identity_root or \
+             with_network_member_comms; a Meta host sets \
+             MobBootstrapSpec::with_session_identity_config_root)"
+        ))
+    }
+}
+
+/// The endpoint source of the seats a mob plans: the one the host declared
+/// ([`super::MobBuilder::with_member_comms_identity_root`],
+/// [`super::MobBuilder::with_network_member_comms`]), which wins, else the
+/// session comms identity root the mob's session service reports
+/// (`reported`, read only when the host declared none): the root its agent
+/// factory keeps the members' key pairs under, so a seat reads the key the
+/// member's first build loads.
+pub(crate) fn member_seat_endpoint_source(
+    declared: Option<&MemberSeatEndpointSource>,
+    reported: impl FnOnce() -> meerkat_core::SessionCommsIdentityRoot,
+) -> Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable> {
+    if let Some(declared) = declared {
+        return Ok(declared.clone());
+    }
+    match reported() {
+        meerkat_core::SessionCommsIdentityRoot::Durable(identity_root) => {
+            Ok(MemberSeatEndpointSource::SessionScopedInproc { identity_root })
+        }
+        meerkat_core::SessionCommsIdentityRoot::NotKept => {
+            Err(MemberSeatEndpointsUnavailable::NotKept)
+        }
+        meerkat_core::SessionCommsIdentityRoot::Unresolved(reason) => {
+            Err(MemberSeatEndpointsUnavailable::Unresolved(reason))
+        }
+    }
+}
+
 /// The name-based id of a fresh seat's session: the same mob, mob
 /// incarnation, identity and generation always name the same session, so a
 /// seat re-driven after a crash finds the session its earlier attempt
@@ -388,7 +468,10 @@ pub(in crate::runtime) enum DormantSeatPlanEntry {
 /// The plan of one seat chunk.
 pub(in crate::runtime) struct DormantSeatPlan {
     pub(in crate::runtime) entries: Vec<DormantSeatPlanEntry>,
-    pub(in crate::runtime) endpoint_source: Option<MemberSeatEndpointSource>,
+    /// Where the chunk's seats take their endpoints from
+    /// ([`member_seat_endpoint_source`]).
+    pub(in crate::runtime) endpoint_source:
+        Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable>,
 }
 
 /// What one seat's commit needs, as the actor planned it.
@@ -417,6 +500,33 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// through the spawn provision path, with the host's registration hook.
     /// Set by [`prepare_dormant_seat`].
     pub(in crate::runtime) session_unborn: bool,
+    /// Whether the seat names the identity entry's archived session record
+    /// (MobMachine's `identity_entry_archived_sessions`, read at the plan):
+    /// the entry's member was retired, its session archived, and this seat
+    /// brings the entry back on it, Dormant, history kept.
+    pub(in crate::runtime) revives_archived_session: bool,
+    /// Whether the seat's session is archived and revivable, as the
+    /// preparation observed it: the raw observation MobMachine's dormant seat
+    /// decides by. It admits only the identity entry's own archived session
+    /// record (a revival, whose member's first wake revives the session) and
+    /// refuses any other. Set by [`prepare_dormant_seat`].
+    pub(in crate::runtime) session_archived: bool,
+    /// The notice a fresh seat carries when the identity's archived session
+    /// is gone from the store: its row records it.
+    pub(in crate::runtime) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// Whether the seat is `rotate_member`'s fresh life of an identity no
+    /// member holds (its last incarnation's retirement had ended): its row
+    /// names the incarnation it follows
+    /// ([`crate::runtime::SeatRotation::FreshLifeAfter`]), the generation
+    /// MobMachine retains for the identity before the seat's step. Set only
+    /// by the rotation's plan.
+    pub(in crate::runtime) fresh_life: bool,
+    /// The role a resume seat's session was last built under, when the seat
+    /// takes another one (a declared role migration, from the spec's
+    /// `MemberLaunchMode::Resume::resume_from_role`): its row records it,
+    /// so the session's next build, after a restart too, declares the
+    /// migration and restamps the session.
+    pub(in crate::runtime) resume_from_role: Option<ProfileName>,
     pub(in crate::runtime) runtime_mode: crate::MobRuntimeMode,
     pub(in crate::runtime) labels: BTreeMap<String, String>,
     pub(in crate::runtime) continuity_intent: super::SpawnContinuityIntent,
@@ -424,6 +534,19 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     pub(in crate::runtime) creation_origin: crate::member_creation::MemberCreationOrigin,
     pub(in crate::runtime) effective_profile_override: Option<crate::profile::Profile>,
     pub(in crate::runtime) effective_model_override: Option<String>,
+    /// Whether the definition's wiring rules apply to the seated member: an
+    /// exempt one is recorded in MobMachine in the seat's (or rotation's)
+    /// own step and journaled with its `MemberSpawned` row.
+    pub(in crate::runtime) definition_wiring: crate::DefinitionWiring,
+    /// Whether the seat acts for the identity entry of its name: its spawn
+    /// ladder's open carries it, and the seat's step records the member an
+    /// entry. A rotation of a seated identity keeps the identity's standing
+    /// and does not read it.
+    pub(in crate::runtime) entry_custody: bool,
+    /// Whether the seat acts for the created identity entry of its name,
+    /// owed its seat: its spawn ladder's open carries it, and the seat keeps
+    /// the member a created entry.
+    pub(in crate::runtime) created_custody: bool,
     /// The generated `AuthorizeSpawnProfile` input and the authorization it
     /// must answer with.
     pub(in crate::runtime) authorize_input: mob_dsl::MobMachineInput,
@@ -443,8 +566,9 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     pub(in crate::runtime) kickoff_objective_id: meerkat_core::interaction::ObjectiveId,
     /// What the seat carries to its session's first build: the spec's build
     /// inputs, taken out of it at the plan. Journaled and kept only for an
-    /// unborn session; a seat whose session exists binds what that session
-    /// holds.
+    /// unborn session, and for a same-session successor whose request
+    /// carries a build ([`super::MemberRespawn`]); any other seat whose
+    /// session exists binds what that session holds.
     pub(in crate::runtime) seat_build: SeatBuild,
 }
 
@@ -467,7 +591,7 @@ pub(in crate::runtime) enum MemberRotationPlan {
         /// step. Otherwise (its last retirement already completed) the
         /// rotation is one fresh seat.
         seated: bool,
-        endpoint_source: Option<MemberSeatEndpointSource>,
+        endpoint_source: Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable>,
     },
     /// An identity that is not seated, whose spec owes a kickoff: spawned
     /// through the ordinary spawn path on its name-based session, as a seat
@@ -490,7 +614,8 @@ pub(in crate::runtime) enum DormantSeatCommitEntry {
     },
     /// A prepared seat: its session exists, or is unborn (created by the
     /// member's first wake), and `endpoint` is its stored-key endpoint
-    /// (`None` under network comms).
+    /// (`None` under network comms, and for a resume seat's archived session
+    /// it does not revive, which MobMachine refuses).
     Seat {
         candidate: Box<DormantSeatCandidate>,
         endpoint: Option<TrustedPeerDescriptor>,
@@ -498,12 +623,29 @@ pub(in crate::runtime) enum DormantSeatCommitEntry {
 }
 
 /// Prepare one seat off the actor: its session's archived state, whether a
-/// fresh seat's session is unborn, and its endpoint. Nothing is built or
-/// created. A spec this refuses is answered with its typed outcome, and
-/// nothing of it is written.
+/// fresh seat's session is unborn, its endpoint and, last, the member
+/// binding of a resume seat over a session that names none. Nothing is
+/// built or created. A spec this refuses is answered with its typed
+/// outcome, as is every spec while the plan found no endpoint source
+/// (`endpoint_source` is `Err`).
+///
+/// A refused spec leaves no seat behind. What may stay is idempotent: the
+/// comms key pair the endpoint step may mint for a session that has none
+/// (the one its first build loads), and a binding stamped before the seat
+/// was refused (by MobMachine's commit, or by the stamp's own save failing
+/// after it landed), which is never cleared. That binding is harmless
+/// beyond what a failed attach leaves: it is the one the session's own
+/// comms name already claims for this member, so a retried seat finds it
+/// and any build of the member writes the same one; the refused seat put
+/// no member on the session, so it owes the session no delivery; and the
+/// session's host has its operator-instruction writes and adoption refused
+/// from then on, with what it wrote before still in effect until a seat of
+/// the member takes it over. A refusal does not clear it: the refused
+/// seat may be the second of two seats of the member on this session,
+/// and the first holds it.
 pub(in crate::runtime) async fn prepare_dormant_seat(
     session_service: &dyn super::session_service::MobSessionService,
-    endpoint_source: Option<&MemberSeatEndpointSource>,
+    endpoint_source: Result<&MemberSeatEndpointSource, &MemberSeatEndpointsUnavailable>,
     mob_id: &MobId,
     mut candidate: Box<DormantSeatCandidate>,
 ) -> Result<DormantSeatCommitEntry, Box<DormantSeatOutcome>> {
@@ -515,12 +657,8 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
             error,
         })
     };
-    let Some(endpoint_source) = endpoint_source else {
-        return Err(refused(MobError::WiringError(format!(
-            "seating '{agent_identity}' dormant needs the members' comms identity source \
-             (MobBuilder::with_member_comms_identity_root or with_network_member_comms)"
-        ))));
-    };
+    let endpoint_source =
+        endpoint_source.map_err(|unavailable| refused(unavailable.refusal(&agent_identity)))?;
     // The session owner's resume observation: authority, catalog lifecycle
     // and runtime lifecycle in one snapshot. No session is built. On a host
     // store the runtime store answers it by loading the stored session's
@@ -532,6 +670,41 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
         .map_err(|error| refused(MobError::from(error)))?
         .lifecycle();
     candidate.session_unborn = match lifecycle {
+        // An archived session, revivable: the observation goes to MobMachine
+        // with the seat, whatever the seat. Its guard
+        // (session_not_archived_or_revived) admits only the identity entry's
+        // own archived session record, which the seat binds as it is and the
+        // member's first wake revives, history kept; any other archived
+        // session is refused there, and answered SessionArchived (a resume
+        // seat's endpoint is not read for it, below).
+        super::session_service::SessionResumeLifecycle::Archived {
+            revivable: true, ..
+        } => {
+            candidate.session_archived = true;
+            false
+        }
+        // A revival whose session is archived with a runtime that is not at
+        // rest (it runs, or is stopped or initializing elsewhere): refused
+        // retryable, never answered with a fresh session.
+        super::session_service::SessionResumeLifecycle::Archived {
+            revivable: false,
+            runtime_state,
+            ..
+        } if candidate.revives_archived_session
+            && !matches!(
+                runtime_state,
+                Some(meerkat_runtime::RuntimeState::Destroyed)
+            ) =>
+        {
+            return Err(refused(MobError::LifecycleOperationPending {
+                intent: format!(
+                    "revive the archived session {session_id} of '{agent_identity}', whose \
+                     runtime is {}",
+                    runtime_state.map_or_else(|| "unknown".to_string(), |state| state.to_string())
+                ),
+            }));
+        }
+        // An archived session that cannot be revived is never bound.
         super::session_service::SessionResumeLifecycle::Archived { .. } => {
             return Err(Box::new(DormantSeatOutcome::SessionArchived {
                 agent_identity: agent_identity.clone(),
@@ -578,6 +751,24 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
     };
     let endpoint = match endpoint_source {
         MemberSeatEndpointSource::Network => None,
+        // A resume seat of an archived session it does not revive is never
+        // bound: MobMachine refuses the seat (session_not_archived_or_revived)
+        // and the commit answers it SessionArchived, as the preparation
+        // answered every archived session before the declared apply's
+        // revival. Its key pair is neither read nor minted. A key pair
+        // missing where this mob recorded the session's endpoint (a store an
+        // earlier release wrote, whose comms identities live outside its
+        // state directory) would otherwise refuse the seat first, and its
+        // host, never told the session is archived, would not revive the
+        // identity on it. A fresh launch (a fresh seat, a rotation) names a
+        // new name-based session and reads its key as before.
+        MemberSeatEndpointSource::SessionScopedInproc { .. }
+            if candidate.launch == DormantSeatLaunch::Resume
+                && candidate.session_archived
+                && !candidate.revives_archived_session =>
+        {
+            None
+        }
         MemberSeatEndpointSource::SessionScopedInproc { identity_root } => {
             // The member's first build loads this key; its wake checks that
             // the endpoint it built is the one recorded here. A key pair is
@@ -621,6 +812,30 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
             )
         }
     };
+    // A resume seat over a session that names no member binding (its host's
+    // own, or one a build before member bindings wrote) makes it the member's
+    // session at the seat, as a build of this mob would: the binding its
+    // comms name implies is stamped store-only before the seat commits, so
+    // its host's later operator-instruction writes are refused and the mob's
+    // first snapshot takes over the target its host wrote before, with no
+    // wake. A session a build of this mob created already names it. It is
+    // the preparation's last step, so no refusal here comes after it.
+    if candidate.launch == DormantSeatLaunch::Resume
+        && !candidate.session_unborn
+        && !candidate.session_archived
+    {
+        let unbound = session_service
+            .load_persisted_session_metadata(&session_id)
+            .await
+            .map_err(|error| refused(MobError::from(error)))?
+            .is_some_and(|metadata| metadata.mob_member_binding().is_none());
+        if unbound {
+            session_service
+                .bind_seated_member_session(&session_id, mob_id.as_str(), agent_identity.as_str())
+                .await
+                .map_err(|error| refused(MobError::from(error)))?;
+        }
+    }
     Ok(DormantSeatCommitEntry::Seat {
         candidate,
         endpoint,
@@ -707,6 +922,59 @@ pub(in crate::runtime) fn inproc_member_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The precedence of a seat's endpoint source: the host's declaration
+    /// wins (the service's report is not even read), else the report's
+    /// durable root, else no source, named by the report. Nothing falls back
+    /// to another root.
+    #[test]
+    fn a_declared_source_wins_and_the_reported_root_stands_in_for_none() {
+        let declared = MemberSeatEndpointSource::SessionScopedInproc {
+            identity_root: PathBuf::from("/declared"),
+        };
+        for declared in [declared, MemberSeatEndpointSource::Network] {
+            assert_eq!(
+                member_seat_endpoint_source(Some(&declared), || {
+                    panic!("a declared source does not read the service's report")
+                }),
+                Ok(declared)
+            );
+        }
+        assert_eq!(
+            member_seat_endpoint_source(None, || {
+                meerkat_core::SessionCommsIdentityRoot::Durable(PathBuf::from("/reported"))
+            }),
+            Ok(MemberSeatEndpointSource::SessionScopedInproc {
+                identity_root: PathBuf::from("/reported"),
+            })
+        );
+        assert_eq!(
+            member_seat_endpoint_source(None, || meerkat_core::SessionCommsIdentityRoot::NotKept),
+            Err(MemberSeatEndpointsUnavailable::NotKept)
+        );
+        assert_eq!(
+            member_seat_endpoint_source(None, || {
+                meerkat_core::SessionCommsIdentityRoot::Unresolved("no home".to_string())
+            }),
+            Err(MemberSeatEndpointsUnavailable::Unresolved(
+                "no home".to_string()
+            ))
+        );
+        let refusal = MemberSeatEndpointsUnavailable::Unresolved("no home".to_string())
+            .refusal(&AgentIdentity::from("w1"));
+        assert!(
+            matches!(
+                &refusal,
+                MobError::WiringError(reason)
+                    if reason.contains("'w1'")
+                        && reason.contains("no home")
+                        && reason.contains("forward session_comms_identity_root")
+                        && reason.contains("with_member_comms_identity_root")
+                        && reason.contains("MobBootstrapSpec::with_session_identity_config_root")
+            ),
+            "{refusal:?}"
+        );
+    }
 
     #[test]
     fn fresh_seat_session_ids_are_name_based() {

@@ -22,6 +22,10 @@ const WAIT: Duration = Duration::from_secs(30);
 /// How long a test waits for a step the row says must happen soon (a stop
 /// landing while a wake is held).
 const STEP: Duration = Duration::from_secs(5);
+/// The wake retry backoff of the build preparation retry rows: long enough
+/// that a row's steps run while the retry stands, short enough to wait for
+/// its timer.
+const PREPARATION_RETRY: Duration = Duration::from_secs(5);
 
 type Service = meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>;
 
@@ -81,6 +85,19 @@ impl ScriptedClient {
                     .collect()
             })
             .expect("a model request mentions the token")
+    }
+
+    /// How many recorded model requests mention every token of `tokens`.
+    fn requests_mentioning_all(&self, tokens: &[&str]) -> usize {
+        self.requests
+            .lock()
+            .expect("recorded requests")
+            .iter()
+            .filter(|request| {
+                let messages = format!("{:?}", request.messages);
+                tokens.iter().all(|token| messages.contains(token))
+            })
+            .count()
     }
 
     /// How many recorded model requests mention `token` anywhere.
@@ -420,6 +437,38 @@ impl WakeFixture {
         configure: impl FnOnce(&mut meerkat::Config),
         edit: impl FnOnce(&mut MobDefinition),
     ) -> Self {
+        Self::build(label, configure, edit, false).await
+    }
+
+    /// [`Self::new`], for a mob that seats members Dormant (the declared
+    /// apply, `seat_dormant_members`): it reads its members' comms identities
+    /// under the factory's own session comms identity root.
+    async fn with_member_seats(label: &str) -> Self {
+        Self::build(label, |_| {}, |_| {}, true).await
+    }
+
+    /// [`Self::new`], with the mob's wake retry backoff (the owed-boot retry
+    /// and the build preparation retry) at `initial`, doubling up to `max`.
+    async fn with_wake_retry_backoff(label: &str, initial: Duration, max: Duration) -> Self {
+        Self::build_with_backoff(label, |_| {}, |_| {}, false, Some((initial, max))).await
+    }
+
+    async fn build(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+    ) -> Self {
+        Self::build_with_backoff(label, configure, edit, member_seats, None).await
+    }
+
+    async fn build_with_backoff(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+        wake_retry_backoff: Option<(Duration, Duration)>,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-wake-")
             .tempdir()
@@ -463,14 +512,21 @@ impl WakeFixture {
         let customizer = Arc::new(VersionedCustomizer::new());
         let mut definition = wake_rows_definition(label);
         edit(&mut definition);
-        let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        let mut mob = MobBuilder::new(definition, MobStorage::in_memory())
             .with_session_service(service.clone())
             .with_default_llm_client(Arc::new(client.clone()))
             .with_member_build_preparer(preparer.clone())
-            .with_spawn_member_customizer(customizer.clone())
-            .create()
-            .await
-            .expect("create the mob");
+            .with_spawn_member_customizer(customizer.clone());
+        if let Some((initial, max)) = wake_retry_backoff {
+            mob = mob.with_member_wake_retry_backoff(initial, max);
+        }
+        if member_seats {
+            mob = mob.with_member_comms_identity_root(
+                meerkat::canonical_session_comms_identity_root(Some(&root_path.join("config")))
+                    .expect("the factory's session comms identity root"),
+            );
+        }
+        let handle = mob.create().await.expect("create the mob");
         Self {
             _root: root,
             handle,
@@ -543,6 +599,38 @@ impl WakeFixture {
             .member_materialization
             .get(&mob_dsl::AgentIdentity::from_domain(identity))
             .copied()
+    }
+
+    /// The host preparation MobMachine records `identity` owing.
+    fn host_preparation(&self, identity: &AgentIdentity) -> Option<mob_dsl::HostPreparationCause> {
+        self.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_host_preparation_causes
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            .copied()
+    }
+
+    /// Wait until MobMachine records `identity` owing `expected`.
+    async fn wait_host_preparation(
+        &self,
+        identity: &AgentIdentity,
+        expected: Option<mob_dsl::HostPreparationCause>,
+    ) {
+        let key = mob_dsl::AgentIdentity::from_domain(identity);
+        let mut state = self.handle.machine_state_watch_rx.clone();
+        let reached = tokio::time::timeout(
+            WAIT,
+            state.wait_for(|state| {
+                state.member_host_preparation_causes.get(&key).copied() == expected
+            }),
+        )
+        .await;
+        assert!(
+            matches!(reached, Ok(Ok(_))),
+            "member {identity} never owed host preparation {expected:?}; it owes {:?}",
+            self.host_preparation(identity)
+        );
     }
 
     async fn wait_residency(
@@ -711,6 +799,19 @@ impl WakeFixture {
     }
 }
 
+/// Whether `woken` is the typed wake refusal for a build preparation the
+/// host asked to retry ([`crate::MemberWakeRefusal::BuildPreparationRetry`]),
+/// whose token on the wire is `host_preparation_pending`.
+pub(super) fn refused_for_build_preparation_retry(woken: &Result<(), MobError>) -> bool {
+    matches!(
+        woken,
+        Err(MobError::MemberWakeRefused {
+            refusal: refusal @ crate::MemberWakeRefusal::BuildPreparationRetry,
+            ..
+        }) if refusal.as_str() == "host_preparation_pending"
+    )
+}
+
 fn token(label: &str) -> String {
     format!("{label}-token-{}", Uuid::new_v4().simple())
 }
@@ -751,6 +852,85 @@ async fn a_peer_message_wakes_a_released_member_once_and_is_delivered_once() {
     fixture.finish().await;
 }
 
+/// A same-session successor (`respawn_member` with no wake) is seated
+/// Dormant on the member's own session with the member's edges kept: a peer
+/// message over the kept edge wakes it once and is delivered into its
+/// session once, and the woken successor's reply over the same edge is
+/// delivered into the peer's session once.
+///
+/// RED: let the same-session terminal drop the member's edges (or publish
+/// no wake route for its successor): the peer's message to the Dormant
+/// successor is refused, or never reaches its session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_wakes_a_same_session_successor_over_its_kept_edge() {
+    let fixture = WakeFixture::new("wake-same-session-successor").await;
+    let peer = fixture.spawn("successor-peer").await;
+    let member = fixture.spawn("successor-member").await;
+    fixture.wire(&peer, &member).await;
+    let session = fixture.session(&member).await;
+    let generation = fixture.entry(&member).await.generation;
+    let receipt = tokio::time::timeout(
+        WAIT,
+        fixture
+            .handle
+            .respawn_member(member.clone(), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned on its own session");
+    assert_eq!(receipt.identity, member);
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Dormant))
+        .await;
+    assert_eq!(
+        fixture.session(&member).await,
+        session,
+        "the successor keeps the member's session"
+    );
+    assert_ne!(
+        fixture.entry(&member).await.generation,
+        generation,
+        "the successor is the member's next incarnation"
+    );
+    let prepared_before = fixture.preparer.prepared_count();
+
+    let body = token("to-successor");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.send_peer_message(
+            peer.clone(),
+            member.clone(),
+            body.as_str(),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the kept edge carries the message to the Dormant successor");
+    assert_eq!(fixture.delivered_count(&member, &body).await, 1);
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Live))
+        .await;
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        prepared_before + 1,
+        "one wake builds the successor once"
+    );
+
+    let reply = token("from-successor");
+    tokio::time::timeout(
+        WAIT,
+        fixture
+            .handle
+            .send_peer_message(member, peer.clone(), reply.as_str(), HandlingMode::Queue),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the kept edge carries the successor's reply");
+    assert_eq!(fixture.delivered_count(&peer, &reply).await, 1);
+    fixture.finish().await;
+}
+
 /// Two peers messaging one released member share one wake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_peers_messaging_one_released_member_share_one_wake() {
@@ -788,6 +968,102 @@ async fn two_peers_messaging_one_released_member_share_one_wake() {
         1,
         "concurrent senders join one wake"
     );
+    fixture.finish().await;
+}
+
+/// A peer message to a fresh seat wakes it once and is delivered once. A
+/// fresh seat (`seat_dormant_members`) is a member seated Dormant on a
+/// session no build has created, never materialized: its seat recorded its
+/// endpoint from the key pair its first build loads and published its wake
+/// route under that key, and the live peer wired to it trusts that
+/// endpoint. A message through the mob's peer-message API, and one from the
+/// peer's own comms runtime addressed by the seat's comms name (as the
+/// peer's comms tools address it), each wakes its seat once (the wake
+/// creates the seat's session) and is delivered into it once; neither is
+/// answered `PeerNotFound`.
+///
+/// RED: publish no inproc wake route (drop the `publish_wake_route` call in
+/// `MobActor::publish_member_wake_route`): both sends find no route and are
+/// refused `PeerNotFound`, and the seats stay Dormant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_wakes_a_fresh_seat_once_and_is_delivered_once() {
+    let fixture = WakeFixture::with_member_seats("wake-fresh-seat").await;
+    let sender = fixture.spawn("fresh-seat-sender").await;
+    let seats = ["fresh-seat-api", "fresh-seat-comms"]
+        .map(|label| AgentIdentity::from(format!("{label}-{}", Uuid::new_v4().simple())));
+    let outcomes = tokio::time::timeout(
+        WAIT,
+        fixture.handle.seat_dormant_members(
+            seats
+                .iter()
+                .map(|seat| SpawnMemberSpec::new("worker", seat.clone()))
+                .collect(),
+        ),
+    )
+    .await
+    .expect("the seat answers")
+    .expect("the seat commits");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, crate::runtime::DormantSeatOutcome::Seated { .. })),
+        "every spec is seated: {outcomes:?}"
+    );
+    for seat in &seats {
+        fixture.wire(&sender, seat).await;
+        assert_eq!(
+            fixture.residency(seat),
+            Some(mob_dsl::MemberMaterializationPhase::Dormant),
+            "{seat} stays Dormant until its first delivery"
+        );
+        assert!(
+            crate::runtime::boot_plan::domain_member_seat_session_unborn(
+                &fixture.handle.machine_state_watch_rx.borrow(),
+                seat,
+            ),
+            "{seat} was never materialized: its session is unborn"
+        );
+    }
+    let [through_api, through_comms] = &seats;
+
+    let api_body = token("fresh-seat-api");
+    let receipt = tokio::time::timeout(
+        WAIT,
+        fixture.handle.send_peer_message(
+            sender.clone(),
+            through_api.clone(),
+            api_body.as_str(),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the fresh seat is woken and the message handed off");
+    assert_eq!(&receipt.to, through_api);
+
+    let comms_body = token("fresh-seat-comms");
+    let sent = fixture
+        .raw_peer_send(&sender, through_comms, &comms_body)
+        .await;
+    assert!(
+        matches!(sent, Ok(SendReceipt::PeerMessageSent { .. })),
+        "the peer's own send wakes the fresh seat and hands the message off, never \
+         PeerNotFound: {sent:?}"
+    );
+
+    for (seat, body) in [(through_api, &api_body), (through_comms, &comms_body)] {
+        assert_eq!(fixture.delivered_count(seat, body).await, 1, "{seat}");
+        fixture
+            .wait_residency(seat, Some(mob_dsl::MemberMaterializationPhase::Live))
+            .await;
+        let builds = fixture
+            .preparer
+            .prepared()
+            .into_iter()
+            .filter(|build| &build.identity == seat)
+            .count();
+        assert_eq!(builds, 1, "one wake builds {seat} once");
+    }
     fixture.finish().await;
 }
 
@@ -982,6 +1258,76 @@ async fn a_released_member_reads_unmaterialized_until_its_wake_and_a_subscriptio
     })
     .await
     .expect("the replay holds the turn the woken member ran");
+    fixture.finish().await;
+}
+
+/// A host waits out a member's lifecycle operation in flight on the machine
+/// state the actor publishes (`MobHandle::wait_member_lifecycle_settled`): with
+/// nothing in flight it answers at once; while a wake is held at its build
+/// preparation the operation is still in flight when the wait's timeout runs
+/// out; and a wait that began while the wake was held answers settled once the
+/// wake ends, woken by the state the wake's end publishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lifecycle_wait_answers_once_the_wake_in_flight_ends() {
+    let fixture = WakeFixture::new("wake-lifecycle-wait").await;
+    let member = fixture.spawn("lifecycle-wait-member").await;
+    assert_eq!(
+        fixture
+            .handle
+            .wait_member_lifecycle_settled(&member, STEP)
+            .await
+            .expect("the wait answers"),
+        crate::runtime::MemberLifecycleSettlement::NothingInFlight,
+        "a live member with nothing in flight"
+    );
+    fixture.release(&member).await;
+    fixture.preparer.close_gate();
+    let wake = tokio::spawn({
+        let handle = fixture.handle.clone();
+        let member = member.clone();
+        async move { handle.ensure_member_live(&member).await }
+    });
+    fixture.preparer.wait_entered(1).await;
+    fixture
+        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Waking))
+        .await;
+    assert_eq!(
+        fixture
+            .handle
+            .wait_member_lifecycle_settled(&member, Duration::from_millis(200))
+            .await
+            .expect("the wait answers"),
+        crate::runtime::MemberLifecycleSettlement::StillInFlight,
+        "the held wake is in flight when the timeout runs out"
+    );
+    {
+        let settled = fixture.handle.wait_member_lifecycle_settled(&member, WAIT);
+        tokio::pin!(settled);
+        assert!(
+            futures::poll!(settled.as_mut()).is_pending(),
+            "the wait began while the wake is held"
+        );
+        fixture.preparer.open_gate();
+        assert_eq!(
+            settled.await.expect("the wait answers"),
+            crate::runtime::MemberLifecycleSettlement::Settled,
+            "the wake's end settles the wait"
+        );
+    }
+    tokio::time::timeout(WAIT, wake)
+        .await
+        .expect("the wake answers")
+        .expect("the wake task")
+        .expect("the wake ends live");
+    assert_eq!(
+        fixture
+            .handle
+            .wait_member_lifecycle_settled(&member, STEP)
+            .await
+            .expect("the wait answers"),
+        crate::runtime::MemberLifecycleSettlement::NothingInFlight,
+        "the woken member has nothing in flight"
+    );
     fixture.finish().await;
 }
 
@@ -1435,31 +1781,65 @@ async fn a_wake_prepares_the_member_build_once_and_reports_it_built() {
     fixture.finish().await;
 }
 
-/// A retryable build preparation refusal leaves the member dormant until
-/// its next delivery.
+/// A retryable build preparation refusal is the typed
+/// `BuildPreparationRetry` wake refusal, and MobMachine records it
+/// (`HostPreparationCause::BuildPreparationRetry`): the member stays Dormant
+/// and its wakes meanwhile are refused for it without asking the host
+/// again. The retry timer ends the cause at the wake retry backoff and
+/// wakes nothing, since the member owes no work; the next delivery asks the
+/// host again and wakes the member.
+///
+/// RED before MobMachine recorded the retry: the refusal was
+/// `HostPreparationPending`, typed from the wake's own answer, and the next
+/// delivery asked the host again at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_retryable_preparation_refusal_leaves_the_member_dormant_until_the_next_delivery() {
-    let fixture = WakeFixture::new("wake-r112").await;
+async fn a_retryable_preparation_refusal_holds_the_members_wakes_until_its_retry() {
+    let fixture =
+        WakeFixture::with_wake_retry_backoff("wake-r112", PREPARATION_RETRY, PREPARATION_RETRY)
+            .await;
     let member = fixture.spawn("r112-member").await;
     fixture.release(&member).await;
 
     fixture.preparer.answer_with(PreparerAnswer::Retryable);
     let refused = fixture.ensure_live(&member).await;
     assert!(
-        matches!(
-            refused,
-            Err(MobError::MemberWakeRefused {
-                refusal: crate::MemberWakeRefusal::HostPreparationPending,
-                ..
-            })
-        ),
-        "a retryable refusal is the typed retryable wake refusal: {refused:?}"
+        refused_for_build_preparation_retry(&refused),
+        "a retryable refusal is the typed build preparation retry: {refused:?}"
     );
     fixture
-        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Dormant))
+        .wait_host_preparation(
+            &member,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
         .await;
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant)
+    );
 
+    // The host would prepare the build now; the retry still stands.
     fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    let held = fixture.ensure_live(&member).await;
+    assert!(
+        refused_for_build_preparation_retry(&held),
+        "a wake while the retry stands is refused for it: {held:?}"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "the host is not asked again while the retry stands"
+    );
+
+    // The retry timer ends the cause and wakes nothing: no work is owed.
+    fixture.wait_host_preparation(&member, None).await;
+    fixture.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the retry wakes no member that is owed no work"
+    );
+    assert_eq!(fixture.preparer.prepared_count(), 1);
+
     fixture
         .ensure_live(&member)
         .await
@@ -1472,6 +1852,125 @@ async fn a_retryable_preparation_refusal_leaves_the_member_dormant_until_the_nex
     fixture.finish().await;
 }
 
+/// A member reached only by peer messages, whose host asked to retry its
+/// build preparation: MobMachine records the retry and refuses the member's
+/// wakes for it, so a sender's message meanwhile is refused
+/// `host_preparation_pending` and the host is not asked again. The retry
+/// timer ends the cause at the wake retry backoff and wakes nothing (a
+/// refused message is the sender's, no work the member owes); once the
+/// host's preparation succeeds, the sender's retry wakes the member and is
+/// delivered once.
+///
+/// RED before MobMachine recorded the retry: no cause was recorded, and the
+/// next message asked the host again at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_only_member_whose_host_asked_to_retry_its_build_is_delivered_after_the_retry() {
+    let fixture = WakeFixture::with_wake_retry_backoff(
+        "wake-preparation-retry-peer",
+        PREPARATION_RETRY,
+        PREPARATION_RETRY,
+    )
+    .await;
+    let sender = fixture.spawn("preparation-retry-sender").await;
+    let recipient = fixture.spawn("preparation-retry-recipient").await;
+    fixture.wire(&sender, &recipient).await;
+    fixture.release(&recipient).await;
+
+    fixture.preparer.answer_with(PreparerAnswer::Retryable);
+    let first = fixture
+        .raw_peer_send(&sender, &recipient, &token("preparation-retry-first"))
+        .await;
+    assert!(
+        matches!(
+            first,
+            Err(SendError::PeerWakeRefused {
+                refusal: meerkat_core::comms::PeerWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "the host asked to retry: the message is refused host_preparation_pending: {first:?}"
+    );
+    fixture
+        .wait_host_preparation(
+            &recipient,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
+        .await;
+    assert_eq!(fixture.preparer.prepared_count(), 1);
+
+    // The host would prepare the build now; the retry still stands.
+    fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    let second = fixture
+        .raw_peer_send(&sender, &recipient, &token("preparation-retry-second"))
+        .await;
+    assert!(
+        matches!(
+            second,
+            Err(SendError::PeerWakeRefused {
+                refusal: meerkat_core::comms::PeerWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "a message while the retry stands is refused for it: {second:?}"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "the host is not asked again while the retry stands"
+    );
+
+    // The retry timer ends the cause and wakes nothing: no work is owed.
+    fixture.wait_host_preparation(&recipient, None).await;
+    fixture.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        fixture.residency(&recipient),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the retry wakes no member that is owed no work"
+    );
+    assert_eq!(fixture.preparer.prepared_count(), 1);
+
+    let body = token("preparation-retry-retried");
+    fixture
+        .raw_peer_send(&sender, &recipient, &body)
+        .await
+        .expect("the sender's retry is delivered");
+    assert_eq!(fixture.delivered_count(&recipient, &body).await, 1);
+    assert_eq!(fixture.preparer.prepared_count(), 2);
+    fixture.finish().await;
+}
+
+/// A wake whose build preparation the host carries out records no build
+/// preparation retry and arms no retry timer: MobMachine records no cause
+/// for the member, and long past the wake retry backoff nothing asks the
+/// host again or moves the member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_healthy_wake_records_no_build_preparation_retry() {
+    let backoff = Duration::from_millis(20);
+    let fixture =
+        WakeFixture::with_wake_retry_backoff("wake-preparation-healthy", backoff, backoff).await;
+    let member = fixture.spawn("preparation-healthy").await;
+    fixture.release(&member).await;
+
+    fixture
+        .ensure_live(&member)
+        .await
+        .expect("the member wakes");
+    assert_eq!(fixture.host_preparation(&member), None);
+    tokio::time::sleep(backoff * 20).await;
+    fixture.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "nothing asks the host again"
+    );
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Live)
+    );
+    assert_eq!(fixture.host_preparation(&member), None);
+    fixture.finish().await;
+}
+
 /// The host's build preparer reads through the mob's own read-only view on
 /// a wake, as on a boot restore: the authority the mob's launch minted (the
 /// owner's), never the agent lane of the member tools the wake builds. A
@@ -1479,7 +1978,7 @@ async fn a_retryable_preparation_refusal_leaves_the_member_dormant_until_the_nex
 /// the member is answered, so the member's on-demand wake goes ahead. On the
 /// agent lane that read is refused (it needs the List scope), the preparer
 /// answers retryable, and every wake of the member is refused
-/// `HostPreparationPending` again: the member never wakes.
+/// `BuildPreparationRetry` again: the member never wakes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wake_hands_the_build_preparer_the_mobs_own_read_view() {
     let fixture = WakeFixture::new("wake-preparer-read-view").await;
@@ -2386,11 +2885,41 @@ async fn a_retire_during_a_wake_answers_its_callers_member_retiring() {
     );
 
     fixture.preparer.open_gate();
-    tokio::time::timeout(WAIT, retire)
+    // The retire answers within its own budget (2 s in a test build), and
+    // the stages after the wake's provision rolls back can outlast it under
+    // load. A retirement still running then answers that it is in progress
+    // (or, not yet admitted at the budget, that its admission is pending)
+    // and stays owned by the mob, which settles it on its own. Either way it
+    // must end `Retired`, and a retire after that answers at once.
+    let retired = tokio::time::timeout(WAIT, retire)
         .await
-        .expect("the retirement finishes once the wake's provision rolls back")
-        .expect("the retire task joins")
-        .expect("the member retires");
+        .expect("the retire answers once the wake's provision rolls back")
+        .expect("the retire task joins");
+    if let Err(error) = retired {
+        assert!(
+            matches!(
+                error,
+                MobError::MemberRetirementInProgress { .. }
+                    | MobError::MemberRetirementAdmissionPending { .. }
+            ),
+            "the member retires: {error:?}"
+        );
+        let mut settlement = fixture
+            .handle
+            .retirement_settlement(&member)
+            .expect("the owned retirement publishes its settlement");
+        let settled = tokio::time::timeout(WAIT, settlement.settled())
+            .await
+            .expect("the owned retirement settles");
+        assert!(
+            matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+            "the member retires: {settled:?}"
+        );
+        tokio::time::timeout(WAIT, fixture.handle.retire(member.clone()))
+            .await
+            .expect("a retire of the retired member answers")
+            .expect("a retire of the retired member answers Ok");
+    }
     fixture.finish().await;
 }
 
@@ -2597,6 +3126,14 @@ async fn a_late_binding_refusal_of_an_abandoned_attempt_leaves_the_newer_wake_ru
     fixture
         .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Dormant))
         .await;
+    // MobMachine holds the member's wakes for the build preparation its
+    // host asked to retry; the host retries it, so the newer wake asks
+    // again.
+    fixture
+        .handle
+        .resolve_member_build_preparation(&member)
+        .await
+        .expect("the host retries the build preparation");
 
     // The newer wake is held in its build preparation.
     fixture.preparer.close_gate();
@@ -3276,5 +3813,663 @@ async fn kickoff_notices_to_a_dormant_peer_wake_it_once() {
         .filter(|build| build.identity == dormant)
         .count();
     assert_eq!(builds, 1, "the notices woke the dormant peer once");
+    fixture.finish().await;
+}
+
+/// The declared apply on a durable store: an identity a complete roster
+/// unlisted, then lists again, comes back as the same identity with its
+/// history. The unlisted retirement archives the member's session and
+/// MobMachine records it; the apply that lists the identity again seats it
+/// Dormant on that archived session at its next generation, waking nothing;
+/// the member's first wake revives the session, and its next turn runs with
+/// the turn it ran before it was unlisted: the model request carries both,
+/// and both are on the one session.
+///
+/// RED: drop the revival admission from the dormant seat's preparation
+/// (`prepare_dormant_seat` answers every archived session `SessionArchived`):
+/// the identity is answered `Failed` and stays unseated. Drop the archived
+/// session record instead: it is seated on a fresh session whose transcript
+/// is empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unlisted_identity_listed_again_wakes_on_its_archived_session_with_its_history() {
+    use crate::runtime::{
+        DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, UnlistedEntryOutcome,
+    };
+
+    let fixture = WakeFixture::with_member_seats("wake-declared-revival").await;
+    let identity = AgentIdentity::from(format!("declared-revival-{}", Uuid::new_v4().simple()));
+    let roster = |listed: bool| {
+        DeclaredRoster::complete(
+            listed.then(|| DeclaredEntry::new(SpawnMemberSpec::new("worker", identity.clone()))),
+        )
+    };
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+
+    let seated = apply(roster(true)).await;
+    let session = match seated.entries.get(&identity) {
+        Some(DeclaredEntryOutcome::Seated {
+            session_id,
+            history_unavailable: None,
+        }) => session_id.clone(),
+        other => panic!("the identity is seated: {other:?}"),
+    };
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+    let before = token("declared-revival");
+    fixture
+        .host_turn(&identity, &before, HandlingMode::Queue)
+        .await;
+    assert_eq!(fixture.delivered_count(&identity, &before).await, 1);
+
+    let unlisted = apply(roster(false)).await;
+    assert!(
+        matches!(
+            unlisted.unlisted.get(&identity),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{unlisted:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .is_none()
+    );
+
+    let listed = apply(roster(true)).await;
+    assert!(
+        matches!(
+            listed.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated {
+                session_id,
+                history_unavailable: None,
+            }) if session_id == &session
+        ),
+        "the identity is seated on its archived session: {listed:?}"
+    );
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the seat wakes nothing"
+    );
+    assert_eq!(
+        fixture.entry(&identity).await.generation,
+        Generation::new(1)
+    );
+
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake revives the archived session");
+    assert_eq!(fixture.session(&identity).await, session);
+    let after = token("declared-revival-after");
+    fixture
+        .host_turn(&identity, &after, HandlingMode::Queue)
+        .await;
+    assert_eq!(
+        fixture
+            .client
+            .requests_mentioning_all(&[before.as_str(), after.as_str()]),
+        1,
+        "the revived member's turn runs with its history"
+    );
+    assert_eq!(fixture.session(&identity).await, session);
+    let transcript = fixture.transcript(&session).await;
+    assert!(
+        transcript.contains(&before) && transcript.contains(&after),
+        "both turns are on the one session"
+    );
+    fixture.finish().await;
+}
+
+/// The declared apply on a durable store: an identity a complete roster
+/// unlisted, then lists again under another role, comes back under the new
+/// role on its archived session only with the migration declared. Listed
+/// again under the new role with none declared, it is held and not seated:
+/// its archived session was last built under its previous role, and that
+/// session's build would refuse the move. Listed with the migration from
+/// that role declared, it is seated Dormant on its archived session, and its
+/// first wake builds it under the new role, history kept.
+///
+/// RED: observe no resume session role in the declaration (the apply passes
+/// none): the first listing under the new role answers `Seated`, and the
+/// identity's first wake fails `MemberRoleMigrationRequired` (its archived
+/// session was built as a worker and nothing declares the move). Keep the
+/// observation but resume the session without the declared migration
+/// (`owed_seat` without `resume_from_role`): the second listing is seated,
+/// and its first wake fails the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relisted_identity_under_a_new_role_wakes_under_it_with_its_declared_migration() {
+    use crate::runtime::{
+        DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, EntryStanding, HostPreparationCause,
+        IdentityEntryRead, UnlistedEntryOutcome, UnseatedEntryCause,
+    };
+
+    let fixture = WakeFixture::build(
+        "wake-declared-role-revival",
+        |_| {},
+        |definition| {
+            let lead = definition
+                .profiles
+                .get_mut(&ProfileName::from("lead"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .expect("inline lead");
+            lead.model = "gpt-5.5".to_string();
+            lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            lead.tools = ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            };
+        },
+        true,
+    )
+    .await;
+    let identity =
+        AgentIdentity::from(format!("declared-role-revival-{}", Uuid::new_v4().simple()));
+    let entry = |role: &str| DeclaredEntry::new(SpawnMemberSpec::new(role, identity.clone()));
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+
+    let seated = apply(DeclaredRoster::complete([entry("worker")])).await;
+    let session = match seated.entries.get(&identity) {
+        Some(DeclaredEntryOutcome::Seated {
+            session_id,
+            history_unavailable: None,
+        }) => session_id.clone(),
+        other => panic!("the identity is seated: {other:?}"),
+    };
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+    let before = token("declared-role-revival");
+    fixture
+        .host_turn(&identity, &before, HandlingMode::Queue)
+        .await;
+    assert_eq!(fixture.delivered_count(&identity, &before).await, 1);
+
+    let unlisted = apply(DeclaredRoster::complete(std::iter::empty::<DeclaredEntry>())).await;
+    assert!(
+        matches!(
+            unlisted.unlisted.get(&identity),
+            Some(UnlistedEntryOutcome::Retired)
+        ),
+        "{unlisted:?}"
+    );
+
+    // Listed again under another role, with no migration declared: held,
+    // and not seated.
+    let held = apply(DeclaredRoster::complete([entry("lead")])).await;
+    assert!(
+        matches!(
+            held.entries.get(&identity),
+            Some(DeclaredEntryOutcome::RoleMigrationHeld { from, to })
+                if from.as_str() == "worker" && to.as_str() == "lead"
+        ),
+        "the identity is held for its undeclared role move: {held:?}"
+    );
+    assert!(
+        fixture
+            .handle
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "nothing is seated"
+    );
+    match fixture
+        .handle
+        .identity_entry(&identity)
+        .expect("entry read")
+    {
+        IdentityEntryRead::Entry(view) => {
+            assert_eq!(
+                view.standing,
+                EntryStanding::Unseated(UnseatedEntryCause::SeatOwed)
+            );
+            assert_eq!(
+                view.host_preparation,
+                Some(HostPreparationCause::RoleMigrationUndeclared)
+            );
+        }
+        other => panic!("the identity is an entry: {other:?}"),
+    }
+
+    // Listed with the migration from the role its session was built under.
+    let migrated = apply(
+        DeclaredRoster::complete([entry("lead")]).with_role_migration(identity.clone(), "worker"),
+    )
+    .await;
+    assert!(
+        matches!(
+            migrated.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated {
+                session_id,
+                history_unavailable: None,
+            }) if session_id == &session
+        ),
+        "the identity is seated on its archived session: {migrated:?}"
+    );
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the seat wakes nothing"
+    );
+    assert_eq!(
+        fixture.entry(&identity).await.role,
+        ProfileName::from("lead")
+    );
+
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member under its new role");
+    assert_eq!(fixture.session(&identity).await, session);
+    assert!(
+        fixture.transcript(&session).await.contains(&before),
+        "the identity keeps its history"
+    );
+    let after = token("declared-role-revival-after");
+    fixture
+        .host_turn(&identity, &after, HandlingMode::Queue)
+        .await;
+    assert_eq!(
+        fixture.delivered_count(&identity, &after).await,
+        1,
+        "the member runs under its new role"
+    );
+    fixture.finish().await;
+}
+
+/// A member whose role move the declared apply holds, still Live at a Stop
+/// (its release once idle was refused: an input waits for a run its hold
+/// does not start), keeps its live actor through the explicit resume, even
+/// when the host's customizer now names another auth binding. MobMachine
+/// answers it held while the mob is still Stopped, before the resume's
+/// preparation would read its session, ask the customizer and retire its
+/// actor for the changed binding; after the resume it is Live and held.
+///
+/// RED: drop the Held arm's Stopped twin
+/// (`AuthorizeExplicitResumeMemberHeldStopped`) or its probe at the
+/// candidate selection: the preparation retires the member's live actor for
+/// the changed binding, the rebuild leaves the member alone as held, and
+/// MobMachine records it Live with no live actor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_live_member_keeps_its_actor_through_an_explicit_resume() {
+    use crate::HostRunStartHoldReason;
+    use crate::runtime::{
+        DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster, HostPreparationCause,
+        IdentityEntryRead,
+    };
+
+    let fixture = WakeFixture::build(
+        "wake-role-hold-resume",
+        |config| {
+            config.realm.insert(
+                "global".to_string(),
+                meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-key")]),
+            );
+        },
+        |definition| {
+            let lead = definition
+                .profiles
+                .get_mut(&ProfileName::from("lead"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .expect("inline lead");
+            lead.model = "gpt-5.5".to_string();
+            lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            lead.tools = ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            };
+        },
+        true,
+    )
+    .await;
+    let identity = AgentIdentity::from(format!("role-hold-resume-{}", Uuid::new_v4().simple()));
+    let roster = |role: &str| {
+        DeclaredRoster::complete([DeclaredEntry::new(SpawnMemberSpec::new(
+            role,
+            identity.clone(),
+        ))])
+    };
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+    let holding = || {
+        fixture
+            .handle
+            .members_holding_run_starts(HostRunStartHoldReason::HostPreparation)
+            .expect("the hold read")
+            .contains(&identity)
+    };
+    let live_actor = |session: SessionId| {
+        let service = fixture.service.clone();
+        async move {
+            MobSessionService::live_session_actor_registered(&*service, &session)
+                .await
+                .unwrap_or(false)
+        }
+    };
+
+    let seated = apply(roster("worker")).await;
+    assert!(
+        matches!(
+            seated.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated { .. })
+        ),
+        "{seated:?}"
+    );
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+    let session = fixture.session(&identity).await;
+    assert!(
+        !fixture
+            .handle
+            .member_holds_run_starts(&identity, HostRunStartHoldReason::HostPreparation)
+            .expect("the member's hold reads"),
+        "one member's read answers as the list read: nothing holds the seated member"
+    );
+
+    // A run in flight, then the role move held: the member's run starts are
+    // held, and the run goes on.
+    fixture.client.block();
+    let entry = fixture.entry(&identity).await;
+    let in_flight = token("role-hold-resume-in-flight");
+    let turn = tokio::time::timeout(
+        WAIT,
+        fixture.handle.start_work_with_mode(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(in_flight.as_str(), WorkOrigin::Internal),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the delivery is admitted in time")
+    .expect("the delivery is admitted");
+    fixture.client.wait_started(1).await;
+    let held = apply(roster("lead")).await;
+    assert!(
+        matches!(
+            held.entries.get(&identity),
+            Some(DeclaredEntryOutcome::RoleMigrationHeld { .. })
+        ),
+        "{held:?}"
+    );
+    let deadline = std::time::Instant::now() + WAIT;
+    while !holding() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held member's run starts are held"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // An input that waits for a run the hold does not start: once the run in
+    // flight settles, the release of the idle member is refused, and it
+    // stays Live.
+    let waiting = token("role-hold-resume-waiting");
+    let _waiting = tokio::time::timeout(
+        WAIT,
+        fixture.handle.start_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(waiting.as_str(), WorkOrigin::Internal),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the waiting input is admitted in time")
+    .expect("the waiting input is admitted");
+    fixture.client.release();
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the run in flight finishes")
+        .expect("the run in flight succeeds");
+
+    tokio::time::timeout(WAIT, fixture.handle.stop())
+        .await
+        .expect("the stop answers")
+        .expect("stop the mob");
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "precondition: the held member is Live at the Stop"
+    );
+    assert!(
+        live_actor(session.clone()).await,
+        "precondition: the Stop kept the member's live actor"
+    );
+
+    // The host's customizer now names another auth binding.
+    fixture
+        .customizer
+        .set_auth_binding(meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::global(),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        });
+    tokio::time::timeout(WAIT, fixture.handle.resume())
+        .await
+        .expect("the resume answers")
+        .expect("resume the mob");
+
+    assert!(
+        live_actor(session.clone()).await,
+        "the held member keeps its live actor through the explicit resume"
+    );
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "MobMachine records it Live, as it is"
+    );
+    assert_eq!(fixture.session(&identity).await, session);
+    assert!(holding(), "its run starts stay held");
+    assert!(
+        fixture
+            .handle
+            .member_holds_run_starts(&identity, HostRunStartHoldReason::HostPreparation)
+            .expect("the member's hold reads"),
+        "one member's read answers as the list read: the held member's run starts are held"
+    );
+    assert!(
+        !fixture
+            .handle
+            .member_holds_run_starts(
+                &AgentIdentity::from("no-such-member"),
+                HostRunStartHoldReason::HostPreparation,
+            )
+            .expect("an unseated member's hold reads"),
+        "a member the mob does not seat holds nothing"
+    );
+    match fixture
+        .handle
+        .identity_entry(&identity)
+        .expect("entry read")
+    {
+        IdentityEntryRead::Entry(view) => assert_eq!(
+            view.host_preparation,
+            Some(HostPreparationCause::RoleMigrationUndeclared),
+            "the member stays held"
+        ),
+        other => panic!("the identity is an entry: {other:?}"),
+    }
+    fixture.finish().await;
+}
+
+/// A Live member whose role move the declared apply holds finishes the run it
+/// has in flight, never preempted, while its run starts are held for its host
+/// preparation (`HostPreparation`), and the mob releases it once that run
+/// settled: it is Dormant, and every wake of it is refused. An apply that
+/// restores the role ends the hold and its run-start hold, and the member
+/// wakes again.
+///
+/// RED: drop the realization of the run-start hold (the hold a release tried
+/// once, at the apply, left a busy member Live): the member is never listed
+/// holding its run starts, and it stays Live, serving under its previous
+/// role, after its run settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_live_member_finishes_its_run_and_is_released_when_idle() {
+    use crate::HostRunStartHoldReason;
+    use crate::runtime::{DeclaredEntry, DeclaredEntryOutcome, DeclaredRoster};
+
+    let fixture = WakeFixture::build(
+        "wake-role-hold-live",
+        |_| {},
+        |definition| {
+            let lead = definition
+                .profiles
+                .get_mut(&ProfileName::from("lead"))
+                .and_then(ProfileBinding::as_inline_mut)
+                .expect("inline lead");
+            lead.model = "gpt-5.5".to_string();
+            lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+            lead.tools = ToolConfig {
+                comms: true,
+                ..ToolConfig::default()
+            };
+        },
+        true,
+    )
+    .await;
+    let identity = AgentIdentity::from(format!("role-hold-live-{}", Uuid::new_v4().simple()));
+    let roster = |role: &str| {
+        DeclaredRoster::complete([DeclaredEntry::new(SpawnMemberSpec::new(
+            role,
+            identity.clone(),
+        ))])
+    };
+    let handle = &fixture.handle;
+    let apply = |roster: DeclaredRoster| async move {
+        tokio::time::timeout(WAIT, handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs")
+    };
+    let holding = || {
+        fixture
+            .handle
+            .members_holding_run_starts(HostRunStartHoldReason::HostPreparation)
+            .expect("the hold read")
+            .contains(&identity)
+    };
+    async fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + WAIT;
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    let seated = apply(roster("worker")).await;
+    assert!(
+        matches!(
+            seated.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Seated { .. })
+        ),
+        "{seated:?}"
+    );
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the first wake builds the member");
+
+    // A run in flight, its model reply held.
+    fixture.client.block();
+    let entry = fixture.entry(&identity).await;
+    let in_flight = token("role-hold-in-flight");
+    let turn = tokio::time::timeout(
+        WAIT,
+        fixture.handle.start_work_with_mode(
+            entry.agent_runtime_id,
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new(in_flight.as_str(), WorkOrigin::Internal),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the delivery is admitted in time")
+    .expect("the delivery is admitted");
+    fixture.client.wait_started(1).await;
+
+    let held = apply(roster("lead")).await;
+    assert!(
+        matches!(
+            held.entries.get(&identity),
+            Some(DeclaredEntryOutcome::RoleMigrationHeld { from, to })
+                if from.as_str() == "worker" && to.as_str() == "lead"
+        ),
+        "{held:?}"
+    );
+    wait_until("the held member's run starts are held", &holding).await;
+    assert_eq!(
+        fixture.residency(&identity),
+        Some(mob_dsl::MemberMaterializationPhase::Live),
+        "the run in flight is never preempted"
+    );
+
+    fixture.client.release();
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the run in flight finishes")
+        .expect("the run in flight succeeds");
+    wait_until("the mob releases the held member once it is idle", || {
+        fixture.residency(&identity) == Some(mob_dsl::MemberMaterializationPhase::Dormant)
+    })
+    .await;
+    assert_eq!(fixture.client.started_count(), 1, "no other run started");
+    assert!(
+        matches!(
+            fixture.ensure_live(&identity).await,
+            Err(MobError::MemberWakeRefused {
+                refusal: crate::MemberWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "every wake of the held member is refused"
+    );
+
+    let restored = apply(roster("worker")).await;
+    assert!(
+        matches!(
+            restored.entries.get(&identity),
+            Some(DeclaredEntryOutcome::Kept)
+        ),
+        "{restored:?}"
+    );
+    wait_until("the restored role releases the run-start hold", || {
+        !holding()
+    })
+    .await;
+    fixture
+        .ensure_live(&identity)
+        .await
+        .expect("the member wakes once its role is restored");
     fixture.finish().await;
 }

@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.8
+// Contract version: 0.9.11
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.8";
+export const CONTRACT_VERSION = "0.9.11";
 
 export type Value = unknown;
 
@@ -501,11 +501,19 @@ export interface ToolsRegisterResult {
 }
 
 export interface WorkEventsResult {
+  event_high_water_mark?: number | null;
   events: unknown[];
+  next_after_seq?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkItemsResult {
+  anchor_event_seq?: number | null;
+  changed_since_anchor?: boolean | null;
   items: unknown[];
+  next_cursor?: string | null;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export type ConfigSetParams = Record<string, unknown>;
@@ -661,6 +669,8 @@ export type WireRunStopReceipt = WireRunStopReceiptStopped | WireRunStopReceiptN
 export type WireRunStopCompletion = "completed" | "completed_without_result" | "callback_pending" | "cancelled" | "abandoned" | "abandoned_with_error" | "completed_with_finalization_failure" | "runtime_terminated";
 
 export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
+
+export type WireCompactionRequestOutcome = "requested" | "already_requested";
 
 export interface WireDeviceCompleteResultPending {
   state: "pending";
@@ -851,6 +861,455 @@ export interface WireLoginCancelledConnectorSlotTarget {
 }
 
 export type WireLoginCancelled = WireLoginCancelledMcpLoginTarget | WireLoginCancelledConnectorSlotTarget;
+
+export interface ToolGrantSubjectSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface ToolGrantSubjectIdentity {
+  identity: string;
+  kind: "identity";
+  mob_id: string;
+}
+
+export type ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity;
+
+export interface ToolGrantTargetTool {
+  kind: "tool";
+  name: string;
+}
+
+export interface ToolGrantTargetFamily {
+  family: string;
+  kind: "family";
+}
+
+export interface ToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer;
+
+export interface ToolGrantScopeWindow {
+  kind: "window";
+}
+
+export interface ToolGrantScopeCurrentRun {
+  kind: "current_run";
+}
+
+export type ToolGrantScopeRequest = ToolGrantScopeWindow | ToolGrantScopeCurrentRun;
+
+export interface WireToolGrantSubjectSession {
+  kind: "session";
+  session_id: string;
+}
+
+export interface WireToolGrantSubjectIdentity {
+  identity: string;
+  kind: "identity";
+  mob_id: string;
+}
+
+export interface WireToolGrantSubjectUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown;
+
+export interface WireToolGrantTargetTool {
+  kind: "tool";
+  name: string;
+}
+
+export interface WireToolGrantTargetFamily {
+  family: string;
+  kind: "family";
+  names?: string[];
+}
+
+export interface WireToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
+export interface WireToolGrantTargetUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown;
+
+export interface WireToolGrantIssuerOperator {
+  caller?: string | null;
+  decision_ref?: string | null;
+  kind: "operator";
+}
+
+export interface WireToolGrantIssuerApproval {
+  approval_id: string;
+  kind: "approval";
+}
+
+export interface WireToolGrantIssuerUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown;
+
+export interface WireToolGrantScopeWindow {
+  kind: "window";
+}
+
+export interface WireToolGrantScopeCurrentRun {
+  kind: "current_run";
+  run_id: string;
+}
+
+export interface WireToolGrantScopeUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantScope = WireToolGrantScopeWindow | WireToolGrantScopeCurrentRun | WireToolGrantScopeUnknown;
+
+export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "run_ended" | "unknown";
+
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "run" | "recovery" | "build" | "unknown";
+
+export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
+
+export interface WireToolGrantAuditEventGranted {
+  expires_at_ms: number;
+  grant_id: string;
+  issuer: WireToolGrantIssuer;
+  kind: "granted";
+  reason?: string | null;
+  scope?: WireToolGrantScope;
+  target: WireToolGrantTarget;
+}
+
+export interface WireToolGrantAuditEventExpired {
+  driver: WireToolGrantExpiryDriver;
+  expires_at_ms: number;
+  grant_id: string;
+  kind: "expired";
+  observed_at_ms: number;
+}
+
+export interface WireToolGrantAuditEventRevoked {
+  actor?: string | null;
+  grant_id: string;
+  kind: "revoked";
+  observed_at_ms: number;
+  reason?: string | null;
+}
+
+export interface WireToolGrantAuditEventRefused {
+  call_id: string;
+  grant_id?: string | null;
+  kind: "refused";
+  reason: WireToolGrantRefusalKind;
+  run_id?: string | null;
+  tool: string;
+}
+
+export interface WireToolGrantAuditEventRunEnded {
+  driver: WireToolGrantExpiryDriver;
+  grant_id: string;
+  kind: "run_ended";
+  observed_at_ms: number;
+  run_id: string;
+}
+
+export interface WireToolGrantAuditEventUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventRunEnded | WireToolGrantAuditEventUnknown;
+
+export type WireToolGrantApplies = "now" | "not_mounted" | "at_next_build" | "unknown";
+
+export type InstructionSetErrorCode = "invalid_request" | "digest_mismatch" | "stale_revision" | "revision_conflict" | "unknown_slot" | "slot_limit_exceeded" | "body_too_large" | "active_set_budget_exceeded" | "owned_by_mob" | "owned_by_session" | "owned_by_other_mob" | "slot_managed_by_activation" | "durability_unavailable" | "mob_terminal" | "malformed_instruction_history" | "prepared_authorization_required";
+
+export type InstructionEffect = "absent" | "active";
+
+export type InstructionEntryKind = "delta" | "snapshot";
+
+export type WireInstructionPendingReason = "awaiting_run_start" | "leading_prefix_only_lowering" | "lowering_unavailable" | "session_unborn" | "delivery_owed";
+
+export type WireInstructionBlockReason = "member_host_unsupported" | "slot_managed_by_activation" | "durability_unavailable" | "owned_by_session" | "owned_by_other_mob";
+
+export type WireInstructionResidency = "live" | "dormant" | "unborn";
+
+export type WireInstructionLowering = "mid_conversation" | "leading_prefix_only" | "unavailable";
+
+export type WireSessionInstructionDisposition = "recorded" | "duplicate";
+
+export type WireMobInstructionDisposition = "committed" | "duplicate";
+
+export interface WireInstructionTargetMob {
+  kind: "mob";
+}
+
+export interface WireInstructionTargetProfile {
+  kind: "profile";
+  profile: string;
+}
+
+export interface WireInstructionTargetMember {
+  agent_identity: string;
+  kind: "member";
+}
+
+export type WireInstructionTarget = WireInstructionTargetMob | WireInstructionTargetProfile | WireInstructionTargetMember;
+
+export interface WireInstructionSlotStateEffective {
+  state: "effective";
+}
+
+export interface WireInstructionSlotStatePending {
+  reason: WireInstructionPendingReason;
+  state: "pending";
+}
+
+export interface WireInstructionSlotStateBlocked {
+  reason: WireInstructionBlockReason;
+  state: "blocked";
+}
+
+export interface WireInstructionSlotStateNotTargeted {
+  state: "not_targeted";
+}
+
+export type WireInstructionSlotState = WireInstructionSlotStateEffective | WireInstructionSlotStatePending | WireInstructionSlotStateBlocked | WireInstructionSlotStateNotTargeted;
+
+export interface WireInstructionTargetOwnerUnowned {
+  kind: "unowned";
+}
+
+export interface WireInstructionTargetOwnerSession {
+  kind: "session";
+}
+
+export interface WireInstructionTargetOwnerMob {
+  agent_identity: string;
+  kind: "mob";
+  mob_id: string;
+}
+
+export type WireInstructionTargetOwner = WireInstructionTargetOwnerUnowned | WireInstructionTargetOwnerSession | WireInstructionTargetOwnerMob;
+
+export interface WireMemberInstructionDeliveryStateCurrent {
+  state: "current";
+}
+
+export interface WireMemberInstructionDeliveryStateOwed {
+  generation: number;
+  last_failure?: string | null;
+  state: "owed";
+}
+
+export interface WireMemberInstructionDeliveryStateBlocked {
+  reason: WireInstructionBlockReason;
+  state: "blocked";
+}
+
+export type WireMemberInstructionDeliveryState = WireMemberInstructionDeliveryStateCurrent | WireMemberInstructionDeliveryStateOwed | WireMemberInstructionDeliveryStateBlocked;
+
+export interface WireInstructionEffectiveReadOk {
+  status: "ok";
+}
+
+export interface WireInstructionEffectiveReadUnreadable {
+  reason: string;
+  status: "unreadable";
+}
+
+export type WireInstructionEffectiveRead = WireInstructionEffectiveReadOk | WireInstructionEffectiveReadUnreadable;
+
+export interface DecisionAudienceApprover {
+  approver_id: string;
+  kind: "approver";
+}
+
+export interface DecisionAudienceReviewer {
+  kind: "reviewer";
+  reviewer: string;
+}
+
+export type DecisionAudienceRequest = DecisionAudienceApprover | DecisionAudienceReviewer;
+
+export type WireDecisionPhase = "open" | "approved" | "rejected" | "expired" | "withdrawn" | "executed" | "execution_refused" | "unknown";
+
+export type WireDecisionStage = "human" | "review" | "unknown";
+
+export type WireDecisionNoticeState = "not_required" | "not_due" | "owed" | "delivered" | "failed" | "unknown";
+
+export type WireDecisionNoticeEvent = "presented" | "unknown";
+
+export type WireDecisionTier = "human" | "review" | "unknown";
+
+export type WireDecisionAssurance = "person_authenticated" | "service_credential" | "device_trusted" | "unknown";
+
+export type WireDecisionReviewVerdict = "allow" | "deny" | "escalate" | "unknown";
+
+export interface WirePresentationAudienceApprover {
+  approver_id: string;
+  kind: "approver";
+}
+
+export interface WirePresentationAudienceReviewer {
+  kind: "reviewer";
+  reviewer: string;
+}
+
+export interface WirePresentationAudienceUnknown {
+  kind: "unknown";
+}
+
+export type WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown;
+
+export interface WireDecisionEvidenceHuman {
+  approve: boolean;
+  approver_id: string;
+  assurance: WireDecisionAssurance;
+  decider: string;
+  event_ref: string;
+  ingress: string;
+  kind: "human";
+  observed_at_ms?: number | null;
+  presentation?: Record<string, unknown> | null;
+  presented_digest: string;
+  reason?: string | null;
+}
+
+export interface WireDecisionEvidenceReview {
+  feedback?: string | null;
+  kind: "review";
+  origin_session: string;
+  presented_digest: string;
+  reviewer: string;
+  verdict: WireDecisionReviewVerdict;
+  verdict_call_ref: string;
+}
+
+export interface WireDecisionEvidenceUnknown {
+  kind: "unknown";
+}
+
+export type WireDecisionEvidence = WireDecisionEvidenceHuman | WireDecisionEvidenceReview | WireDecisionEvidenceUnknown;
+
+export interface WireDecisionRefusalInvalidWindow {
+  kind: "invalid_window";
+}
+
+export interface WireDecisionRefusalSelfReview {
+  kind: "self_review";
+}
+
+export interface WireDecisionRefusalHoldConflict {
+  kind: "hold_conflict";
+}
+
+export interface WireDecisionRefusalNotOpen {
+  kind: "not_open";
+}
+
+export interface WireDecisionRefusalExpired {
+  kind: "expired";
+}
+
+export interface WireDecisionRefusalSubjectChanged {
+  kind: "subject_changed";
+}
+
+export interface WireDecisionRefusalPresentationIncomplete {
+  kind: "presentation_incomplete";
+}
+
+export interface WireDecisionRefusalWrongAudience {
+  kind: "wrong_audience";
+}
+
+export interface WireDecisionRefusalReviewStage {
+  kind: "review_stage";
+}
+
+export interface WireDecisionRefusalHumanStage {
+  kind: "human_stage";
+}
+
+export interface WireDecisionRefusalEvidenceRequired {
+  kind: "evidence_required";
+}
+
+export interface WireDecisionRefusalNotEligible {
+  kind: "not_eligible";
+}
+
+export interface WireDecisionRefusalSelfApproval {
+  kind: "self_approval";
+}
+
+export interface WireDecisionRefusalWrongReviewer {
+  kind: "wrong_reviewer";
+}
+
+export interface WireDecisionRefusalNotRequester {
+  kind: "not_requester";
+}
+
+export interface WireDecisionRefusalNotApproved {
+  kind: "not_approved";
+}
+
+export interface WireDecisionRefusalBindingMismatch {
+  kind: "binding_mismatch";
+}
+
+export interface WireDecisionRefusalNotAuthorized {
+  kind: "not_authorized";
+}
+
+export interface WireDecisionRefusalSettlementOwed {
+  kind: "settlement_owed";
+}
+
+export interface WireDecisionRefusalNotOwed {
+  kind: "not_owed";
+}
+
+export interface WireDecisionRefusalDecidedBeforePresentation {
+  kind: "decided_before_presentation";
+}
+
+export type WireDecisionRefusal = WireDecisionRefusalInvalidWindow | WireDecisionRefusalSelfReview | WireDecisionRefusalHoldConflict | WireDecisionRefusalNotOpen | WireDecisionRefusalExpired | WireDecisionRefusalSubjectChanged | WireDecisionRefusalPresentationIncomplete | WireDecisionRefusalWrongAudience | WireDecisionRefusalReviewStage | WireDecisionRefusalHumanStage | WireDecisionRefusalEvidenceRequired | WireDecisionRefusalNotEligible | WireDecisionRefusalSelfApproval | WireDecisionRefusalWrongReviewer | WireDecisionRefusalNotRequester | WireDecisionRefusalNotApproved | WireDecisionRefusalBindingMismatch | WireDecisionRefusalNotAuthorized | WireDecisionRefusalSettlementOwed | WireDecisionRefusalNotOwed | WireDecisionRefusalDecidedBeforePresentation;
+
+export interface WireDecisionErrorDataDecisionRefused {
+  decision_refusal: WireDecisionRefusal;
+  kind: "decision_refused";
+}
+
+export interface WireDecisionErrorDataDecisionNotFound {
+  kind: "decision_not_found";
+}
+
+export interface WireDecisionErrorDataDecisionUnreadable {
+  kind: "decision_unreadable";
+}
+
+export interface WireDecisionErrorDataCandidateLaunch {
+  kind: "candidate_launch";
+}
+
+export interface WireDecisionErrorDataNoDecisionStore {
+  kind: "no_decision_store";
+}
+
+export type WireDecisionErrorData = WireDecisionErrorDataDecisionRefused | WireDecisionErrorDataDecisionNotFound | WireDecisionErrorDataDecisionUnreadable | WireDecisionErrorDataCandidateLaunch | WireDecisionErrorDataNoDecisionStore;
 
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
@@ -1183,6 +1642,15 @@ export interface WireRunStopContributor {
   terminal?: WireInputTerminalOutcome | null;
 }
 
+export interface CompactSessionParams {
+  session_id: string;
+}
+
+export interface CompactSessionResult {
+  outcome: WireCompactionRequestOutcome;
+  session_id: string;
+}
+
 export interface ListSessionTranscriptRevisionsParams {
   limit?: number | null;
   offset?: number | null;
@@ -1414,6 +1882,396 @@ export interface WireSessionTranscriptRevision {
 export interface WireSessionTranscriptRevisionList {
   entries: Record<string, unknown>[];
   head_revision: string;
+}
+
+export interface WireToolGrant {
+  ended_at_ms?: number | null;
+  expires_at_ms: number;
+  grant_id: string;
+  issued_at_ms: number;
+  issuer: WireToolGrantIssuer;
+  reason?: string | null;
+  scope?: WireToolGrantScope;
+  status: WireToolGrantStatus;
+  subject: WireToolGrantSubject;
+  target: WireToolGrantTarget;
+}
+
+export interface WireUnreadableToolGrant {
+  detail: string;
+  grant_id: string;
+}
+
+export interface WireToolGrantAuditRow {
+  at_ms: number;
+  event: WireToolGrantAuditEvent;
+  sequence: number;
+}
+
+export interface WireUnreadableToolGrantAuditRow {
+  detail: string;
+  sequence: number;
+}
+
+export interface WireToolGrantGateEntries {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
+export interface WireToolGrantGateView {
+  gated?: WireToolGrantGateEntries;
+  not_mounted?: WireToolGrantGateEntries;
+}
+
+export interface WireMemberToolGrantGate {
+  next_build: WireToolGrantGateView;
+  running?: WireToolGrantGateView | null;
+}
+
+export interface GrantToolParams {
+  decision_ref?: string | null;
+  duration_ms?: number | null;
+  expires_at_ms?: number | null;
+  reason?: string | null;
+  scope?: ToolGrantScopeRequest | null;
+  subject: ToolGrantSubjectRequest;
+  target: ToolGrantTargetRequest;
+}
+
+export interface GrantToolResult {
+  applies?: WireToolGrantApplies | null;
+  grant: WireToolGrant;
+}
+
+export interface RevokeToolGrantParams {
+  grant_id: string;
+  reason?: string | null;
+}
+
+export interface RevokeToolGrantResult {
+  changed: boolean;
+  grant: WireToolGrant;
+}
+
+export interface ListToolGrantsParams {
+  include_ended?: boolean;
+  subject: ToolGrantSubjectRequest;
+}
+
+export interface ListToolGrantsResult {
+  gate?: WireMemberToolGrantGate | null;
+  grants: WireToolGrant[];
+  unreadable?: WireUnreadableToolGrant[];
+}
+
+export interface ToolGrantAuditParams {
+  after_sequence?: number | null;
+  limit?: number | null;
+  subject: ToolGrantSubjectRequest;
+}
+
+export interface ToolGrantAuditResult {
+  next_sequence?: number | null;
+  rows: WireToolGrantAuditRow[];
+  unreadable?: WireUnreadableToolGrantAuditRow[];
+}
+
+export interface InstructionSetErrorData {
+  instruction_set_code: InstructionSetErrorCode;
+}
+
+export interface WireInstructionSlotView {
+  effect: InstructionEffect;
+  revision: number;
+}
+
+export interface WireInstructionEffectiveSlot {
+  effect: InstructionEffect;
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  message_index: number;
+  revision: number;
+  run_id?: RunId | null;
+}
+
+export interface WireSessionInstructionSlot {
+  effective?: WireInstructionEffectiveSlot | null;
+  key: string;
+  namespace: string;
+  recorded?: WireInstructionSlotView | null;
+  state: WireInstructionSlotState;
+}
+
+export interface SetSessionInstructionParams {
+  body: string;
+  content_sha256?: string | null;
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+}
+
+export interface RevokeSessionInstructionParams {
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+}
+
+export interface SessionInstructionStatusParams {
+  session_id: string;
+}
+
+export interface SessionInstructionWriteResult {
+  disposition: WireSessionInstructionDisposition;
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+  target_generation: number;
+}
+
+export interface SessionInstructionStatusResult {
+  entry_sequence: number;
+  lowering?: WireInstructionLowering | null;
+  owner: WireInstructionTargetOwner;
+  session_id: string;
+  slots: WireSessionInstructionSlot[];
+  target_generation: number;
+}
+
+export interface WireInstructionRecord {
+  body_bytes?: number | null;
+  content_sha256?: string | null;
+  effect: InstructionEffect;
+  key: string;
+  namespace: string;
+  revision: number;
+  target: WireInstructionTarget;
+}
+
+export interface WireMemberInstructionSlot {
+  desired: WireInstructionSlotView;
+  effective?: WireInstructionEffectiveSlot | null;
+  key: string;
+  namespace: string;
+  recorded?: WireInstructionSlotView | null;
+  state: WireInstructionSlotState;
+}
+
+export interface WireMemberInstructionDelivery {
+  recorded_generation?: number | null;
+  state: WireMemberInstructionDeliveryState;
+}
+
+export interface WireMemberInstructionStatus {
+  agent_identity: string;
+  delivery: WireMemberInstructionDelivery;
+  effective_read: WireInstructionEffectiveRead;
+  live_channel_open: boolean;
+  profile: string;
+  residency: WireInstructionResidency;
+  slots: WireMemberInstructionSlot[];
+}
+
+export interface MobSetInstructionParams {
+  body: string;
+  content_sha256?: string | null;
+  key: string;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+  target: WireInstructionTarget;
+}
+
+export interface MobRevokeInstructionParams {
+  key: string;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+}
+
+export interface MobInstructionStatusParams {
+  agent_identity?: string | null;
+  key?: string | null;
+  limit?: number | null;
+  mob_id: string;
+  namespace?: string | null;
+  offset?: number | null;
+  profile?: string | null;
+}
+
+export interface MobInstructionWriteResult {
+  disposition: WireMobInstructionDisposition;
+  generation: number;
+  key: string;
+  matched_members: number;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+}
+
+export interface MobInstructionStatusResult {
+  desired: WireInstructionRecord[];
+  generation: number;
+  members: WireMemberInstructionStatus[];
+  mob_id: string;
+  next_offset?: number | null;
+}
+
+export interface WireCanonicalPart {
+  count: number;
+  index: number;
+  part_digest: string;
+}
+
+export interface WirePresentationLink {
+  reference: string;
+  served_digest: string;
+}
+
+export interface WirePresentationRecord {
+  at_ms: number;
+  audience: WirePresentationAudience;
+  channel_ref: string;
+  link?: WirePresentationLink | null;
+  max_part_bytes?: number | null;
+  message_ref: string;
+  parts_shown: WireCanonicalPart[];
+  subject_digest: string;
+}
+
+export interface WireDecisionOutcome {
+  evidence: WireDecisionEvidence;
+  tier: WireDecisionTier;
+}
+
+export interface WireDecisionEffect {
+  grant_id?: string | null;
+}
+
+export interface WireDecision {
+  approver_id: string;
+  created_at_ms: number;
+  deadline_at_ms: number;
+  decided_at_ms?: number | null;
+  decision_id: string;
+  effect?: WireDecisionEffect | null;
+  ended_at_ms?: number | null;
+  execution_refusal?: string | null;
+  first_presented_to_approver_at_ms?: number | null;
+  kind: string;
+  notice: WireDecisionNoticeState;
+  operation_id: string;
+  outcome?: WireDecisionOutcome | null;
+  permit_issued: boolean;
+  phase: WireDecisionPhase;
+  presentations?: WirePresentationRecord[];
+  renderer: string;
+  request?: unknown;
+  request_digest: string;
+  requester: string;
+  reviewer?: string | null;
+  revision: number;
+  stage: WireDecisionStage;
+  subject_digest: string;
+  subject_key: string;
+}
+
+export interface WireUnreadableDecision {
+  decision_id: string;
+  detail: string;
+}
+
+export interface DecisionPresentationRequest {
+  at_ms: number;
+  audience: DecisionAudienceRequest;
+  channel_ref: string;
+  link?: WirePresentationLink | null;
+  max_part_bytes?: number | null;
+  message_ref: string;
+  parts_shown: WireCanonicalPart[];
+  subject_digest: string;
+}
+
+export interface DecisionListParams {
+  after?: string | null;
+  approver_id?: string | null;
+  kind?: string | null;
+  limit?: number | null;
+  phase?: WireDecisionPhase | null;
+  requester?: string | null;
+}
+
+export interface DecisionListResult {
+  decisions: WireDecision[];
+  next_after?: string | null;
+  unreadable?: WireUnreadableDecision[];
+}
+
+export interface DecisionGetParams {
+  decision_id: string;
+  include_request?: boolean;
+}
+
+export interface DecisionResult {
+  decision: WireDecision;
+}
+
+export interface DecisionRenderingParams {
+  decision_id: string;
+  max_part_bytes?: number | null;
+}
+
+export interface DecisionRenderingResult {
+  decision_id: string;
+  max_part_bytes?: number | null;
+  parts: WireCanonicalPart[];
+  renderer: string;
+  rendering: string;
+  subject_digest: string;
+}
+
+export interface DecisionPresentParams {
+  decision_id: string;
+  presentation: DecisionPresentationRequest;
+}
+
+export interface DecisionWithdrawParams {
+  decision_id: string;
+}
+
+export interface WireDecisionNoticePresentation {
+  parts: WireCanonicalPart[];
+  renderer: string;
+  rendering: string;
+  subject_digest: string;
+}
+
+export interface WireDecisionNotice {
+  approver_id: string;
+  decision_id: string;
+  event: WireDecisionNoticeEvent;
+  kind: string;
+  notice_id: string;
+  phase: WireDecisionPhase;
+  presentation?: WireDecisionNoticePresentation | null;
+  requester: string;
+}
+
+export interface RequestToolGrantParams {
+  duration_ms: number;
+  reason?: string | null;
+  scope?: ToolGrantScopeRequest | null;
+  subject: ToolGrantSubjectRequest;
+  target: ToolGrantTargetRequest;
+}
+
+export interface RequestToolGrantResult {
+  decision: WireDecision;
+  grant: WireToolGrant;
 }
 
 export interface CallbackToolExecutionFast {
@@ -1718,13 +2576,25 @@ export interface MobCreateResult {
   mob_id: string;
 }
 
+export interface WireQuarantinedMob {
+  attempts?: number;
+  class: WireMobQuarantineClass;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | "ADMISSION_IN_PROGRESS" | "ADMISSION_FENCE_UNAVAILABLE" | null;
+  message: string;
+  mob_id: string;
+  retryable: boolean;
+  retrying?: boolean;
+  structured_data?: unknown;
+}
+
 export interface MobListResult {
   mobs: Record<string, unknown>[];
+  quarantined?: WireQuarantinedMob[];
 }
 
 export interface WireMobLifecycleFailure {
   cause: MobSpawnManyFailureCause;
-  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | "ADMISSION_IN_PROGRESS" | "ADMISSION_FENCE_UNAVAILABLE" | null;
   message: string;
   structured_data?: unknown;
 }
@@ -1869,10 +2739,18 @@ export interface WireMemberCustodyDeferral {
   restore: WireMemberCustodyRestore;
 }
 
+export interface WireGrantGatedTools {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -2266,6 +3144,23 @@ export interface MobHelperResult {
   usage: Record<string, unknown>;
 }
 
+export interface MobForkMemberParams {
+  agent_identity: string;
+  message_index?: number | null;
+  mob_id: string;
+  profile?: string | null;
+  runtime_mode?: WireMobRuntimeMode | null;
+  source_member_id: string;
+}
+
+export interface MobForkMemberResult {
+  agent_identity: string;
+  member_ref: WireMemberRef;
+  message_count: number;
+  session_id: string;
+  source_session_id: string;
+}
+
 export interface MobForceCancelResult {
   cancelled: boolean;
 }
@@ -2341,6 +3236,11 @@ export interface MobRotateSupervisorResult {
   mob_id: string;
   ok: boolean;
   report: SupervisorRotationReportWire;
+}
+
+export interface MobRestoreRetryResult {
+  mob_id: string;
+  outcome: WireMobRestoreRetryOutcome;
 }
 
 export interface MobClaimCallbackRouteParams {
@@ -2450,6 +3350,7 @@ export interface MobProfileDeleteResult {
 
 export interface MobStreamOpenParams {
   agent_identity?: string | null;
+  cursor?: MobStreamCursor | null;
   mob_id: string;
 }
 
@@ -2607,6 +3508,17 @@ export interface MobStopMemberRunResult {
   agent_identity: string;
   mob_id: string;
   receipt: WireRunStopReceipt;
+}
+
+export interface MobCompactMemberParams {
+  agent_identity: string;
+  mob_id: string;
+}
+
+export interface MobCompactMemberResult {
+  agent_identity: string;
+  mob_id: string;
+  outcome: WireCompactionRequestOutcome;
 }
 
 export interface MobMemberLiveOpenParams {
@@ -2784,6 +3696,7 @@ export interface MobToolConfigInput {
   bundles?: string[];
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -3018,6 +3931,11 @@ export interface WireProviderParamsOverride {
   top_p?: number | null;
 }
 
+export interface MobStreamCursor {
+  epoch: string;
+  seq: number;
+}
+
 export interface AttentionBindingRequest {
   binding_id: string;
   namespace?: string | null;
@@ -3056,6 +3974,7 @@ export interface GoalStatusResult {
 }
 
 export interface ReadyWorkFilter {
+  cursor?: string | null;
   labels?: string[];
   limit?: number | null;
   namespace?: string | null;
@@ -3084,7 +4003,10 @@ export interface WorkGraphEventFilter {
 }
 
 export interface WorkGraphEventsResponse {
+  event_high_water_mark?: number | null;
   events: WorkGraphEvent[];
+  next_after_seq?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphIdParams {
@@ -3094,23 +4016,34 @@ export interface WorkGraphIdParams {
 }
 
 export interface WorkGraphItemsResponse {
+  anchor_event_seq?: number | null;
+  changed_since_anchor?: boolean | null;
   items: WorkItem[];
+  next_cursor?: string | null;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshot {
   all_namespaces: boolean;
+  anchor_event_seq?: number | null;
   attention?: WorkAttentionBinding[];
   captured_at: string;
+  changed_since_anchor?: boolean | null;
   edges: WorkEdge[];
   event_high_water_mark?: number | null;
   items: WorkItem[];
   namespace?: string | null;
+  next_cursor?: string | null;
   ready_item_ids: string[];
   realm_id: string;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshotFilter {
   all_namespaces?: boolean;
+  cursor?: string | null;
   include_terminal?: boolean;
   labels?: string[];
   limit?: number | null;
@@ -3147,6 +4080,7 @@ export interface WorkItem {
 
 export interface WorkItemFilter {
   all_namespaces?: boolean;
+  cursor?: string | null;
   include_terminal?: boolean;
   labels?: string[];
   limit?: number | null;
@@ -3178,6 +4112,7 @@ export interface WorkEvidenceRef {
   kind: string;
   label?: string | null;
   summary?: string | null;
+  withdraws?: string[];
 }
 
 export interface WorkGraphEvent {
@@ -3512,7 +4447,7 @@ export interface WireFlowTurnOutcomeInteractionFailed {
 
 export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
 
-export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable";
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "source_unavailable";
 
 export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
 
@@ -3577,7 +4512,11 @@ export interface ForkInstructionRefusalCauseMemberHostUnsupported {
   kind: "member_host_unsupported";
 }
 
-export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported;
+export interface ForkInstructionRefusalCauseHeadBodyRetired {
+  kind: "head_body_retired";
+}
+
+export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported | ForkInstructionRefusalCauseHeadBodyRetired;
 
 export interface ForkInstructionRefusal {
   cause: ForkInstructionRefusalCause;
@@ -3945,7 +4884,7 @@ export type WireReachability = "reachable" | "stale" | "unreachable" | "unknown"
 
 export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_tools" | "mob_default_external_tools" | "default_llm_client_override" | "host_surface_mcp_allowlist" | "workgraph_tools";
 
-export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring";
+export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring" | "store_refused";
 
 export type WireMemberRegistrationHookCall = "select_destination" | "select_agent_mandate" | "prepare_member_surface" | "verify_member_surface";
 
@@ -3972,7 +4911,11 @@ export type WireContinuationStatus = WireContinuationStatusPending | WireContinu
 
 export type WireMemberCustodyRestore = "startup_binding" | "cleanup_delivery";
 
-export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable";
+export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable" | "store_unavailable" | "store_unreadable";
+
+export type WireMobQuarantineClass = "store_unavailable" | "store_unreadable" | "resume_refused";
+
+export type WireMobRestoreRetryOutcome = "restored" | "held" | "settled" | "not_quarantined";
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
@@ -4890,6 +5833,7 @@ export interface BridgeCommandMaterializeMember {
   fence_token: number;
   forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
+  instruction_target?: Record<string, unknown> | null;
   launch: { mode: "fresh" } | Record<string, unknown>;
   prompt_context_fork?: Record<string, unknown> | null;
   protocol_version: BridgeProtocolVersion;
@@ -5017,7 +5961,28 @@ export interface BridgeCommandReadMemberVisibleTools {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools;
+export interface BridgeCommandRecordMemberInstructionTarget {
+  binding_generation: number;
+  command: "record_member_instruction_target";
+  epoch: number;
+  member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  target: Record<string, unknown>;
+}
+
+export interface BridgeCommandReleaseMemberInstructionTarget {
+  agent_identity: string;
+  binding_generation: number;
+  command: "release_member_instruction_target";
+  epoch: number;
+  member_session_id: string;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools | BridgeCommandRecordMemberInstructionTarget | BridgeCommandReleaseMemberInstructionTarget;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -5233,7 +6198,15 @@ export interface BridgeRejectionCauseForkInstructionRefused {
   fork_instruction_refused: BridgeRejectionCauseForkInstructionRefusedPayload;
 }
 
-export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused;
+export interface BridgeRejectionCauseInstructionTargetRefusedPayload {
+  code: "invalid_request" | "digest_mismatch" | "stale_revision" | "revision_conflict" | "unknown_slot" | "slot_limit_exceeded" | "body_too_large" | "active_set_budget_exceeded" | "owned_by_mob" | "owned_by_session" | "owned_by_other_mob" | "slot_managed_by_activation" | "durability_unavailable" | "mob_terminal" | "malformed_instruction_history" | "prepared_authorization_required";
+}
+
+export interface BridgeRejectionCauseInstructionTargetRefused {
+  instruction_target_refused: BridgeRejectionCauseInstructionTargetRefusedPayload;
+}
+
+export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused | BridgeRejectionCauseInstructionTargetRefused;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -5436,7 +6409,18 @@ export interface BridgeReplyMemberVisibleTools {
   result: "member_visible_tools";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools;
+export interface BridgeReplyMemberInstructionTargetRecorded {
+  disposition: "recorded" | "already_recorded";
+  result: "member_instruction_target_recorded";
+  target_generation: number;
+}
+
+export interface BridgeReplyMemberInstructionTargetReleased {
+  disposition?: "released" | "already_unowned" | null;
+  result: "member_instruction_target_released";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools | BridgeReplyMemberInstructionTargetRecorded | BridgeReplyMemberInstructionTargetReleased;
 
 export interface ContentBlockText {
   text: string;
@@ -6939,7 +7923,12 @@ export interface WireAuthErrorCredentialStoreUnavailable {
   kind: "credential_store_unavailable";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable;
+export interface WireAuthErrorSourceUnavailable {
+  detail: string;
+  kind: "source_unavailable";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 
@@ -7558,7 +8547,9 @@ export interface WireSessionMessageSystem {
   created_at: string;
   identity?: Record<string, unknown> | null;
   instruction_activation?: InstructionActivationIdentity | null;
+  instruction_entry?: Record<string, unknown> | unknown | null;
   prompt_version?: SystemPromptVersionIdentity | null;
+  retired_instruction_body?: Record<string, unknown> | unknown | null;
   role: "system";
 }
 
@@ -7663,7 +8654,12 @@ export function parseWorkGraphEvent(value: unknown): WorkGraphEvent {
 export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsResponse {
   const data = expectWireObject(value, "WorkGraphItemsResponse");
   return {
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkGraphItemsResponse.anchor_event_seq") }),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkGraphItemsResponse.changed_since_anchor") }),
     items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items").map((entry) => parseWorkItem(entry)),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkGraphItemsResponse.next_cursor") }),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphItemsResponse.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphItemsResponse.truncated") }),
   };
 }
 
@@ -7671,7 +8667,10 @@ export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsRespo
 export function parseWorkGraphEventsResponse(value: unknown): WorkGraphEventsResponse {
   const data = expectWireObject(value, "WorkGraphEventsResponse");
   return {
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphEventsResponse.event_high_water_mark") }),
     events: expectWireArray(requireWireField(data, "events", "WorkGraphEventsResponse"), "WorkGraphEventsResponse.events").map((entry) => parseWorkGraphEvent(entry)),
+    ...(data["next_after_seq"] === undefined || data["next_after_seq"] === null ? {} : { next_after_seq: expectWireInteger(data["next_after_seq"], "WorkGraphEventsResponse.next_after_seq") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphEventsResponse.truncated") }),
   };
 }
 
@@ -7680,14 +8679,19 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
   const data = expectWireObject(value, "WorkGraphSnapshot");
   return {
     all_namespaces: expectWireBoolean(requireWireField(data, "all_namespaces", "WorkGraphSnapshot"), "WorkGraphSnapshot.all_namespaces"),
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkGraphSnapshot.anchor_event_seq") }),
     ...(data["attention"] === undefined || data["attention"] === null ? {} : { attention: expectWireArray(data["attention"], "WorkGraphSnapshot.attention").map((entry) => parseWorkAttentionBinding(entry)) }),
     captured_at: expectWireString(requireWireField(data, "captured_at", "WorkGraphSnapshot"), "WorkGraphSnapshot.captured_at"),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkGraphSnapshot.changed_since_anchor") }),
     edges: expectWireArray(requireWireField(data, "edges", "WorkGraphSnapshot"), "WorkGraphSnapshot.edges").map((entry) => parseWorkEdge(entry)),
     ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphSnapshot.event_high_water_mark") }),
     items: expectWireArray(requireWireField(data, "items", "WorkGraphSnapshot"), "WorkGraphSnapshot.items").map((entry) => parseWorkItem(entry)),
     ...(data["namespace"] === undefined || data["namespace"] === null ? {} : { namespace: expectWireString(data["namespace"], "WorkGraphSnapshot.namespace") }),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkGraphSnapshot.next_cursor") }),
     ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids").map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphSnapshot"), "WorkGraphSnapshot.realm_id"),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphSnapshot.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphSnapshot.truncated") }),
   };
 }
 
@@ -7695,7 +8699,12 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
 export function parseWorkItemsResult(value: unknown): WorkItemsResult {
   const data = expectWireObject(value, "WorkItemsResult");
   return {
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkItemsResult.anchor_event_seq") }),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkItemsResult.changed_since_anchor") }),
     items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items"),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkItemsResult.next_cursor") }),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkItemsResult.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkItemsResult.truncated") }),
   };
 }
 
@@ -7703,7 +8712,10 @@ export function parseWorkItemsResult(value: unknown): WorkItemsResult {
 export function parseWorkEventsResult(value: unknown): WorkEventsResult {
   const data = expectWireObject(value, "WorkEventsResult");
   return {
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkEventsResult.event_high_water_mark") }),
     events: expectWireArray(requireWireField(data, "events", "WorkEventsResult"), "WorkEventsResult.events"),
+    ...(data["next_after_seq"] === undefined || data["next_after_seq"] === null ? {} : { next_after_seq: expectWireInteger(data["next_after_seq"], "WorkEventsResult.next_after_seq") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkEventsResult.truncated") }),
   };
 }
 
@@ -7778,6 +8790,7 @@ export function parseWorkEvidenceRef(value: unknown): WorkEvidenceRef {
     kind: expectWireString(requireWireField(data, "kind", "WorkEvidenceRef"), "WorkEvidenceRef.kind"),
     ...(data["label"] === undefined || data["label"] === null ? {} : { label: expectWireString(data["label"], "WorkEvidenceRef.label") }),
     ...(data["summary"] === undefined || data["summary"] === null ? {} : { summary: expectWireString(data["summary"], "WorkEvidenceRef.summary") }),
+    ...(data["withdraws"] === undefined || data["withdraws"] === null ? {} : { withdraws: expectWireArray(data["withdraws"], "WorkEvidenceRef.withdraws").map((entry) => expectWireString(entry, "WorkEvidenceRef.withdraws[]")) }),
   };
 }
 

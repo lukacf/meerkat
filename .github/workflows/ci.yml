@@ -14,16 +14,25 @@ name: CI
 #   changes         - changed-path classification (packages, shards, closure,
 #                     conditional-lane flags, what a PR left to the push)
 #   fmt-governance  - always: fmt, docs, semver self-test, version parity,
-#                     lock consistency, classifier self-tests, and the
+#                     lock consistency, release-tooling self-tests, and the
 #                     ripgrep tombstone scans (legacy surface names,
 #                     session-control routes, deprecated backend)
+#   ci-lanes-selftest - always, beside fmt-governance: make
+#                     ci-lanes-selftest (the lane classifier, the gate's
+#                     consistency with the job conditions, release-projection
+#                     reuse, the non-Rust reader inventory)
+#   path-classifier-selftest - always, beside fmt-governance: make
+#                     path-classifier-selftest (the shell path classifiers,
+#                     the TLC lane parts, gate wiring)
 #   ratchets        - generated-contract freshness when contract paths
 #                     changed; machine/protocol drift when machine authority
-#                     changed
-#   governance-gates - the typed governance gates (rmat-audit, seam-inventory,
-#                     runtime authority, machine-authority docs) when machine
-#                     authority or a dogma document changed
-#   tlc-audits      - (x8) the hand-written TLC audit shards on a
+#                     changed; the runtime authority bypass audit when Rust,
+#                     machine authority or a dogma document changed
+#   governance-gates - the typed governance gates (rmat-audit, seam-inventory)
+#                     when machine authority or a dogma document changed
+#   governance-docs-gate - the machine-authority docs gate, on the same
+#                     changes, in parallel with governance-gates
+#   tlc-audits      - (x24) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-features over every target; in a
@@ -73,10 +82,12 @@ name: CI
 #                     (scripts/pre-push-unit.sh) for the test scope
 #   closure-check   - cargo check --all-features (lib and bin targets) over
 #                     the reverse-dependency closure of the changed packages
-#   rustdoc         - (x2) cargo doc --workspace --no-deps with rustdoc's
-#                     lints denied (RUSTDOCFLAGS=-Dwarnings), one leg with
-#                     default features and one with --all-features: every
-#                     crate's documentation and its intra-doc links
+#   rustdoc         - (xN) cargo doc --no-deps with rustdoc's lints denied
+#                     (RUSTDOCFLAGS=-Dwarnings): Core's members in one leg
+#                     with default features and one with --all-features,
+#                     each product's packages the change reaches with
+#                     --all-features: every crate's documentation and its
+#                     intra-doc links
 #   feature-check   - (xN, two per clippy shard) compile-only checks of the
 #                     shard's packages under their Bazel feature sets (tests
 #                     included) and the `make test-minimal` /
@@ -225,7 +236,7 @@ env:
   # reuse (rust-cache + sccache) requires registry source paths that do not
   # change between runs.
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
@@ -336,8 +347,8 @@ jobs:
       release_evidence_run_attempt: ${{ steps.plan.outputs.release_evidence_run_attempt }}
       package_count: ${{ steps.plan.outputs.package_count }}
       closure_count: ${{ steps.plan.outputs.closure_count }}
-      closure_flags: ${{ steps.plan.outputs.closure_flags }}
       closure_check: ${{ steps.plan.outputs.closure_check }}
+      closure_check_matrix: ${{ steps.plan.outputs.closure_check_matrix }}
       rustdoc: ${{ steps.plan.outputs.rustdoc }}
       governed_jsonl: ${{ steps.plan.outputs.governed_jsonl }}
       mcp_confinement_positive: ${{ steps.plan.outputs.mcp_confinement_positive }}
@@ -379,6 +390,14 @@ jobs:
       feature_check_rest_count: ${{ steps.plan.outputs.feature_check_rest_count }}
       feature_check_matrix: ${{ steps.plan.outputs.feature_check_matrix }}
       feature_check_rest_matrix: ${{ steps.plan.outputs.feature_check_rest_matrix }}
+      core_changed: ${{ steps.plan.outputs.core_changed }}
+      core_paths_changed: ${{ steps.plan.outputs.core_paths_changed }}
+      rustdoc_matrix: ${{ steps.plan.outputs.rustdoc_matrix }}
+      products_changed: ${{ steps.plan.outputs.products_changed }}
+      floor_check_count: ${{ steps.plan.outputs.floor_check_count }}
+      floor_check_matrix: ${{ steps.plan.outputs.floor_check_matrix }}
+      downstream_products: ${{ steps.plan.outputs.downstream_products }}
+      connect_checks: ${{ steps.plan.outputs.connect_checks }}
     steps:
       # Depth 2 is HEAD and its parents. The classifier diffs a pull
       # request's merge commit against its first parent, or a push against
@@ -490,7 +509,7 @@ jobs:
           node scripts/ci-cargo-lanes.mjs --format github --event "${EVENT_NAME}" \
             --base "${plan_base}" --head HEAD "${plan_args[@]}" \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|shard_rest_matrix|unit_shard_matrix|main_unit_shard_matrix|main_unit_rest_shard_matrix|closure_test_rest_matrix|feature_check_rest_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|closure_test_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|closure_check_matrix|shard_matrix|shard_rest_matrix|unit_shard_matrix|main_unit_shard_matrix|main_unit_rest_shard_matrix|closure_test_rest_matrix|feature_check_rest_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|closure_test_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   stagger:
     name: Stagger the short rows
@@ -510,6 +529,9 @@ jobs:
   fmt-governance:
     name: Format + governance
     runs-on: ubuntu-24.04
+    # The planner self-tests run beside this job, in ci-lanes-selftest and
+    # path-classifier-selftest. The steps left here took 340-542 s on the
+    # monorepo pull requests of 2026-11-02..03.
     timeout-minutes: 20
     env:
       RUSTC_WRAPPER: sccache
@@ -606,15 +628,13 @@ jobs:
           make published-crates-standalone-selftest
           make check-published-crates-standalone-guard
 
-      - name: CI lane classifier fails closed
-        run: make ci-lanes-selftest
-
-      # The shell path classifiers (scripts/machine-authority-changed, the
-      # remote-graph edge classifier and scripts/cargo-agent-gate) silently
-      # stopped matching after the crates/ layout move because nothing ran
-      # their pinning tests.
-      - name: Path classifiers route gate inputs
-        run: make path-classifier-selftest
+      # The test-feature canary (each Core crate's lib.rs) must stop a test
+      # binary built without the crate's test features and nothing else: a
+      # fixture crate with the same canary, on the pinned toolchain, fails
+      # here if a toolchain evaluates it in check builds or stops evaluating
+      # it in code generation. A few seconds.
+      - name: Test-feature canary trips test code generation only
+        run: make test-feature-canary-selftest
 
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
@@ -672,6 +692,95 @@ jobs:
 
       - name: Deprecated backend stays unreferenced
         run: make deprecated-backend-gate
+
+      # The Mintlify parse and link check of the docs site (docs/, the Meta
+      # mirror included) and of Meta's source pages (meta/docs), last in the
+      # job on the Node.js it sets up itself. publish-meta-docs.yml runs the
+      # same check on docs/ only after a merge to main, where an MDX error (a
+      # raw angle-bracket placeholder in prose, or a code span broken across
+      # lines inside a component, say) fails the publication; here it fails
+      # the pull request instead. The mint version is the one
+      # publish-meta-docs.yml pins; change both together. Each directory's
+      # .mintignore keeps its internal records, which MDX cannot parse, out
+      # of the check.
+      - name: Setup Node.js for the Mintlify docs parse
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Mintlify parse and links (docs)
+        working-directory: docs
+        run: npx --yes mint@4.2.728 broken-links
+
+      - name: Mintlify parse and links (meta/docs)
+        working-directory: meta/docs
+        run: npx --yes mint@4.2.728 broken-links
+
+  # The planner self-tests, beside Format + governance rather than inside it:
+  # on the monorepo pull requests of 2026-11-02..03 the two took 767-1237 s
+  # of that job's 1107-1710 s, past the 1080-second lane budget. Like it,
+  # they run on every event, wait for no plan (ROOT_JOB_NAMES in the CI
+  # gate's budget step) and are required by the CI gate. They compile
+  # nothing: cargo only reads metadata, so they restore the registry cache
+  # and start no sccache.
+  ci-lanes-selftest:
+    name: CI lane classifier selftest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # Depth 2, the checkout these self-tests had in Format + governance;
+      # the release-projection self-tests fetch the older commits they read.
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          # The registry entry every lane shares (fmt-governance's comment).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: CI lane classifier fails closed
+        run: make ci-lanes-selftest
+
+  path-classifier-selftest:
+    name: Path classifier selftest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 2
+
+      # The edge classifier's self-test and the affected-test selection's
+      # end-to-end cases read cargo metadata.
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          # The registry entry every lane shares (fmt-governance's comment).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      # The path classifiers (scripts/machine-authority-changed, the
+      # remote-graph edge classifier, the local affected-test selection in
+      # scripts/affected-tests.mjs) run their pinning tests here: the shell
+      # ones silently stopped matching after the crates/ layout move because
+      # nothing ran them.
+      - name: Path classifiers route gate inputs
+        run: make path-classifier-selftest
 
   ratchets:
     name: Generation ratchets
@@ -823,16 +932,28 @@ jobs:
         if: ${{ needs.changes.outputs.machine_authority == 'true' || needs.changes.outputs.machine_posters == 'true' }}
         run: make verify-machine-poster-coverage
 
+      # The runtime authority bypass audit reads every production Rust source
+      # of the workspace: the raw runtime queue calls, and the callers of the
+      # session service's mob-only operator-instruction entry points, which
+      # any crate could add. It runs on every pull request that changes Rust
+      # or a governance path, in this job, which every pull request runs;
+      # after the poster check it reuses that step's xtask build.
+      # `make runtime-authority-bypass` is the same command locally.
+      - name: Runtime authority bypass audit
+        if: ${{ needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.governance_gates == 'true' }}
+        run: make runtime-authority-bypass
+
   # The typed governance gates over the live workspace: the effect-authority,
-  # ownership-ledger and strict RMAT audits, the strict seam inventory, the
-  # runtime authority bypass audit and the machine-authority docs alignment
-  # test. They run on the agent gate's governance paths (machine authority
-  # or a dogma document; governance_gates in scripts/ci-cargo-lanes.mjs),
-  # where the pre-push hook's changed-path ratchets ran them before every
-  # push; the hook no longer runs them, and no other per-push lane does. A
-  # job of its own, beside `ratchets`: they took 400 s locally, 114 s of it
-  # building xtask, which after the drift checks would hold the ratchets job
-  # past the pull-request lane target.
+  # ownership-ledger and strict RMAT audits, the strict seam inventory and
+  # the machine-authority docs alignment test (the runtime authority bypass
+  # audit runs in `ratchets`, on every Rust change). They run on the agent
+  # gate's governance paths (machine authority or a dogma document;
+  # governance_gates in scripts/ci-cargo-lanes.mjs), where the pre-push
+  # hook's changed-path ratchets ran them before every push; the hook no
+  # longer runs them, and no other per-push lane does. A job of its own,
+  # beside `ratchets`: they took 400 s locally, 114 s of it building xtask,
+  # which after the drift checks would hold the ratchets job past the
+  # pull-request lane target.
   governance-gates:
     name: Typed governance gates
     needs: changes
@@ -870,19 +991,68 @@ jobs:
           cache-on-failure: true
 
       - name: Typed governance gates
-        run: make rmat-audit seam-inventory runtime-authority-bypass machine-authority-docs-gate
+        run: make rmat-audit seam-inventory
+
+  # The machine-authority docs gate in a job of its own, beside the other
+  # typed governance gates: in one job the four gates ran 664-1048 s on
+  # hosted runners (runs 40399556131, 40402047748, 40411814108 and
+  # 40413996978), and the docs gate's own run is the part the others do not
+  # share. Both jobs take their compiled dependencies from sccache.
+  governance-docs-gate:
+    name: Typed governance gates (machine-authority docs)
+    needs: changes
+    if: ${{ needs.changes.outputs.governance_gates == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          # Registry only; compiled objects come from sccache (see ratchets).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Machine-authority docs gate
+        run: make machine-authority-docs-gate
 
   # Bounded TLC on machine-authority changes. The hand-written audits model
   # check the generated machines against their invariants and goals (drift
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: seven shards of 376-586 s of audits on a hosted
-  # runner (measured per audit in machine_verify_all_tlc_test.sh), where
-  # three shards ran 13-18 minutes or past the job timeout on runs
-  # 40721495692 and 40721504088, and an eighth for the controller hold
-  # audit with its mutants (100 s on a 4-worker local run, not yet measured
-  # on a hosted runner).
+  # fits the PR budget: twenty-four shards, which took 146-751 s each on the
+  # hosted runners of the 0.9.9 release pushes and up to 776 s on its pull
+  # requests, audits-f aside (1020 s, then its 20-minute timeout, before
+  # two of its audits moved out). machine_verify_all_tlc_test.sh lists
+  # every audit's and shard's hosted seconds; its assignment keeps each
+  # shard within about 720 s, 60 percent of the job timeout, except
+  # audits-n, one part of the identity entry audit (741-776 s), which gets
+  # shorter only when its part splits. The identity entry audit's entry and
+  # lifecycle runs take three shards (audits-l, audits-w and audits-x) since
+  # its single entry run reached the 900 s per-run cap, and its legacy run
+  # two (audits-m and audits-y) since one shard of it took 1182 s.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -892,12 +1062,19 @@ jobs:
     runs-on: ubuntu-24.04
     # On a pull request a shard past about 17.5 minutes fails the execution
     # budget anyway (CI_MAX_EXEC_SECONDS, 1080 s, less about 30 s of change
-    # classification); 20 leaves headroom over the expected 6-10 minutes.
-    timeout-minutes: 20
+    # classification), but a budget failure is reported while a cancelled
+    # shard is a failed lane. A shard is sized to about 13 minutes hosted
+    # (776 s, the longest shard of this assignment on the 0.9.9 release
+    # runs), but one audit cannot be split across shards: in 0.9.11
+    # audits-s takes 1109 s locally with 4 TLC workers, 756 s of it the
+    # AuthMachine source-credential publication audit alone, so about
+    # 2000-2400 s at the 1.8-2.15x hosted factor of its run class, past 30
+    # minutes. 60 leaves headroom.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v, audits-w, audits-x, audits-y]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.
@@ -923,7 +1100,22 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_first_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A push lints every target of a whole product or chain head, and
+    # splitting such a row saves little: every split row lints the library
+    # first. Meta's row lints meerkat-meta's library (14-16 minutes) before
+    # its 170 test targets, and took 39m41s of its 40 minutes on main push
+    # 41608949055, where meerkat-mob's change also left the chain below it
+    # uncached; meerkat-rpc's row took 29-37 minutes on recent pushes
+    # (37m26s on main push 41217791146). Connect's row needs more cold: on
+    # main push 42497143053 and release-branch push 42321043843 it reached
+    # meerkat-connect after 40 minutes and was cancelled at the old 60, and
+    # meerkat-connect alone takes 28 minutes (40m55s for the whole row with
+    # its dependencies cached, on that push's second attempt), so about 70
+    # minutes cold, as after a release version bump. A push gets 120 minutes.
+    # A pull request that invalidates meerkat-mob's build leaves the products'
+    # rows to the push, and its own rows took at most 18m38s cold (pull
+    # request run 42485928170); it gets 60.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1005,7 +1197,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}
@@ -1125,6 +1317,12 @@ jobs:
           # Set only on the rows of a partitioned lane (PARTITIONED_UNIT_PACKAGES):
           # the row builds the lane and runs one hash partition of its tests.
           PARTITION: ${{ matrix.partition }}
+          # Set only on feature-suite rows that filter their tests or carry
+          # known reds (FEATURE_UNIT_SUITES): the row runs without its known
+          # reds, then runs the ones that fail every time and needs each to fail.
+          FILTER: ${{ matrix.filter }}
+          KNOWN_REDS: ${{ matrix.known_reds }}
+          KNOWN_RED_COUNT: ${{ matrix.known_red_count }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a unit lane"; exit 1; }
@@ -1139,6 +1337,10 @@ jobs:
           if [[ -n "${PARTITION}" ]]; then
             partition_args=(--partition "${PARTITION}")
           fi
+          filter_args=()
+          if [[ -n "${FILTER}" ]]; then
+            filter_args=(-E "${FILTER}")
+          fi
           # Tests of crates that dev-depend on mcp-test-server spawn this exact
           # fixture and fail without it (mcp_test_server::fixture_binary).
           # shellcheck disable=SC2086
@@ -1147,9 +1349,43 @@ jobs:
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # meerkat-connect's Console process controls (resources::local_round)
+          # run a synthetic protocol child under an explicitly selected Python,
+          # its standard library only, and refuse to guess an interpreter.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+          if [[ -n "${KNOWN_REDS}" ]]; then
+            # Each known red must still fail, within the ci-known-reds bound: a
+            # fixed test leaves the known-red list and its debt page, and a
+            # renamed or deleted one, or one that hangs, fails the count.
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-known-reds -E "${KNOWN_REDS}" \
+              --color never --no-tests=fail --no-fail-fast --status-level fail --final-status-level none \
+              >"${RUNNER_TEMP}/known-reds.out" 2>&1 || true
+            if ! grep -Eq "^ *Summary \[[^]]*\] ${KNOWN_RED_COUNT} tests? run: 0 passed, ${KNOWN_RED_COUNT} failed(,|$)" "${RUNNER_TEMP}/known-reds.out"; then
+              cat "${RUNNER_TEMP}/known-reds.out"
+              echo "::error::each of the row's ${KNOWN_RED_COUNT} known reds must still fail: take a fixed or renamed test off the known-red list and its debt page"
+              exit 1
+            fi
+            grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1238,9 +1474,11 @@ jobs:
               "governed_jsonl::tests::ordinary_rpc_host_materializes_a_scheduled_fire_past_the_mandate_gate",
               "governed_jsonl::tests::rpc_runtimes_compose_the_realms_own_schedule_service",
           ])
+          # workspace-tests: meerkat-rpc's test feature, which every test
+          # build of it passes (scripts/core-workspace-args.mjs --tests).
           command = [
               "./scripts/repo-cargo", "test", "--locked", "-p", "meerkat-rpc", "--lib",
-              "--no-default-features", "--features", "local-authorization",
+              "--no-default-features", "--features", "local-authorization,workspace-tests",
               "governed_jsonl::tests::", "--",
           ]
 
@@ -1446,10 +1684,11 @@ jobs:
     # cold. On dispatch 39211283488, whose cache is read-only so every lane
     # compiled alone, the rpc-configured-turn-limit row was cancelled at 30
     # minutes with meerkat-rpc still compiling (it started 22m44s in), and
-    # gpt-live-replay took 28m52s there and 29m29s on main push 39213218053.
-    # A push or dispatch gets 50 minutes; a pull request runs only the suites
+    # gpt-live-replay took 28m52s there and 29m29s on main push 39213218053,
+    # then 37m44s and 40m28s on main pushes 42497143053 and 42463179911.
+    # A push or dispatch gets 70 minutes; a pull request runs only the suites
     # outside the chain and keeps 30.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 50 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 70 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.integration_matrix) }}
@@ -1552,10 +1791,13 @@ jobs:
     if: ${{ needs.changes.result == 'success' && needs.changes.outputs.closure_test_first_count != '0' }}
     runs-on: ubuntu-24.04
     # A cold row (no reusable units, as after a release version bump) builds
-    # for about 22 min before its tests run. The nested-Cargo canaries'
+    # for about 22 min before its tests run; Connect's rows build longer:
+    # tests connect 1/2 took 54m17s on main push 42497143053, and both
+    # Connect rows were cancelled at the old 60 minutes on release-branch
+    # push 42321043843. The nested-Cargo canaries'
     # binary has rows of its own, one count partition per canary, so the
     # canaries run side by side on separate runners instead of one at a time.
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_test_matrix) }}
@@ -1564,6 +1806,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # A row builds up to about 50 test binaries, each against the whole
+      # workspace, and three rows of the 40 push runs before 2026-11-07 ran
+      # the runner's root disk out of space ("No space left on device"; the
+      # runner died with the row's step unfinished). No step here uses these
+      # preinstalled toolchains; removing them takes the free root disk from
+      # 86 GB to 104 GB (Meta CI's jobs, which free it the same way).
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
@@ -1662,7 +1916,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.result == 'success' && needs.changes.outputs.closure_test_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_test_rest_matrix) }}
@@ -1671,6 +1925,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # As in the first wave: the runner's root disk is the limit.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
@@ -1756,7 +2017,16 @@ jobs:
     # branch can measure the main lanes before it merges.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_unit_first_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Connect's rows compile the longest: cold, as after a release version
+    # bump, the connect[console] and toolkit-mobkit[native-host] rows were
+    # cancelled at the old 60 minutes on main push 42497143053 and
+    # release-branch push 42321043843. On the first they reached
+    # meerkat-connect after 50 minutes (native-host), and meerkat-connect's
+    # test build alone took 42-44 minutes with every dependency cached (the
+    # second attempt of 42321043843: 47m40s and 52m49s for the rows' steps),
+    # so about 100-105 minutes cold. The hung-test kill of the ci-pr nextest
+    # profile bounds the test run; this cap bounds the build.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.main_unit_shard_matrix) }}
@@ -1805,6 +2075,12 @@ jobs:
           # Set only on the rows of a partitioned lane (PARTITIONED_UNIT_PACKAGES):
           # the row builds the lane and runs one hash partition of its tests.
           PARTITION: ${{ matrix.partition }}
+          # Set only on feature-suite rows that filter their tests or carry
+          # known reds (FEATURE_UNIT_SUITES): the row runs without its known
+          # reds, then runs the ones that fail every time and needs each to fail.
+          FILTER: ${{ matrix.filter }}
+          KNOWN_REDS: ${{ matrix.known_reds }}
+          KNOWN_RED_COUNT: ${{ matrix.known_red_count }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a main unit lane"; exit 1; }
@@ -1819,6 +2095,10 @@ jobs:
           if [[ -n "${PARTITION}" ]]; then
             partition_args=(--partition "${PARTITION}")
           fi
+          filter_args=()
+          if [[ -n "${FILTER}" ]]; then
+            filter_args=(-E "${FILTER}")
+          fi
           # Tests of crates that dev-depend on mcp-test-server spawn this exact
           # fixture and fail without it (mcp_test_server::fixture_binary).
           # shellcheck disable=SC2086
@@ -1827,9 +2107,43 @@ jobs:
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # meerkat-connect's Console process controls (resources::local_round)
+          # run a synthetic protocol child under an explicitly selected Python,
+          # its standard library only, and refuse to guess an interpreter.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+          if [[ -n "${KNOWN_REDS}" ]]; then
+            # Each known red must still fail, within the ci-known-reds bound: a
+            # fixed test leaves the known-red list and its debt page, and a
+            # renamed or deleted one, or one that hangs, fails the count.
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-known-reds -E "${KNOWN_REDS}" \
+              --color never --no-tests=fail --no-fail-fast --status-level fail --final-status-level none \
+              >"${RUNNER_TEMP}/known-reds.out" 2>&1 || true
+            if ! grep -Eq "^ *Summary \[[^]]*\] ${KNOWN_RED_COUNT} tests? run: 0 passed, ${KNOWN_RED_COUNT} failed(,|$)" "${RUNNER_TEMP}/known-reds.out"; then
+              cat "${RUNNER_TEMP}/known-reds.out"
+              echo "::error::each of the row's ${KNOWN_RED_COUNT} known reds must still fail: take a fixed or renamed test off the known-red list and its debt page"
+              exit 1
+            fi
+            grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -1849,7 +2163,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_unit_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.main_unit_rest_shard_matrix) }}
@@ -1895,6 +2209,12 @@ jobs:
           MIN_STACK: ${{ matrix.rust_min_stack }}
           # A partitioned lane's rows only (see main-unit).
           PARTITION: ${{ matrix.partition }}
+          # Set only on feature-suite rows that filter their tests or carry
+          # known reds (FEATURE_UNIT_SUITES): the row runs without its known
+          # reds, then runs the ones that fail every time and needs each to fail.
+          FILTER: ${{ matrix.filter }}
+          KNOWN_REDS: ${{ matrix.known_reds }}
+          KNOWN_RED_COUNT: ${{ matrix.known_red_count }}
         run: |
           set -euo pipefail
           [[ -n "${PACKAGES}" ]] || { echo "::error::empty package list in a main unit lane"; exit 1; }
@@ -1907,15 +2227,53 @@ jobs:
           if [[ -n "${PARTITION}" ]]; then
             partition_args=(--partition "${PARTITION}")
           fi
+          filter_args=()
+          if [[ -n "${FILTER}" ]]; then
+            filter_args=(-E "${FILTER}")
+          fi
           # shellcheck disable=SC2086
           fixture="$(scripts/mcp-test-server-fixture --if-needed ${PACKAGES})"
           if [[ -n "${fixture}" ]]; then
             export MEERKAT_MCP_TEST_SERVER="${fixture}"
             echo "mcp-test-server fixture: ${MEERKAT_MCP_TEST_SERVER}"
           fi
+          # meerkat-connect's Console process controls (resources::local_round)
+          # run a synthetic protocol child under an explicitly selected Python,
+          # its standard library only, and refuse to guess an interpreter.
+          TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
+          export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" \
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
+          if [[ -n "${KNOWN_REDS}" ]]; then
+            # Each known red must still fail, within the ci-known-reds bound: a
+            # fixed test leaves the known-red list and its debt page, and a
+            # renamed or deleted one, or one that hangs, fails the count.
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-known-reds -E "${KNOWN_REDS}" \
+              --color never --no-tests=fail --no-fail-fast --status-level fail --final-status-level none \
+              >"${RUNNER_TEMP}/known-reds.out" 2>&1 || true
+            if ! grep -Eq "^ *Summary \[[^]]*\] ${KNOWN_RED_COUNT} tests? run: 0 passed, ${KNOWN_RED_COUNT} failed(,|$)" "${RUNNER_TEMP}/known-reds.out"; then
+              cat "${RUNNER_TEMP}/known-reds.out"
+              echo "::error::each of the row's ${KNOWN_RED_COUNT} known reds must still fail: take a fixed or renamed test off the known-red list and its debt page"
+              exit 1
+            fi
+            grep -E "^ *Summary " "${RUNNER_TEMP}/known-reds.out"
+          fi
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -2090,14 +2448,24 @@ jobs:
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 
   closure-check:
-    name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
-    needs: [changes, stagger]
+    name: Closure check (${{ matrix.name }})
+    needs: changes
     # Push only: a pull request's Clippy lanes compile its changed packages
     # under every feature (a whole-workspace plan lints every package, a
     # superset of this check), and the dependents compile here on the push.
+    # One job per product's part of the closure (closure_check_rows in
+    # scripts/ci-cargo-lanes.mjs), in parallel, with the first wave: as one
+    # job that checked the parts in turn it was a workspace push's longest
+    # job (51m49s on main push 41608949055) and waited for the stagger job.
+    # Connect's part is the longest: 52m56s on release-branch push
+    # 42321043843 and 59m21s of the old 60 on main push 42497143053. It
+    # gets 90 minutes, on a pull request too (whose plan holds no part).
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2137,10 +2505,14 @@ jobs:
       - name: Check the reverse-dependency closure
         shell: bash
         env:
-          CLOSURE: ${{ needs.changes.outputs.closure_flags }}
+          CLOSURE: ${{ matrix.packages }}
         run: |
           set -euo pipefail
           [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
+          # One product's part of the closure, in one invocation: Cargo
+          # unifies features across the packages of one invocation, and the
+          # products' requests must not reach Core's.
+          [[ "${CLOSURE}" != *";"* ]] || { echo "::error::a closure-check job holds more than one product's part"; exit 1; }
           targets=()
           if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
             targets+=(--all-targets)
@@ -2154,31 +2526,38 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-closure-check-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-closure-check-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
 
   rustdoc:
-    name: Rustdoc (whole workspace, ${{ matrix.features }} features)
+    name: Rustdoc (${{ matrix.name }}, ${{ matrix.features }} features)
     needs: changes
     # Push only, like the closure check: every crate documented with
-    # rustdoc's lints denied, in two parallel legs, default features and
-    # --all-features (feature-gated docs included). A broken, private or
-    # redundant intra-doc link, a bare URL or an unclosed HTML tag fails it.
-    # It documents the whole workspace, where Cargo unifies features across
-    # members, so an error that only a crate documented alone shows
-    # (`cargo doc -p <crate>`, the way docs.rs builds a published crate) is
-    # outside it. A pull request names it in deferred_to_push: it documents
-    # meerkat-mob and every crate built on it, which does not fit the
-    # pull-request budget.
+    # rustdoc's lints denied. A broken, private or redundant intra-doc link,
+    # a bare URL or an unclosed HTML tag fails it. The plan's rustdoc_rows:
+    # Core's members when the change reaches Core, in two parallel legs,
+    # default features and --all-features (feature-gated docs included), and
+    # each product's packages in the reverse-dependency closure, in the
+    # --all-features leg only and in as few rows of their own as hold no bin
+    # name twice (Cargo refuses to document two bins of one name at once),
+    # so a Core change that breaks a product's link into a Core item fails
+    # here. Each row documents its packages together, where Cargo unifies
+    # features across them, so an error that only a crate documented alone
+    # shows (`cargo doc -p <crate>`, the way docs.rs builds a published
+    # crate) is outside it. A pull request names it in deferred_to_push: it
+    # documents meerkat-mob and every crate built on it, which does not fit
+    # the pull-request budget.
     if: ${{ needs.changes.outputs.rustdoc == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A product's row compiles the product's whole dependency graph under
+    # its own features, as the closure check's part does (60 minutes).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
-      matrix:
-        features: [default, all]
+      # One entry per row and leg (rustdoc_matrix in the plan's output).
+      matrix: ${{ fromJSON(needs.changes.outputs.rustdoc_matrix) }}
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2206,15 +2585,21 @@ jobs:
           cache-on-failure: true
 
       # --keep-going reports every crate that fails, not only the first.
-      - name: Document the workspace with rustdoc's lints denied (${{ matrix.features }} features)
+      # The row's flags name what it documents: Core's members
+      # (`--workspace` without the products' packages) or a product's
+      # packages, `-p` each (rustdoc_rows in scripts/ci-cargo-lanes.mjs).
+      - name: Document the row's packages with rustdoc's lints denied (${{ matrix.features }} features)
         env:
           RUSTDOCFLAGS: -Dwarnings
           FEATURES: ${{ matrix.features }}
+          RUSTDOC_FLAGS: ${{ matrix.flags }}
         run: |
           set -euo pipefail
+          if [[ -z "${RUSTDOC_FLAGS}" ]]; then echo "::error::the plan names no rustdoc packages"; exit 1; fi
+          read -r -a rustdoc_packages <<<"${RUSTDOC_FLAGS}"
           case "${FEATURES}" in
-            default) ./scripts/repo-cargo doc --workspace --no-deps --keep-going ;;
-            all) ./scripts/repo-cargo doc --workspace --no-deps --keep-going --all-features ;;
+            default) ./scripts/repo-cargo doc "${rustdoc_packages[@]}" --no-deps --keep-going ;;
+            all) ./scripts/repo-cargo doc "${rustdoc_packages[@]}" --no-deps --keep-going --all-features ;;
             *) echo "::error::unexpected rustdoc features '${FEATURES}'"; exit 1 ;;
           esac
 
@@ -2224,7 +2609,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-rustdoc-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-rustdoc-${{ matrix.key }}-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -2401,7 +2786,7 @@ jobs:
     # whole workspace (the classifier's `wasm` flag): the wasm32 clippy of
     # the web runtime and the provider crates it links caught breaks only
     # after merge before (#1108).
-    if: ${{ (github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true') || needs.changes.outputs.wasm == 'true' }}
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.core_changed == 'true') || needs.changes.outputs.wasm == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -2451,9 +2836,13 @@ jobs:
     # (examples/037-live-webrtc-web in Playwright Chromium and the examples
     # SDK suite) also run on pull requests that touch their inputs, without
     # the Rust build.
-    if: ${{ (github.event_name == 'push' && (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
+    if: ${{ (github.event_name == 'push' && (needs.changes.outputs.core_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A push builds meerkat-rpc first, cold after a change below it, as
+    # after a release version bump: 34m55s on main push 42463179911, and
+    # 38m12s on main push 42497143053, which the old 40 minutes cancelled
+    # 32 s into the suites (the whole job 3m41s-4m31s warm). 75 minutes.
+    timeout-minutes: 75
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2551,7 +2940,7 @@ jobs:
     # runtime's whole dependency closure cold, 1181 s of pull request
     # 39209102985's 1329 s lane, over the 1080 s lane budget. The push runs
     # the wasm build and the browser suites (deferred_to_push names them).
-    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true') || needs.changes.outputs.example_web == 'true' }}
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true' && needs.changes.outputs.core_paths_changed == 'true') || needs.changes.outputs.example_web == 'true' }}
     runs-on: ubuntu-24.04
     # Sized from measurement (2026-09-29). Warm (sccache 100% hits, e.g. job
     # 109577859270): 4.5 min, 2 min of it the wasm build. Cold, a pull request
@@ -2567,8 +2956,10 @@ jobs:
     # caps it first: run 38931641220's cold lane took 842 s. A push or a
     # dispatch builds the wasm cold after a change below the runtime: 22m15s
     # on dispatch 39211283488 and 22m23s on main push 39213218053 (wasm build
-    # 19m21s), so they get 35 minutes, about 55% above those.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 35 }}
+    # 19m21s), and 29m07s and 30m24s on main pushes 42497143053 and
+    # 42463179911 (wasm build 25m54s and 27m13s), so they get 50 minutes,
+    # about 65% above those.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 50 }}
     env:
       RUSTC_WRAPPER: sccache
       # The suites need a working runtime, not a size-optimized one: skip
@@ -2702,9 +3093,11 @@ jobs:
     # workspace, leaves both to the push,
     # since this lane compiles the same closure for wasm32 (893 s cold at
     # opt-level 0 on pull request 39209102985).
-    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true') || needs.changes.outputs.example_web_wasm == 'true' }}
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true' && needs.changes.outputs.core_paths_changed == 'true') || needs.changes.outputs.example_web_wasm == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Cold on a push: 17m44s and 18m46s of the old 20 minutes on main pushes
+    # 42418024252 and 42497143053.
+    timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
       CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
@@ -2799,6 +3192,204 @@ jobs:
       - name: Bazel analysis
         run: bazel build --nobuild //... --repository_cache="${HOME}/.cache/bazel-repo" --disk_cache="${HOME}/.cache/bazel-disk"
 
+  published-floor:
+    name: Published floor (${{ matrix.product }})
+    needs: [changes, stagger]
+    # The published-floor check of every product whose own packages, or an
+    # input of every floor check, changed (the plan's floor_checks,
+    # ci/products.json): the product's crates built against crates.io at the
+    # versions they declare (`scripts/published_crates_standalone.py floor`),
+    # so a product that uses unreleased Core API says so on the pull request
+    # that adds the use. Advisory on pull requests and main pushes (the step
+    # reports and the job passes); required on the product's own release
+    # branch (release/meta-*, release/connect-*) and in its release workflow.
+    if: ${{ needs.changes.outputs.floor_check_count != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.floor_check_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      # The scratch target sits at a fixed runner path, so the registry
+      # crates it compiles keep their sccache keys from run to run.
+      - name: Build ${{ matrix.product }} against its published dependencies
+        id: floor
+        continue-on-error: ${{ !startsWith(github.ref, format('refs/heads/release/{0}-', matrix.product)) && !startsWith(github.base_ref, format('release/{0}-', matrix.product)) }}
+        env:
+          PRODUCT: ${{ matrix.product }}
+        run: python3 scripts/published_crates_standalone.py floor --product "${PRODUCT}" --out "${RUNNER_TEMP}/floor-${PRODUCT}" --mode pr
+
+      - name: Report an advisory floor
+        if: ${{ steps.floor.outcome == 'failure' }}
+        env:
+          PRODUCT: ${{ matrix.product }}
+        run: echo "::warning title=Published floor::${PRODUCT} is not releasable against its published dependencies (advisory here; required on release/${PRODUCT}-* and at its release)."
+
+      # The floor compiles the product's published dependency graph in a
+      # scratch workspace whose objects only earlier floor runs cached: about
+      # 150 s when they did, 1529 to 2513 s when a new release or lock entry
+      # left them cold. The statistics name the hit rate of this run.
+      - name: Report the floor's sccache statistics
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        run: sccache --show-stats
+
+      - name: Upload the floor report
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: published-floor-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/floor-${{ matrix.product }}/floor.json
+            ${{ runner.temp }}/floor-${{ matrix.product }}/logs/
+            /home/runner/work/_temp/sccache.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  connect-checks:
+    name: Connect packaging, host adapters, SDK, Console panel and docs
+    needs: [changes, stagger]
+    # Meerkat Connect's non-Rust checks (its former checks.yml): the build
+    # receipt, packaging, library release, candidate and installed-acceptance
+    # script tests, the product and starter preparation tests, the immutable
+    # preparation and product readback tests, the hosted MCP callback
+    # tests, the docs check and the TypeScript SDK suite with the embedded
+    # Console panel test. None of them builds native code or needs an
+    # account. Every change under connect/ selects them (the plan's product
+    # lane connect_checks). Connect's standalone repo-cargo wrapper test is
+    # not run here: the monorepo builds with the root scripts/repo-cargo.
+    # Meta's Python SDK comes from this tree (../meta/sdk/python), not from
+    # a meerkat-meta release on PyPI.
+    if: ${{ needs.changes.outputs.connect_checks == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: connect
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Check build receipts and qualification cleanup without native builds
+        run: >-
+          python3 -B -m unittest -v
+          scripts.test_verify_local
+          scripts.test_qualify_connect_cli
+
+      - name: Check historical artifact bindings without native builds
+        run: >-
+          python3 -B -m unittest discover -s scripts/fixtures
+          -p 'test_historical_g_current_binding.py' -v
+
+      - name: Check inert package construction and validation
+        run: |
+          python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
+          python3 -B -m unittest -v scripts.test_assemble_connect_product
+          python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+          python3 -B -m unittest -v scripts.test_release_payload_privacy_scan
+
+      - name: Install candidate and preparation test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0
+
+      - name: Check candidate producer and publication contracts without native builds
+        run: >-
+          python3 -B -m pytest -q -p no:cacheprovider
+          scripts/test_connect_candidate_cli.py
+          scripts/test_connect_candidate_publication.py
+
+      - name: Check documentation
+        run: python3 scripts/check-docs.py
+
+      - name: Check installed acceptance contracts without accounts or native builds
+        # The shared workflow controls import Connect's Python SDK
+        # (meerkat_toolkit) and Meta's (meerkat_meta), both from this tree.
+        env:
+          PYTHONPATH: scripts:sdk/python/src:../meta/sdk/python
+        run: >-
+          python3 -B -m unittest -v
+          scripts.test_verify_installed_github
+          scripts.test_native_fixture_stack
+          scripts.test_console_reopen_status
+          scripts.test_verify_supplied_shared_workflow.HelperlessRestoreControls
+          scripts.test_verify_supplied_shared_workflow.ColdSharedRestoreControls
+          scripts.test_verify_supplied_shared_workflow.BothSelectedSuccessControls
+
+      - name: Check product and starter preparation
+        run: |
+          python3 -B -m unittest discover -s sdk/consumer-setup/tests -p 'test_start.py'
+          python3 -B -m unittest discover -s scripts/tests -p 'test_export_setup_starter.py'
+
+      - name: Check immutable preparation and product readback
+        # The official GitHub readback of the selected-reads profile is left
+        # out by name: its fixture bundle is the macOS arm64 build, which the
+        # official installer refuses on this Linux runner ("official setup
+        # supports macOS arm64 only"). The two Enterprise readbacks (Linux
+        # x86_64 bundles) run.
+        env:
+          PYTHONPATH: sdk/consumer-setup/tests
+        run: >-
+          python3 -B -m unittest -v
+          test_product_local_session test_immutable_release
+          test_product_official_readback.OfficialProductTests.test_enterprise_readback_preserves_selected_host_profile_and_operation_subset
+          test_product_official_readback.OfficialProductTests.test_enterprise_identity_readback_preserves_protected_account_selection
+
+      - name: Check hosted MCP callback transport and lifecycle
+        env:
+          PYTHONPATH: sdk/python/src:sdk/python/tests
+        run: >-
+          python3 -m unittest -v
+          test_mcp_auth_https test_mcp_auth_custody
+          test_mcp_auth_host test_hosted_mcp_endpoint_adversarial
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install locked SDK and panel test dependencies
+        working-directory: connect/sdk/typescript
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Test the TypeScript SDK and embedded Console panel
+        working-directory: connect/sdk/typescript
+        run: npm test
+
   gate:
     name: CI gate
     # Not `always()`: a superseded run (cancel-in-progress) must surface as
@@ -2807,8 +3398,11 @@ jobs:
     needs:
       - changes
       - fmt-governance
+      - ci-lanes-selftest
+      - path-classifier-selftest
       - ratchets
       - governance-gates
+      - governance-docs-gate
       - tlc-audits
       - stagger
       - clippy
@@ -2832,6 +3426,8 @@ jobs:
       - example-web
       - wasm-timers
       - bazel-graph
+      - published-floor
+      - connect-checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -2840,10 +3436,13 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
+          CI_LANES_SELFTEST_RESULT: ${{ needs.ci-lanes-selftest.result }}
+          PATH_CLASSIFIER_SELFTEST_RESULT: ${{ needs.path-classifier-selftest.result }}
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
           TLC_AUDITS_RESULT: ${{ needs.tlc-audits.result }}
           MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
           GOVERNANCE_GATES_RESULT: ${{ needs.governance-gates.result }}
+          GOVERNANCE_DOCS_GATE_RESULT: ${{ needs.governance-docs-gate.result }}
           GOVERNANCE_GATES: ${{ needs.changes.outputs.governance_gates }}
           STAGGER_RESULT: ${{ needs.stagger.result }}
           CLIPPY_FIRST_RESULT: ${{ needs.clippy.result }}
@@ -2914,6 +3513,14 @@ jobs:
           RELEASE_EVIDENCE_COMMIT: ${{ needs.changes.outputs.release_evidence_commit }}
           RELEASE_EVIDENCE_RUN_ID: ${{ needs.changes.outputs.release_evidence_run_id }}
           RELEASE_EVIDENCE_RUN_ATTEMPT: ${{ needs.changes.outputs.release_evidence_run_attempt }}
+          CORE_CHANGED: ${{ needs.changes.outputs.core_changed }}
+          CORE_PATHS_CHANGED: ${{ needs.changes.outputs.core_paths_changed }}
+          PRODUCTS_CHANGED: ${{ needs.changes.outputs.products_changed }}
+          FLOOR_CHECK_COUNT: ${{ needs.changes.outputs.floor_check_count }}
+          PUBLISHED_FLOOR_RESULT: ${{ needs.published-floor.result }}
+          DOWNSTREAM_PRODUCTS: ${{ needs.changes.outputs.downstream_products }}
+          CONNECT_CHECKS: ${{ needs.changes.outputs.connect_checks }}
+          CONNECT_CHECKS_RESULT: ${{ needs.connect-checks.result }}
         run: |
           set -euo pipefail
           # A two-wave lane (long rows first, the rest after the stagger job)
@@ -2984,7 +3591,7 @@ jobs:
           if [[ -n "${READER_NOT_RUN}" ]]; then
             echo "::notice::readers of changed files that need live-provider credentials run in no CI lane: ${READER_NOT_RUN}"
           fi
-          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ratchets=${RATCHETS_RESULT} governance-gates=${GOVERNANCE_GATES_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
+          echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ci-lanes-selftest=${CI_LANES_SELFTEST_RESULT} path-classifier-selftest=${PATH_CLASSIFIER_SELFTEST_RESULT} ratchets=${RATCHETS_RESULT} governance-gates=${GOVERNANCE_GATES_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
           echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} governed-jsonl=${GOVERNED_JSONL_RESULT} mcp-confinement-positive=${MCP_CONFINEMENT_POSITIVE_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) closure-tests=${CLOSURE_TESTS_RESULT} (${CLOSURE_TEST_COUNT} rows, ${HOOK_BINARY_COUNT} hook binaries, ${HOOK_RETAINED_COUNT} of them lib binaries left to the main and nightly unit lanes, ${TEST_SCOPE_COUNT}-package scope) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} rustdoc=${RUSTDOC_RESULT} feature-check=${FEATURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
           require_success() {
@@ -3015,6 +3622,8 @@ jobs:
           # produce a plan, nothing below can be trusted.
           require_success "Change classification" "${CHANGES_RESULT}"
           require_success "Format + governance" "${FMT_GOVERNANCE_RESULT}"
+          require_success "CI lane classifier selftest" "${CI_LANES_SELFTEST_RESULT}"
+          require_success "Path classifier selftest" "${PATH_CLASSIFIER_SELFTEST_RESULT}"
           require_success "Generation ratchets" "${RATCHETS_RESULT}"
           # The rest waves and the short lanes wait for the stagger job.
           require_success "Stagger the short rows" "${STAGGER_RESULT}"
@@ -3051,8 +3660,10 @@ jobs:
           fi
           if [[ "${GOVERNANCE_GATES}" == "true" ]]; then
             require_ran "Typed governance gates" "${GOVERNANCE_GATES_RESULT}"
+            require_ran "Typed governance gates (machine-authority docs)" "${GOVERNANCE_DOCS_GATE_RESULT}"
           else
             forbid_failure "Typed governance gates" "${GOVERNANCE_GATES_RESULT}"
+            forbid_failure "Typed governance gates (machine-authority docs)" "${GOVERNANCE_DOCS_GATE_RESULT}"
           fi
           if [[ "${RUST_CHANGED}" == "true" ]]; then
             if ! [[ "${SHARD_COUNT}" =~ ^[0-9]+$ ]] || (( SHARD_COUNT < 1 )); then
@@ -3063,8 +3674,12 @@ jobs:
             # The push runs every lane; a pull request leaves these to it
             # (an exact-profile lane runs when it touches that lane's own
             # inputs). A push plan that deferred one cannot be trusted.
+            # The guard lanes are Core's: a plan that does not reach Core
+            # (a change inside a product's root) runs them on no event.
             push_plan_whole=true
-            for flag in "${CLOSURE_CHECK}" "${RUSTDOC}" "${GOVERNED_JSONL}" "${MCP_CONFINEMENT_POSITIVE}"; do
+            push_flags=("${CLOSURE_CHECK}" "${RUSTDOC}")
+            if [[ "${CORE_CHANGED}" == "true" ]]; then push_flags+=("${GOVERNED_JSONL}" "${MCP_CONFINEMENT_POSITIVE}"); fi
+            for flag in "${push_flags[@]}"; do
               [[ "${flag}" == "true" ]] || push_plan_whole=false
             done
             if [[ "${PLAN_EVENT}" != "push" || -n "${DEFERRED_TO_PUSH}" ]]; then push_plan_whole=false; fi
@@ -3121,11 +3736,22 @@ jobs:
               forbid_failure "${lane%%:*}" "${lane##*:}"
             done
           fi
-          if [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" ]]; then
+          if [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" && "${CORE_CHANGED}" == "true" ]]; then
             # Post-merge coverage of everything the pull request deferred.
             require_ran "Main unit tests" "${MAIN_UNIT_RESULT}"
             require_ran "wasm32 check" "${WASM_CHECK_RESULT}"
             require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+          elif [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" ]]; then
+            # A change inside a product's root: the main unit rows cover the
+            # product's closure; Core's wasm and SDK lanes have nothing new.
+            echo "products only (${PRODUCTS_CHANGED}): Core's wasm and SDK lanes are not required on this push."
+            require_ran "Main unit tests" "${MAIN_UNIT_RESULT}"
+            forbid_failure "wasm32 check" "${WASM_CHECK_RESULT}"
+            if [[ "${SDK_HOST}" == "true" || "${EXAMPLES_BROWSER}" == "true" ]]; then
+              require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            else
+              forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            fi
           elif [[ "${IS_MAIN_PUSH}" == "true" ]]; then
             # No Rust-relevant change on main: no unit lanes are required,
             # exactly as on a pull request; the SDK suites run only when SDK
@@ -3181,7 +3807,7 @@ jobs:
           # Example web suites: every main push but a release projection's
           # (it reuses its parent's), and pull requests that touch the web
           # runtime, its crates, or examples 031-033.
-          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" ) || "${EXAMPLE_WEB}" == "true" ]]; then
+          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" && "${CORE_PATHS_CHANGED}" == "true" ) || "${EXAMPLE_WEB}" == "true" ]]; then
             require_ran "Example web suites" "${EXAMPLE_WEB_RESULT}"
           else
             forbid_failure "Example web suites" "${EXAMPLE_WEB_RESULT}"
@@ -3190,7 +3816,7 @@ jobs:
           # (example_web_wasm), which a pull request that changes a crate the
           # web runtime builds on, or plans the whole workspace, leaves to the
           # push: it is required exactly when the job's condition selects it.
-          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" ) || "${EXAMPLE_WEB_WASM}" == "true" ]]; then
+          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" && "${CORE_PATHS_CHANGED}" == "true" ) || "${EXAMPLE_WEB_WASM}" == "true" ]]; then
             require_ran "WASM timer ownership" "${WASM_TIMERS_RESULT}"
           else
             forbid_failure "WASM timer ownership" "${WASM_TIMERS_RESULT}"
@@ -3201,6 +3827,23 @@ jobs:
             require_ran "Bazel graph check" "${BAZEL_GRAPH_RESULT}"
           else
             forbid_failure "Bazel graph check" "${BAZEL_GRAPH_RESULT}"
+          fi
+          # Products (ci/products.json). The published-floor job passes when
+          # its check is advisory (the job reports a not-releasable product in
+          # a warning); on a product release branch the check itself must
+          # pass. Connect's checks run for every change under connect/.
+          if [[ "${FLOOR_CHECK_COUNT}" =~ ^[0-9]+$ ]] && (( FLOOR_CHECK_COUNT > 0 )); then
+            require_ran "Published floor" "${PUBLISHED_FLOOR_RESULT}"
+          else
+            forbid_failure "Published floor" "${PUBLISHED_FLOOR_RESULT}"
+          fi
+          if [[ "${CONNECT_CHECKS}" == "true" ]]; then
+            require_ran "Connect packaging, Console panel and docs" "${CONNECT_CHECKS_RESULT}"
+          else
+            forbid_failure "Connect packaging, Console panel and docs" "${CONNECT_CHECKS_RESULT}"
+          fi
+          if [[ -n "${DOWNSTREAM_PRODUCTS}" ]]; then
+            echo "downstream type-check rows (in the Clippy lane): ${DOWNSTREAM_PRODUCTS}"
           fi
           if (( failed )); then
             exit 1
@@ -3273,8 +3916,8 @@ jobs:
         #   terminal  completed_at, timed from the start of the run attempt
         #             the lane ran in
         # The execution path of a lane is its own run time plus the change
-        # classification's (every lane but classification and format +
-        # governance waits for the plan) and, for a lane that waits for the
+        # classification's (every lane but the root jobs, ROOT_JOB_NAMES below,
+        # waits for the plan) and, for a lane that waits for the
         # stagger job, the stagger job's. The budgets:
         #   - execution path <= CI_MAX_EXEC_SECONDS: fails (exec_over_budget)
         #   - terminal minus path queue <= CI_MAX_TERMINAL_SECONDS: fails
@@ -3284,7 +3927,9 @@ jobs:
         # Run times belong to the job, so re-running only this gate cannot
         # launder an execution overrun. Terminals use per-attempt clocks: a
         # re-run lane gets a fresh clock, a carried-over lane keeps its own
-        # attempt's clock.
+        # attempt's clock and its own attempt's runner queue (a re-run
+        # attempt lists a carried-over job with the re-run's creation time,
+        # so its creation time is read from the attempt it ran in).
         #
         # One exception, on a pull request only: an exact-profile lane
         # (governed JSONL, MCP confinement positive) that the plan ran only
@@ -3312,7 +3957,8 @@ jobs:
           ENFORCE_BUDGET: ${{ github.event_name == 'pull_request' }}
           GATE_JOB_NAME: CI gate
           CLASSIFICATION_JOB_NAME: Change classification
-          ROOT_JOB_NAMES: Change classification,Format + governance
+          # The jobs that wait for no plan, by exact name.
+          ROOT_JOB_NAMES: Change classification,Format + governance,CI lane classifier selftest,Path classifier selftest
           STAGGER_JOB_NAME: Stagger the short rows
           # Why the plan ran each exact-profile lane, and those lanes' job
           # names (exact matches).
@@ -3414,16 +4060,25 @@ jobs:
               for n in range(1, attempt + 1):
                   page = api(f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}")[0]
                   attempt_starts.append((n, ts(page["run_started_at"])))
-              jobs = [
-                  job
-                  for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
-                  )
-                  for job in page["jobs"]
-              ]
 
-              lanes = []
-              for job in jobs:
+              def attempt_jobs(n):
+                  return [
+                      job
+                      for page in api(
+                          f"/repos/{repo}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=30"
+                      )
+                      for job in page["jobs"]
+                  ]
+
+              def ran_in(started):
+                  number, clock = attempt_starts[0]
+                  for n, begun in attempt_starts:
+                      if begun <= started:
+                          number, clock = n, begun
+                  return number, clock
+
+              completed_jobs = []
+              for job in attempt_jobs(attempt):
                   if job["name"] == gate_name or job["conclusion"] in (None, "skipped"):
                       continue
                   if not job["started_at"] or not job["completed_at"]:
@@ -3431,15 +4086,35 @@ jobs:
                   started, completed = ts(job["started_at"]), ts(job["completed_at"])
                   if completed < started:
                       continue
-                  created = ts(job["created_at"]) if job.get("created_at") else started
-                  ran_in, clock = attempt_starts[0]
-                  for n, begun in attempt_starts:
-                      if begun <= started:
-                          ran_in, clock = n, begun
+                  completed_jobs.append((job, started, completed))
+
+              # A re-run attempt lists the jobs it carried over from an
+              # earlier attempt with that attempt's start and completion
+              # times but with its own creation time, so their runner queue
+              # read as 0 and each looked created after the stagger job. A
+              # carried-over job's creation time comes from the listing of the
+              # attempt it ran in (matched by name and start); one that listing
+              # lacks keeps the re-run's.
+              own_created = {}
+              for job, started, _ in completed_jobs:
+                  ran, _ = ran_in(started)
+                  if ran < attempt and ran not in own_created:
+                      own_created[ran] = {
+                          (own["name"], own["started_at"]): own.get("created_at")
+                          for own in attempt_jobs(ran)
+                      }
+
+              lanes = []
+              for job, started, completed in completed_jobs:
+                  ran, clock = ran_in(started)
+                  created_at = job.get("created_at")
+                  if ran < attempt:
+                      created_at = own_created[ran].get((job["name"], job["started_at"])) or created_at
+                  created = ts(created_at) if created_at else started
                   lanes.append(
                       {
                           "name": job["name"],
-                          "attempt": ran_in,
+                          "attempt": ran,
                           "created": created,
                           "completed": completed,
                           "queued": max(0, int((started - created).total_seconds())),
@@ -3502,6 +4177,48 @@ jobs:
               # 40-job account cap is shared, so queue is reported, never
               # budgeted.
               lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
+
+          # Lanes that also wait for other lanes (LANE_UPSTREAMS; this
+          # workflow's lanes wait for none and leave it unset; Meta CI, which
+          # runs this same step, sets it): "lane=upstream|upstream;..." by job
+          # name, where a name ending in "*" also matches a matrix job's legs
+          # ("name (...)"). Such a lane's execution path is its own run time
+          # plus the longest path among the lanes it waits for, whose own
+          # paths hold the classification's, and its path queue is that
+          # path's queue in the lane's attempt.
+          def named(pattern, name):
+              if pattern.endswith("*"):
+                  return name == pattern[:-1] or name.startswith(pattern[:-1] + " (")
+              return name == pattern
+
+          waits = []
+          for entry in os.environ.get("LANE_UPSTREAMS", "").split(";"):
+              waiter, _, upstreams = entry.partition("=")
+              upstreams = [name.strip() for name in upstreams.split("|") if name.strip()]
+              if waiter.strip() and upstreams:
+                  waits.append((waiter.strip(), upstreams))
+          for _ in range(len(lanes)):
+              extended = False
+              for lane in lanes:
+                  ahead = [
+                      other
+                      for waiter, upstreams in waits
+                      if named(waiter, lane["name"])
+                      for other in lanes
+                      if other is not lane and any(named(upstream, other["name"]) for upstream in upstreams)
+                  ]
+                  if not ahead:
+                      continue
+                  longest = max(ahead, key=lambda other: other["exec_path"])
+                  if lane["duration"] + longest["exec_path"] > lane["exec_path"]:
+                      lane["exec_path"] = lane["duration"] + longest["exec_path"]
+                      lane["path_queued"] = lane["queued"] + (
+                          longest["path_queued"] if longest["attempt"] == lane["attempt"] else 0
+                      )
+                      lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
+                      extended = True
+              if not extended:
+                  break
 
           # A lane the plan ran for its inputs or definition is outside the
           # budget only when it succeeded; failed or cancelled, it is

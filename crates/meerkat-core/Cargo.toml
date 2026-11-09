@@ -51,6 +51,11 @@ getrandom = "0.3"
 tokio = { workspace = true }
 toml_edit = { workspace = true }
 
+# The realm admission fences: open flags, fchmod/fchown and statfs, without
+# unsafe code.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
 wasm-bindgen = "0.2.116"
@@ -69,18 +74,13 @@ __meerkat-live-authority-bridge = []
 test-support = []
 # Internal, not for consumers: compiles the unit tests that need the
 # workspace (a crate this one cannot depend on once published). Only the
-# path-only self dev-dependency enables it, and `cargo package` strips that
-# dev-dependency, so the published package compiles those tests out
-# (ci/standalone-workspace-only.toml names them).
+# workspace's own test builds turn it on (they pass every crate's test
+# features: scripts/core-workspace-args.mjs --tests), so the published
+# package compiles those tests out (ci/standalone-workspace-only.toml
+# names them).
 workspace-tests = []
 
 [dev-dependencies]
-# Enables `workspace-tests` for this crate's own tests; path-only, so the
-# published package does not carry it. It adds nothing else: with default
-# features on, every test build would turn them back on, and a
-# `--no-default-features` test build would not check the feature set it
-# names.
-meerkat-core = { path = ".", default-features = false, features = ["workspace-tests"] }
 # Path-only (no version): dev-deps that cycle back to meerkat-core are
 # stripped from the published tarball, which is the canonical cargo answer
 # to dev-dependency cycles (consumers never see dev-deps).
@@ -88,6 +88,10 @@ meerkat-machine-kernels = { path = "../meerkat-machine-kernels", features = ["te
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+
+# The admission fence rows set a umask and read the process's groups.
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "js-sys"]  # cfg(target_arch = "wasm32")

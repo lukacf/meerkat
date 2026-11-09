@@ -1,0 +1,48 @@
+---
+title: "Configuration and compatibility"
+description: "Keep package configuration, credential references, policy and host capability declarations separate."
+icon: "sliders"
+---
+
+Each integration selection refers to configuration and policy owned by the application. Package metadata carries exact references and declared requirements.
+
+## Configuration and policy references
+
+`ConfigurationSelection` has `owner`, `reference`, `revision` and `content_digest`. `PolicySelection` has `owner`, `revision` and `content_digest`. These bind exact selected inputs without embedding secrets or asserting runtime permission.
+
+Store credential handles under their existing owner. A package can declare an authentication requirement and credential audience; it cannot grant itself a token or authorize a destination. When configuration changes, update its owner revision and reconcile affected selections.
+
+## Required host services
+
+Packages declare versioned contracts and host-service requirements. A host offers only what it can actually provide and enforce. Missing required contracts reject the selected path; optional degradation is explicit and visible.
+
+Examples of host services include credential access, protected browser auth, native tool activation, durable stores, inbound admission, live media and domain-specific device control. The host chooses actual implementations; a matching string in `HostCapabilities` is not enforcement evidence.
+
+## Compatibility before import
+
+<Steps>
+  <Step title="Select the exact package and strategy">
+    Retain identity and complete recipe digests. Resolve required configuration using authenticated application context and explicit agent choices.
+  </Step>
+  <Step title="Validate the manifest">
+    Check role declarations, component reachability, dependencies, state/lifecycle contracts and event semantics.
+  </Step>
+  <Step title="Compare required and offered contracts">
+    Use `ValidatedManifest::check_host` or the joined bundle's selection validation. Surface missing services before importing code or starting effects.
+  </Step>
+  <Step title="Obtain actual owner decisions">
+    Apply deployment approval, current grants, credential binding and runtime activation. These are not outputs of compatibility checking.
+  </Step>
+</Steps>
+
+## Account and resource configuration
+
+Two accounts at one provider endpoint require distinct host selections. Friendly names, workspace labels and server renaming are not credential isolation. A resource selector such as a Calendar ID chooses a path; the host still verifies account correspondence and permission.
+
+Empty allowance is explicit. Do not translate an empty grant into a host profile convention that means "all available tools." Operation classifications and schemas need to match the actual execution surface.
+
+## Updates
+
+Changing an artifact, configuration, policy, account or observed schema can invalidate an existing binding even when operation names are unchanged. Verify the new selection, required state migration and current target before replacement. A late acknowledgment for the old manifest must not mark the new selection ready.
+
+For supported runtime modes and imported formats, see [portability](/reference/portability).

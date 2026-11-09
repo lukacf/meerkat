@@ -145,6 +145,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 )),
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content,
@@ -571,7 +572,7 @@ mod tests {
             .expect("attached prompt should finish after release");
     }
 
-    /// M1 regression (meerkat-studio P0): `force_cancel_member` →
+    /// M1 regression (downstream P0): `force_cancel_member` →
     /// `interrupt_member` → `MeerkatMachine::cancel_after_boundary` used to
     /// stack-overflow (SIGABRT) when the member's boundary handle re-entered
     /// the machine mid-turn — the exact shape of an embedder session service

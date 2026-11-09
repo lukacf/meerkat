@@ -193,6 +193,19 @@ pub enum HttpAuthorizationResponseAction {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HttpAuthorizationContent {
     pub has_images: bool,
+    /// Who the request continues: the user, or the agent's own work.
+    pub initiator: HttpRequestInitiator,
+}
+
+/// Who a provider request continues.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HttpRequestInitiator {
+    /// A new step of the conversation: the request's last input is a user
+    /// message, or it has no input yet.
+    #[default]
+    User,
+    /// The agent continuing its own work.
+    Agent,
 }
 
 /// Dynamic authorizer trait. Used when auth artifacts need to be computed
@@ -227,6 +240,16 @@ pub trait HttpAuthorizer: Send + Sync {
     ) -> Result<HttpAuthorizationResponseAction, AuthError> {
         self.observe_response(response).await
     }
+
+    /// Remove the credential material this authorizer signed requests with
+    /// from `diagnostic`: a response body, a message decoded from one, or a
+    /// field a provider client logs. A proxy, gateway or provider can echo a
+    /// request's headers in an error, the bearer included, so provider
+    /// clients pass what they read from a response through this before they
+    /// parse, log or return it; successful content is never passed. The
+    /// default leaves `diagnostic` unchanged.
+    fn redact_response_diagnostic(&self, _diagnostic: &mut String) {}
+
     fn label(&self) -> &str;
 
     fn append_content_headers(

@@ -1,0 +1,11 @@
+{
+  "mode": "dry_run",
+  "state_dir": "{state_dir}",
+  "fenced_databases": [],
+  "ledger": [],
+  "renames": [],
+  "twins": [],
+  "findings": [],
+  "notes": [],
+  "errors": []
+}

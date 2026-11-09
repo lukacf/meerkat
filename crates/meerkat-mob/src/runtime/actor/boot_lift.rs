@@ -642,18 +642,33 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let mut first_error = None;
         for mut member in members {
-            if member.authorized
-                && let Err(error) = self.apply_dsl_input(
+            if member.authorized {
+                match self.apply_dsl_input_collect_effects(
                     mob_dsl::MobMachineInput::AuthorizeExplicitResumeMember {
                         attempt: member.resume_attempt.clone(),
                         agent_identity: mob_dsl::AgentIdentity::from_domain(&member.agent_identity),
                         binding: member.binding.clone(),
                     },
                     "join_explicit_resume_boot_member",
-                )
-            {
-                first_error.get_or_insert(error);
-                member.authorized = false;
+                ) {
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        member.authorized = false;
+                    }
+                    // A member whose host preparation is owed is never
+                    // joined: the resume does not wait for it.
+                    Ok(effects)
+                        if effects.iter().any(|effect| {
+                            matches!(
+                                effect,
+                                mob_dsl::MobMachineEffect::ExplicitResumeMemberHeld { .. }
+                            )
+                        }) =>
+                    {
+                        member.authorized = false;
+                    }
+                    Ok(_) => {}
+                }
             }
             self.watch_explicit_resume_boot_member_wake(member);
         }
@@ -1170,6 +1185,7 @@ impl MobActor {
                         reason.clone(),
                         None,
                         None,
+                        None,
                     )
                     .await;
                     // The explicit resume answers a member whose build the
@@ -1185,6 +1201,7 @@ impl MobActor {
                         session_id,
                         reason,
                         hold: None,
+                        cause_data: None,
                     });
                 }
             }
@@ -1464,6 +1481,7 @@ impl MobActor {
             attempt,
             error.to_string(),
             error.durable_resume_hold(),
+            error.structured_data(),
             registration_refusal,
         )
         .await;
@@ -1479,6 +1497,7 @@ impl MobActor {
         attempt: u64,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+        cause_data: Option<serde_json::Value>,
         registration_refusal: Option<crate::MemberRegistrationHookCall>,
     ) {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
@@ -1518,6 +1537,7 @@ impl MobActor {
                         bridge_session_id: session_id,
                         reason,
                         hold,
+                        cause_data,
                         registration_refusal,
                     },
                 )

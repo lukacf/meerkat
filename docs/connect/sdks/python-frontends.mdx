@@ -42,7 +42,7 @@ profile permits 1-3 UNKNOWN resends inside the same four-attempt budget and
 5/30/120-second backoff. `EgressDeliveryPolicy()` retains the conservative default.
 It provides no native consent exception and does not enable authorization;
 the host must separately enforce current permission on every entry.
-A home-automation host selects one resend for conversational Telegram replies only. Consent-
+An example home-automation host selects one resend for conversational Telegram replies only. Consent-
 or approval-governed effects still require resolved uncertainty or applicable
 idempotency; this is not a connector write retry policy.
 
@@ -101,7 +101,7 @@ observation and supply its migration binding. Opening a managed database does
 not perform a migration. The transition links the predecessor observation by
 digest; it is not an independent history archive. Additive SQL readability is
 not proof that predecessor code can safely modify these rows on rollback;
-the home-automation host's database compatibility remains an adoption requirement.
+The example host's database compatibility remains an adoption requirement.
 
 ### Current delivery permission
 
@@ -124,8 +124,7 @@ Enforced mode requires the callback; legacy mode rejects a supplied callback.
 The default legacy mode preserves existing callers but cannot establish current
 audience conformance. Hosts must enable enforcement after every restart and
 exclude competing legacy owners. This is a host-policy seam, not atomic provider
-revocation, native admission or completed adoption by the home-automation host or
-the downstream console application.
+revocation, native admission or completed adoption by downstream hosts.
 
 With a replaceable sender, selection waits before authorization. Connect checks
 that the selected attachment is still current after the callback returns, then
@@ -163,12 +162,12 @@ The host supplies exact raw bytes/header pairs and an out-of-band signing secret
 
 `SlackReplyTransport` borrows a prepared selected HTTPX client. `send_text(channel_id, text, thread_ts=...)` makes one explicit reply attempt. Its receipt preserves requested/observed destination and `sent`, `known_not_sent` or `unknown`. It never opens a DM, infers a thread or falls back to a channel-level send.
 
-## Home-automation host live image input
+## Paired host live image input
 
-`meerkat_toolkit.frontend.homecore_live.HomeCoreLiveImageClient` submits an image to the home-automation host's existing Reachy route, using a selected literal loopback origin and a current host lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
+`meerkat_toolkit.frontend.paired_host_live.PairedHostLiveImageClient` submits an image to a live route the paired host names, using a selected literal loopback origin, the host's lease authorization scheme and a current lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
 
 This specialized client creates its own per-submission HTTPX client. It does not use the borrowed service-client preparation contract. An HTTP response is not a native image-acceptance receipt: the caller must observe the exact image job on its original live channel generation before follow-up text is queued.
 
-It is not a camera service, motion API or durable automatic replay mechanism. The [Reachy example](/connect/examples/reachy-extension) explains the complete intended composition.
+It is not a camera service, motion API or durable automatic replay mechanism. The [device example](/connect/examples/device-extension) explains the complete intended composition.
 
-Source contracts live in `sdk/python/FRONTEND.md`, `TELEGRAM.md`, `SLACK-FRONTEND.md` and `HOMECORE-LIVE.md`.
+Source contracts live in `sdk/python/FRONTEND.md`, `TELEGRAM.md`, `SLACK-FRONTEND.md` and `PAIRED-HOST-LIVE.md`.

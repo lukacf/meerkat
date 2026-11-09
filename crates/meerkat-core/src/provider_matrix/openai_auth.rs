@@ -20,6 +20,9 @@ pub enum OpenAiAuthMethod {
     ExternalChatGptTokens,
     ExternalAuthorizer,
     GitHubCopilotOauth,
+    /// An operator-supplied GitHub token sent as the Copilot API credential
+    /// (no device sign-in). Stored, when stored, as a static bearer secret.
+    GitHubCopilotToken,
 }
 
 impl OpenAiAuthMethod {
@@ -31,6 +34,7 @@ impl OpenAiAuthMethod {
         Self::ExternalChatGptTokens,
         Self::ExternalAuthorizer,
         Self::GitHubCopilotOauth,
+        Self::GitHubCopilotToken,
     ];
 
     pub fn parse(raw: &str) -> Option<Self> {
@@ -42,6 +46,7 @@ impl OpenAiAuthMethod {
             "external_chatgpt_tokens" => Some(Self::ExternalChatGptTokens),
             "external_authorizer" => Some(Self::ExternalAuthorizer),
             "github_copilot_oauth" => Some(Self::GitHubCopilotOauth),
+            "github_copilot_token" => Some(Self::GitHubCopilotToken),
             _ => None,
         }
     }
@@ -55,6 +60,7 @@ impl OpenAiAuthMethod {
             Self::ExternalChatGptTokens => "external_chatgpt_tokens",
             Self::ExternalAuthorizer => "external_authorizer",
             Self::GitHubCopilotOauth => "github_copilot_oauth",
+            Self::GitHubCopilotToken => "github_copilot_token",
         }
     }
 
@@ -71,6 +77,7 @@ impl OpenAiAuthMethod {
             Self::ExternalChatGptTokens => Some(PersistedAuthMode::ExternalTokens),
             Self::ExternalAuthorizer => None,
             Self::GitHubCopilotOauth => Some(PersistedAuthMode::GithubCopilotOauth),
+            Self::GitHubCopilotToken => Some(PersistedAuthMode::StaticBearer),
         }
     }
 }
@@ -91,6 +98,21 @@ mod tests {
     #[test]
     fn parse_rejects_unknown() {
         assert_eq!(OpenAiAuthMethod::parse("unknown"), None);
+    }
+
+    /// The operator-token method is a wire member of the matrix and stores an
+    /// operator-supplied secret, never an OAuth-login token.
+    #[test]
+    fn github_copilot_token_is_a_static_bearer_wire_method() {
+        let method = OpenAiAuthMethod::parse("github_copilot_token");
+        assert_eq!(
+            method.map(OpenAiAuthMethod::as_str),
+            Some("github_copilot_token")
+        );
+        assert_eq!(
+            method.and_then(OpenAiAuthMethod::persisted_auth_mode),
+            Some(crate::auth::token_store::PersistedAuthMode::StaticBearer)
+        );
     }
 
     #[test]
@@ -115,6 +137,14 @@ mod tests {
                 Some(PersistedAuthMode::ExternalTokens),
             ),
             (OpenAiAuthMethod::ExternalAuthorizer, None),
+            (
+                OpenAiAuthMethod::GitHubCopilotOauth,
+                Some(PersistedAuthMode::GithubCopilotOauth),
+            ),
+            (
+                OpenAiAuthMethod::GitHubCopilotToken,
+                Some(PersistedAuthMode::StaticBearer),
+            ),
         ];
         for (method, expected) in cases {
             assert_eq!(

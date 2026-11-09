@@ -691,6 +691,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -700,6 +701,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
         .expect("controller lineage");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("peer-send"),
             principal("executor"),
@@ -724,6 +726,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -816,7 +819,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
         .pin_controller_client_for_actor(&actor)
         .await
         .expect("selected controller client");
-    assert!(pin.selection() == &selection());
+    assert_eq!(pin.selection(), &selection());
     let credential_owner = machine.generated_auth_lease_handle();
     meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
         &credential_owner,

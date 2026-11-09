@@ -23,6 +23,10 @@ pub struct RpcMethodCatalogOptions {
     /// serves R3 human consent (the stock governed stdio pipe); the plain
     /// router never emits it.
     pub consent_enabled: bool,
+    /// `decision/notice` is delivered only by an `rkat-rpc` stdio connection
+    /// whose operator decides durable decisions (Unix builds with local
+    /// authorization); the plain router never emits it.
+    pub decision_notices_enabled: bool,
 }
 
 impl RpcMethodCatalogOptions {
@@ -41,6 +45,7 @@ impl RpcMethodCatalogOptions {
             skills_enabled: true,
             live_webrtc_enabled: true,
             consent_enabled: true,
+            decision_notices_enabled: true,
         }
     }
 }
@@ -275,6 +280,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "InstructionActivationReadPage",
         ),
         RpcMethodDescriptor::typed(
+            "session/set_instruction",
+            "Record one session-owned operator instruction, applied at the session's next fresh run start",
+            "SetSessionInstructionParams",
+            "SessionInstructionWriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/revoke_instruction",
+            "Revoke one session-owned operator instruction at a higher revision",
+            "RevokeSessionInstructionParams",
+            "SessionInstructionWriteResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/instruction_status",
+            "Read a session's committed operator-instruction state without materializing it",
+            "SessionInstructionStatusParams",
+            "SessionInstructionStatusResult",
+        ),
+        RpcMethodDescriptor::typed(
             "session/transcript_revision",
             "Read a retained immutable transcript revision body",
             "ReadSessionTranscriptRevisionParams",
@@ -316,6 +339,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Stop one exact run and terminalize every contributor bound to it",
             "StopRunParams",
             "StopRunResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/compact",
+            "Ask a live session's next compaction check to compact, without a rebuild",
+            "CompactSessionParams",
+            "CompactSessionResult",
         ),
         RpcMethodDescriptor::result_only("config/get", "Read config", "ConfigEnvelope"),
         RpcMethodDescriptor::typed(
@@ -475,6 +504,83 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             )
             .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
         );
+    }
+
+    // Scoped tool grants: served by the runtime's grant service, over grant
+    // rows only (a method never loads, registers or wakes a session).
+    if options.runtime_available {
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "tool_grants/grant",
+                "Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window",
+                "GrantToolParams",
+                "GrantToolResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/request",
+                "Ask for a grant of a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server, which a person approves through a durable decision",
+                "RequestToolGrantParams",
+                "RequestToolGrantResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/revoke",
+                "Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it",
+                "RevokeToolGrantParams",
+                "RevokeToolGrantResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/list",
+                "List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first",
+                "ListToolGrantsParams",
+                "ListToolGrantsResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "tool_grants/audit",
+                "Read a page of the audit log of a session's or a mob member identity's scoped tool grants",
+                "ToolGrantAuditParams",
+                "ToolGrantAuditResult",
+            ),
+        ]);
+    }
+
+    // Durable decisions: served by the persistence's decision owner, one
+    // row or one index page per call. A runtime without a decision store
+    // (an ephemeral persistence) answers them capability unavailable.
+    // `decision/decide` has no plain route: a host adapter decides through
+    // its authenticated event.
+    if options.runtime_available {
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "decision/list",
+                "List a page of durable decisions, filtered by kind, phase, approver id or requester",
+                "DecisionListParams",
+                "DecisionListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/get",
+                "Get one durable decision, its expiry recorded when its deadline passed",
+                "DecisionGetParams",
+                "DecisionResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/rendering",
+                "Get a durable decision's rendering and its canonical parts for a part size",
+                "DecisionRenderingParams",
+                "DecisionRenderingResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/present",
+                "Record a host presenter's presentation of a durable decision's rendering",
+                "DecisionPresentParams",
+                "DecisionResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "decision/withdraw",
+                "Withdraw an open durable decision as the host",
+                "DecisionWithdrawParams",
+                "DecisionResult",
+            ),
+        ]);
     }
 
     if options.blob_enabled {
@@ -773,7 +879,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobCreateParams",
                 "MobCreateResult",
             ),
-            RpcMethodDescriptor::result_only("mob/list", "List active mobs", "MobListResult"),
+            RpcMethodDescriptor::result_only(
+                "mob/list",
+                "List active mobs and the quarantined persisted mobs",
+                "MobListResult",
+            ),
             RpcMethodDescriptor::typed(
                 "mob/status",
                 "Get mob lifecycle status",
@@ -901,6 +1011,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobAppendSystemContextResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/set_instruction",
+                "Write one operator instruction for the members a target selects",
+                "MobSetInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/revoke_instruction",
+                "Revoke one operator instruction of a mob at a higher revision",
+                "MobRevokeInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/instruction_status",
+                "Read a mob's operator-instruction records and each member's delivery and slot state",
+                "MobInstructionStatusParams",
+                "MobInstructionStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/flows",
                 "List flows defined for a mob",
                 "MobIdParams",
@@ -949,6 +1077,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobHelperResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/fork_member",
+                "Fork a member's session at a message boundary into a new member",
+                "MobForkMemberParams",
+                "MobForkMemberResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/force_cancel",
                 "Force-cancel a mob member",
                 "MobMemberParams",
@@ -984,6 +1118,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Rotate the supervisor bridge for all members of a mob",
                 "MobIdParams",
                 "MobRotateSupervisorResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/restore_retry",
+                "Re-attempt the restore of a quarantined persisted mob, for example after a repair",
+                "MobIdParams",
+                "MobRestoreRetryResult",
             ),
             RpcMethodDescriptor::typed(
                 "mob/claim_callback_route",
@@ -1134,6 +1274,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobStopMemberRunResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/compact_member",
+                "Ask a live mob member's next compaction check to compact, without a respawn",
+                "MobCompactMemberParams",
+                "MobCompactMemberResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/member_live_open",
                 "Open a live realtime channel on a mob member by identity",
                 "MobMemberLiveOpenParams",
@@ -1264,6 +1410,13 @@ pub fn rpc_notification_catalog(
         ));
     }
 
+    if options.decision_notices_enabled {
+        notifications.push(RpcNotificationDescriptor::basic(
+            crate::wire::DECISION_NOTICE_NOTIFICATION,
+            "One durable decision this stdio connection presented to its operator, with the whole rendering: when the decision opened while the connection was open, or before the decision/list answer that caused it",
+        ));
+    }
+
     if options.runtime_available && options.live_enabled && options.live_webrtc_enabled {
         notifications.extend([
             RpcNotificationDescriptor::basic(
@@ -1340,6 +1493,23 @@ mod tests {
         assert!(notifications.iter().any(|n| n == "session/stream_end"));
         assert!(notifications.iter().any(|n| n == "mob/stream_event"));
         assert!(notifications.iter().any(|n| n == "mob/stream_end"));
+    }
+
+    /// The decision notice is documented, and a surface whose connections
+    /// have no operator does not advertise it.
+    #[test]
+    fn the_decision_notice_is_documented_and_follows_its_option() {
+        let notice = crate::wire::DECISION_NOTICE_NOTIFICATION;
+        let documented = rpc_notification_names(RpcMethodCatalogOptions::documented_surface());
+        assert!(documented.iter().any(|n| n == notice), "{documented:?}");
+        let without_operator = rpc_notification_names(RpcMethodCatalogOptions {
+            decision_notices_enabled: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        assert!(
+            !without_operator.iter().any(|n| n == notice),
+            "{without_operator:?}"
+        );
     }
 
     #[test]
@@ -1497,6 +1667,90 @@ mod tests {
         );
     }
 
+    /// The operator-instruction verbs: three mob verbs on the mob surface and
+    /// three session verbs, each with its typed request and result contract.
+    #[test]
+    fn operator_instruction_methods_advertise_typed_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, params_type, result_type) in [
+            (
+                "mob/set_instruction",
+                "MobSetInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            (
+                "mob/revoke_instruction",
+                "MobRevokeInstructionParams",
+                "MobInstructionWriteResult",
+            ),
+            (
+                "mob/instruction_status",
+                "MobInstructionStatusParams",
+                "MobInstructionStatusResult",
+            ),
+            (
+                "session/set_instruction",
+                "SetSessionInstructionParams",
+                "SessionInstructionWriteResult",
+            ),
+            (
+                "session/revoke_instruction",
+                "RevokeSessionInstructionParams",
+                "SessionInstructionWriteResult",
+            ),
+            (
+                "session/instruction_status",
+                "SessionInstructionStatusParams",
+                "SessionInstructionStatusResult",
+            ),
+        ] {
+            let descriptors: Vec<_> = methods
+                .iter()
+                .filter(|method| method.name == name)
+                .collect();
+            assert_eq!(
+                descriptors.len(),
+                1,
+                "missing or duplicated descriptor for {name}"
+            );
+            assert_eq!(
+                descriptors[0].params_type,
+                Some(params_type),
+                "{name} params"
+            );
+            assert_eq!(
+                descriptors[0].result_type,
+                Some(result_type),
+                "{name} result"
+            );
+            assert_eq!(
+                descriptors[0].request_lifecycle.resolve(None),
+                RequestLifecycle::InlineObservation,
+                "{name} answers inline"
+            );
+        }
+        let without_mob = rpc_method_names(RpcMethodCatalogOptions {
+            mob_enabled: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        for name in [
+            "mob/set_instruction",
+            "mob/revoke_instruction",
+            "mob/instruction_status",
+        ] {
+            assert!(
+                !without_mob.iter().any(|method| method == name),
+                "{name} rides the mob surface"
+            );
+        }
+        assert!(
+            without_mob
+                .iter()
+                .any(|name| name == "session/set_instruction"),
+            "the session instruction verbs do not need the mob surface"
+        );
+    }
+
     #[test]
     fn external_event_catalog_owns_the_complete_request_payload() {
         let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
@@ -1548,6 +1802,7 @@ mod tests {
             "turn/start",
             "turn/interrupt",
             "turn/stop_run",
+            "session/compact",
         ] {
             let descriptors: Vec<_> = methods
                 .iter()
@@ -1680,6 +1935,133 @@ mod tests {
                 "{name} must advertise its concrete result type"
             );
         }
+    }
+
+    #[test]
+    fn tool_grant_methods_advertise_concrete_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params_type, expected_result_type) in [
+            ("tool_grants/grant", "GrantToolParams", "GrantToolResult"),
+            (
+                "tool_grants/request",
+                "RequestToolGrantParams",
+                "RequestToolGrantResult",
+            ),
+            (
+                "tool_grants/revoke",
+                "RevokeToolGrantParams",
+                "RevokeToolGrantResult",
+            ),
+            (
+                "tool_grants/list",
+                "ListToolGrantsParams",
+                "ListToolGrantsResult",
+            ),
+            (
+                "tool_grants/audit",
+                "ToolGrantAuditParams",
+                "ToolGrantAuditResult",
+            ),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.params_type,
+                Some(expected_params_type),
+                "{name} must advertise its concrete params type"
+            );
+            assert_eq!(
+                descriptor.result_type,
+                Some(expected_result_type),
+                "{name} must advertise its concrete result type"
+            );
+            assert_eq!(
+                descriptor.request_lifecycle.resolve(None),
+                RequestLifecycle::InlineObservation,
+                "{name} is an inline call"
+            );
+        }
+
+        // The grant service is the runtime's: a surface without a runtime
+        // advertises none of them.
+        let without_runtime = rpc_method_names(RpcMethodCatalogOptions {
+            runtime_available: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        assert!(
+            !without_runtime
+                .iter()
+                .any(|method| method.starts_with("tool_grants/")),
+            "{without_runtime:?}"
+        );
+    }
+
+    #[test]
+    fn decision_methods_advertise_concrete_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params_type, expected_result_type) in [
+            ("decision/list", "DecisionListParams", "DecisionListResult"),
+            ("decision/get", "DecisionGetParams", "DecisionResult"),
+            (
+                "decision/rendering",
+                "DecisionRenderingParams",
+                "DecisionRenderingResult",
+            ),
+            (
+                "decision/present",
+                "DecisionPresentParams",
+                "DecisionResult",
+            ),
+            (
+                "decision/withdraw",
+                "DecisionWithdrawParams",
+                "DecisionResult",
+            ),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.params_type,
+                Some(expected_params_type),
+                "{name} must advertise its concrete params type"
+            );
+            assert_eq!(
+                descriptor.result_type,
+                Some(expected_result_type),
+                "{name} must advertise its concrete result type"
+            );
+            assert_eq!(
+                descriptor.request_lifecycle.resolve(None),
+                RequestLifecycle::InlineObservation,
+                "{name} is an inline call"
+            );
+        }
+
+        // A host adapter decides through its authenticated event only: the
+        // plain catalog never lists decide.
+        assert!(
+            !methods
+                .iter()
+                .any(|method| method.name == "decision/decide"),
+            "decision/decide has no plain route"
+        );
+
+        // The decision owner is the runtime's: a surface without a runtime
+        // advertises none of the methods.
+        let without_runtime = rpc_method_names(RpcMethodCatalogOptions {
+            runtime_available: false,
+            ..RpcMethodCatalogOptions::documented_surface()
+        });
+        assert!(
+            !without_runtime
+                .iter()
+                .any(|method| method.starts_with("decision/")),
+            "{without_runtime:?}"
+        );
     }
 
     #[test]
@@ -1828,6 +2210,11 @@ mod tests {
                 Some("MobHelperResult"),
             ),
             (
+                "mob/fork_member",
+                Some("MobForkMemberParams"),
+                Some("MobForkMemberResult"),
+            ),
+            (
                 "mob/force_cancel",
                 Some("MobMemberParams"),
                 Some("MobForceCancelResult"),
@@ -1852,6 +2239,11 @@ mod tests {
                 "mob/rotate_supervisor",
                 Some("MobIdParams"),
                 Some("MobRotateSupervisorResult"),
+            ),
+            (
+                "mob/restore_retry",
+                Some("MobIdParams"),
+                Some("MobRestoreRetryResult"),
             ),
             (
                 "mob/claim_callback_route",
@@ -1955,6 +2347,11 @@ mod tests {
                 "mob/stop_member_run",
                 Some("MobStopMemberRunParams"),
                 Some("MobStopMemberRunResult"),
+            ),
+            (
+                "mob/compact_member",
+                Some("MobCompactMemberParams"),
+                Some("MobCompactMemberResult"),
             ),
             (
                 "mob/member_live_open",

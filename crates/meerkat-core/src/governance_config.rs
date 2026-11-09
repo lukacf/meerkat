@@ -1,7 +1,8 @@
 //! Governance settings of a realm's native composition, read from the
 //! realm's ordinary `config.toml` with the rest of [`crate::Config`]: the
 //! stock governed host's owner-selected review rules and its explicit
-//! reviewer.
+//! reviewer, and the approver ids the operator of an `rkat-rpc` stdio
+//! connection decides durable decisions for.
 //!
 //! ```toml
 //! [[governance.review.rules]]
@@ -16,18 +17,23 @@
 //! [governance.review.reviewer]
 //! identity = { model = "<model-id>", provider = "anthropic" }
 //! max_output_tokens = 1024
+//!
+//! [governance.decisions]
+//! operator_approver_ids = ["operator", "team:owners"]
 //! ```
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::approval::ApprovalAssurance;
+use crate::approval::decision::ApproverId;
 use crate::config::ConfigError;
 use crate::session::SessionLlmIdentity;
 
-/// Governance of a realm's native composition. Empty by default: a stock
-/// governed realm keeps every operation at its local R1 tier and calls no
-/// reviewer. A present section ([`crate::Config::governance`]), even an
-/// empty one, replaces an inherited one as a whole.
+/// Governance of a realm's native composition. By default a stock governed
+/// realm keeps every operation at its local R1 tier and calls no reviewer,
+/// and the stdio operator decides for the approver id `operator`.
+/// A present section ([`crate::Config::governance`]), even an empty one,
+/// replaces an inherited one as a whole.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
@@ -35,18 +41,89 @@ pub struct GovernanceConfig {
     /// The review the stock governed host requires.
     #[serde(skip_serializing_if = "StockReviewConfig::is_empty")]
     pub review: StockReviewConfig,
+    /// The approver ids the stdio operator decides durable decisions for.
+    #[serde(skip_serializing_if = "DecisionGovernanceConfig::is_default")]
+    pub decisions: DecisionGovernanceConfig,
 }
 
 impl GovernanceConfig {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.review.is_empty()
+        self.review.is_empty() && self.decisions.is_default()
     }
 
     /// # Errors
-    /// [`ConfigError::Validation`] for a malformed review section.
+    /// [`ConfigError::Validation`] for a malformed review section or an
+    /// operator approver id that is not an approver id.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        self.review.validate()
+        self.review.validate()?;
+        self.decisions.validate()
+    }
+}
+
+/// The durable decisions the operator of an `rkat-rpc` stdio connection
+/// decides: those addressed to one of `operator_approver_ids`. The operator
+/// is the process's operating-system user (on a governed pipe, the
+/// composition's operator); the connection presents it the open decisions
+/// of these approver ids when they open while the connection is open and
+/// when its client lists them, and it decides only a decision the
+/// connection presented, while the decision's approver id is still listed
+/// here.
+///
+/// Changing the list is approver-authority administration, so it lives in
+/// the host-administered governance section: an ordinary config write can
+/// neither add, change nor remove it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct DecisionGovernanceConfig {
+    /// The approver ids the operator acts for. Absent, it is `["operator"]`;
+    /// an explicitly empty list presents nothing and decides nothing.
+    pub operator_approver_ids: Vec<String>,
+}
+
+/// The approver id the stdio operator acts for when the realm states none.
+const DEFAULT_OPERATOR_APPROVER_ID: &str = "operator";
+
+impl Default for DecisionGovernanceConfig {
+    fn default() -> Self {
+        Self {
+            operator_approver_ids: vec![DEFAULT_OPERATOR_APPROVER_ID.to_owned()],
+        }
+    }
+}
+
+impl DecisionGovernanceConfig {
+    /// Whether this is the default: the operator acts for `operator` only.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether the operator acts for `approver_id`.
+    #[must_use]
+    pub fn lists(&self, approver_id: &str) -> bool {
+        self.operator_approver_ids
+            .iter()
+            .any(|listed| listed == approver_id)
+    }
+
+    /// Every listed entry is an approver id.
+    ///
+    /// # Errors
+    /// [`ConfigError::Validation`] naming the first entry that is not one.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self
+            .operator_approver_ids
+            .iter()
+            .find(|entry| ApproverId::new(entry.as_str()).is_err())
+        {
+            Some(entry) => Err(ConfigError::Validation(format!(
+                "governance.decisions.operator_approver_ids: {entry:?} is not an approver id \
+                 (non-empty, at most 256 bytes, no whitespace or control characters)"
+            ))),
+            None => Ok(()),
+        }
     }
 }
 
@@ -574,6 +651,108 @@ max_output_tokens = 1024
             binding.profile.map(|profile| profile.as_str().to_owned()),
             Some("p".to_owned())
         );
+    }
+
+    fn decisions_of(document: &str) -> DecisionGovernanceConfig {
+        let (config, _) = Config::from_persisted_toml(document).expect(document);
+        config.governance.unwrap_or_default().decisions
+    }
+
+    /// Without a stated list the operator decides for `operator` only, and
+    /// the default is never written out.
+    #[test]
+    fn an_absent_operator_list_is_operator_only() {
+        for document in [
+            "max_tokens = 1024\n",
+            "[governance]\n",
+            "[governance.decisions]\n",
+        ] {
+            let decisions = decisions_of(document);
+            assert_eq!(decisions, DecisionGovernanceConfig::default(), "{document}");
+            assert_eq!(decisions.operator_approver_ids, vec!["operator".to_owned()]);
+            assert!(decisions.is_default());
+            assert!(decisions.lists("operator"));
+            assert!(!decisions.lists("team:owners"));
+            decisions.validate().expect("the default list is valid");
+        }
+        let (config, _) =
+            Config::from_persisted_toml("[governance.decisions]\n").expect("stated section");
+        let written = toml::to_string(&config).expect("serialize");
+        assert!(!written.contains("operator_approver_ids"), "{written}");
+    }
+
+    /// An explicitly empty list is stated, not absent: the operator decides
+    /// for nobody, and the empty list survives a write and a read back.
+    #[test]
+    fn an_explicitly_empty_operator_list_lists_nobody() {
+        let document = "[governance.decisions]\noperator_approver_ids = []\n";
+        let decisions = decisions_of(document);
+        assert!(decisions.operator_approver_ids.is_empty());
+        assert!(!decisions.is_default());
+        assert!(!decisions.lists("operator"));
+        decisions.validate().expect("an empty list is valid");
+        let (config, _) = Config::from_persisted_toml(document).expect(document);
+        assert!(!config.governance.as_ref().expect("stated").is_empty());
+        let written = toml::to_string(&config).expect("serialize");
+        assert_eq!(decisions_of(&written), decisions, "{written}");
+    }
+
+    #[test]
+    fn an_operator_list_entry_that_is_not_an_approver_id_is_refused() {
+        let oversized = "x".repeat(257);
+        for entry in ["", "two words", "tab\there", oversized.as_str()] {
+            let decisions = DecisionGovernanceConfig {
+                operator_approver_ids: vec!["operator".to_owned(), entry.to_owned()],
+            };
+            assert!(
+                refusal(decisions.validate())
+                    .contains("governance.decisions.operator_approver_ids"),
+                "{entry:?}"
+            );
+            let governance = GovernanceConfig {
+                decisions,
+                ..GovernanceConfig::default()
+            };
+            assert!(
+                refusal(governance.validate())
+                    .contains("governance.decisions.operator_approver_ids"),
+                "{entry:?}"
+            );
+        }
+        // Unknown fields of the section are refused when read.
+        for document in [
+            "[governance.decisions]\nunknown = 1\n",
+            "[governance.decisions]\noperator_approver_ids = \"operator\"\n",
+        ] {
+            assert!(Config::from_persisted_toml(document).is_err(), "{document}");
+        }
+    }
+
+    /// A stated list reads exactly, in order, and survives a TOML write and
+    /// a JSON round trip unchanged.
+    #[test]
+    fn a_stated_operator_list_round_trips() {
+        let document =
+            "[governance.decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n";
+        let decisions = decisions_of(document);
+        assert_eq!(
+            decisions.operator_approver_ids,
+            vec!["operator".to_owned(), "team:owners".to_owned()]
+        );
+        assert!(decisions.lists("team:owners"));
+        assert!(!decisions.lists("team:others"));
+        decisions.validate().expect("a valid list");
+        let (config, _) = Config::from_persisted_toml(document).expect(document);
+        let written = toml::to_string(&config).expect("serialize");
+        assert_eq!(decisions_of(&written), decisions, "{written}");
+        let governance = config.governance.expect("stated");
+        let json = serde_json::to_value(&governance).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({ "decisions": { "operator_approver_ids": ["operator", "team:owners"] } })
+        );
+        let read: GovernanceConfig = serde_json::from_value(json).expect("read back");
+        assert_eq!(read, governance);
     }
 
     #[test]

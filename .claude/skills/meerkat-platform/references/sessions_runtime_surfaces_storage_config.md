@@ -103,6 +103,20 @@ Contract, obligations and conformance: `docs/reference/host-store-spi.mdx`.
   itself before its next write (a later renew never restores it); if
   another process took the fence or committed meanwhile, the realm stops
   until it is reopened.
+- Stopped writer (since 0.9.9): a dispatch, a round commit or a closing save
+  that meets a stopped writer waits for its re-acquire (at most one
+  self-fence window plus the re-acquire's own timeouts, 35 s at the default
+  timing), and the turn goes on once it succeeds. When no re-acquire succeeds
+  and no other writer is found (a store fence gap), the runtime suspends the
+  run (`RunSuspensionCause::FenceGap`): its inputs stay bound to it, their
+  waiters are answered `RequeuedAcrossStop`, and it resumes from its last
+  round commit once the fence is back. A direct turn is stopped and settled
+  as cancelled instead, failing with a retryable `StoreError`. Only another
+  writer (a live holder, a batch this writer did not write, a `FencedOut`
+  renew or commit) still ends the session.
+- Fencing at commit (obligation 5): a store refuses with `FencedOut` a batch
+  whose token is below one acquired before the batch's commit point; a store
+  that only hides such a batch at load is outside the contract.
 - Opening lists every head once. A session body loads at open only when
   recovery must act on it (unsettled inputs, an open run cursor, a current
   run), otherwise on first use, and stays loaded until the session is
@@ -202,6 +216,7 @@ Upgrade every process that shares a realm together.
 | 0.9.0 | Stored runtime input state version 6 (versions 3 to 5 are read and rewritten) |
 | 0.9.4 | Stored runtime input state version 7 (versions 3 to 6 are read; every row written is version 7) |
 | 0.9.5 | Stored runtime input state version 8 for a row that carries a stop mark or the `RequeueExpired` reason (a requeue Shutdown); every other row is still version 7. Machine lifecycle record version 6 for an unregister in progress with the requeue disposition; every other record is still version 5 |
+| 0.9.9 | Session envelope 5 for a session that holds operator-instruction facts, a retired instruction activation body or a rewrite that moved an activation row (every other session stays at 4; 0.9.8 refuses 5). Mob event schema 10 for operator-instruction events (0.9.8 and 0.9.7 then stop restoring the realm's mobs). Schema domains `runtime-tool-grants` and `approval-decisions`, created on first use. `rkat storage doctor` lists the envelope 5 sessions and the schema 10 mobs before a rollback |
 
 Since 0.9.4 every input row a binary writes is version 7, including a row it
 read at an older version. 0.9.3 and older refuse a version 7 row before
@@ -395,7 +410,7 @@ claims and evidence. Agents change it with `workgraph_*` tools when
 `enable_workgraph`. Hosts observe it:
 
 ```bash
-rkat workgraph list [--status open|in-progress|blocked|completed|cancelled|failed]... [--label L]... [--include-terminal] [--limit N] [--json]
+rkat workgraph list [--status open|in-progress|blocked|completed|cancelled|failed]... [--label L]... [--include-terminal] [--limit N] [--cursor C] [--json]
 rkat workgraph show <ID> [--json]
 rkat workgraph ready | snapshot | events [--after-seq N] ...
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed]
@@ -412,6 +427,9 @@ rkat workgraph attention-list|attention-pause|attention-resume ...
 - Collection reads default to 100 items; `--limit` above 1000 is refused
   ("limit N exceeds the WorkGraph maximum of 1000"); attention lists are capped
   at 1000 rows.
+- List, ready and snapshot pages that end early name a cursor: pass it back
+  with `--cursor` (`cursor` on the tools, RPC and REST) for the next page.
+  Events pages name `next_after_seq` for `--after-seq`.
 - Mob members resolve attention in the mob's realm (`mob.<mob_id>`); an
   attention binding that names a mob member is refused in any other realm
   (0.8.41).

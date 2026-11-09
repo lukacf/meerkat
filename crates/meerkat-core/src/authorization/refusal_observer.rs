@@ -23,6 +23,9 @@ use crate::types::SessionId;
 /// retained attempt included, once the attempt has resolved its candidate)
 /// and compaction summaries, and the owner-change waits of a tool's delegate
 /// operations that use [`crate::ToolDispatchContext::owner_change_churn`].
+/// A host that waits out its own operations reports their waits to it too,
+/// through [`super::OwnerChangeChurn::reporting_to`] (a governed input's "not
+/// now" waits, on [`OperationRefusalSurface::GovernedInput`]).
 /// Exact-control refusals (MCP attachments, tool applications, context
 /// controls), a consent attempt refused before it resolved its candidate, and
 /// review outcomes, which are not operation refusals, are not observed.
@@ -54,6 +57,10 @@ pub enum OperationRefusalSurface {
     ToolCall { tool_use_id: String },
     /// A compaction summary request.
     Compaction,
+    /// A host's governed input to the session: the waits of its binder's "not
+    /// now" answers, which the host reports itself
+    /// ([`super::OwnerChangeChurn::reporting_to`]).
+    GovernedInput,
 }
 
 /// What the operation's owners answered.
@@ -106,9 +113,10 @@ impl OperationRefusalOutcome {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationRefusalDisposition {
-    /// Waited for an owner change in progress on the work's own publication
-    /// (bounded): for `waited_ms`, and whether the change settled so the
-    /// operation may rebuild.
+    /// Waited after a refusal to rebuild (bounded): for an owner change in
+    /// progress on the work's own publication, or, after a stale read with
+    /// none in progress, one backoff step. For `waited_ms`, and whether the
+    /// wait settled so the operation may rebuild.
     WaitedForOwnerChange { waited_ms: u64, settled: bool },
     /// Rebuilt the model request once from current owners.
     Rebuilt,

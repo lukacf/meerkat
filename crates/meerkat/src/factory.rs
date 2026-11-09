@@ -221,7 +221,7 @@ impl SessionStore for EphemeralSessionStore {
             .map(SessionMeta::from)
             .collect();
 
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
 
         if let Some(created_after) = filter.created_after {
             metas.retain(|m| m.created_at >= created_after);
@@ -520,6 +520,8 @@ struct AgentAssembly {
     tool_execution_policy: Option<meerkat_core::ToolExecutionPolicy>,
     consequence_policy: AssemblyConsequencePolicy,
     tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    /// The build's scoped tool grant gate, for the outermost dispatch gate.
+    tool_grant_gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
     builder: AgentBuilder,
     session: Session,
     factory_metadata: SessionMetadata,
@@ -673,6 +675,104 @@ pub fn decode_llm_client_override_from_service(
         .map(|typed| typed.0.clone())
 }
 
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+struct ErasedMcpAuthResolverOverride(Arc<dyn meerkat_mcp::McpAuthResolver>);
+
+/// Encode a build's own MCP credential source for transport in
+/// `SessionBuildOptions::mcp_auth_resolver_override`.
+///
+/// `SessionBuildOptions` lives in `meerkat-core` and cannot name
+/// `meerkat_mcp::McpAuthResolver`, so the source is carried as
+/// `Arc<dyn Any + Send + Sync>`, as an LLM client override is.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub fn encode_mcp_auth_resolver_override_for_service(
+    resolver: Arc<dyn meerkat_mcp::McpAuthResolver>,
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    Arc::new(ErasedMcpAuthResolverOverride(resolver))
+}
+
+/// Decode a build's own MCP credential source from `SessionBuildOptions`.
+///
+/// Accepts exactly the typed wrapper produced by
+/// [`encode_mcp_auth_resolver_override_for_service`]; any other payload
+/// decodes to `None`.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub fn decode_mcp_auth_resolver_override_from_service(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Option<Arc<dyn meerkat_mcp::McpAuthResolver>> {
+    value
+        .as_ref()
+        .downcast_ref::<ErasedMcpAuthResolverOverride>()
+        .map(|typed| Arc::clone(&typed.0))
+}
+
+/// The MCP credential source of a build whose
+/// `SessionBuildOptions::mcp_auth_resolver_override` is not one: it refuses
+/// every credential, so the build never falls back to the factory's source.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+struct RefusingMcpAuthResolver;
+
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+const FOREIGN_MCP_AUTH_RESOLVER_OVERRIDE: &str =
+    "this build's MCP credential source override is not a credential source";
+
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#[async_trait::async_trait]
+impl meerkat_mcp::McpAuthResolver for RefusingMcpAuthResolver {
+    async fn stored_bearer_token(
+        &self,
+        _target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+    ) -> Result<Option<String>, meerkat_providers::mcp_oauth::McpOAuthError> {
+        Err(foreign_override_refusal())
+    }
+
+    async fn interactive_login(
+        &self,
+        _target: &meerkat_providers::mcp_oauth::McpServerIdentity,
+        _www_authenticate: Option<&str>,
+    ) -> Result<String, meerkat_providers::mcp_oauth::McpOAuthError> {
+        Err(foreign_override_refusal())
+    }
+
+    async fn stdio_service_secrets(
+        &self,
+        _server: &meerkat_core::McpServerConfig,
+    ) -> Result<
+        meerkat_core::auth::McpServiceSecretValues,
+        meerkat_core::auth::McpServiceSecretRefusal,
+    > {
+        Err(meerkat_core::auth::McpServiceSecretRefusal::Unavailable {
+            reason: FOREIGN_MCP_AUTH_RESOLVER_OVERRIDE.to_owned(),
+        })
+    }
+}
+
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+fn foreign_override_refusal() -> meerkat_providers::mcp_oauth::McpOAuthError {
+    meerkat_providers::mcp_oauth::McpOAuthError::CredentialAccess {
+        refusal: meerkat_core::auth::TokenStoreRefusal::Unsupported,
+        detail: FOREIGN_MCP_AUTH_RESOLVER_OVERRIDE.to_owned(),
+    }
+}
+
+/// The MCP credential source a build carries in
+/// `SessionBuildOptions::mcp_auth_resolver_override`, decoded fail-closed: a
+/// payload that is not a credential source becomes one that refuses every
+/// credential.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+fn decode_build_mcp_auth_resolver(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Arc<dyn meerkat_mcp::McpAuthResolver> {
+    decode_mcp_auth_resolver_override_from_service(value).unwrap_or_else(|| {
+        tracing::warn!(
+            "a session build's MCP credential source override is not a credential source; its \
+             MCP connections get no credential"
+        );
+        Arc::new(RefusingMcpAuthResolver)
+    })
+}
+
 /// Resolve a pre-built session comms runtime override (multi-host mobs
 /// DEC-P3H-3). Fail closed on both failure modes: an unrecognized payload
 /// never falls back to config-mode construction, and a runtime whose
@@ -722,6 +822,29 @@ fn resolve_session_comms_runtime_override(
             "session_comms_runtime_override is not supported on wasm32 builds".to_string(),
         )),
     }
+}
+
+/// The root a factory whose user-global convention root is
+/// `user_config_root` keeps its sessions' comms identities under: the one
+/// its session-scoped comms construction resolves
+/// (`build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents_typed`).
+#[cfg(all(feature = "comms", not(target_arch = "wasm32")))]
+fn session_comms_identity_root_under(
+    user_config_root: Option<&std::path::Path>,
+) -> meerkat_core::SessionCommsIdentityRoot {
+    match crate::sdk::canonical_session_comms_identity_root(user_config_root) {
+        Ok(root) => meerkat_core::SessionCommsIdentityRoot::Durable(root),
+        Err(reason) => meerkat_core::SessionCommsIdentityRoot::Unresolved(reason),
+    }
+}
+
+/// Without the `comms` feature a build has no comms, and a browser runtime
+/// keeps a session's comms identity in memory: neither keeps a durable one.
+#[cfg(not(all(feature = "comms", not(target_arch = "wasm32"))))]
+fn session_comms_identity_root_under(
+    _user_config_root: Option<&std::path::Path>,
+) -> meerkat_core::SessionCommsIdentityRoot {
+    meerkat_core::SessionCommsIdentityRoot::NotKept
 }
 
 /// A1/ADJ-17 predicate: the factory-appended skill-inventory prompt section
@@ -939,6 +1062,13 @@ pub struct AgentBuildConfig {
     /// member's session. Persisted onto `SessionMetadata.mob_member_binding`,
     /// where mob ownership routing reads it directly on resume/restart.
     pub mob_member_binding: Option<meerkat_core::MobMemberBinding>,
+    /// The witness of the mob runtime performing this member build (a fresh
+    /// spawn, a restore or a wake), set only by that runtime; see
+    /// `SessionBuildOptions::mob_incarnation`, which carries it to a host's
+    /// member build hook. Never persisted. The build forms the member's tool
+    /// grant subject from it: its identity in this incarnation, read before
+    /// its session.
+    pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -1061,6 +1191,22 @@ pub struct AgentBuildConfig {
     /// It is not persisted; live delegation reconstructs it from generated
     /// operation admission when rematerialization is supported.
     pub tool_dispatch_admission: Option<Arc<dyn meerkat_core::ToolDispatchAdmission>>,
+    /// The built-in tool families and tool names this build marks
+    /// grant-gated: mounted (a gated family as if enabled) but hidden and
+    /// refused until a live scoped tool grant opens them. Persisted as
+    /// `SessionMetadata.tooling.grant_gated`; a resume that leaves this
+    /// `None` restores the recorded gate. A gate needs the runtime's grant
+    /// service, on the session's runtime bindings.
+    pub grant_gated_tools: Option<meerkat_core::tool_grant::GrantGatedTools>,
+    /// The entries of a mob member's gate that come from its role's current
+    /// gate and that its own gate (`grant_gated_tools`) lacks. None ever
+    /// refuses the build: a tool name is installed whether or not the build
+    /// mounts it (it is gated from the moment it appears), a family where
+    /// the build mounts it; a family the build does not mount, and a name the
+    /// build's tool policy refuses, are ignored. The session records the
+    /// entries the build installed with its own. Set by the mob runtime's
+    /// member builds only.
+    pub grant_gated_tools_where_mounted: Option<meerkat_core::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy binding for the member/session.
     pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Host-scoped registry containing in-process immutable policy providers.
@@ -1089,7 +1235,10 @@ pub struct AgentBuildConfig {
     /// never open a browser: when no usable credential exists the server is
     /// reported through the router's typed `AuthorizationRequired` host
     /// status, and the host runs `mcp_login_start`/`mcp_login_complete`.
-    /// `None` connects without OAuth.
+    /// `None` uses the factory's source ([`AgentFactory::mcp_auth_resolver`]),
+    /// and without one connects without OAuth. A service build takes it from
+    /// `SessionBuildOptions::mcp_auth_resolver_override`
+    /// ([`encode_mcp_auth_resolver_override_for_service`]).
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     pub mcp_auth_resolver: Option<Arc<dyn meerkat_mcp::McpAuthResolver>>,
 }
@@ -1173,6 +1322,7 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
+            .field("mob_incarnation", &self.mob_incarnation)
             .field("mob_tools", &self.mob_tools.is_some())
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)
@@ -1215,6 +1365,11 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field(
                 "tool_dispatch_admission",
                 &self.tool_dispatch_admission.is_some(),
+            )
+            .field("grant_gated_tools", &self.grant_gated_tools)
+            .field(
+                "grant_gated_tools_where_mounted",
+                &self.grant_gated_tools_where_mounted,
             )
             .field(
                 "session_comms_runtime_override",
@@ -1287,6 +1442,7 @@ impl AgentBuildConfig {
             config_generation: None,
             auth_binding: None,
             mob_member_binding: None,
+            mob_incarnation: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -1312,6 +1468,8 @@ impl AgentBuildConfig {
             tool_access_policy: None,
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
+            grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
@@ -1326,6 +1484,16 @@ impl AgentBuildConfig {
     /// catalog is fully composed.
     pub fn set_initial_tool_filter(&mut self, filter: meerkat_core::ToolFilter) {
         self.initial_tool_filter = Some(filter);
+    }
+
+    /// Whether this build's output budget is fixed before provider
+    /// resolution under the effective `config`: an explicit budget (the
+    /// build's own, or the one a restored session persisted) or a configured
+    /// one. Such a build reads none of the account's stated limits, so its
+    /// resolution may admit an account whose limits are pending; a budget
+    /// taken from the account's limit needs them.
+    pub(crate) fn output_budget_known(&self, config: &Config) -> bool {
+        self.max_tokens.is_some() || config.configured_max_tokens().is_some()
     }
 
     /// Build config from a service `CreateSessionRequest` + event channel.
@@ -1399,6 +1567,14 @@ impl AgentBuildConfig {
             .llm_client_override
             .as_ref()
             .and_then(decode_llm_client_override_from_service);
+        // The build's own MCP credential source, in place of the factory's.
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        {
+            self.mcp_auth_resolver = build
+                .mcp_auth_resolver_override
+                .as_ref()
+                .map(decode_build_mcp_auth_resolver);
+        }
         self.agent_llm_client_decorator = build.agent_llm_client_decorator.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
@@ -1428,6 +1604,7 @@ impl AgentBuildConfig {
         // AgentBuildConfig so surfaces can drive binding selection per-request.
         self.auth_binding = build.auth_binding.clone();
         self.mob_member_binding = build.mob_member_binding.clone();
+        self.mob_incarnation = build.mob_incarnation;
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -1442,6 +1619,8 @@ impl AgentBuildConfig {
         self.tool_access_policy = build.tool_access_policy.clone();
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
+        self.grant_gated_tools = build.grant_gated_tools.clone();
+        self.grant_gated_tools_where_mounted = build.grant_gated_tools_where_mounted.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
@@ -1458,6 +1637,23 @@ impl AgentBuildConfig {
         // payload is a typed refusal there, never ordinary resolution).
         self.prepared_controller = build.prepared_controller.clone();
         self.host_prompt_sections = build.host_prompt_sections;
+    }
+
+    /// This build's own MCP credential source, erased for
+    /// `SessionBuildOptions::mcp_auth_resolver_override`.
+    fn mcp_auth_resolver_override_for_service(
+        &self,
+    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+        {
+            self.mcp_auth_resolver
+                .clone()
+                .map(encode_mcp_auth_resolver_override_for_service)
+        }
+        #[cfg(not(all(feature = "mcp", not(target_arch = "wasm32"))))]
+        {
+            None
+        }
     }
 
     /// Convert build options to the service transport representation.
@@ -1490,6 +1686,7 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            mcp_auth_resolver_override: self.mcp_auth_resolver_override_for_service(),
             agent_llm_client_decorator: self.agent_llm_client_decorator.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
@@ -1515,6 +1712,7 @@ impl AgentBuildConfig {
             config_generation: self.config_generation,
             auth_binding: self.auth_binding.clone(),
             mob_member_binding: self.mob_member_binding.clone(),
+            mob_incarnation: self.mob_incarnation,
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -1543,6 +1741,8 @@ impl AgentBuildConfig {
             // handed to; a projection never carries it to another build.
             prepared_controller: None,
             host_prompt_sections: self.host_prompt_sections,
+            grant_gated_tools: self.grant_gated_tools.clone(),
+            grant_gated_tools_where_mounted: self.grant_gated_tools_where_mounted.clone(),
         }
     }
 }
@@ -1671,6 +1871,645 @@ fn builtin_tool_vocabulary() -> Vec<(meerkat_core::ToolVocabularySource, Vec<&'s
     ]
 }
 
+/// The tool names a built-in tool family can provide, whether or not a given
+/// build mounts it: the snapshot a family grant target names. `None` for a
+/// name that is not a built-in tool family.
+#[must_use]
+pub fn tool_family_names(family: &str) -> Option<Vec<&'static str>> {
+    builtin_tool_vocabulary()
+        .into_iter()
+        .find_map(|(source, names)| match source {
+            meerkat_core::ToolVocabularySource::Family(name) if name == family => Some(names),
+            _ => None,
+        })
+}
+
+/// Why a build's scoped tool grant gate was refused: core's
+/// [`meerkat_core::tool_grant::GrantGateRefusal`], which a session service
+/// surfaces as the typed `AgentError::ToolGrantGateRefused`.
+pub use meerkat_core::tool_grant::GrantGateRefusal as GrantGateBuildError;
+
+/// The grant target a grant request names, checked against `gate`: the gate
+/// a session's build recorded, or every entry a mob member identity's gate
+/// names. A tool name must be gated by name or through a gated family; a
+/// family must be gated, and the grant takes every name the family can
+/// provide (the gate admits only the names a build gated); an MCP server
+/// must be named by the gate, or gated by its unconfigured-servers mode and
+/// not among `ungated_servers` (the servers the subject's build configures
+/// ungated). Only a server target opens a server's tools: a tool name only a
+/// gated server provides is named by no gate. Every grant surface resolves
+/// targets here, so no surface owns the rule.
+///
+/// # Errors
+/// [`ToolGrantRequestRefusal::EmptyTarget`] for an empty tool or server name
+/// or an empty `tools` subset, and
+/// [`ToolGrantRequestRefusal::TargetNotGated`] for a target the gate does not
+/// name.
+///
+/// [`ToolGrantRequestRefusal::EmptyTarget`]: meerkat_core::tool_grant::ToolGrantRequestRefusal::EmptyTarget
+/// [`ToolGrantRequestRefusal::TargetNotGated`]: meerkat_core::tool_grant::ToolGrantRequestRefusal::TargetNotGated
+pub fn resolve_grant_target(
+    target: meerkat_contracts::ToolGrantTargetRequest,
+    gate: &meerkat_core::tool_grant::GrantGatedTools,
+    ungated_servers: &BTreeSet<String>,
+) -> Result<
+    meerkat_core::tool_grant::ToolGrantTarget,
+    meerkat_core::tool_grant::ToolGrantRequestRefusal,
+> {
+    use meerkat_contracts::ToolGrantTargetRequest;
+    use meerkat_core::tool_grant::{ToolGrantRequestRefusal, ToolGrantTarget};
+    use meerkat_core::types::ToolName;
+    match target {
+        ToolGrantTargetRequest::Tool { name } => {
+            if name.is_empty() {
+                return Err(ToolGrantRequestRefusal::EmptyTarget);
+            }
+            let gated = gate.tools.contains(&name)
+                || gate.families.iter().any(|family| {
+                    tool_family_names(family).is_some_and(|names| names.contains(&name.as_str()))
+                });
+            if !gated {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            Ok(ToolGrantTarget::Tool {
+                name: ToolName::from(name),
+            })
+        }
+        ToolGrantTargetRequest::Family { family } => {
+            if !gate.families.contains(&family) {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            let Some(names) = tool_family_names(&family) else {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            };
+            Ok(ToolGrantTarget::Family {
+                family,
+                names: names.into_iter().map(ToolName::from).collect(),
+            })
+        }
+        ToolGrantTargetRequest::McpServer { server, tools } => {
+            if server.is_empty()
+                || tools
+                    .as_ref()
+                    .is_some_and(|tools| tools.is_empty() || tools.iter().any(String::is_empty))
+            {
+                return Err(ToolGrantRequestRefusal::EmptyTarget);
+            }
+            if !gate.gates_mcp_server(&server, ungated_servers) {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            Ok(ToolGrantTarget::McpServer {
+                server,
+                tools: tools.map(|tools| tools.into_iter().map(ToolName::from).collect()),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod grant_target_tests {
+    use super::*;
+    use meerkat_contracts::ToolGrantTargetRequest;
+    use meerkat_core::tool_grant::{GrantGatedTools, ToolGrantRequestRefusal, ToolGrantTarget};
+    use meerkat_core::types::ToolName;
+
+    /// The target `target` resolves to under `gate`, for a subject that
+    /// configures no server ungated.
+    fn resolve(
+        target: ToolGrantTargetRequest,
+        gate: &GrantGatedTools,
+    ) -> Result<ToolGrantTarget, ToolGrantRequestRefusal> {
+        resolve_grant_target(target, gate, &BTreeSet::new())
+    }
+
+    #[test]
+    fn a_target_must_be_named_by_the_gate() {
+        let gate = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy");
+
+        assert_eq!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: "deploy".to_string()
+                },
+                &gate
+            ),
+            Ok(ToolGrantTarget::Tool {
+                name: ToolName::from("deploy")
+            })
+        );
+        // A name a gated family provides is gated through the family.
+        assert!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: "shell".to_string()
+                },
+                &gate
+            )
+            .is_ok()
+        );
+        let Ok(ToolGrantTarget::Family { family, names }) = resolve(
+            ToolGrantTargetRequest::Family {
+                family: "shell".to_string(),
+            },
+            &gate,
+        ) else {
+            panic!("a gated family resolves");
+        };
+        assert_eq!(family, "shell");
+        assert!(names.contains("shell"), "{names:?}");
+
+        for refused in [
+            ToolGrantTargetRequest::Tool {
+                name: "web_search".to_string(),
+            },
+            ToolGrantTargetRequest::Family {
+                family: "tasks".to_string(),
+            },
+        ] {
+            assert_eq!(
+                resolve(refused.clone(), &gate),
+                Err(ToolGrantRequestRefusal::TargetNotGated),
+                "{refused:?} must be refused"
+            );
+        }
+        assert_eq!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: String::new()
+                },
+                &gate
+            ),
+            Err(ToolGrantRequestRefusal::EmptyTarget)
+        );
+    }
+
+    /// A server target passes a gate that names the server, or one whose
+    /// unconfigured-servers mode gates it (a server the subject's build
+    /// configures ungated is not gated); its `tools` subset only narrows,
+    /// and an empty subset or server name is an empty target. A tool name
+    /// is never resolved through a gated server.
+    #[test]
+    fn a_server_target_must_be_gated_by_name_or_by_the_mode() {
+        let server = |server: &str, tools: Option<&[&str]>| ToolGrantTargetRequest::McpServer {
+            server: server.to_string(),
+            tools: tools.map(|tools| tools.iter().map(|tool| (*tool).to_string()).collect()),
+        };
+        let named = GrantGatedTools::default().with_mcp_server("tickets");
+        assert_eq!(
+            resolve(server("tickets", Some(&["open_ticket"])), &named),
+            Ok(ToolGrantTarget::McpServer {
+                server: "tickets".to_string(),
+                tools: Some(BTreeSet::from([ToolName::from("open_ticket")])),
+            })
+        );
+        assert_eq!(
+            resolve(server("calendar", None), &named),
+            Err(ToolGrantRequestRefusal::TargetNotGated)
+        );
+        assert_eq!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: "open_ticket".to_string()
+                },
+                &named
+            ),
+            Err(ToolGrantRequestRefusal::TargetNotGated),
+            "a server's tool is granted through the server target"
+        );
+        for empty in [server("", None), server("tickets", Some(&[]))] {
+            assert_eq!(
+                resolve(empty.clone(), &named),
+                Err(ToolGrantRequestRefusal::EmptyTarget),
+                "{empty:?}"
+            );
+        }
+
+        let mode = GrantGatedTools::default().with_unconfigured_mcp_servers();
+        assert!(resolve(server("calendar", None), &mode).is_ok());
+        assert_eq!(
+            resolve_grant_target(
+                server("calendar", None),
+                &mode,
+                &BTreeSet::from(["calendar".to_string()])
+            ),
+            Err(ToolGrantRequestRefusal::TargetNotGated),
+            "a server the subject configures ungated is not gated by the mode"
+        );
+    }
+}
+
+/// Whether a build's gate covers web search, by name or through its family.
+/// Such a build disables every provider-native tool, so the gated `web_search`
+/// tool is its only search path and the gate adjudicates every search.
+fn grant_gate_covers_web_search(gated: &meerkat_core::tool_grant::GrantGatedTools) -> bool {
+    meerkat_tools::builtin::WEB_SEARCH_TOOL_NAMES
+        .iter()
+        .any(|name| {
+            gated.tools.iter().any(|tool| tool.as_str() == *name)
+                || gated.families.iter().any(|family| {
+                    tool_family_names(family).is_some_and(|names| names.contains(name))
+                })
+        })
+}
+
+/// The category overrides a session's metadata records: the caller's own,
+/// before the build's grant gate mounted its gated families.
+#[derive(Debug, Clone, Copy)]
+struct RecordedToolOverrides {
+    shell: ToolCategoryOverride,
+    comms: ToolCategoryOverride,
+    memory: ToolCategoryOverride,
+    schedule: ToolCategoryOverride,
+    workgraph: ToolCategoryOverride,
+    image_generation: ToolCategoryOverride,
+    web_search: ToolCategoryOverride,
+}
+
+impl RecordedToolOverrides {
+    fn of(build_config: &AgentBuildConfig) -> Self {
+        Self {
+            shell: build_config.override_shell,
+            comms: build_config.override_comms,
+            memory: build_config.override_memory,
+            schedule: build_config.override_schedule,
+            workgraph: build_config.override_workgraph,
+            image_generation: build_config.override_image_generation,
+            web_search: build_config.override_web_search,
+        }
+    }
+}
+
+/// A build's grant gate, rules 1 and 2: every gated family is a built-in
+/// tool family, and a gated family whose category override mounts it is
+/// mounted as if enabled; the build may not disable it. A family that shares
+/// its category with ungated tools (the builtins), or whose tools mount only
+/// with a runtime of their own (comms needs a comms runtime), is not mounted
+/// by the gate. Every gated family must still reach the final dispatcher
+/// (`grant_gate_for_build`), or the build is refused.
+fn mount_grant_gated_families(
+    build_config: &mut AgentBuildConfig,
+    gated: &meerkat_core::tool_grant::GrantGatedTools,
+) -> Result<(), GrantGateBuildError> {
+    for family in &gated.families {
+        if tool_family_names(family).is_none() {
+            return Err(GrantGateBuildError::UnknownFamily {
+                family: family.clone(),
+            });
+        }
+        let category = match family.as_str() {
+            "shell" => &mut build_config.override_shell,
+            "memory" => &mut build_config.override_memory,
+            "schedule" => &mut build_config.override_schedule,
+            "workgraph" => &mut build_config.override_workgraph,
+            "image_generation" => &mut build_config.override_image_generation,
+            "web_search" => &mut build_config.override_web_search,
+            _ => continue,
+        };
+        match *category {
+            ToolCategoryOverride::Disable => {
+                return Err(GrantGateBuildError::FamilyDisabled {
+                    family: family.clone(),
+                });
+            }
+            ToolCategoryOverride::Inherit => *category = ToolCategoryOverride::Enable,
+            ToolCategoryOverride::Enable => {}
+        }
+    }
+    Ok(())
+}
+
+/// A build's resolved grant gate: the gate to install (`None` for a gate
+/// that gates nothing) and the gate the session records, the build's own
+/// entries and the role entries it installed.
+struct ResolvedGrantGate {
+    gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
+    recorded: meerkat_core::tool_grant::GrantGatedTools,
+}
+
+/// A build's grant gate, rules 3 to 6, over the build's final dispatcher:
+/// every gated tool name is mounted (a name a pending source may provide once
+/// it connects is gated from the moment it appears, and so is a name a gated
+/// MCP server the build does not configure, or any server the
+/// unconfigured-servers mode gates, may provide once it is attached), the
+/// build's tool policy refuses no gated name, every gated family has a
+/// mounted name, and the runtime carries the session's grants. These rules
+/// hold the build's own entries (`gated`), each refused typed.
+///
+/// A gated MCP server need not be configured: it may be attached later, and
+/// every tool it provides is gated from the moment it appears. While the
+/// gate's unconfigured-servers mode is on, every server the build configures
+/// (`configured_servers`) that the gate does not name is ungated, and every
+/// other server is gated.
+///
+/// The role entries of a mob member's gate (`where_mounted`, the entries of
+/// its role's current gate its own gate lacks) never refuse the build: a
+/// role tool name and a role server are installed whether or not the build
+/// mounts them now, so each is gated from the moment it appears; a role
+/// family is installed when the build mounts any of its names. A role family
+/// the build mounts none of, and a role name the build's tool policy refuses,
+/// are ignored outright (installed as not mounted): their tools cannot appear
+/// within the build, so no grant could open them.
+///
+/// A gate that covers web search has already disabled every provider-native
+/// tool for the build (`grant_gate_covers_web_search`), so no gated name is
+/// served natively.
+#[allow(clippy::too_many_arguments)]
+fn grant_gate_for_build(
+    gated: &meerkat_core::tool_grant::GrantGatedTools,
+    where_mounted: &meerkat_core::tool_grant::GrantGatedTools,
+    configured_servers: &BTreeSet<String>,
+    tools: &Arc<dyn AgentToolDispatcher>,
+    tool_execution_policy: Option<&meerkat_core::ToolExecutionPolicy>,
+    declared_tool_restriction: Option<&meerkat_core::ops::DeclaredToolRestriction>,
+    session_grants: Option<Arc<dyn meerkat_core::tool_grant::SessionToolGrants>>,
+    owner: Option<&meerkat_core::GeneratedToolVisibilityOwner>,
+) -> Result<ResolvedGrantGate, GrantGateBuildError> {
+    use meerkat_core::types::ToolName;
+    let mut recorded = gated.clone();
+    if gated.is_empty() && where_mounted.is_empty() {
+        return Ok(ResolvedGrantGate {
+            gate: None,
+            recorded,
+        });
+    }
+    let mut families = BTreeMap::new();
+    for family in &gated.families {
+        let names =
+            tool_family_names(family).ok_or_else(|| GrantGateBuildError::UnknownFamily {
+                family: family.clone(),
+            })?;
+        families.insert(
+            family.clone(),
+            names
+                .into_iter()
+                .map(ToolName::from)
+                .collect::<BTreeSet<_>>(),
+        );
+    }
+    let own = meerkat_core::tool_grant::GatedToolTable::new(
+        families.clone(),
+        gated.tools.iter().cloned().collect(),
+    );
+
+    let mounted: std::collections::HashSet<String> = tools
+        .tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .chain(
+            tools
+                .tool_catalog()
+                .iter()
+                .map(|entry| entry.tool.name.to_string()),
+        )
+        .collect();
+    let vocabulary: std::collections::HashSet<&str> = builtin_tool_vocabulary()
+        .into_iter()
+        .flat_map(|(_, names)| names)
+        .collect();
+    let declared = |name: &str| {
+        declared_tool_restriction.is_some_and(|restriction| {
+            restriction
+                .vocabulary
+                .values()
+                .any(|names| names.contains(name))
+        })
+    };
+    // A gated server the build does not configure, and any server the
+    // unconfigured-servers mode gates, may still be attached: such a source
+    // may provide a gated name later, as a pending source may.
+    let gated_servers: BTreeSet<String> = gated
+        .mcp_servers
+        .iter()
+        .chain(where_mounted.mcp_servers.iter())
+        .cloned()
+        .collect();
+    let gates_unconfigured_servers =
+        gated.unconfigured_mcp_servers || where_mounted.unconfigured_mcp_servers;
+    let pending_sources = !tools.pending_catalog_sources().is_empty()
+        || declared_tool_restriction
+            .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty())
+        || gates_unconfigured_servers
+        || gated_servers
+            .iter()
+            .any(|server| !configured_servers.contains(server));
+    for name in own.tools() {
+        let name = name.as_str();
+        if mounted.contains(name) {
+            continue;
+        }
+        if pending_sources {
+            tracing::info!(
+                tool = name,
+                "grant-gated name deferred: a pending tool source may provide it"
+            );
+            continue;
+        }
+        return Err(if vocabulary.contains(name) || declared(name) {
+            GrantGateBuildError::ToolNotMounted {
+                tool: name.to_string(),
+            }
+        } else {
+            GrantGateBuildError::UnknownTool {
+                tool: name.to_string(),
+            }
+        });
+    }
+
+    // Whether the build's tool policy refuses `name`: a mounted name by its
+    // mutation class, a name not mounted yet by name only, since only a
+    // refusal by name is certain before the name appears.
+    let policy_refuses = |name: &str| {
+        tool_execution_policy.is_some_and(|policy| {
+            if mounted.contains(name) {
+                !policy.permits_call(name, tools.tool_mutation_class(name))
+            } else {
+                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
+            }
+        })
+    };
+    for name in own.gated_names() {
+        let name = name.as_str();
+        // A gated family's name that is not mounted is never callable, so
+        // only a mounted one, or an individually gated one, can be refused.
+        if (mounted.contains(name) || own.tools().contains(name)) && policy_refuses(name) {
+            return Err(GrantGateBuildError::PolicyRefused {
+                tool: name.to_string(),
+            });
+        }
+    }
+
+    // Every gated family reaches the final dispatcher: a family none of whose
+    // names this build mounts (comms without a comms runtime, a builtin
+    // family the build leaves off) could never open.
+    for (family, names) in own.families() {
+        if !names.iter().any(|name| mounted.contains(name.as_str())) {
+            return Err(GrantGateBuildError::FamilyNotMounted {
+                family: family.clone(),
+            });
+        }
+    }
+
+    // The role entries: installed where this build can ever show them,
+    // ignored outright (not mounted) otherwise, never refused.
+    let mut tool_names: BTreeSet<ToolName> = gated.tools.iter().cloned().collect();
+    let mut not_mounted: BTreeSet<ToolName> = BTreeSet::new();
+    for family in &where_mounted.families {
+        let Some(names) = tool_family_names(family) else {
+            tracing::warn!(
+                family = family.as_str(),
+                "a role's grant gate names no built-in tool family; the member's build ignores it"
+            );
+            continue;
+        };
+        let (refused, names): (BTreeSet<ToolName>, BTreeSet<ToolName>) = names
+            .into_iter()
+            .map(ToolName::from)
+            .partition(|name| policy_refuses(name.as_str()));
+        if !names.iter().any(|name| mounted.contains(name.as_str())) {
+            not_mounted.extend(names);
+            not_mounted.extend(refused);
+            continue;
+        }
+        not_mounted.extend(refused);
+        families.insert(family.clone(), names);
+        recorded.families.insert(family.clone());
+    }
+    for name in where_mounted.tools.iter() {
+        if policy_refuses(name.as_str()) {
+            not_mounted.insert(name.clone());
+            continue;
+        }
+        tool_names.insert(name.clone());
+        recorded.tools.insert(name.clone());
+    }
+    recorded
+        .mcp_servers
+        .extend(where_mounted.mcp_servers.iter().cloned());
+    recorded.unconfigured_mcp_servers = gates_unconfigured_servers;
+    let table = meerkat_core::tool_grant::GatedToolTable::new(families, tool_names);
+    let gated_names = table.gated_names();
+    // A name another entry gates is gated: only the names nothing gates are
+    // not mounted.
+    not_mounted.retain(|name| !gated_names.contains(name));
+    let install = meerkat_core::tool_grant::InstalledToolGrantGate {
+        ungated_servers: if gates_unconfigured_servers {
+            configured_servers
+                .iter()
+                .filter(|server| !gated_servers.contains(*server))
+                .cloned()
+                .collect()
+        } else {
+            BTreeSet::new()
+        },
+        gated: gated_names,
+        gated_servers,
+        gates_unconfigured_servers,
+        not_mounted_names: not_mounted,
+    };
+    if install.gates_nothing() {
+        return Ok(ResolvedGrantGate {
+            gate: None,
+            recorded,
+        });
+    }
+
+    let grants = session_grants.ok_or(GrantGateBuildError::NoGrantService)?;
+    let owner = owner.ok_or(GrantGateBuildError::NoGrantService)?;
+    Ok(ResolvedGrantGate {
+        gate: Some(
+            meerkat_core::tool_grant::ToolGrantGate::new(grants, install, owner.clone())
+                .with_table(table),
+        ),
+        recorded,
+    })
+}
+
+/// Where the operator-instruction entry rows `session` wrote itself stand in
+/// the requests of a build that resumes it
+/// ([`Session::own_operator_instruction_entry_placement`]). A prompt row the
+/// build authors (`authors_prompt_row`: the session carries no metadata, or
+/// the build names its prompt) stands beside them as another System row.
+/// The judgment runs before the prompt is assembled, so a named prompt
+/// counts even when the builder will append nothing because it is already
+/// the newest prompt row ([`Session::newest_prompt_row_is`]); that changes
+/// no verdict, since the newest prompt row is then another System row of
+/// the placement already.
+pub(crate) fn resumed_build_entry_placement(
+    session: &Session,
+    authors_prompt_row: bool,
+) -> Result<meerkat_core::InstructionEntryPlacement, meerkat_core::ModelBoundaryProjectionError> {
+    let placement = session.own_operator_instruction_entry_placement()?;
+    Ok(if authors_prompt_row && !placement.is_empty() {
+        placement.with_another_system_row()
+    } else {
+        placement
+    })
+}
+
+/// Why a build that resumes `session` cannot serve its own
+/// operator-instruction entries on `identity`, or `None` when it can
+/// ([`meerkat_core::InstructionEntryPlacement::refusal`]). The model is
+/// judged by the weakest lowering its binding may serve
+/// ([`ModelRegistry::weakest_instruction_lowering_for_target`]), before any
+/// client for it is built.
+fn resumed_build_entry_refusal(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    identity: &SessionLlmIdentity,
+    preferred_realm: Option<&RealmId>,
+    authors_prompt_row: bool,
+) -> Result<Option<meerkat_core::InstructionEntryLoweringRefusal>, BuildAgentError> {
+    let placement = resumed_build_entry_placement(session, authors_prompt_row)
+        .map_err(|error| BuildAgentError::Config(error.to_string()))?;
+    if placement.is_empty() {
+        return Ok(None);
+    }
+    let lowering =
+        registry.weakest_instruction_lowering_for_target(config, identity, preferred_realm);
+    Ok(placement.refusal(lowering))
+}
+
+/// Refuse a build that resumes `session` onto a model that cannot carry the
+/// operator-instruction entry rows the session wrote itself where they stand
+/// ([`resumed_build_entry_refusal`]), before the build resolves the model's
+/// client.
+fn refuse_resumed_entries_the_model_cannot_carry(
+    session: &Session,
+    registry: &ModelRegistry,
+    config: &Config,
+    build_config: &AgentBuildConfig,
+    provider: Provider,
+    self_hosted_server_id: &Option<String>,
+    authors_prompt_row: bool,
+) -> Result<(), BuildAgentError> {
+    let identity = SessionLlmIdentity {
+        model: build_config.model.clone(),
+        provider,
+        self_hosted_server_id: self_hosted_server_id.clone(),
+        provider_params: build_config.provider_params.clone(),
+        auth_binding: build_config.auth_binding.clone(),
+    };
+    match resumed_build_entry_refusal(
+        session,
+        registry,
+        config,
+        &identity,
+        build_config.realm_id.as_ref(),
+        authors_prompt_row,
+    )? {
+        None => Ok(()),
+        Some(refusal) => Err(BuildAgentError::Config(format!(
+            "model '{}' cannot represent the operator-instruction entries already applied in session {}: {refusal}",
+            identity.model,
+            session.id()
+        ))),
+    }
+}
+
 /// Errors that can occur when building an agent via [`AgentFactory::build_agent()`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAgentError {
@@ -1727,6 +2566,10 @@ pub enum BuildAgentError {
     /// composed nor finds in any tool vocabulary.
     #[error(transparent)]
     DeclaredToolUnknown(Box<meerkat_core::error::DeclaredToolUnknown>),
+
+    /// The build's scoped tool grant gate cannot be honoured.
+    #[error(transparent)]
+    GrantGate(GrantGateBuildError),
 
     /// An explicit tool-category `Enable` could not be satisfied.
     ///
@@ -2162,7 +3005,9 @@ impl CreateSessionModelResolutionError {
                     | meerkat_core::ProviderBindingError::UnknownProviderName(_)
                     | meerkat_core::ProviderBindingError::InvalidRealmId { .. }
                     | meerkat_core::ProviderBindingError::ServerRequiresSelfHostedProvider { .. }
-                    | meerkat_core::ProviderBindingError::EmptySelfHostedServerId { .. },
+                    | meerkat_core::ProviderBindingError::EmptySelfHostedServerId { .. }
+                    | meerkat_core::ProviderBindingError::CopilotAccountRouteConflict { .. }
+                    | meerkat_core::ProviderBindingError::CopilotAccountSourceUnsupported { .. },
                 ..
             }
             | meerkat_core::ConnectionTargetError::ProviderMismatch { .. }
@@ -2227,7 +3072,7 @@ pub fn resolve_create_session_model(
         return Err(CreateSessionModelResolutionError::EmptyExplicitModel);
     }
 
-    let resolved_binding = request
+    let mut resolved_binding = request
         .auth_binding
         .as_ref()
         .map(|binding| meerkat_core::resolve_explicit_auth_binding_target(config, binding))
@@ -2294,7 +3139,7 @@ pub fn resolve_create_session_model(
         (meerkat_models::global_default_model().to_string(), None)
     };
 
-    let provider = provider_hint
+    let mut provider = provider_hint
         .or_else(|| registry.entry(&model).map(|entry| entry.provider))
         .ok_or_else(|| {
             if model_was_explicit {
@@ -2307,6 +3152,25 @@ pub fn resolve_create_session_model(
                 }
             }
         })?;
+    // A binding on a shared credential account names the account: when the
+    // registry gives the model another provider than the binding's, the
+    // account's route for that provider serves it (the routes of a GitHub
+    // Copilot account share one account across provider families), as a
+    // provider switch keeps its account. A request that names its provider,
+    // and an account with no route for the model's provider, keep the strict
+    // check below.
+    if request.provider.is_none()
+        && let Some(target) = resolved_binding.as_ref()
+        && let meerkat_core::AuthCredentialIdentity::Account(account) = &target.credential_identity
+        && let Some(registered) = registry.entry(&model).map(|entry| entry.provider)
+        && registered != provider
+        && let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
+            config, registered, account,
+        )?
+    {
+        provider = registered;
+        resolved_binding = Some(route);
+    }
     if let Some(reason) = registry.provider_override_mismatch_reason(provider, &model) {
         return Err(if model_was_explicit {
             CreateSessionModelResolutionError::ProviderModelMismatch(reason)
@@ -2372,25 +3236,32 @@ fn model_aware_compaction_config(
     provider: Provider,
     model: &str,
     build_threshold_override: Option<std::num::NonZeroU64>,
+    account_prompt_token_limit: Option<u32>,
 ) -> meerkat_core::CompactionConfig {
     let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
     // Keep only an explicit host cap here. Built-in clients attach the current
     // provider's cap to their exact lowered-request witness on every boundary,
     // so model fallback cannot keep applying the initial provider's limit.
     // The per-build override (e.g. a mob profile's `auto_compact_threshold`)
-    // wins over the global config knob and model-aware scaling.
+    // wins over the global config knob and model-aware scaling. Either
+    // explicit value stays within the selected account's prompt limit.
     if let Some(threshold) = build_threshold_override {
-        compaction.auto_compact_threshold = threshold.get();
+        compaction.auto_compact_threshold =
+            explicit_threshold_within_account_limit(threshold.get(), account_prompt_token_limit);
         return compaction;
     }
     let default_threshold = meerkat_core::CompactionConfig::default().auto_compact_threshold;
     if config.compaction.auto_compact_threshold_explicit
         || compaction.auto_compact_threshold != default_threshold
     {
+        compaction.auto_compact_threshold = explicit_threshold_within_account_limit(
+            compaction.auto_compact_threshold,
+            account_prompt_token_limit,
+        );
         return compaction;
     }
 
-    if let Some(context_window) = registry
+    let registry_bound = registry
         .entry_for_provider(provider, model)
         .and_then(|entry| {
             entry.context_window.map(|window| {
@@ -2398,8 +3269,15 @@ fn model_aware_compaction_config(
                     .max_input_tokens
                     .map_or(window, |input| input.min(window))
             })
-        })
-    {
+        });
+    // The selected account's own prompt limit (a Copilot account model's
+    // `max_prompt_tokens`) bounds it as well: the account refuses a longer
+    // prompt whatever the model's own window.
+    let bound = match (registry_bound, account_prompt_token_limit) {
+        (Some(registry), Some(account)) => Some(registry.min(account)),
+        (registry, account) => registry.or(account),
+    };
+    if let Some(context_window) = bound {
         // The static default is intentionally conservative for unknown models.
         // Compact before the tighter of the shared window and separate input
         // ceiling, leaving headroom for the active turn.
@@ -2410,6 +3288,31 @@ fn model_aware_compaction_config(
     }
 
     compaction
+}
+
+/// An explicit compaction threshold, bounded by the selected account's own
+/// prompt limit (the rule of the request-byte cap,
+/// `ProviderRequestPressure::effective_cap`): the account refuses a longer
+/// prompt whatever the threshold, so a higher value could only fail the
+/// session later with a non-retryable error. A lowered value is logged once,
+/// when the session's compactor is built. The model's own window does not
+/// bound an explicit threshold.
+#[cfg(any(feature = "session-compaction", test))]
+fn explicit_threshold_within_account_limit(
+    threshold: u64,
+    account_prompt_token_limit: Option<u32>,
+) -> u64 {
+    match account_prompt_token_limit.map(u64::from) {
+        Some(limit) if threshold > limit => {
+            tracing::warn!(
+                threshold,
+                account_prompt_token_limit = limit,
+                "the explicit compaction threshold is above the selected account's prompt limit; the session compacts by that limit"
+            );
+            limit
+        }
+        _ => threshold,
+    }
 }
 
 fn model_aware_default_max_tokens(
@@ -2669,7 +3572,7 @@ mod image_generation_executor_routing_tests {
                 "requires_scoped_override": false,
                 "provider_plan": {
                     "tool_name": "image_generation",
-                    "model": "gpt-image-2",
+                    "model": "gpt-image-2.6-sunburst",
                     "output": {
                         "size": "square1024",
                         "quality": "low",
@@ -2951,7 +3854,9 @@ pub struct AgentFactory {
     pub runtime_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
     /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
-    /// When unset, convention loading remains disabled unless caller opts in.
+    /// When unset, a build takes `project_root` as that root (its
+    /// `.rkat/config.toml` hooks, `.rkat/skills` and AGENTS.md); with neither
+    /// root set, it reads no project convention.
     pub context_root: Option<PathBuf>,
     /// Optional user-global convention root (typically HOME).
     pub user_config_root: Option<PathBuf>,
@@ -2970,6 +3875,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The host's trust over the convention hook sources, installed with
+    /// [`Self::with_hook_source_trust`]: asked about each source over the
+    /// bytes the build read.
+    #[cfg(not(target_arch = "wasm32"))]
+    hook_source_trust: Option<Arc<dyn crate::HookSourceTrust>>,
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile,
     /// The host's HTTP egress profile, retained by newly built routers.
@@ -3096,6 +4006,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_mob", &self.enable_mob);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("shell_confinement", &self.shell_confinement);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("hook_source_trust", &self.hook_source_trust.is_some());
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         d.field("mcp_stdio_launch_profile", &self.mcp_stdio_launch_profile);
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -3123,6 +4035,16 @@ impl std::fmt::Debug for AgentFactory {
         );
         d.finish()
     }
+}
+
+/// A build's model as the account behind the build's route defines it
+/// (`AgentFactory::account_model_definition`): its definition for the
+/// build's model registry, and the connection that read the account's model
+/// list, which the build holds until its client is built so the client's
+/// resolution reuses the same account state.
+struct AccountModelDefinition {
+    definition: meerkat_core::config::CustomModelConfig,
+    connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
 }
 
 /// Output of `AgentFactory::resolve_llm_client_phase` (build_agent phase 3).
@@ -4145,7 +5067,14 @@ impl AgentFactory {
                 "failed to resolve web-search auth binding for provider {search_provider:?}"
             ));
         };
-        let mut env = self.host_resolver_environment();
+        // The helper reads none of the account's stated limits (its route
+        // takes the account's model list once it loads, as the session's own
+        // does), so its resolution admits an account whose limits are pending,
+        // such as one whose credential exchange is temporarily unavailable;
+        // the first search completes it.
+        let mut env = self
+            .host_resolver_environment()
+            .admitting_pending_account_limits();
         // A faulted credential backend is a hard typed fault, never folded
         // into the inherit-mode `Ok(None)` degradation.
         if let Some(persistence) = self
@@ -4268,6 +5197,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4478,6 +5409,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4731,6 +5664,17 @@ impl AgentFactory {
         self
     }
 
+    /// Where this factory's agents keep the durable comms identity (the key
+    /// pair) of each session they build with session-scoped comms
+    /// (in-process comms): `<root>/<session id>`, under the root
+    /// `canonical_session_comms_identity_root` resolves from the factory's
+    /// `user_config_root` (the platform's per-user default when it is
+    /// unset). A build keeps no durable one without the `comms` feature, or
+    /// in a browser runtime.
+    pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        session_comms_identity_root_under(self.user_config_root.as_deref())
+    }
+
     /// Set runtime root used for realm-scoped runtime artifacts.
     ///
     /// On Linux and macOS this also starts, once per root per process, a
@@ -4843,6 +5787,30 @@ impl AgentFactory {
             return env.with_host_launch_guard(guard);
         }
         env
+    }
+
+    /// Install the host's trust over the convention hook sources
+    /// (`<context_root>/.rkat/config.toml`, or `<project_root>/.rkat/config.toml`
+    /// when the factory has no context root, and
+    /// `<user_config_root>/.rkat/config.toml`).
+    /// Each build, of this factory or a clone of it, asks it once about every
+    /// such file it read and parsed, with the SHA-256 of the exact bytes
+    /// ([`crate::HookSource`]), so the decision covers the content consumed
+    /// rather than a check the host made before the build: a file changed
+    /// after the host's check is judged as changed. Every hook of an
+    /// untrusted source keeps its slot and is refused at each invocation with
+    /// [`meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource`];
+    /// none of them runs. Without one, every source is trusted (unless the
+    /// host confinement says otherwise). The trust judges those files' bytes
+    /// only, not the programs their command hooks name, a run's hook
+    /// overrides or the hooks of the config passed to the build. A build
+    /// handed its own hook engine ([`AgentBuildConfig::hook_engine_override`])
+    /// reads no such file, so the trust is not asked. It must not block: see
+    /// [`crate::HookSourceTrust`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_hook_source_trust(mut self, trust: Arc<dyn crate::HookSourceTrust>) -> Self {
+        self.hook_source_trust = Some(trust);
+        self
     }
 
     /// Install a stock host's resolved OS process confinement: each launch
@@ -5471,6 +6439,14 @@ impl AgentFactory {
         if !mask.application_tool_policy {
             build_config.application_tool_policy = metadata.tooling.application_tool_policy.clone();
         }
+        // The grant gate is durable session truth, like the launch policy: a
+        // resume that names no gate restores the recorded one, so a gated
+        // session cannot shed its gate by being resumed. A mob member's build
+        // always names its gate (the one its profiles declare now, the empty
+        // gate included), so this serves plain sessions.
+        if build_config.grant_gated_tools.is_none() && !metadata.tooling.grant_gated.is_empty() {
+            build_config.grant_gated_tools = Some(metadata.tooling.grant_gated.clone());
+        }
         if !mask.keep_alive {
             build_config.keep_alive = metadata.keep_alive;
         }
@@ -5981,6 +6957,9 @@ impl AgentFactory {
             } else {
                 meerkat_core::ProviderNativeToolPolicy::Inherit
             },
+            // A live hot swap installs it: the agent cannot judge the binding.
+            operator_instruction_lowering: registry
+                .instruction_lowering_for_identity(config, identity),
         })
     }
 
@@ -5998,6 +6977,11 @@ impl AgentFactory {
         Ok(binding)
     }
 
+    /// The credential identity of `identity`'s binding: the account a
+    /// binding table of its realm names, else the binding itself. A route no
+    /// table declares (a realm's `[copilot]` account routes, the zero-config
+    /// Copilot routes) has the identity its resolution gives it, its
+    /// account; a binding that does not resolve is its own credential.
     pub(crate) fn credential_identity_for_llm_identity(
         config: &Config,
         identity: &SessionLlmIdentity,
@@ -6005,10 +6989,13 @@ impl AgentFactory {
         let Some(auth_binding) = identity.auth_binding.as_ref() else {
             return Ok(None);
         };
+        if let Some(binding) = Self::configured_binding_for_llm_identity(config, identity)? {
+            return Ok(Some(binding.credential_identity(auth_binding)));
+        }
         Ok(Some(
-            Self::configured_binding_for_llm_identity(config, identity)?.map_or_else(
-                || meerkat_core::AuthCredentialIdentity::from_auth_binding(auth_binding),
-                |binding| binding.credential_identity(auth_binding),
+            meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding).map_or_else(
+                |_| meerkat_core::AuthCredentialIdentity::from_auth_binding(auth_binding),
+                |target| target.credential_identity,
             ),
         ))
     }
@@ -6075,7 +7062,19 @@ impl AgentFactory {
         identity: &SessionLlmIdentity,
     ) -> Result<bool, FactoryError> {
         let Some(binding) = Self::configured_binding_for_llm_identity(config, identity)? else {
-            return Ok(false);
+            // A route no table of its realm declares (a realm's `[copilot]`
+            // account routes, the zero-config Copilot routes) is judged by
+            // the backend its resolution gives it.
+            return Ok(identity.auth_binding.as_ref().is_some_and(|auth_binding| {
+                meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding).is_ok_and(
+                    |target| {
+                        Self::backend_is_copilot(
+                            target.backend.provider,
+                            &target.backend.backend_kind,
+                        )
+                    },
+                )
+            }));
         };
         let backend = config
             .realm
@@ -6092,11 +7091,16 @@ impl AgentFactory {
                     binding.backend_profile
                 ))
             })?;
-        Ok(matches!(
-            meerkat_providers::ProviderRuntimeCatalog::normalize_backend(
-                identity.provider,
-                &backend.backend_kind,
-            ),
+        Ok(Self::backend_is_copilot(
+            identity.provider,
+            &backend.backend_kind,
+        ))
+    }
+
+    /// Whether `backend_kind` of `provider` is a GitHub Copilot backend.
+    fn backend_is_copilot(provider: Provider, backend_kind: &str) -> bool {
+        matches!(
+            meerkat_providers::ProviderRuntimeCatalog::normalize_backend(provider, backend_kind),
             Ok(meerkat_providers::NormalizedBackendKind::OpenAi(
                 meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot,
             ) | meerkat_providers::NormalizedBackendKind::Anthropic(
@@ -6104,13 +7108,137 @@ impl AgentFactory {
             ) | meerkat_providers::NormalizedBackendKind::Google(
                 meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot,
             ))
-        ))
+        )
     }
 
     fn model_registry(&self, config: &Config) -> Result<ModelRegistry, BuildAgentError> {
         config
             .model_registry(meerkat_models::canonical())
             .map_err(|err| BuildAgentError::Config(err.to_string()))
+    }
+
+    /// The definition of `build_config`'s model by the model list of the
+    /// account its binding names, for a model `registry` does not define.
+    ///
+    /// Only a build that resolves its credentials asks: a client override,
+    /// a prepared controller and the test client shim leave the build as it
+    /// is, and so do a model the registry defines, a build that names no
+    /// binding, and a binding that is not a GitHub Copilot route on a
+    /// credential account (the client's own resolution reports a binding
+    /// that does not resolve). The named route resolves with the
+    /// environment and the lease the client's resolution uses, and its
+    /// lease is published as that resolution publishes it. Then:
+    ///
+    /// - the account offers the model: its provider family is the build's
+    ///   provider, and a fresh build moves to the account's route of that
+    ///   provider (a resumed build keeps its durable route; the resumed
+    ///   provider-switch rule moves it when the provider changed), or
+    ///   refuses with [`meerkat_core::ConnectionTargetError::NoCredentialAccountRoute`]
+    ///   when the account has none;
+    /// - the account refuses the model: the build fails with
+    ///   [`FactoryError::AccountModel`], and no other route or credential is
+    ///   tried;
+    /// - the backend states no account model list: the build is left as it
+    ///   is.
+    async fn account_model_definition(
+        &self,
+        config: &Config,
+        registry: &ModelRegistry,
+        build_config: &mut AgentBuildConfig,
+        fresh_build: bool,
+    ) -> Result<Option<AccountModelDefinition>, BuildAgentError> {
+        use meerkat_llm_core::provider_runtime::AccountModelLookup;
+
+        if build_config.llm_client_override.is_some()
+            || build_config.agent_llm_client_override.is_some()
+            || build_config.prepared_controller.is_some()
+            || test_client_shim_requested()
+            || registry.entry(&build_config.model).is_some()
+        {
+            return Ok(None);
+        }
+        let Some(auth_binding) = build_config
+            .auth_binding
+            .clone()
+            .filter(|auth_binding| !auth_binding.is_env_default())
+        else {
+            return Ok(None);
+        };
+        let Ok(target) = meerkat_core::resolve_explicit_auth_binding_target(config, &auth_binding)
+        else {
+            return Ok(None);
+        };
+        let meerkat_core::AuthCredentialIdentity::Account(account) = &target.credential_identity
+        else {
+            return Ok(None);
+        };
+        if !Self::backend_is_copilot(target.backend.provider, &target.backend.backend_kind) {
+            return Ok(None);
+        }
+
+        let auth_lease = match &build_config.runtime_build_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        };
+        let mut env = self.host_resolver_environment();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(persistence) = self
+                .resolution_provider_auth_persistence()
+                .map_err(BuildAgentError::LlmClient)?
+            {
+                env = env.with_provider_auth_persistence(persistence);
+            }
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+        if let Some(auth_lease) = auth_lease.as_ref() {
+            env = env.with_auth_lease_handle(auth_lease.clone());
+        }
+        let connection = self
+            .provider_registry
+            .resolve(&target.realm, &target.auth_binding, &env)
+            .await
+            .map_err(|error| BuildAgentError::LlmClient(FactoryError::ProviderAuth(error)))?;
+        if let Some(auth_lease) = auth_lease.as_ref() {
+            Self::publish_auth_lease(auth_lease, &target.auth_binding, &connection)
+                .map_err(BuildAgentError::LlmClient)?;
+        }
+
+        let definition = match self
+            .provider_registry
+            .account_model(&connection, &build_config.model)
+        {
+            AccountModelLookup::Offered(definition) => definition,
+            AccountModelLookup::Refused(refusal) => {
+                return Err(BuildAgentError::LlmClient(FactoryError::AccountModel(
+                    Box::new(refusal),
+                )));
+            }
+            _ => return Ok(None),
+        };
+        let provider = definition.provider;
+        build_config.provider = Some(provider);
+        if fresh_build && provider != target.backend.provider {
+            let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
+                config, provider, account,
+            )
+            .map_err(|error| BuildAgentError::LlmClient(FactoryError::ConnectionTarget(error)))?
+            else {
+                return Err(BuildAgentError::LlmClient(FactoryError::ConnectionTarget(
+                    meerkat_core::ConnectionTargetError::NoCredentialAccountRoute {
+                        provider,
+                        account: account.clone(),
+                    },
+                )));
+            };
+            build_config.auth_binding = Some(route.auth_binding);
+        }
+        Ok(Some(AccountModelDefinition {
+            definition,
+            connection,
+        }))
     }
 
     fn resolve_provider_from_registry(
@@ -7178,6 +8306,56 @@ impl AgentFactory {
         // the resumed binding is settled against the registry's provider below.
         let caller_auth_binding = build_config.auth_binding.clone();
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
+        // The build's scoped tool grant gate. The session's metadata records
+        // the category overrides the caller asked for, before the gate mounts
+        // its gated families as if enabled. A mob member's build carries the
+        // entries of its role's gate its own gate lacks apart: the gate
+        // installs them where the build mounts them and never refuses for
+        // them.
+        let grant_gated = build_config.grant_gated_tools.clone().unwrap_or_default();
+        let grant_gated_where_mounted = build_config
+            .grant_gated_tools_where_mounted
+            .clone()
+            .unwrap_or_default();
+        // A mob member's build reads its identity's grants, formed from the
+        // sealed incarnation witness its mob runtime handed the build.
+        let grant_member = build_config
+            .mob_member_binding
+            .clone()
+            .zip(build_config.mob_incarnation);
+        // The build's grant seam, formed once, before any MCP server is
+        // staged: the session's grants, or a mob member's (its identity's
+        // first, then its session's; a seam without identity subjects reads
+        // the session's).
+        let session_grants = match &build_config.runtime_build_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        }
+        .map(|grants| match &grant_member {
+            Some((member, incarnation)) => grants.for_member(member, incarnation).unwrap_or(grants),
+            None => grants,
+        });
+        // The MCP servers the gate gates by name, own and role: a configured
+        // one is staged only while a live server grant covers it.
+        let grant_gated_servers: BTreeSet<String> = grant_gated
+            .mcp_servers
+            .iter()
+            .chain(grant_gated_where_mounted.mcp_servers.iter())
+            .cloned()
+            .collect();
+        let grant_gates_unconfigured_servers = grant_gated.unconfigured_mcp_servers
+            || grant_gated_where_mounted.unconfigured_mcp_servers;
+        // The servers the build configures: while the gate's
+        // unconfigured-servers mode is on, the ones it does not name are its
+        // only ungated servers.
+        let grant_configured_servers: BTreeSet<String> = build_config
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect();
+        let recorded_overrides = RecordedToolOverrides::of(&build_config);
+        mount_grant_gated_families(&mut build_config, &grant_gated)
+            .map_err(BuildAgentError::GrantGate)?;
         self.validate_runtime_profile(&build_config, config)?;
         let mut session =
             build_config.resume_session.clone().unwrap_or_else(|| {
@@ -7296,6 +8474,18 @@ impl AgentFactory {
             };
             external_tools.bind_session_mob_tool_authority(bound);
         }
+        // External tools that only observe that binding (a mob runtime's
+        // receiver for a member whose build has no external tools of its
+        // own) compose as no external tools: they change nothing in the
+        // build's surface, its catalog exactness included. The session's
+        // agent holds the authority handle bound to them.
+        if build_config
+            .external_tools
+            .as_ref()
+            .is_some_and(|external_tools| external_tools.observes_bindings_only())
+        {
+            build_config.external_tools = None;
+        }
 
         if let Some(value) = build_config.max_inline_peer_notifications
             && value < -1
@@ -7321,6 +8511,37 @@ impl AgentFactory {
             )
             .map_err(|err| BuildAgentError::Config(err.to_string()))?
         };
+        // A model that neither the catalog, the config nor the build's own
+        // definitions define, on a route of an account that states the
+        // models it serves (a GitHub Copilot account), is defined for this
+        // build by the account's model list: the definition joins the
+        // registry through the caller-scoped seam, and the build's provider
+        // and route become those of the protocol the account serves the
+        // model on. The connection that read the list is held while the
+        // client is built.
+        let fresh_build = resumed_session_metadata.is_none();
+        let (registry, _account_model_connection) =
+            match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                self.account_model_definition(config, &registry, &mut build_config, fresh_build)
+            })
+            .await?
+            {
+                Some(AccountModelDefinition {
+                    definition,
+                    connection,
+                }) => {
+                    let mut models = build_config.custom_models.clone();
+                    models.insert(build_config.model.clone(), definition);
+                    let registry = ModelRegistry::from_config_with_models(
+                        config,
+                        &models,
+                        meerkat_models::canonical(),
+                    )
+                    .map_err(|err| BuildAgentError::Config(err.to_string()))?;
+                    (registry, Some(connection))
+                }
+                None => (registry, None),
+            };
         #[cfg(not(target_arch = "wasm32"))]
         let image_generation_planner: Option<
             Arc<dyn meerkat_core::ImageGenerationPlanner>,
@@ -7340,7 +8561,11 @@ impl AgentFactory {
         // Durable agent construction is the single fail-closed chokepoint for
         // release-stage admission. This check deliberately precedes client
         // overrides, binding selection, credential resolution, lease
-        // publication, and every provider/tool side effect. Experimental
+        // publication, and every provider/tool side effect, except the
+        // account-model lookup above: it resolves the named account route and
+        // publishes that route's lease to read the account's model list, but
+        // only for a model no registry row defines, and the definition it
+        // adds is operator-defined, never experimental. Experimental
         // identities are channel-scoped and may only enter through the
         // separately sealed live admission path.
         if registry
@@ -7494,12 +8719,18 @@ impl AgentFactory {
         // Every governed input to the provider-native tool policy is final
         // here: nothing below changes the effective restriction, consequence
         // binding or admission. The policy is derived once, from these inputs
-        // and the final model identity, before any helper is provisioned.
+        // and the final model identity, before any helper is provisioned. A
+        // grant gate that covers web search is one of them: provider-native
+        // search would bypass the gate on every request (session and turn
+        // provider params included), so the build disables it and the gated
+        // `web_search` tool is the only search path.
         let governed_tool_inputs_disable_native = tool_dispatch_admission.is_some()
             || consequence_policy.governs()
             || tool_execution_policy
                 .as_ref()
-                .is_some_and(|policy| !policy.is_unrestricted());
+                .is_some_and(|policy| !policy.is_unrestricted())
+            || grant_gate_covers_web_search(&grant_gated)
+            || grant_gate_covers_web_search(&grant_gated_where_mounted);
         // Refuse a fallback the browser profile cannot provision before any
         // credential is resolved. Governed inputs already disable native
         // search; the final identity is rechecked before helper provisioning.
@@ -7594,12 +8825,30 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
+        // A session that resumes holds its own operator-instruction entry
+        // rows where they stand: a model that cannot carry them there is
+        // refused here, before its client is built (credential resolution,
+        // lease publication). A prompt row this build authors stands beside
+        // them too; a named prompt that is already the newest prompt row is
+        // counted though the builder appends nothing, which changes no
+        // verdict (`resumed_build_entry_placement`).
+        let authors_prompt_row =
+            resumed_session_metadata.is_none() || build_config.system_prompt.is_explicit();
         let primary_llm_client_phase = match prepared_controller.as_deref() {
             Some(graph) => {
                 build_config.model.clone_from(&graph.resolved_model);
                 build_config
                     .auth_binding
                     .clone_from(&graph.resolved_auth_binding);
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 Ok(ResolvedLlmClientPhase {
                     llm_client: None,
                     credential_identity: graph.credential_identity.clone(),
@@ -7609,6 +8858,15 @@ impl AgentFactory {
                 })
             }
             None => {
+                refuse_resumed_entries_the_model_cannot_carry(
+                    &session,
+                    &registry,
+                    config,
+                    &build_config,
+                    provider,
+                    &self_hosted_server_id,
+                    authors_prompt_row,
+                )?;
                 self.resolve_llm_client_phase(
                     config,
                     &registry,
@@ -7627,6 +8885,22 @@ impl AgentFactory {
                 let Some(bootstrap_identity) = handoff_bootstrap_identity.as_ref() else {
                     return Err(primary_error);
                 };
+                // A target that cannot carry the session's own
+                // operator-instruction entries where they stand gets no
+                // bootstrap client: it would serve a transcript its wire
+                // refuses, and the realization denies the request anyway.
+                if resumed_build_entry_refusal(
+                    &session,
+                    &registry,
+                    config,
+                    bootstrap_identity,
+                    build_config.realm_id.as_ref(),
+                    authors_prompt_row,
+                )?
+                .is_some()
+                {
+                    return Err(primary_error);
+                }
                 let auth_lease_handle = match &build_config.runtime_build_mode {
                     RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
                     RuntimeBuildMode::StandaloneEphemeral => None,
@@ -7682,6 +8956,14 @@ impl AgentFactory {
             None => llm_client
                 .as_ref()
                 .and_then(|client| client.output_token_limit()),
+        };
+        // Its own prompt limit, likewise, read once the session's output
+        // budget is resolved (below): the session's default compaction
+        // threshold stays below the limit for that budget.
+        #[cfg(feature = "session-compaction")]
+        let account_limit_client = match prepared_controller.as_deref() {
+            Some(graph) => Some(Arc::clone(&graph.account_limit_client)),
+            None => llm_client.clone(),
         };
         let resolved_auth_credential_identity = resolved_llm_client_phase.credential_identity;
         let prompt_cache_backend = resolved_llm_client_phase.prompt_cache_backend;
@@ -7916,6 +9198,11 @@ impl AgentFactory {
                 );
                 account_output_token_limit.map_or(default, |limit| default.min(limit))
             });
+        // The selected account's prompt limit for this budget.
+        #[cfg(feature = "session-compaction")]
+        let account_prompt_token_limit = account_limit_client
+            .as_ref()
+            .and_then(|client| client.prompt_token_limit(max_tokens));
         let _realm_scope_root = self.realm_scope_root(&build_config);
         let _conventions_context_root = self
             .context_root
@@ -8266,11 +9553,16 @@ impl AgentFactory {
         // A governed session-owned construction (one whose bindings carry the
         // host's configured attachment authority) owns a router even with no
         // configured server, so its member can attach its first server live.
+        // So does a session-owned construction whose grant gate names an MCP
+        // server or gates every server it does not configure: a later grant
+        // or attach can reach it.
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         let live_mcp_attachable = matches!(
             resolved_mode,
             RuntimeBuildMode::SessionOwned(bindings)
                 if bindings.configured_mcp_attachment().is_some()
+                    || !grant_gated_servers.is_empty()
+                    || grant_gates_unconfigured_servers
         );
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         if !build_config.mcp_servers.is_empty()
@@ -8369,7 +9661,40 @@ impl AgentFactory {
                 Arc::clone(&adapter),
                 configured_authority.is_some(),
             )));
+            // Lazy residency: a configured server the grant gate names is
+            // staged only while a live server grant of the build's subjects
+            // covers it, so a gated server costs no process until it is
+            // granted. When the grants cannot be read, none is staged and its
+            // tools stay closed. Every other server is staged as before.
+            let gated_configured: BTreeSet<String> = build_config
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .filter(|name| grant_gated_servers.contains(name))
+                .collect();
+            let granted_servers = match (&session_grants, gated_configured.is_empty()) {
+                (Some(grants), false) => match grants.granted_servers(&gated_configured).await {
+                    Ok(granted) => granted,
+                    Err(refusal) => {
+                        tracing::warn!(
+                            error = %refusal,
+                            "tool grants could not be read at build; no grant-gated MCP server is attached"
+                        );
+                        BTreeSet::new()
+                    }
+                },
+                _ => BTreeSet::new(),
+            };
             for server in &build_config.mcp_servers {
+                if gated_configured.contains(&server.name)
+                    && !granted_servers.contains(&server.name)
+                {
+                    tracing::info!(
+                        server = server.name.as_str(),
+                        "grant-gated MCP server not attached: no live grant covers it"
+                    );
+                    continue;
+                }
                 let staged = match &configured_authority {
                     Some(authority) => {
                         adapter
@@ -8808,6 +10133,8 @@ impl AgentFactory {
             let mob_args = meerkat_core::service::MobToolsBuildArgs {
                 session_id: session.id().clone(),
                 model: model.clone(),
+                provider: resolved_llm_identity.provider,
+                self_hosted_server_id: resolved_llm_identity.self_hosted_server_id.clone(),
                 authority_context: build_config.mob_tool_authority_context.clone(),
                 effective_authority: mob_authority_handle.clone(),
                 comms_name: mob_comms_name,
@@ -8876,14 +10203,35 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    // A hook a confined process could have defined keeps its
-                    // slot and is refused at every invocation.
-                    let refused_hooks = self
-                        .host_confinement
-                        .as_ref()
-                        .map_or_else(Vec::new, |host| {
-                            layered.untrusted_entries(|source| host.untrusted_source(source))
-                        });
+                    // A hook a confined process could have defined, or one
+                    // whose content the host does not trust as read here,
+                    // keeps its slot and is refused at every invocation.
+                    let refused_hooks = if self.host_confinement.is_none()
+                        && self.hook_source_trust.is_none()
+                    {
+                        Vec::new()
+                    } else {
+                        layered.untrusted_entries(|source| {
+                            // Both policies see every read source: the
+                            // trust is asked once per source whatever
+                            // confinement said, so an auditing or
+                            // stateful trust observes each build's files.
+                            let confined = self
+                                .host_confinement
+                                .as_ref()
+                                .is_some_and(|host| host.untrusted_source(source.path));
+                            let untrusted = self.hook_source_trust.as_ref().is_some_and(|trust| {
+                                // Exhaustive on purpose: a decision added
+                                // later is classified here, never trusted
+                                // by default.
+                                match trust.decide(source) {
+                                    crate::HookSourceDecision::Trusted => false,
+                                    crate::HookSourceDecision::Untrusted => true,
+                                }
+                            });
+                            confined || untrusted
+                        })
+                    };
                     let layered_hooks = layered.config;
                     // Run overrides execute through this engine too. With
                     // override entries and no base entries the engine is
@@ -8956,7 +10304,7 @@ impl AgentFactory {
                 let mut preload = build_config
                     .preload_skills
                     .take()
-                    .and_then(|ids| if ids.is_empty() { None } else { Some(ids) });
+                    .filter(|ids| !ids.is_empty());
 
                 // Resumed sessions may carry persisted skill IDs from an older
                 // surface or older metadata semantics. Filter to the skills
@@ -9116,7 +10464,9 @@ impl AgentFactory {
         }
         // A bare resume authors nothing. An explicit prompt decision on resume
         // is different: it materializes a new ordinary System message at the
-        // current transcript boundary, whatever the binding. Nothing here
+        // current transcript boundary, whatever the binding, unless the
+        // assembled prompt is exactly the newest prompt row the model reads
+        // (the builder then appends nothing). Nothing here
         // checks the provider wire: a wire that cannot carry a System message
         // at that position refuses the request that would carry it with a
         // typed projection error, and the session's resolved
@@ -9293,22 +10643,21 @@ impl AgentFactory {
             metadata.self_hosted_server_id = self_hosted_server_id.clone();
             metadata.provider_params = build_config.provider_params.clone();
             metadata.tooling.builtins = build_config.override_builtins;
-            metadata.tooling.shell = build_config.override_shell;
+            metadata.tooling.shell = recorded_overrides.shell;
             // Apply an explicit comms override on resume; preserve the persisted
             // value when the build carries no explicit comms intent (Inherit) so
             // a prior explicit Enable/Disable survives across resumes.
-            if !matches!(build_config.override_comms, ToolCategoryOverride::Inherit) {
-                metadata.tooling.comms = build_config.override_comms;
+            if !matches!(recorded_overrides.comms, ToolCategoryOverride::Inherit) {
+                metadata.tooling.comms = recorded_overrides.comms;
             }
             metadata.tooling.mob = build_config.override_mob;
-            metadata.tooling.memory = metadata_memory_override_for_realm(
-                build_config.override_memory,
-                build_config.backend,
-            );
-            metadata.tooling.schedule = build_config.override_schedule;
-            metadata.tooling.workgraph = build_config.override_workgraph;
-            metadata.tooling.image_generation = build_config.override_image_generation;
-            metadata.tooling.web_search = build_config.override_web_search;
+            metadata.tooling.memory =
+                metadata_memory_override_for_realm(recorded_overrides.memory, build_config.backend);
+            metadata.tooling.schedule = recorded_overrides.schedule;
+            metadata.tooling.workgraph = recorded_overrides.workgraph;
+            metadata.tooling.image_generation = recorded_overrides.image_generation;
+            metadata.tooling.web_search = recorded_overrides.web_search;
+            metadata.tooling.grant_gated = grant_gated.clone();
             // Effective (resolved) policy only — an unresolved `Inherit`
             // failed the build above, so `Inherit` can never persist here.
             metadata.tooling.tool_access_policy = build_config.tool_access_policy.clone();
@@ -9342,17 +10691,17 @@ impl AgentFactory {
                 provider_params: build_config.provider_params.clone(),
                 tooling: SessionTooling {
                     builtins: build_config.override_builtins,
-                    shell: build_config.override_shell,
-                    comms: build_config.override_comms,
+                    shell: recorded_overrides.shell,
+                    comms: recorded_overrides.comms,
                     mob: build_config.override_mob,
                     memory: metadata_memory_override_for_realm(
-                        build_config.override_memory,
+                        recorded_overrides.memory,
                         build_config.backend,
                     ),
-                    schedule: build_config.override_schedule,
-                    workgraph: build_config.override_workgraph,
-                    image_generation: build_config.override_image_generation,
-                    web_search: build_config.override_web_search,
+                    schedule: recorded_overrides.schedule,
+                    workgraph: recorded_overrides.workgraph,
+                    image_generation: recorded_overrides.image_generation,
+                    web_search: recorded_overrides.web_search,
                     // Effective (resolved) policy only — an unresolved
                     // `Inherit` failed the build above.
                     tool_access_policy: build_config.tool_access_policy.clone(),
@@ -9363,6 +10712,7 @@ impl AgentFactory {
                     ),
                     application_tool_policy: build_config.application_tool_policy.clone(),
                     active_skills: active_skill_ids.clone(),
+                    grant_gated: grant_gated.clone(),
                 },
                 keep_alive: build_config.keep_alive,
                 comms_name: build_config.comms_name.clone(),
@@ -9434,6 +10784,14 @@ impl AgentFactory {
         if let Some(max_turns) = config.agent.max_turns {
             builder = builder.max_turns(max_turns);
         }
+        // Operator instructions lower as the session's model is served by its
+        // backend (`ModelRegistry::instruction_lowering_for_identity`): the
+        // ChatGPT backend's wire carries only the prompt's leading System
+        // row, so it lowers no entry, and it narrows a model that carries
+        // mid-conversation System rows.
+        builder = builder.with_operator_instruction_lowering(
+            registry.instruction_lowering_for_identity(config, &resolved_llm_identity),
+        );
 
         if let Some(defaults) = provider_request_defaults_for(
             provider,
@@ -9578,6 +10936,7 @@ impl AgentFactory {
                     provider,
                     &model,
                     build_config.auto_compact_threshold_override,
+                    account_prompt_token_limit,
                 ),
             ));
             builder = builder.compactor(compactor);
@@ -9741,6 +11100,21 @@ impl AgentFactory {
                         "deny name {tool} deferred to runtime (server {servers} declares no tool list)"
                     );
                 }
+            } else if grant_gates_unconfigured_servers
+                || grant_gated_servers
+                    .iter()
+                    .any(|server| !grant_configured_servers.contains(server))
+            {
+                // A grant-gated MCP server the build does not configure, and
+                // any server the gate's unconfigured-servers mode gates, may
+                // be attached later and provide any name: the gate enforces
+                // these by name.
+                for tool in unknown.drain(..) {
+                    tracing::info!(
+                        declared_by = %restriction.declared_by,
+                        "deny name {tool} deferred to runtime (a grant-gated MCP server may provide it)"
+                    );
+                }
             }
             let withheld = restriction
                 .vocabulary
@@ -9780,6 +11154,47 @@ impl AgentFactory {
             }
         }
 
+        // 12i-gate. The scoped tool grant gate over the final dispatcher: the
+        // agent gates each gated server's names and opens the gated names a
+        // live grant admits at each boundary, and the outermost dispatch gate
+        // adjudicates every gated call. The gate reads the session's machine
+        // through the build's generated visibility owner. A gated build also
+        // mounts the agent's `request_tool_grant` beside its tools, itself
+        // ungated; the session's host holds each request, or answers that it
+        // takes none.
+        let grant_gate_owner = match resolved_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.tool_visibility_owner()),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        };
+        let ResolvedGrantGate {
+            gate: tool_grant_gate,
+            recorded: recorded_grant_gate,
+        } = grant_gate_for_build(
+            &grant_gated,
+            &grant_gated_where_mounted,
+            &grant_configured_servers,
+            &tools,
+            tool_execution_policy.as_ref(),
+            declared_tool_restriction.as_ref(),
+            session_grants,
+            grant_gate_owner,
+        )
+        .map_err(BuildAgentError::GrantGate)?;
+        // The session records its own gate entries and the role entries this
+        // build installed.
+        let mut factory_metadata = factory_metadata;
+        factory_metadata.tooling.grant_gated = recorded_grant_gate;
+        if let Some(gate) = &tool_grant_gate {
+            builder = builder.with_tool_grant_gate(gate.clone());
+            let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(
+                gate.clone(),
+            )) as Arc<dyn AgentToolDispatcher>;
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                request_tool,
+            ]));
+        }
+
         let visibility_filters = capability_base_filter_override
             .into_iter()
             .chain(
@@ -9794,6 +11209,7 @@ impl AgentFactory {
             tool_execution_policy,
             consequence_policy,
             tool_dispatch_admission,
+            tool_grant_gate,
             builder,
             session,
             factory_metadata,
@@ -9821,6 +11237,7 @@ impl AgentFactory {
             tool_execution_policy,
             consequence_policy,
             tool_dispatch_admission,
+            tool_grant_gate,
             mut builder,
             mut session,
             mut factory_metadata,
@@ -9891,9 +11308,12 @@ impl AgentFactory {
         // reach the inner dispatcher. Provider-native server tools never
         // traverse the dispatcher and cannot be gated here; hosts that need
         // them gated must disable the native capability on gated builds.
+        // A grant-gated build's gate adjudicates every gated call last, after
+        // the policy, the consequence policy and any dispatch admission.
         if tool_execution_policy.is_some()
             || bound_consequence_policy.is_some()
             || tool_dispatch_admission.is_some()
+            || tool_grant_gate.is_some()
         {
             let mut gate = meerkat_core::ExecutionPolicyGatedDispatcher::new(
                 tools,
@@ -9905,6 +11325,9 @@ impl AgentFactory {
             }
             if let Some(admission) = tool_dispatch_admission {
                 gate = gate.with_dispatch_admission(admission);
+            }
+            if let Some(grant_gate) = tool_grant_gate {
+                gate = gate.with_tool_grant_gate(grant_gate);
             }
             tools = Arc::new(gate);
         }
@@ -10265,6 +11688,8 @@ impl AgentFactory {
             )
         })?;
         let account_output_token_limit = llm_client.output_token_limit();
+        #[cfg(feature = "session-compaction")]
+        let account_limit_client = Arc::clone(&llm_client);
         let identity = SessionLlmIdentity {
             model: build_config.model.clone(),
             provider,
@@ -10297,6 +11722,8 @@ impl AgentFactory {
             event_tap,
             late_event,
             account_output_token_limit,
+            #[cfg(feature = "session-compaction")]
+            account_limit_client,
             credential_identity: phase.credential_identity,
             auto_image_generation_executor: phase.auto_image_generation_executor,
             resolved_model: identity.model,
@@ -10513,6 +11940,20 @@ impl AgentFactory {
                         }
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
+                        }
+                        // A build whose output budget is fixed before
+                        // resolution (an explicit or configured budget, or
+                        // the one a restored session persisted) reads none of
+                        // the account's stated limits, so its resolution may
+                        // admit an account whose limits are pending, such as
+                        // one whose credential exchange is temporarily
+                        // unavailable; the first request completes it. A
+                        // budget taken from the account's limit needs those
+                        // limits, so that build still fails until they are
+                        // known. A prepared controller pins the same fact in
+                        // its inputs, so the build that consumes it agrees.
+                        if build_config.output_budget_known(config) {
+                            env = env.admitting_pending_account_limits();
                         }
                         let explicit_auth_binding = build_config.auth_binding.is_some();
                         let provider_registry = Arc::clone(&self.provider_registry);
@@ -10812,6 +12253,9 @@ impl AgentFactory {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod account_model_tests;
 /// The live A→B `brain_swap` proof over the real runtime loop.
 ///
 /// It lives inside this module rather than in `crates/meerkat/tests/` because the
@@ -11516,7 +12960,7 @@ mod tests {
                 coordinator
                     .with_exclusive_mutation(
                         key,
-                        Box::new(move || {
+                        Box::new(move |_fence| {
                             Box::pin(async move {
                                 let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                                 max_in_flight.fetch_max(current, Ordering::SeqCst);
@@ -11807,7 +13251,7 @@ mod tests {
                 Provider::OpenAI,
                 "gpt-5.4"
             ),
-            Some(std::time::Duration::from_secs(600))
+            Some(std::time::Duration::from_mins(10))
         );
         assert_eq!(
             meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(
@@ -11887,8 +13331,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 840_000);
     }
@@ -11905,6 +13355,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             None,
+            None,
         );
         assert_eq!(compaction.auto_compact_threshold, 737_600);
         assert_eq!(
@@ -11920,6 +13371,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             None,
+            None,
         );
         assert_eq!(explicit.auto_compact_threshold, 42_000);
         let build_override = model_aware_compaction_config(
@@ -11928,6 +13380,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-6-astra",
             std::num::NonZeroU64::new(9_000),
+            None,
         );
         assert_eq!(build_override.auto_compact_threshold, 9_000);
     }
@@ -11988,6 +13441,7 @@ mod tests {
             Provider::Anthropic,
             "claude-fable-5",
             None,
+            None,
         );
         assert_eq!(compaction.max_request_bytes, None);
 
@@ -11997,6 +13451,7 @@ mod tests {
             Provider::Anthropic,
             "claude-fable-5",
             Some(std::num::NonZeroU64::new(1_234).expect("non-zero")),
+            None,
         );
         assert_eq!(overridden.auto_compact_threshold, 1_234);
         assert_eq!(overridden.max_request_bytes, None);
@@ -12038,6 +13493,7 @@ mod tests {
             &registry,
             Provider::Anthropic,
             "claude-fable-5",
+            None,
             None,
         );
 
@@ -12515,6 +13971,88 @@ mod tests {
         );
     }
 
+    /// The selected account's prompt limit (a Copilot account model's
+    /// `max_prompt_tokens`) bounds the model-aware default threshold the way
+    /// the registry's input ceiling does: the tighter one wins. An explicit
+    /// threshold or a per-build override under the limit keeps its value.
+    #[test]
+    fn account_prompt_limit_bounds_the_model_aware_compaction_threshold() {
+        let mut config = Config::default();
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let threshold = |config: &Config, account, build_override| {
+            model_aware_compaction_config(
+                config,
+                &registry,
+                Provider::OpenAI,
+                "gpt-5.5",
+                build_override,
+                account,
+            )
+            .auto_compact_threshold
+        };
+        assert_eq!(threshold(&config, Some(128_000), None), 102_400);
+        assert_eq!(
+            threshold(&config, Some(2_000_000), None),
+            840_000,
+            "the registry's ceiling is the tighter one"
+        );
+        assert_eq!(threshold(&config, None, None), 840_000);
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(9_000)),
+            9_000
+        );
+        config.compaction.auto_compact_threshold = 42_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        assert_eq!(threshold(&config, Some(128_000), None), 42_000);
+    }
+
+    /// An explicit compaction threshold, from the configuration or a
+    /// per-build override, is bounded by the selected account's prompt limit
+    /// (the byte cap's rule): a prompt over that limit is refused whatever the
+    /// threshold, so a higher value could only fail the session later. A value
+    /// under the limit, or one with no account limit, keeps its value, and the
+    /// model's own window still does not bound it.
+    #[test]
+    fn an_explicit_threshold_above_the_account_prompt_limit_is_lowered_to_it() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = 150_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let threshold = |config: &Config, account, build_override| {
+            model_aware_compaction_config(
+                config,
+                &registry,
+                Provider::OpenAI,
+                "gpt-5.5",
+                build_override,
+                account,
+            )
+            .auto_compact_threshold
+        };
+        assert_eq!(threshold(&config, Some(128_000), None), 128_000);
+        assert_eq!(threshold(&config, Some(200_000), None), 150_000);
+        assert_eq!(threshold(&config, None, None), 150_000);
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(200_000)),
+            128_000,
+            "a per-build override above the account limit is lowered too"
+        );
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(9_000)),
+            9_000
+        );
+        config.compaction.auto_compact_threshold = 2_000_000;
+        assert_eq!(
+            threshold(&config, None, None),
+            2_000_000,
+            "the model's own window does not bound an explicit threshold"
+        );
+    }
+
     #[test]
     fn explicit_compaction_threshold_is_preserved() {
         let mut config = Config::default();
@@ -12523,8 +14061,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 42_000);
     }
@@ -12538,8 +14082,14 @@ mod tests {
             .model_registry(meerkat_models::canonical())
             .expect("registry");
 
-        let compaction =
-            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5", None);
+        let compaction = model_aware_compaction_config(
+            &config,
+            &registry,
+            Provider::OpenAI,
+            "gpt-5.5",
+            None,
+            None,
+        );
 
         assert_eq!(compaction.auto_compact_threshold, 100_000);
     }
@@ -12817,7 +14367,11 @@ mod tests {
         )
         .expect("fixture token must carry the durable lifecycle marker");
         token_store
-            .save(&token_key, &committed_tokens)
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &token_key,
+                &committed_tokens,
+            )
             .await
             .unwrap();
 
@@ -13138,7 +14692,13 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let session_id = meerkat_core::SessionId::parse("018f2f0d-7b1d-7a34-8c09-0a1b2c3d4e5f")
             .expect("fixed session id");
-        for model in ["gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna"] {
+        for model in [
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+        ] {
             let identity = SessionLlmIdentity {
                 model: model.to_string(),
                 provider: Provider::OpenAI,
@@ -13185,6 +14745,7 @@ mod tests {
             "gpt-6-astra",
             "gpt-6-sol",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -13713,6 +15274,53 @@ mod tests {
         );
     }
 
+    /// The request policy a live hot swap installs carries the
+    /// operator-instruction lowering the identity's binding serves: none on
+    /// the ChatGPT backend, whose wire carries only the prompt's leading
+    /// System row, and what the model row lowers on the public API, for an
+    /// identity naming no binding too.
+    #[test]
+    fn a_request_policy_carries_the_operator_instruction_lowering_its_binding_serves() {
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let (mut config, chatgpt_binding) = chatgpt_backend_cache_config();
+        config.realm.insert(
+            "public".to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        let lowering = |auth_binding: Option<AuthBindingRef>| {
+            factory
+                .request_policy_for_llm_identity(
+                    &config,
+                    &SessionLlmIdentity {
+                        model: "gpt-5.6-sol".to_string(),
+                        provider: Provider::OpenAI,
+                        self_hosted_server_id: None,
+                        provider_params: None,
+                        auth_binding,
+                    },
+                    ToolCategoryOverride::Disable,
+                )
+                .expect("request policy")
+                .operator_instruction_lowering
+        };
+        assert_eq!(
+            lowering(Some(chatgpt_binding)),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the ChatGPT backend's wire carries no entry"
+        );
+        assert_eq!(
+            lowering(Some(configured_auth_binding("public", "default_openai"))),
+            meerkat_core::InstructionLowering::MidConversation,
+            "the public API carries the row's mid-conversation System rows"
+        );
+        assert_eq!(
+            lowering(None),
+            meerkat_core::InstructionLowering::MidConversation,
+            "an identity naming no binding is served by the API-key backend"
+        );
+    }
+
     /// Lower `identity`'s request policy through a ChatGPT-backend client, as
     /// the session's turn does, and return the body the wire would carry.
     #[cfg(feature = "openai")]
@@ -13800,6 +15408,359 @@ mod tests {
             "cache defaults computed for an unresolved binding reached the ChatGPT backend wire: {:?}",
             cache_fields(&body)
         );
+    }
+
+    /// Answers a request only after lowering it through the real ChatGPT
+    /// backend Responses request builder, as the OpenAI client does before
+    /// it sends one: a request that wire cannot carry fails the turn.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    struct ChatGptWireAnsweringClient {
+        wire: meerkat_openai::OpenAiClient,
+        bodies: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    impl ChatGptWireAnsweringClient {
+        fn new() -> Self {
+            Self {
+                wire: meerkat_openai::OpenAiClient::new("test-key".to_string())
+                    .with_chatgpt_backend_wire(),
+                bodies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn bodies(&self) -> Vec<serde_json::Value> {
+            self.bodies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for ChatGptWireAnsweringClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+            self.wire.project_replay_messages(messages)
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>
+        {
+            match self.wire.build_request_body(request) {
+                Err(error) => Box::pin(futures::stream::iter(vec![Err(error)])),
+                Ok(body) => {
+                    self.bodies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(body);
+                    Box::pin(futures::stream::iter(vec![
+                        Ok(LlmEvent::TextDelta {
+                            delta: "done".to_string(),
+                            meta: None,
+                        }),
+                        Ok(LlmEvent::UsageUpdate {
+                            usage: meerkat_core::TurnUsage::host_declared(
+                                Provider::OpenAI,
+                                &request.model,
+                                meerkat_core::Usage::default(),
+                            ),
+                        }),
+                        Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A session the factory builds on the ChatGPT backend: that wire
+    /// carries exactly one leading System row, the session's prompt, so the
+    /// build resolves no operator-instruction lowering. A recorded target
+    /// stays pending at the fresh session's first run and at the next one,
+    /// no entry row is written, and every request reaches the wire through
+    /// the real ChatGPT backend request builder.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn chatgpt_backend_session_keeps_the_target_pending_and_every_request_succeeds() {
+        const REALM: &str = "operator_instructions_chatgpt";
+        let mut config = Config::default();
+        let mut realm = inline_realm_section(&[("openai", "test-key")]);
+        realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        config.realm.insert(REALM.to_string(), realm);
+        let client = Arc::new(ChatGptWireAnsweringClient::new());
+        let wire_client: Arc<dyn LlmClient> = client.clone();
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+        build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+        build.llm_client_override = Some(wire_client);
+        build.system_prompt =
+            crate::SystemPromptOverride::Set("You are a careful assistant.".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_web_search = ToolCategoryOverride::Disable;
+        let mut agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("a ChatGPT backend session builds");
+        assert_eq!(
+            agent.operator_instruction_lowering(),
+            meerkat_core::InstructionLowering::Unavailable,
+            "the build resolves the backend's lowering, not the model row's"
+        );
+
+        agent
+            .session_mut()
+            .set_session_instruction(meerkat_core::SessionInstructionWrite {
+                slot: meerkat_core::InstructionSlot {
+                    namespace: meerkat_core::InstructionNamespace::new("app.example")
+                        .expect("namespace"),
+                    key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                },
+                revision: meerkat_core::InstructionRevision::new(1).expect("revision"),
+                change: meerkat_core::SessionInstructionChange::Activate {
+                    body: "Answer formally.".to_string(),
+                    content_sha256: None,
+                },
+            })
+            .expect("the session records the target");
+        for input in ["first", "second"] {
+            assert_eq!(
+                agent
+                    .apply_run_start_operator_instructions(
+                        meerkat_core::InstructionRunStart::FreshRun,
+                        None,
+                    )
+                    .expect("the run start resolves"),
+                meerkat_core::RunStartInstructionOutcome::Deferred(
+                    meerkat_core::InstructionDeferReason::LoweringUnavailable
+                ),
+                "the target stays pending at the {input} run's start"
+            );
+            agent.set_runtime_execution_kind(Some(
+                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+            ));
+            agent
+                .run(meerkat_core::ContentInput::Text(input.to_string()))
+                .await
+                .expect("the request reaches the ChatGPT backend wire");
+        }
+
+        let bodies = client.bodies();
+        assert_eq!(bodies.len(), 2, "every request reached the wire");
+        for body in &bodies {
+            assert!(
+                !body.to_string().contains("Answer formally."),
+                "no instruction body reaches the wire: {body}"
+            );
+        }
+        assert!(
+            agent.session().messages().iter().all(|message| !matches!(
+                message,
+                meerkat_core::Message::System(system) if system.instruction_entry.is_some()
+            )),
+            "no entry row is written"
+        );
+        let state = agent
+            .session()
+            .instruction_target_state()
+            .expect("the target state reads")
+            .expect("the target is recorded");
+        assert_eq!(
+            state.slots()[0].pending_body.as_deref(),
+            Some("Answer formally."),
+            "the target stays pending"
+        );
+    }
+
+    /// A resumed build is refused, before its client is built, where the
+    /// model it resumes on cannot carry the operator-instruction entry rows
+    /// the session wrote itself where they stand: an entry after a
+    /// conversation row on a model that lowers System rows only in the
+    /// leading prefix, and an entry beside the session's prompt on the
+    /// ChatGPT backend, whose wire takes one leading System row. The first
+    /// session resumes on a model that lowers entries anywhere.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_resumed_build_is_refused_where_its_model_cannot_carry_the_sessions_own_entries() {
+        const REALM: &str = "operator_instructions_resume";
+        let temp = tempfile::tempdir().expect("temp sessions");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .without_provider_auth_persistence()
+            .builtins(false);
+        let mut api_config = Config::default();
+        api_config.realm.insert(
+            REALM.to_string(),
+            inline_realm_section(&[("openai", "test-key")]),
+        );
+        api_config.models.custom.insert(
+            "custom-prefix-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let mut chatgpt_config = Config::default();
+        let mut chatgpt_realm = inline_realm_section(&[("openai", "test-key")]);
+        chatgpt_realm
+            .backend
+            .get_mut("default_openai")
+            .expect("OpenAI backend")
+            .backend_kind = "chatgpt_backend".to_string();
+        chatgpt_realm
+            .auth
+            .get_mut("default_openai")
+            .expect("OpenAI auth")
+            .auth_method = "managed_chatgpt_oauth".to_string();
+        chatgpt_config
+            .realm
+            .insert(REALM.to_string(), chatgpt_realm);
+        let resume = |model: &str, session: Session| {
+            let mut build = AgentBuildConfig::new(model);
+            build.provider = Some(Provider::OpenAI);
+            build.realm_id = Some(RealmId::parse(REALM).expect("test realm"));
+            build.auth_binding = Some(configured_auth_binding(REALM, "default_openai"));
+            build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::for_provider(
+                Provider::OpenAI,
+            )));
+            build.resume_session = Some(session);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_web_search = ToolCategoryOverride::Disable;
+            build
+        };
+        // A session the factory built and persisted on `model` through the
+        // realm's binding: its durable session metadata names that identity,
+        // so the resume reaches the operator-instruction check.
+        let resumable = |model: &str| {
+            let mut session = Session::new();
+            session
+                .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: model.to_string(),
+                    max_tokens: 8_192,
+                    structured_output_retries: 2,
+                    provider: Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling: SessionTooling::default(),
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: Some(RealmId::parse(REALM).expect("test realm")),
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: Some(configured_auth_binding(REALM, "default_openai")),
+                    mob_member_binding: None,
+                })
+                .expect("durable session metadata");
+            session
+        };
+        let after_conversation = |model: &str| {
+            let mut session = resumable(model);
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text("Hello"),
+            ));
+            session
+                .append_operator_instruction_activation_for_test(
+                    "app.example",
+                    "tone",
+                    1,
+                    "Answer formally.",
+                )
+                .expect("an entry after the conversation row");
+            session
+        };
+        let mut beside_the_prompt = resumable("gpt-5.5");
+        beside_the_prompt.push(meerkat_core::Message::System(
+            meerkat_core::SystemMessage::new("You are a careful assistant."),
+        ));
+        beside_the_prompt
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry beside the prompt");
+
+        for (target, build, config) in [
+            (
+                "a leading-prefix-only model",
+                resume(
+                    "custom-prefix-model",
+                    after_conversation("custom-prefix-model"),
+                ),
+                &api_config,
+            ),
+            (
+                "the ChatGPT backend",
+                resume("gpt-5.5", beside_the_prompt),
+                &chatgpt_config,
+            ),
+        ] {
+            let Err(error) = factory.build_agent(build, config).await else {
+                panic!("a resumed build on {target} must be refused");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    BuildAgentError::Config(message)
+                        if message.contains("cannot represent the operator-instruction entries")
+                ),
+                "unexpected build error on {target}: {error}"
+            );
+        }
+
+        factory
+            .build_agent(
+                resume("gpt-5.5", after_conversation("gpt-5.5")),
+                &api_config,
+            )
+            .await
+            .expect("a model that lowers entries anywhere resumes the session");
     }
 
     /// An inherited tool-visibility ceiling keeps the identity witnesses that
@@ -14789,7 +16750,7 @@ mod tests {
             let opener = {
                 let gate = gate.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(1_000)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     std::fs::write(&gate, b"open").expect("open the server gate");
                 })
             };
@@ -14904,6 +16865,174 @@ mod tests {
         assert_eq!(requested_output_budget(None).await, 64_000);
         assert_eq!(requested_output_budget(Some(128_000)).await, 128_000);
         assert_eq!(requested_output_budget(Some(1_024)).await, 1_024);
+    }
+
+    /// A client whose selected account states a prompt limit (as a Copilot
+    /// account model does) and whose provider measures every request's
+    /// prompt at `input_tokens`. With `less_the_budget` the account states a
+    /// context window of `prompt_limit` and no output limit, so its prompt
+    /// limit is that window less a request's output budget.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    struct AccountPromptLimitedClient {
+        prompt_limit: u32,
+        input_tokens: u64,
+        less_the_budget: bool,
+    }
+
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for AccountPromptLimitedClient {
+        fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+            Some(if self.less_the_budget {
+                self.prompt_limit.saturating_sub(output_budget)
+            } else {
+                self.prompt_limit
+            })
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        Provider::OpenAI,
+                        &request.model,
+                        meerkat_core::Usage {
+                            input_tokens: self.input_tokens,
+                            output_tokens: 1,
+                            ..Default::default()
+                        },
+                    ),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session, on a client
+    /// whose account allows prompts of at most 128_000 tokens, starts by
+    /// compacting after a first turn whose prompt measured `input_tokens`;
+    /// `threshold` is the build's explicit threshold override.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts(input_tokens: u64, threshold: Option<u64>) -> bool {
+        second_turn_compacts_on(
+            Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+                less_the_budget: false,
+            }),
+            None,
+            threshold,
+        )
+        .await
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session on `client`,
+    /// with the output budget `max_tokens` (the model default when `None`)
+    /// and the explicit threshold override `threshold`, starts by
+    /// compacting.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts_on(
+        client: Arc<dyn LlmClient>,
+        max_tokens: Option<u32>,
+        threshold: Option<u64>,
+    ) -> bool {
+        let session_id = SessionId::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.resume_session = Some(Session::with_id(session_id));
+        build.llm_client_override = Some(client);
+        build.max_tokens = max_tokens;
+        build.auto_compact_threshold_override = threshold.and_then(std::num::NonZeroU64::new);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("agent on the prompt-limited client");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("first".into()))
+            .await
+            .expect("first turn");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        agent
+            .run_with_events(meerkat_core::ContentInput::Text("second".into()), tx)
+            .await
+            .expect("second turn");
+        let mut compacted = false;
+        while let Ok(event) = rx.try_recv() {
+            compacted |= matches!(event, meerkat_core::AgentEvent::CompactionStarted { .. });
+        }
+        compacted
+    }
+
+    /// The selected account's prompt limit reaches the session's compactor:
+    /// on `gpt-5.5` (whose own default threshold is 840_000) an account that
+    /// allows 128_000 prompt tokens compacts from 102_400, four-fifths of its
+    /// limit, and an explicit 150_000 is lowered to the 128_000 limit.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_session_compactor() {
+        assert!(second_turn_compacts(110_000, None).await);
+        assert!(!second_turn_compacts(100_000, None).await);
+        assert!(second_turn_compacts(130_000, Some(150_000)).await);
+        assert!(!second_turn_compacts(125_000, Some(150_000)).await);
+    }
+
+    /// The account's prompt limit reaches the compactor for the session's
+    /// own output budget: an account stating a 128_000-token window and no
+    /// output limit lets a session with a 32_000-token budget send prompts of
+    /// 96_000 tokens, so the session compacts from 76_800, four-fifths of
+    /// that.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_compactor_for_the_session_budget() {
+        let window = |input_tokens| -> Arc<dyn LlmClient> {
+            Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+                less_the_budget: true,
+            })
+        };
+        assert!(second_turn_compacts_on(window(80_000), Some(32_000), None).await);
+        assert!(!second_turn_compacts_on(window(70_000), Some(32_000), None).await);
     }
 
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -15427,6 +17556,8 @@ mod tests {
     const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
     const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
     const FALLBACK_REALM_CHATGPT_UNBOUND: &str = "fallback_chatgpt_unbound";
+    const FALLBACK_REALM_CHATGPT_BOUND_LOWERING: &str = "fallback_chatgpt_bound_lowering";
+    const FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING: &str = "fallback_chatgpt_unbound_lowering";
     const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
     const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
     const FALLBACK_REALM_SETTLED_ACTOR: &str = "fallback_settled_actor";
@@ -16084,14 +18215,18 @@ mod tests {
     /// Run one sticky fallback from an Anthropic source onto `gpt-5.5`
     /// through realm `realm_name` (the caller's own), whose OpenAI binding is the private
     /// ChatGPT backend, and return the session's resolved capability surface
-    /// afterwards. `bound` names that binding on both the source and the
+    /// and the agent's operator-instruction lowering afterwards. `bound`
+    /// names that binding on both the source and the
     /// fallback target; otherwise neither names one, and the target is served
     /// by the binding its client resolution selects (the ChatGPT one).
     #[cfg(not(target_arch = "wasm32"))]
     async fn chatgpt_backend_sticky_fallback_capabilities(
         realm_name: &str,
         bound: bool,
-    ) -> meerkat_runtime::SessionLlmCapabilitySurface {
+    ) -> (
+        meerkat_runtime::SessionLlmCapabilitySurface,
+        meerkat_core::InstructionLowering,
+    ) {
         use meerkat_runtime::SessionServiceRuntimeExt as _;
 
         let primary_model = "claude-sonnet-4-5";
@@ -16204,11 +18339,12 @@ mod tests {
             Some(backup_binding),
             "the fallback is served through the ChatGPT-backend binding"
         );
-        runtime
+        let capabilities = runtime
             .resolved_session_llm_capabilities(&session_id)
             .await
             .expect("resolved capability read")
-            .expect("the fallback records a resolved capability surface")
+            .expect("the fallback records a resolved capability surface");
+        (capabilities, agent.operator_instruction_lowering())
     }
 
     /// A sticky fallback onto a target that names the ChatGPT-backend binding
@@ -16219,7 +18355,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn sticky_fallback_onto_a_chatgpt_binding_records_its_backend_capability() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_BOUND, true).await;
         assert!(
             !capabilities.supports_mid_conversation_system_messages,
@@ -16234,7 +18370,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn unbound_fallback_target_is_judged_by_the_binding_it_resolves() {
-        let capabilities =
+        let (capabilities, _) =
             chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_UNBOUND, false)
                 .await;
         assert!(
@@ -16242,6 +18378,27 @@ mod tests {
             "the target resolves the ChatGPT-backend binding; the row's capability \
              must not stand for it"
         );
+    }
+
+    /// A sticky fallback onto the ChatGPT backend, through a binding the
+    /// target names or the one its client resolution selects, lowers no
+    /// operator-instruction entry afterwards: that wire carries exactly one
+    /// leading System row, the session's prompt. The activated witness,
+    /// judged through that binding, states it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sticky_fallback_onto_a_chatgpt_binding_lowers_no_operator_instruction_entry() {
+        for (realm, bound) in [
+            (FALLBACK_REALM_CHATGPT_BOUND_LOWERING, true),
+            (FALLBACK_REALM_CHATGPT_UNBOUND_LOWERING, false),
+        ] {
+            let (_, lowering) = chatgpt_backend_sticky_fallback_capabilities(realm, bound).await;
+            assert_eq!(
+                lowering,
+                meerkat_core::InstructionLowering::Unavailable,
+                "a fallback onto the ChatGPT backend (target names its binding: {bound})"
+            );
+        }
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -17958,6 +20115,370 @@ mod tests {
         assert!(
             selection.uses_synthetic_env_default_credential(),
             "governed custody must recognize the factory's env-default route"
+        );
+    }
+
+    /// Stands in for a provider runtime whose accounts state their limits
+    /// only once a credential exchange answers: while `outage` is set, a
+    /// resolution that does not admit pending account limits fails, as one
+    /// on a GitHub Copilot route does during a token exchange outage. Records
+    /// whether each resolution admitted them.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct PendingLimitsProviderRuntime {
+        outage: Arc<std::sync::atomic::AtomicBool>,
+        admissions: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait]
+    impl meerkat_llm_core::provider_runtime::ProviderRuntime for PendingLimitsProviderRuntime {
+        fn provider_id(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn resolve_binding(
+            &self,
+            binding: &meerkat_llm_core::provider_runtime::ValidatedBinding,
+            env: &meerkat_llm_core::provider_runtime::ResolverEnvironment,
+        ) -> Result<
+            meerkat_llm_core::provider_runtime::ResolvedConnection,
+            meerkat_llm_core::provider_runtime::ProviderAuthError,
+        > {
+            let admitted = env.admits_pending_account_limits();
+            self.admissions.lock().unwrap().push(admitted);
+            if self.outage.load(std::sync::atomic::Ordering::SeqCst) && !admitted {
+                return Err(
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                        "credential exchange returned 503".to_string(),
+                    ),
+                );
+            }
+            Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: binding.backend(),
+                backend_profile: Arc::clone(binding.backend_profile()),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                        "test-openai-key".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    ),
+                ),
+            })
+        }
+
+        fn build_client(
+            &self,
+            _connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, meerkat_llm_core::provider_runtime::ProviderClientError>
+        {
+            Ok(Arc::new(meerkat_client::TestClient::default()))
+        }
+    }
+
+    /// A factory whose only provider runtime is a
+    /// [`PendingLimitsProviderRuntime`], with the outage switch and the
+    /// admission record that runtime shares.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct PendingLimitsFactory {
+        factory: AgentFactory,
+        outage: Arc<std::sync::atomic::AtomicBool>,
+        admissions: Arc<std::sync::Mutex<Vec<bool>>>,
+        _sessions: tempfile::TempDir,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl PendingLimitsFactory {
+        fn new() -> Self {
+            let sessions = tempfile::tempdir().unwrap();
+            let outage = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let admissions = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut factory = AgentFactory::new(sessions.path().join("sessions"))
+                .without_provider_auth_persistence()
+                .builtins(false);
+            factory.provider_registry = Arc::new(
+                meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
+                    Arc::new(PendingLimitsProviderRuntime {
+                        outage: Arc::clone(&outage),
+                        admissions: Arc::clone(&admissions),
+                    }),
+                ),
+            );
+            Self {
+                factory,
+                outage,
+                admissions,
+                _sessions: sessions,
+            }
+        }
+
+        fn begin_outage(&self) {
+            self.outage.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn admissions(&self) -> Vec<bool> {
+            self.admissions.lock().unwrap().clone()
+        }
+
+        /// A build of the stand-in's model as a request makes it, without an
+        /// output budget. Image generation is off: its executors resolve
+        /// image bindings of their own (strictly, through the stand-in too),
+        /// so the admissions recorded are the session's own resolution's.
+        fn request() -> AgentBuildConfig {
+            let mut build = AgentBuildConfig::new("gpt-5.4");
+            build.provider = Some(Provider::OpenAI);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_image_generation = ToolCategoryOverride::Disable;
+            build
+        }
+
+        /// A build of `session` (a new one, or one to restore) on its own
+        /// runtime bindings from `runtime`.
+        async fn build_config(
+            runtime: &meerkat_runtime::MeerkatMachine,
+            session: Session,
+        ) -> AgentBuildConfig {
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session runtime bindings");
+            let mut build = Self::request();
+            build.resume_session = Some(session);
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+            build
+        }
+    }
+
+    /// A web-search helper on an account whose limits are pending (its
+    /// credential exchange is temporarily unavailable) builds like the session
+    /// it serves: the helper reads none of the account's limits, so its
+    /// resolution admits the pending ones, and an explicit web search is
+    /// provisioned instead of failing the build.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_web_search_helper_builds_while_the_account_limits_are_pending() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let config = Config::default();
+        let registry = stand_in.factory.model_registry(&config).expect("registry");
+        let executor = stand_in
+            .factory
+            .build_web_search_executor(
+                &config,
+                &registry,
+                Provider::OpenAI,
+                &PendingLimitsFactory::request(),
+                meerkat_core::new_event_tap(),
+                true,
+            )
+            .await
+            .expect("an explicit web search is provisioned during the outage");
+        assert!(executor.is_some());
+        assert_eq!(stand_in.admissions(), [true]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_new_session_whose_budget_comes_from_the_account_fails_to_build_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+
+        let error = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .err()
+            .expect("a build whose output budget comes from the account's limit must fail while that limit is pending");
+        assert!(
+            matches!(
+                &error,
+                BuildAgentError::LlmClient(FactoryError::ProviderAuth(
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                        message
+                    )
+                )) if message.contains("returned 503")
+            ),
+            "{error}"
+        );
+        assert_eq!(stand_in.admissions(), [false]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_session_with_an_explicit_budget_builds_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let mut build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+        build.max_tokens = Some(1024);
+
+        let agent = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a build whose output budget is explicit reads none of the account's limits");
+        assert_eq!(stand_in.admissions(), [true]);
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            1024
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_session_with_a_configured_budget_builds_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+        let config = Config {
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+
+        let agent =
+            stand_in.factory.build_agent(build, &config).await.expect(
+                "a build whose output budget is configured reads none of the account's limits",
+            );
+        assert_eq!(stand_in.admissions(), [true]);
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            2048
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_restored_session_builds_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+        let agent = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a new session builds while the exchange answers");
+        let session = agent.session().clone();
+        let budget = session
+            .session_metadata()
+            .expect("metadata written")
+            .max_tokens;
+
+        // The session is restored (a wake, or a surface rebuilding it) while
+        // the exchange is down.
+        stand_in.begin_outage();
+        let restored_runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&restored_runtime, session).await;
+        let restored = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a restored session keeps its persisted budget and reads none of the account's limits");
+        assert_eq!(stand_in.admissions(), [false, true]);
+        assert_eq!(
+            restored
+                .session()
+                .session_metadata()
+                .expect("metadata kept")
+                .max_tokens,
+            budget,
+            "the restored session keeps the budget it persisted"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_controller_prepared_under_a_known_budget_refuses_a_build_without_one() {
+        use crate::prepared_controller::{
+            PreparedControllerCell, PreparedControllerRefusal, PreparedControllerTicket,
+            encode_prepared_controller_for_service,
+        };
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = meerkat_core::SessionId::new();
+
+        // Prepared during the outage under an explicit budget: its resolution
+        // admitted the account's pending limits.
+        let mut request = PendingLimitsFactory::request();
+        request.max_tokens = Some(1024);
+        let graph = stand_in
+            .factory
+            .prepare_controller_graph(
+                request,
+                &Config::default(),
+                runtime.generated_auth_lease_handle(),
+                &session_id,
+            )
+            .await
+            .expect("a controller whose budget is known is prepared during the outage");
+        let ticket =
+            PreparedControllerTicket::new(PreparedControllerCell::new(session_id.clone(), graph));
+        assert_eq!(stand_in.admissions(), [true]);
+
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let consuming_build = |max_tokens: Option<u32>| {
+            let mut build = PendingLimitsFactory::request();
+            build.max_tokens = max_tokens;
+            build.resume_session = Some(Session::with_id(session_id.clone()));
+            build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
+            build.prepared_controller =
+                Some(encode_prepared_controller_for_service(ticket.clone()));
+            build
+        };
+
+        // The session's build names no budget: its budget would come from the
+        // account's limit, which the admitted resolution never read.
+        let error = stand_in
+            .factory
+            .build_agent(consuming_build(None), &Config::default())
+            .await
+            .err()
+            .expect("a build whose budget comes from the account's limit must not consume a controller admitted under a known budget");
+        assert!(
+            matches!(
+                error,
+                BuildAgentError::PreparedController(PreparedControllerRefusal::InputsChanged(
+                    "output budget"
+                ))
+            ),
+            "{error}"
+        );
+
+        // The refusal leaves the controller to a build whose budget is known.
+        let agent = stand_in
+            .factory
+            .build_agent(consuming_build(Some(1024)), &Config::default())
+            .await
+            .expect("a build with the prepared budget consumes the controller");
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            1024
+        );
+        assert_eq!(
+            stand_in.admissions(),
+            [true],
+            "consumption resolves nothing"
         );
     }
 
@@ -21753,6 +24274,66 @@ mod tests {
         ));
     }
 
+    /// The OpenAI image models OpenAI shut down are no image targets: with
+    /// provider openai the planner denies them `UnsupportedTarget` before any
+    /// provider call, and without a provider no configured image provider owns
+    /// them, so `generate_image` refuses the arguments.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "openai"))]
+    #[test]
+    fn image_planner_refuses_shut_down_openai_image_models() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(
+            meerkat_openai::image_generation::OpenAiImageGenerationProfile,
+        )]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-5.5"),
+            None,
+            None,
+            None,
+        )
+        .with_session_provider(Some(meerkat_core::Provider::OpenAI));
+
+        for model in ["gpt-image-1", "dall-e-3", "dall-e-2"] {
+            let request = meerkat_core::GenerateImageRequest::new(
+                meerkat_core::ImageGenerationIntent::Generate {
+                    prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                    prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                        tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                    },
+                    reference_images: Vec::new(),
+                },
+                meerkat_core::ImageGenerationTargetPreference::Model {
+                    provider: meerkat_core::ProviderId::new("openai"),
+                    model: meerkat_core::lifecycle::run_primitive::ModelId::new(model),
+                },
+                meerkat_core::ImageSizePreference::Square1024,
+                meerkat_core::ImageQualityPreference::Auto,
+                meerkat_core::ImageFormatPreference::Png,
+                std::num::NonZeroU32::MIN,
+            )
+            .unwrap();
+
+            let result = planner.resolve_image_generation_plan(
+                &status,
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+                &request,
+            );
+
+            assert!(
+                matches!(
+                    result,
+                    Err(meerkat_core::ImageOperationDenialReason::UnsupportedTarget)
+                ),
+                "{model} with provider openai must be denied UnsupportedTarget"
+            );
+            assert!(
+                planner.infer_provider_for_model(model).is_none(),
+                "no configured image provider may own {model}"
+            );
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn image_planner_rejects_unknown_provider_without_alias_fallback() {
@@ -22125,6 +24706,7 @@ mod tests {
             Provider::OpenAI,
             "gpt-5.5",
             std::num::NonZeroU64::new(9_000),
+            None,
         );
 
         assert_eq!(
@@ -25228,5 +27810,617 @@ mod prepared_agent_tests {
         })
         .await
         .expect("the abandoned preparation's router is shut down");
+    }
+}
+
+/// The MCP server grant gate at the factory: a gated configured server's lazy
+/// residency, a member build's role entries (servers included), a server and
+/// a role tool name that appear after the build, the unconfigured-servers
+/// mode, and the order of the gate and an MCP call's preparation.
+#[cfg(all(
+    test,
+    feature = "workspace-tests",
+    feature = "mcp",
+    not(target_arch = "wasm32")
+))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod mcp_server_grant_gate_tests {
+    use super::*;
+    use meerkat_core::ToolCatalogVisibility;
+    use meerkat_core::tool_grant::{
+        GrantGatedTools, TOOL_GRANT_REQUIRED_CODE, ToolGrantIssuer, ToolGrantSubject,
+        ToolGrantTarget,
+    };
+    use meerkat_core::types::{ToolCall, ToolName};
+    use meerkat_runtime::MeerkatMachine;
+    use meerkat_runtime::tool_grant::{
+        ToolGrantAuditEvent, ToolGrantClock, ToolGrantClockError, ToolGrantExpiryDriver,
+        ToolGrantRequest, ToolGrantWindow,
+    };
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// The host clock reading the rows start at, in UNIX ms.
+    const T0: u64 = 1_800_000_000_000;
+
+    #[derive(Debug)]
+    struct RowClock(AtomicU64);
+
+    impl ToolGrantClock for RowClock {
+        fn now_ms(&self) -> Result<u64, ToolGrantClockError> {
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    /// Publishes each construction's own adapter as it is, and keeps it, so
+    /// a row can attach a server to the construction after its build.
+    #[derive(Default)]
+    struct Adapters(std::sync::Mutex<Vec<Arc<meerkat_mcp::McpRouterAdapter>>>);
+
+    impl McpAdapterComposer for Adapters {
+        fn compose(
+            &self,
+            adapter: &Arc<meerkat_mcp::McpRouterAdapter>,
+            _session_id: &SessionId,
+            _member: Option<&meerkat_core::MobMemberBinding>,
+        ) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
+            self.0.lock().unwrap().push(Arc::clone(adapter));
+            Ok(Arc::clone(adapter) as Arc<dyn AgentToolDispatcher>)
+        }
+    }
+
+    impl Adapters {
+        fn last(&self) -> Arc<meerkat_mcp::McpRouterAdapter> {
+            Arc::clone(self.0.lock().unwrap().last().expect("a composed adapter"))
+        }
+    }
+
+    /// Counts the MCP calls whose preparation ran.
+    #[derive(Default)]
+    struct CountingPreparation(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl meerkat_mcp::McpCallContextProvider for CountingPreparation {
+        async fn prepare(
+            &self,
+            _target: meerkat_mcp::McpCallTarget<'_>,
+            _call: meerkat_core::ToolCallView<'_>,
+            _context: &meerkat_core::ToolDispatchContext,
+        ) -> Result<Option<meerkat_mcp::McpCallContext>, meerkat_mcp::McpCallContextError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    struct Rig {
+        machine: Arc<MeerkatMachine>,
+        clock: Arc<RowClock>,
+        adapters: Arc<Adapters>,
+        preparations: Arc<CountingPreparation>,
+        factory: AgentFactory,
+        started: PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    fn rig() -> Rig {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let clock = Arc::new(RowClock(AtomicU64::new(T0)));
+        machine.set_tool_grant_clock(Arc::clone(&clock) as Arc<dyn ToolGrantClock>);
+        let adapters = Arc::new(Adapters::default());
+        let preparations = Arc::new(CountingPreparation::default());
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .with_mcp_adapter_composer(Arc::clone(&adapters) as Arc<dyn McpAdapterComposer>)
+            .mcp_call_context_provider(
+                Arc::clone(&preparations) as Arc<dyn meerkat_mcp::McpCallContextProvider>
+            );
+        Rig {
+            machine,
+            clock,
+            adapters,
+            preparations,
+            factory,
+            started: temp.path().join("started"),
+            _temp: temp,
+        }
+    }
+
+    /// The fixture server `name`, whose tools are `<prefix>echo`,
+    /// `<prefix>add`, ..., and whose process starts the rig counts.
+    fn fixture(rig: &Rig, name: &str, prefix: &str) -> meerkat_core::McpServerConfig {
+        meerkat_core::McpServerConfig::stdio(
+            name,
+            mcp_test_server::fixture_binary()
+                .to_string_lossy()
+                .to_string(),
+            vec![
+                "--tool-prefix".to_string(),
+                prefix.to_string(),
+                "--started-file".to_string(),
+                rig.started.to_string_lossy().to_string(),
+            ],
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// How many fixture server processes started.
+    fn started(rig: &Rig) -> usize {
+        std::fs::read_to_string(&rig.started).map_or(0, |log| log.lines().count())
+    }
+
+    /// A build of a new session on the rig's runtime: its own gate `gate`,
+    /// the role entries `role`, and its own MCP servers `servers`.
+    async fn session_build(
+        rig: &Rig,
+        session: &Session,
+        gate: GrantGatedTools,
+        role: Option<GrantGatedTools>,
+        servers: Vec<meerkat_core::McpServerConfig>,
+    ) -> AgentBuildConfig {
+        let bindings = rig
+            .machine
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("runtime bindings");
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session.clone());
+        build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.grant_gated_tools = Some(gate);
+        build.grant_gated_tools_where_mounted = role;
+        build.mcp_servers = servers;
+        build.wait_for_mcp = true;
+        build
+    }
+
+    async fn build_agent(rig: &Rig, build: AgentBuildConfig) -> DynAgent {
+        rig.factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("the build builds")
+    }
+
+    async fn grant(rig: &Rig, session: &Session, target: ToolGrantTarget, lifetime: Duration) {
+        rig.machine
+            .grant_tool(
+                ToolGrantRequest {
+                    subject: ToolGrantSubject::session(session.id().clone()),
+                    target,
+                    issuer: ToolGrantIssuer::operator(),
+                    reason: None,
+                    window: ToolGrantWindow::For(lifetime),
+                    run_scope: None,
+                },
+                None,
+            )
+            .await
+            .expect("the grant is issued");
+    }
+
+    fn server(server: &str, tools: Option<&[&str]>) -> ToolGrantTarget {
+        ToolGrantTarget::McpServer {
+            server: server.to_string(),
+            tools: tools.map(|tools| tools.iter().map(|tool| ToolName::from(*tool)).collect()),
+        }
+    }
+
+    fn mounted(agent: &DynAgent, name: &str) -> bool {
+        agent
+            .tool_scope()
+            .base_tools_snapshot()
+            .expect("base tools")
+            .iter()
+            .any(|tool| tool.name == name)
+    }
+
+    /// How the agent's next model request shows `name`: `None` for a tool it
+    /// does not mount.
+    fn shown(agent: &DynAgent, name: &str) -> Option<ToolCatalogVisibility> {
+        agent
+            .tool_catalog_view()
+            .expect("an exact catalog")
+            .entries
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.visibility)
+    }
+
+    /// Whether the grant gate hides the mounted tool `name`.
+    fn closed(agent: &DynAgent, name: &str) -> bool {
+        shown(agent, name) == Some(ToolCatalogVisibility::Hidden)
+    }
+
+    /// One turn, so the agent crosses a model-request boundary.
+    async fn turn(agent: &mut DynAgent) {
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("go".into()))
+            .await
+            .expect("an agent turn");
+    }
+
+    /// One call through the agent's own precheck and dispatch gate.
+    async fn call(agent: &mut DynAgent, name: &str) -> meerkat_core::ToolDispatchOutcome {
+        agent
+            .dispatch_external_tool_call(ToolCall::new(
+                format!("{name}-call"),
+                name.to_string(),
+                serde_json::json!({"message": "probe"}),
+            ))
+            .await
+            .expect("an external call outcome")
+    }
+
+    /// The grant refusal code a call was refused with, if any.
+    fn refusal_code(outcome: &meerkat_core::ToolDispatchOutcome) -> Option<String> {
+        match outcome.terminal_cause() {
+            Some(meerkat_core::ToolDispatchTerminalCause::RuntimeToolError {
+                error: meerkat_core::ToolError::PolicyDenied { denial },
+            }) => Some(denial.code.clone()),
+            _ => None,
+        }
+    }
+
+    fn ran(outcome: &meerkat_core::ToolDispatchOutcome) -> bool {
+        outcome.terminal_cause().is_none()
+            && !outcome.result.is_error
+            && outcome.result.text_content().contains("probe")
+    }
+
+    /// A configured server the gate names is staged only while a live server
+    /// grant covers it: without one its process never starts and its tools
+    /// are not mounted; with one, the build connects it and its tools are
+    /// mounted closed, by their provenance, until a boundary opens them. A
+    /// grant the build finds past its deadline is settled expired by the
+    /// build and starts nothing.
+    #[tokio::test]
+    async fn a_gated_configured_server_starts_only_under_a_live_server_grant() {
+        let rig = rig();
+        let gate = GrantGatedTools::default().with_mcp_server("s");
+
+        let ungranted = Session::new();
+        let build = session_build(
+            &rig,
+            &ungranted,
+            gate.clone(),
+            None,
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 0, "no live grant covers it: no process");
+        assert!(!mounted(&agent, "s_echo"));
+        let running = rig
+            .machine
+            .tool_grant_gate(ungranted.id())
+            .await
+            .expect("the session is registered");
+        assert_eq!(
+            running.gate.gated_servers,
+            BTreeSet::from(["s".to_string()])
+        );
+        drop(agent);
+
+        let granted = Session::new();
+        grant(&rig, &granted, server("s", None), Duration::from_mins(10)).await;
+        let build = session_build(
+            &rig,
+            &granted,
+            gate.clone(),
+            None,
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 1, "a live server grant attaches it");
+        assert!(mounted(&agent, "s_echo"));
+        assert!(closed(&agent, "s_echo"), "mounted closed until a boundary");
+        drop(agent);
+
+        let lapsed = Session::new();
+        grant(&rig, &lapsed, server("s", None), Duration::from_mins(1)).await;
+        rig.clock.0.store(T0 + 120_000, Ordering::SeqCst);
+        let build = session_build(&rig, &lapsed, gate, None, vec![fixture(&rig, "s", "s_")]).await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 1, "a lapsed grant attaches nothing");
+        assert!(!mounted(&agent, "s_echo"));
+        let audit = rig
+            .machine
+            .read_tool_grant_audit(&ToolGrantSubject::session(lapsed.id().clone()), None, 10)
+            .await
+            .expect("the audit reads");
+        assert!(
+            audit.rows.iter().any(|record| matches!(
+                record.row.event,
+                ToolGrantAuditEvent::Expired {
+                    driver: ToolGrantExpiryDriver::Build,
+                    ..
+                }
+            )),
+            "the build settles the lapsed grant: {audit:?}"
+        );
+    }
+
+    /// A member's role entries never refuse its build: a role family it does
+    /// not mount and a role name its tool policy refuses reach the machine as
+    /// not-mounted names, never gated; a role tool name nothing mounts and a
+    /// role server neither configured nor attached are gated all the same;
+    /// a configured role server is gated, and staged only under a grant.
+    #[tokio::test]
+    async fn role_entries_are_gated_or_not_mounted_and_never_refuse_the_build() {
+        let rig = rig();
+        let role = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy")
+            .with_tool("refused_by_policy")
+            .with_mcp_server("s")
+            .with_mcp_server("later");
+        let session = Session::new();
+        let mut build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default(),
+            Some(role.clone()),
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        build.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["refused_by_policy"].into_iter().collect(),
+        ));
+        let agent = build_agent(&rig, build).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert_eq!(
+            running.gate.gated_servers,
+            BTreeSet::from(["later".to_string(), "s".to_string()])
+        );
+        assert!(running.gate.gated.contains("deploy"), "{running:?}");
+        for ignored in ["refused_by_policy", "shell"] {
+            assert!(
+                running.gate.not_mounted_names.contains(ignored)
+                    && !running.gate.gated.contains(ignored),
+                "{ignored}: {running:?}"
+            );
+        }
+        assert_eq!(
+            started(&rig),
+            0,
+            "a configured role server waits for a grant"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata")
+                .tooling
+                .grant_gated,
+            GrantGatedTools::default()
+                .with_tool("deploy")
+                .with_mcp_server("later")
+                .with_mcp_server("s"),
+            "the session records the role entries the build installed"
+        );
+        drop(agent);
+
+        let granted = Session::new();
+        grant(&rig, &granted, server("s", None), Duration::from_mins(10)).await;
+        let build = session_build(
+            &rig,
+            &granted,
+            GrantGatedTools::default(),
+            Some(role),
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 1);
+        assert!(mounted(&agent, "s_echo") && closed(&agent, "s_echo"));
+    }
+
+    /// A role gate's server and tool name that nothing mounts at the build
+    /// are gated from the moment they appear: once the server, and another
+    /// server that provides the name, are attached after the build through
+    /// the ordinary add, the next boundary gates the server's names, both
+    /// stay hidden, and a call to either is refused `tool_grant_required`,
+    /// while the other server's ungated tools stay open.
+    #[tokio::test]
+    async fn a_role_server_and_name_attached_after_the_build_are_gated() {
+        let rig = rig();
+        let role = GrantGatedTools::default()
+            .with_mcp_server("s")
+            .with_tool("u_echo");
+        let session = Session::new();
+        let build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default(),
+            Some(role),
+            Vec::new(),
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(
+            running.gate.gated_servers.contains("s") && running.gate.gated.contains("u_echo"),
+            "{running:?}"
+        );
+
+        let adapter = rig.adapters.last();
+        for (name, prefix) in [("s", "s_"), ("u", "u_")] {
+            adapter
+                .stage_add(fixture(&rig, name, prefix))
+                .await
+                .expect("an ordinary add stages");
+        }
+        adapter.apply_staged().await.expect("the adds apply");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("both servers connect");
+        turn(&mut agent).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(
+            running.gate.gated.contains("s_echo") && running.gate.gated.contains("s_add"),
+            "the boundary gates the server's names: {running:?}"
+        );
+        for gated in ["s_echo", "u_echo"] {
+            assert!(closed(&agent, gated), "{gated}");
+            assert_eq!(
+                refusal_code(&call(&mut agent, gated).await).as_deref(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{gated}"
+            );
+        }
+        assert!(
+            mounted(&agent, "u_add") && !closed(&agent, "u_add"),
+            "an ungated server's other tools stay open"
+        );
+    }
+
+    /// With the unconfigured-servers mode on, the servers the build
+    /// configures are its ungated servers and stay open; a server staged
+    /// after the build through the ordinary add is gated by provenance:
+    /// hidden, a call refused `tool_grant_required`, its names gated at the
+    /// next boundary, and opened by a grant of it. With the mode off such a
+    /// server stays ungated.
+    #[tokio::test]
+    async fn the_unconfigured_servers_mode_gates_a_server_attached_after_the_build() {
+        let rig = rig();
+        let session = Session::new();
+        let build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default().with_unconfigured_mcp_servers(),
+            None,
+            vec![fixture(&rig, "c", "c_")],
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(running.gate.gates_unconfigured_servers);
+        assert_eq!(
+            running.gate.ungated_servers,
+            BTreeSet::from(["c".to_string()])
+        );
+        assert!(mounted(&agent, "c_echo") && !closed(&agent, "c_echo"));
+
+        let adapter = rig.adapters.last();
+        adapter
+            .stage_add(fixture(&rig, "n", "n_"))
+            .await
+            .expect("an ordinary add stages");
+        adapter.apply_staged().await.expect("the add applies");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the server connects");
+        turn(&mut agent).await;
+        assert!(closed(&agent, "n_echo") && !closed(&agent, "c_echo"));
+        assert_eq!(
+            refusal_code(&call(&mut agent, "n_echo").await).as_deref(),
+            Some(TOOL_GRANT_REQUIRED_CODE)
+        );
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(running.gate.gated.contains("n_echo"), "{running:?}");
+
+        grant(&rig, &session, server("n", None), Duration::from_mins(10)).await;
+        turn(&mut agent).await;
+        assert!(!closed(&agent, "n_echo"), "the grant opens it");
+
+        let ungated = Session::new();
+        let build = session_build(
+            &rig,
+            &ungated,
+            GrantGatedTools::default(),
+            None,
+            vec![fixture(&rig, "c", "c_")],
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+        let adapter = rig.adapters.last();
+        adapter
+            .stage_add(fixture(&rig, "n", "n_"))
+            .await
+            .expect("an ordinary add stages");
+        adapter.apply_staged().await.expect("the add applies");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the server connects");
+        turn(&mut agent).await;
+        assert!(
+            mounted(&agent, "n_echo") && !closed(&agent, "n_echo"),
+            "without the mode a later server is ungated"
+        );
+    }
+
+    /// The grant gate authorizes an MCP call before the host's call
+    /// preparation runs: a call the gate refuses never reaches preparation,
+    /// so no per-call credential is ever chosen for it; a call a grant
+    /// admits is prepared once.
+    #[tokio::test]
+    async fn the_server_gate_refuses_before_call_preparation_runs() {
+        let rig = rig();
+        let session = Session::new();
+        grant(
+            &rig,
+            &session,
+            server("s", Some(&["s_echo"])),
+            Duration::from_mins(10),
+        )
+        .await;
+        let build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default().with_mcp_server("s"),
+            None,
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+
+        let refused = call(&mut agent, "s_add").await;
+        assert_eq!(
+            refusal_code(&refused).as_deref(),
+            Some(TOOL_GRANT_REQUIRED_CODE),
+            "{refused:?}"
+        );
+        assert_eq!(
+            rig.preparations.0.load(Ordering::SeqCst),
+            0,
+            "a refused call is never prepared"
+        );
+
+        let admitted = call(&mut agent, "s_echo").await;
+        assert!(ran(&admitted), "{admitted:?}");
+        assert_eq!(
+            rig.preparations.0.load(Ordering::SeqCst),
+            1,
+            "an admitted call is prepared once"
+        );
     }
 }

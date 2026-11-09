@@ -43,7 +43,7 @@ use crate::{PrincipalKind, PrincipalRef, SurfaceMetadata, ToolCallView, TrustDom
 /// The only principal the route lets decide.
 const APPROVER: &str = "lead-1";
 /// Host-chosen validity of the consent request.
-const VALIDITY: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
+const VALIDITY: std::time::Duration = std::time::Duration::from_hours(4);
 /// Model review deadline of the review composition (R3 never uses it).
 const REVIEW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -267,6 +267,10 @@ impl PreparedOperationAuthorization for R3Decision {
         &self,
         _binding: &PreparedAuthorizationBinding,
     ) -> Result<(), OperationAuthorizationError> {
+        Ok(())
+    }
+
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
         Ok(())
     }
 }

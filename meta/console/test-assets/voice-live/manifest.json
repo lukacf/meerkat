@@ -1,0 +1,26 @@
+{
+  "provenance": "Original synthetic speech authored for Meta paid voice acceptance; no human microphone recording or third-party audio samples.",
+  "generation": {
+    "engine": "macOS say",
+    "voice": "Samantha",
+    "words_per_minute": 165,
+    "conversion": "afconvert -f WAVE -d LEI16@24000",
+    "postprocessing": "Trim leading/trailing silence, preserve 20ms leading and 50ms trailing padding.",
+    "runtime_dependency": "None; checked-in portable WAV files are decoded by Chromium WebAudio."
+  },
+  "format": {
+    "container": "RIFF/WAVE",
+    "encoding": "PCM signed 16-bit little-endian",
+    "channels": 1,
+    "sample_rate_hz": 24000
+  },
+  "phrases": {
+    "reverse": "Please get the keeper's verification code for these three words.",
+    "finish": "Have the keeper reverse the words and report its code with the verified answer.",
+    "recall": "What is the exact current console value? Say all four words in order.",
+    "peer": "Please get the launch code from the keeper. Tell me when it is verified.",
+    "overlap": "Please start the overlap voice check with the keeper. Tell me when the result arrives."
+  },
+  "word_fixtures": ["amber", "birch", "coral", "delta", "elm", "fern", "gold", "hazel", "iris", "jade", "kiwi", "lemon", "maple", "north", "opal", "pine"],
+  "composition": "The runner concatenates the keeper-verification request, fresh randomly chosen word fixtures and finish phrase into one real microphone stream. Phase one requires actual primary/keeper peer calls, the keeper's reversed words, and a fresh verification code available only to the keeper until its immediate reply. Launch and overlap tasks remain separately held until operator release. All expected words and codes are selected afresh every run."
+}

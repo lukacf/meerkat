@@ -19,7 +19,7 @@ async fn run_fixture(binary: &str) -> Result<String, Box<dyn std::error::Error>>
         return Err(format!("missing fixture binary {binary}").into());
     };
     let output = timeout(
-        Duration::from_secs(180),
+        Duration::from_mins(3),
         Command::new(path)
             .arg("basic-roundtrip")
             .stdin(Stdio::null())

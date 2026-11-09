@@ -390,6 +390,12 @@ pub struct CallbackJobStartParams {
     pub credential_scopes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_checkpoint: Option<String>,
+    /// The original requester of the run that submitted the job, recorded
+    /// with the job when it was submitted: the principal, and `carried` when
+    /// that run's work reached its agent through another actor. Absent when
+    /// the run had none. Only the runtime sets it; tool arguments never do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<meerkat_core::TurnRequester>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

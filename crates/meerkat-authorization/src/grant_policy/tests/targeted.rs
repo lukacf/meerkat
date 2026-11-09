@@ -127,7 +127,7 @@ fn mcp_call(targets: &[(&str, &str)]) -> PreparedAuthorizationBinding {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),
@@ -179,7 +179,7 @@ fn catalog_call(
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),
@@ -228,6 +228,7 @@ impl Fixture {
         };
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(id_name),
                 who("executor"),
@@ -356,7 +357,12 @@ fn each_target_resolves_only_its_own_selected_lineage() {
     // (b) Revoking beta's lineage refuses beta only.
     fixture
         .grants
-        .revoke(&who("root"), &read, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &read,
+            &mut NoController,
+        )
         .expect("revoke beta");
     let context = fixture.context(&policy, &association);
     assert!(is_denied(&refusal(
@@ -476,6 +482,7 @@ fn the_optional_base_is_neither_a_prerequisite_nor_a_fallback() {
     let base = fixture
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("base-read"),
             who("executor"),
@@ -503,7 +510,12 @@ fn the_optional_base_is_neither_a_prerequisite_nor_a_fallback() {
     )));
     fixture
         .grants
-        .revoke(&who("root"), &base, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &base,
+            &mut NoController,
+        )
         .expect("revoke base");
     let context = fixture.context(&policy, &with_base);
     assert!(is_denied(&refusal(
@@ -547,6 +559,7 @@ fn catalog_controls_resolve_the_targeted_base() {
         fixture
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(id_name),
                 who("executor"),
@@ -631,6 +644,7 @@ fn a_two_link_catalog_base_covers_the_controls_through_every_link() {
     let root = fixture
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("catalog-root"),
             who("first"),
@@ -641,6 +655,7 @@ fn a_two_link_catalog_base_covers_the_controls_through_every_link() {
     let child = fixture
         .grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("first"),
             &root,
             id("catalog-child"),
@@ -651,6 +666,7 @@ fn a_two_link_catalog_base_covers_the_controls_through_every_link() {
     let narrowed = fixture
         .grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("first"),
             &root,
             id("narrowed-child"),
@@ -692,7 +708,12 @@ fn a_two_link_catalog_base_covers_the_controls_through_every_link() {
     // Revoking the root denies the controls through the unrevoked child.
     fixture
         .grants
-        .revoke(&who("root"), &root, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &root,
+            &mut NoController,
+        )
         .expect("revoke the catalog root");
     assert!(denies_both(&with_base(
         "catalog-revoked-root",
@@ -717,7 +738,7 @@ fn call_with_target(target: ToolOperationTarget) -> PreparedAuthorizationBinding
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),
@@ -819,6 +840,7 @@ fn a_bundle_operation_resolves_only_its_own_exact_lineage() {
         fixture
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(id_name),
                 who("executor"),
@@ -831,6 +853,7 @@ fn a_bundle_operation_resolves_only_its_own_exact_lineage() {
         fixture
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(id_name),
                 who("executor"),
@@ -921,7 +944,12 @@ fn a_bundle_operation_resolves_only_its_own_exact_lineage() {
     // Revoking the read grant refuses only the read.
     fixture
         .grants
-        .revoke(&who("root"), &read, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &read,
+            &mut NoController,
+        )
         .expect("revoke read");
     let context = fixture.context(&policy, &association);
     assert!(is_denied(&refusal(
@@ -1024,7 +1052,12 @@ fn a_checked_route_operation_resolves_only_its_own_exact_lineage() {
     // Revoking the checked grant refuses only the checked route.
     fixture
         .grants
-        .revoke(&who("root"), &checked, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &checked,
+            &mut NoController,
+        )
         .expect("revoke checked");
     let context = fixture.context(&policy, &association);
     assert!(is_denied(&refusal(
@@ -1102,6 +1135,7 @@ fn peer_and_memory_operations_resolve_only_their_own_exact_lineage() {
         fixture
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(id_name),
                 who("executor"),
@@ -1114,6 +1148,7 @@ fn peer_and_memory_operations_resolve_only_their_own_exact_lineage() {
         fixture
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id(id_name),
                 who("executor"),
@@ -1197,7 +1232,12 @@ fn peer_and_memory_operations_resolve_only_their_own_exact_lineage() {
     // Revoking alice's grant refuses only deliveries to alice.
     fixture
         .grants
-        .revoke(&who("root"), &to_alice, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &to_alice,
+            &mut NoController,
+        )
         .expect("revoke alice");
     let context = fixture.context(&policy, &association);
     assert!(is_denied(&refusal(

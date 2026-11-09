@@ -844,6 +844,14 @@ impl IngressView<'_> {
         self.driver.durable_steer_order()
     }
 
+    /// Whether `input_id` may join the current run `run_id` at a live
+    /// boundary: inputs of different requesters never share a run, and the
+    /// Steer lane is first in, first out across requesters (see
+    /// [`EphemeralRuntimeDriver::live_boundary_joins_run_batch`]).
+    pub(crate) fn live_boundary_joins_run_batch(&self, input_id: &InputId, run_id: &RunId) -> bool {
+        self.driver.live_boundary_joins_run_batch(input_id, run_id)
+    }
+
     pub(crate) fn admission_order(&self) -> Vec<InputId> {
         self.driver.admission_order()
     }
@@ -5732,11 +5740,17 @@ impl DriverEntry {
                 error,
             ));
         }
+        // The apply failure's typed reason (a refused scoped tool grant gate)
+        // rides on the staged error, as the live completion paths give it.
+        let mut terminal_error_metadata =
+            meerkat_core::TurnErrorMetadata::runtime_apply_failure(terminal_error.clone());
+        terminal_error_metadata.reason = runtime_apply_failure
+            .as_ref()
+            .and_then(CoreApplyFailureCause::reason)
+            .cloned();
         let terminal_candidate =
             crate::input_state::InteractionTerminalCandidate::MachineTerminalFailure {
-                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
-                    terminal_error.clone(),
-                ),
+                error: terminal_error_metadata,
             };
         let completion_batch = if terminal_input_ids.is_empty() {
             None
@@ -9564,16 +9578,19 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                 admission_sequence_recovery,
             )?;
 
-            // A kept retained-resume row (one a graceful requeue stop kept,
+            // A kept row (a retained-resume row, or governed work admitted
+            // under its own association, that a graceful requeue stop kept,
             // or a restart found) lost its controller client in the store:
             // one never survives persistence. Ask the installed host for it
             // once now. A row whose host cannot say yet is held by the
-            // machine once recovery is done (it keeps its attempts, and its
-            // budget starts). A row the host refuses definitely keeps no
-            // client: the runtime loop asks again at its first pass and ends
-            // it as a refused resume
-            // (`EphemeralRuntimeDriver::ask_kept_resume_controllers`).
-            match driver.reacquire_retained_resume_client(&bundle.state) {
+            // machine once recovery is done (it keeps its attempts). A row
+            // the host refuses definitely keeps no client: a retained resume
+            // is asked again at the runtime loop's first pass and ended as a
+            // refused resume, and kept governed work is ended by the
+            // attachment before it serves
+            // (`EphemeralRuntimeDriver::ask_kept_resume_controllers`,
+            // `MeerkatMachine::settle_kept_governed_inputs_without_controller`).
+            match driver.reacquire_kept_input_client(&bundle.state) {
                 Some(crate::retained_work::RetainedClientReacquisition::Pinned(client)) => {
                     bundle.state.controller_client = Some(client);
                 }
@@ -9582,7 +9599,7 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                         %runtime_id,
                         input_id = %bundle.state.input_id,
                         ?reason,
-                        "a kept retained-work resume's host cannot say yet whether it supplies its controller client; the machine holds it"
+                        "a kept input's host cannot say yet whether it supplies its controller client; the machine holds it"
                     );
                     controller_holds.push(bundle.state.input_id.clone());
                 }
@@ -9590,7 +9607,7 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                     tracing::info!(
                         %runtime_id,
                         input_id = %bundle.state.input_id,
-                        "a kept retained-work resume's host supplies no controller client for it; the runtime loop ends it as a refused resume"
+                        "a kept input's host supplies no controller client for it; it ends as a refused resume"
                     );
                 }
                 None => {}
@@ -9646,13 +9663,13 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
         }
     }
 
-    // Hold the kept retained-resume rows whose host could not say yet, now
-    // that each is queued or bound to the run marked resumable as recovery
-    // left it. A row recovery normalized otherwise is asked again by the
-    // runtime loop instead.
+    // Hold the kept rows whose host could not say yet, now that each is
+    // queued or bound to the run marked resumable as recovery left it. A row
+    // recovery normalized otherwise is asked again by the runtime loop
+    // instead.
     let now = meerkat_core::time_compat::Instant::now();
     for input_id in controller_holds {
-        if !driver.kept_retained_resume_waits_unstaged(&input_id) {
+        if !driver.kept_input_waits_unstaged(&input_id) {
             continue;
         }
         if let Err(error) = driver.hold_input_controller(&input_id, now) {
@@ -9660,7 +9677,7 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
                 %runtime_id,
                 %input_id,
                 %error,
-                "the machine refused to hold a kept retained-work resume for its controller; the runtime loop asks its host again"
+                "the machine refused to hold a kept input for its controller; the runtime loop asks its host again"
             );
         }
     }
@@ -10125,6 +10142,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: "drive the queue".into(),
             typed_turn_appends: Vec::new(),
@@ -10287,6 +10305,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "scheduler_tick".into(),
             payload: serde_json::json!({"body": "tick"}),
@@ -13505,19 +13524,15 @@ mod recovery_tests {
         driver
             .mark_interaction_terminal_outboxes_published(&input_id, &receipts)
             .await
-            .map_or_else(
-                |error| match error {
-                    // The seeded row never received a machine-owned terminal
-                    // seed, so post-publication archiving classifies it as
-                    // non-quiescent. The publication CAS itself has already
-                    // committed, which is the delivery step under test.
-                    RuntimeDriverError::Internal(ref reason)
-                        if reason.contains("terminal-obligation inputs were durably quiescent") => {
-                    }
-                    other => panic!("repaired batch must publish: {other}"),
-                },
-                |()| (),
-            );
+            .unwrap_or_else(|error| match error {
+                // The seeded row never received a machine-owned terminal
+                // seed, so post-publication archiving classifies it as
+                // non-quiescent. The publication CAS itself has already
+                // committed, which is the delivery step under test.
+                RuntimeDriverError::Internal(ref reason)
+                    if reason.contains("terminal-obligation inputs were durably quiescent") => {}
+                other => panic!("repaired batch must publish: {other}"),
+            });
         let durable_published = store
             .load_input_states_strict(&runtime_id)
             .await

@@ -1,0 +1,97 @@
+/* Keep the opening canvas while the actual first guide turn is pending. */
+.setup-shell.setup-first-turn {
+  --forge-welcome-canvas: #f7f6f1;
+}
+.setup-first-turn .setup-header {
+  background: var(--forge-welcome-canvas);
+  border-bottom-color: #e8e6df;
+}
+.setup-shell.setup-first-turn.setup-composer-focused > .setup-header {
+  display: flex;
+}
+.setup-first-turn .setup-conversation {
+  background: #fdfcf8;
+}
+.setup-first-turn .setup-plan-pane {
+  background: var(--forge-welcome-canvas);
+  border-left: 1px solid #e7e5dc;
+}
+.setup-first-turn .evolving-plan {
+  height: 100%;
+  background: var(--forge-welcome-canvas);
+}
+.setup-first-turn .evolving-plan > .ep-inner {
+  height: 100%;
+  gap: 0;
+  padding: 0 28px 18px;
+}
+.setup-first-turn .forge-welcome-composer-actions button {
+  min-height: 44px;
+}
+.forge-next-draft-hint {
+  margin: 9px 0 0;
+  color: #6f6b63;
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* The first questions continue the opening's quiet conversational typography. */
+.setup-first-conversation .setup-current-question h1,
+.setup-first-conversation .setup-current-question h2 {
+  font-family: Newsreader, Georgia, serif;
+  font-size: clamp(28px, 2.6vw, 36px);
+  line-height: 1.2;
+  font-weight: 400;
+}
+.setup-first-conversation .setup-choice-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.setup-first-conversation .setup-choice {
+  min-height: 64px;
+  padding: 15px 12px;
+  border: 0;
+  border-bottom: 1px solid #e6e2d8;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.setup-first-conversation .setup-choice:first-child { border-top: 1px solid #e6e2d8; }
+.setup-first-conversation .setup-choice:not(:disabled):hover { background: #f5f2e9; box-shadow: none; }
+.setup-first-conversation .setup-choice.selected { background: #f4eee2; box-shadow: inset 3px 0 #a54e2d; }
+.setup-first-conversation .setup-choice strong { font-size: 14px; font-weight: 500; margin-bottom: 3px; }
+.setup-first-conversation .setup-choice small { font-size: 13px; color: #777164; }
+.setup-first-conversation .setup-choice-marker { flex-basis: 18px; width: 18px; height: 18px; margin-top: 1px; font-size: 10px; }
+.setup-first-conversation .setup-choice-caption { color: #777164; line-height: 1.6; }
+.setup-first-conversation .setup-text-action { min-height: 44px; }
+.setup-first-turn .ep-first-proposal-status {
+  flex: 0 0 auto;
+  padding: 14px 0 0;
+}
+.setup-first-turn .forge-welcome-portrait {
+  padding-top: 12px;
+}
+.setup-first-turn .forge-portrait-art {
+  width: min(100%, 430px, 48dvh);
+}
+.setup-shell.setup-first-turn .setup-composer-area .cc-composer__shell:has(.forge-welcome-composer-actions) {
+  display: block;
+  padding: 0;
+}
+.setup-shell.setup-first-turn .setup-composer-area .cc-composer__textarea {
+  height: 88px;
+  min-height: 88px;
+  max-height: min(180px, 28dvh);
+  padding: 14px 16px 8px;
+  line-height: 24px;
+}
+/* Retain transcript scrolling and the ordinary editable composer controls. */
+@media (min-width: 761px) {
+  .setup-shell.setup-first-turn .setup-columns {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .setup-first-turn .setup-chat-scroll {
+    padding: 24px clamp(24px, 4.5vw, 72px);
+  }
+}
+@media (max-width: 760px) {
+  .setup-first-turn .setup-chat-scroll {
+    padding: 22px 24px;
+  }
+}

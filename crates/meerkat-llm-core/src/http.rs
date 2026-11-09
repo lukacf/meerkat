@@ -4,6 +4,22 @@ use crate::error::LlmError;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::IpAddr;
 
+/// A credential header value, marked sensitive: one a dynamic authorizer
+/// supplies (an `Authorization` bearer, a session token) or a static API key
+/// (an `Authorization` bearer, `x-api-key`, `api-key`). These values are
+/// secrets, so the HTTP stack keeps them out of `Debug` output and out of
+/// HTTP/2 header compression tables. A value that is not a valid header value
+/// fails as `authentication_failed`, before any request is sent.
+pub fn sensitive_header_value(value: &str) -> Result<reqwest::header::HeaderValue, LlmError> {
+    let mut value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+        LlmError::AuthenticationFailed {
+            message: "a credential header value is not a valid HTTP header value".to_string(),
+        }
+    })?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 /// Execute the already-built immutable request at its actual HTTP boundary.
 /// Auth/header awaits belong before this call. Entry failure prevents sending;
 /// outcome failure appends one safe diagnostic and preserves the exact result.
@@ -311,6 +327,10 @@ mod review_entry_tests {
             ) {
                 self.entries.fetch_add(1, Ordering::AcqRel);
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
     }

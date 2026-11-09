@@ -570,6 +570,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn observed_control(session: &Session) -> Arc<SystemContextControlRequest> {
@@ -780,6 +784,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn owner(permitted: &Arc<AtomicBool>, entries: &Arc<AtomicUsize>) -> WorkAuthorizationContext {
@@ -868,6 +876,11 @@ mod tests {
                     {
                         self.0.observe(binding, observation.clone())?;
                         self.1.observe(binding, observation)
+                    }
+
+                    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                        self.0.spend_at_entry()?;
+                        self.1.spend_at_entry()
                     }
                 }
                 Ok(Arc::new(Decision(
@@ -1306,6 +1319,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn changing_owner(change: EntryChange) -> (Arc<ChangingOwner>, WorkAuthorizationContext) {
@@ -1479,13 +1496,13 @@ mod tests {
             .context_control_observation(&control.operation_id)
             .unwrap()
             .unwrap();
-        assert!(audit.source.as_ref() == Some(&expected));
+        assert_eq!(audit.source.as_ref(), Some(&expected));
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         let restored_audit = restored
             .context_control_observation(&control.operation_id)
             .unwrap()
             .unwrap();
-        assert!(restored_audit.source == Some(expected));
+        assert_eq!(restored_audit.source, Some(expected));
     }
 }

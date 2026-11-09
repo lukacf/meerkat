@@ -1390,6 +1390,7 @@ fn live_factory_failure_class(error: &meerkat_client::FactoryError) -> &'static 
         FactoryError::ClientCreationFailed(_) => "client_creation_failed",
         FactoryError::ExperimentalModelRequiresLiveChannel { .. } => "experimental_model",
         FactoryError::SelfHostedBinding(_) => "self_hosted_binding",
+        FactoryError::AccountModel(_) => "account_model_refused",
     }
 }
 
@@ -11041,6 +11042,7 @@ mod tests {
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &meerkat_core::auth::TokenKey,
             _tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -11049,6 +11051,7 @@ mod tests {
 
         async fn clear(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             Ok(())
@@ -11079,17 +11082,19 @@ mod tests {
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
             tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -12479,7 +12484,11 @@ mod tests {
         .expect("fixture token carries durable lifecycle marker");
         let token_store = Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
         token_store
-            .save(&token_key, &committed_tokens)
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &token_key,
+                &committed_tokens,
+            )
             .await
             .expect("persist fixture token");
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));

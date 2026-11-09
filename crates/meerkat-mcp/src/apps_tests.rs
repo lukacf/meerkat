@@ -288,6 +288,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for ResourceDec
         self.audit.lock().unwrap().push(observation);
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 struct ResourceLease {
@@ -479,6 +483,67 @@ async fn app_resource_timeout_returns_through_native_outcome_and_releases_lease(
         // The local timeout does not claim the remote finished. Let its actual
         // server handler settle only after checking local failure and cleanup.
         fixture.server.read_release.add_permits(1);
+    })
+    .catch_unwind()
+    .await;
+    fixture.server.read_release.add_permits(1);
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+/// A response that arrives after the read timed out is dropped: the lease
+/// the timeout released is not released again, nothing is observed twice,
+/// and nothing stays in flight.
+#[tokio::test]
+async fn app_resource_response_after_timeout_is_dropped_and_leases_once() {
+    use meerkat_core::authorization::{OperationObservation, OperationObservedOutcome};
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let original = dispatch(&router, "workspace_display", json!({})).await;
+    let invocation: McpAppInvocation =
+        serde_json::from_value(original.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+    let audit = Arc::new(ResourceAudit::default());
+    let router = router.with_call_context_provider(audit.clone());
+    let result = AssertUnwindSafe(async {
+        fixture.server.block_reads.store(true, Ordering::SeqCst);
+        let context = resource_context(&audit);
+        let mut read = Box::pin(router.read_app_resource(
+            "workspace_display",
+            &invocation.registration,
+            &invocation.tool,
+            OTHER_URI,
+            &context,
+        ));
+        tokio::select! {
+            _ = &mut read => panic!("read completed before server admission"),
+            permit = fixture.server.read_entered.acquire() => permit.unwrap().forget(),
+            () = tokio::time::sleep(LIMIT) => panic!("read never reached server"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        tokio::time::resume();
+        let failure = tokio::time::timeout(LIMIT, read)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(failure, McpError::ToolCallFailed { .. }));
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1);
+
+        // The server answers late; the answer goes nowhere.
+        fixture.server.read_release.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1, "released once");
+        assert!(matches!(
+            audit.observations.lock().unwrap().as_slice(),
+            [
+                OperationObservation::Entry(meerkat_core::OperationEntryBoundary::McpResourceRead),
+                OperationObservation::Outcome(OperationObservedOutcome::SourceReadUnavailable),
+            ]
+        ));
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
     })
     .catch_unwind()
     .await;
@@ -1102,6 +1167,88 @@ async fn retired_or_replaced_physical_connection_cannot_receive_old_app_io() {
             "identical tool metadata is not connection custody"
         );
         assert!(resolve(&router, fresh, refresh()).await.is_ok());
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+/// Records the lease publication each prepared resource read's target names.
+#[derive(Default)]
+struct ResourcePublications(
+    Mutex<
+        Vec<(
+            String,
+            Option<meerkat_core::handles::CredentialLeasePublication>,
+        )>,
+    >,
+);
+
+#[async_trait]
+impl crate::McpCallContextProvider for ResourcePublications {
+    async fn prepare(
+        &self,
+        _: crate::McpCallTarget<'_>,
+        _: ToolCallView<'_>,
+        _: &ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        Ok(None)
+    }
+
+    async fn prepare_resource(
+        &self,
+        target: crate::McpResourceTarget<'_>,
+        _: &ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((target.uri.to_owned(), target.credential_publication));
+        Ok(None)
+    }
+}
+
+/// A resource read over an OAuth connection names the lease publication of
+/// the credential its requests carry, as a call does: each read of the view
+/// a tool declares (before the call) names the publication the connection's
+/// credential owner states when the read is prepared.
+#[tokio::test]
+async fn resource_target_records_the_lease_publication_used() {
+    use super::call_context_tests::{PublishingOwner, lease_publication};
+    let fixture = Fixture::start().await;
+    let reads = Arc::new(ResourcePublications::default());
+    let owner = Arc::new(PublishingOwner::holding(Some(lease_publication(1))));
+    let mut router = McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        crate::McpStdioLaunchProfile::trusted_host(),
+    )
+    .with_client_service_factory(Arc::new(crate::apps::McpAppsClientServiceFactory))
+    .with_mcp_auth(
+        McpAuthMode::Stored,
+        Some(owner.clone() as Arc<dyn McpAuthResolver>),
+    )
+    .with_call_context_provider(reads.clone());
+    tokio::time::timeout(LIMIT, router.add_server(fixture.config.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    let result = AssertUnwindSafe(async {
+        dispatch(&router, "workspace_display", json!({})).await;
+        owner.publish(Some(lease_publication(2)));
+        dispatch(&router, "workspace_display", json!({})).await;
+        owner.publish(None);
+        dispatch(&router, "workspace_display", json!({})).await;
+        assert_eq!(
+            *reads.0.lock().unwrap(),
+            vec![
+                (APP_URI.to_owned(), Some(lease_publication(1))),
+                (APP_URI.to_owned(), Some(lease_publication(2))),
+                (APP_URI.to_owned(), None),
+            ],
+            "each read's target names the publication its owner held when it was prepared"
+        );
+        assert_eq!(*fixture.server.reads.lock().unwrap(), [APP_URI; 3]);
     })
     .catch_unwind()
     .await;

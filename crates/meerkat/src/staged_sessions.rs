@@ -288,6 +288,11 @@ impl GeneratedStagedSessionAuthority {
 pub struct StagedSlot {
     authority: GeneratedStagedSessionAuthority,
     payload: StagedPayload,
+    /// The scoped tool grant gate the staged build names, kept from staging
+    /// until the slot is removed after the session's first commit: a
+    /// promotion takes the build config, never this copy, and an abandoned
+    /// promotion restores both.
+    grant_gated_tools: meerkat_core::tool_grant::GrantGatedTools,
     pub labels: Option<BTreeMap<String, String>>,
     /// Prompt supplied at `session/create` time when the initial turn is
     /// deferred. Prepended to the first `turn/start` prompt on promotion.
@@ -319,6 +324,7 @@ impl StagedSlot {
         }
         let keep_alive = build_config.keep_alive;
         let has_comms_name = build_config.comms_name.is_some();
+        let grant_gated_tools = build_config.grant_gated_tools.clone().unwrap_or_default();
         Ok(Self {
             authority: GeneratedStagedSessionAuthority::new(
                 id,
@@ -330,6 +336,7 @@ impl StagedSlot {
             payload: StagedPayload::Staged {
                 build_config: Box::new(build_config),
             },
+            grant_gated_tools,
             labels,
             deferred_prompt,
             deferred_injected_context,
@@ -492,6 +499,38 @@ impl StagedSessionRegistry {
         self.info(id).await
     }
 
+    /// Where the operator-instruction entry rows of the session the staged
+    /// build resumes stand in that build's requests, read without promoting
+    /// the slot (`resumed_build_entry_placement`: a prompt row the build may
+    /// author counts as another System row). A model change of a session
+    /// staged before its first build is judged on it. `Ok(None)` when no
+    /// slot exists for `id`; an empty placement while a promotion is
+    /// building the session (that build judges it) or when the build resumes
+    /// no session.
+    pub async fn own_operator_instruction_entry_placement(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::InstructionEntryPlacement>,
+        meerkat_core::ModelBoundaryProjectionError,
+    > {
+        let slots = self.slots.read().await;
+        let Some(slot) = slots.get(id) else {
+            return Ok(None);
+        };
+        let (StagedPayload::Staged { build_config } | StagedPayload::Closing { build_config }) =
+            &slot.payload
+        else {
+            return Ok(Some(meerkat_core::InstructionEntryPlacement::default()));
+        };
+        let Some(session) = build_config.resume_session.as_ref() else {
+            return Ok(Some(meerkat_core::InstructionEntryPlacement::default()));
+        };
+        let authors_prompt_row =
+            session.session_metadata().is_none() || build_config.system_prompt.is_explicit();
+        crate::factory::resumed_build_entry_placement(session, authors_prompt_row).map(Some)
+    }
+
     /// Effective LLM identity captured by generated authority when the slot was
     /// staged.
     pub async fn effective_llm_identity(
@@ -511,6 +550,19 @@ impl StagedSessionRegistry {
         let slots = self.slots.read().await;
         let slot = slots.get(id)?;
         slot.authority.keep_alive()
+    }
+
+    /// The scoped tool grant gate the staged build names, read without
+    /// promoting it: empty when the build gates nothing. It is answered for
+    /// as long as the slot exists, staged, promoting or closing, so through
+    /// the session's whole first turn; the slot is removed only after that
+    /// turn's first commit. `None` when no slot exists for `id`.
+    pub async fn grant_gated_tools(
+        &self,
+        id: &SessionId,
+    ) -> Option<meerkat_core::tool_grant::GrantGatedTools> {
+        let slots = self.slots.read().await;
+        slots.get(id).map(|slot| slot.grant_gated_tools.clone())
     }
 
     /// Apply a keep-alive override to a staged session before its first turn
@@ -796,6 +848,7 @@ impl StagedSessionRegistry {
             return false;
         }
         let updated_at_secs = updated_at_secs.max(slot.updated_at_secs);
+        slot.grant_gated_tools = build_config.grant_gated_tools.clone().unwrap_or_default();
         slot.payload = StagedPayload::Staged {
             build_config: Box::new(build_config),
         };

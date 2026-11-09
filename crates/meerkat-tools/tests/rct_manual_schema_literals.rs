@@ -249,6 +249,22 @@ fn cfg_test_module_exemption_is_verified_not_inferred_from_the_name() {
     );
 }
 
+/// The top-level directories of the repository's products other than Core.
+fn product_roots(root: &Path) -> Vec<String> {
+    let registry: serde_json::Value = std::fs::read_to_string(root.join("ci/products.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    registry["products"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|product| product["root"].as_str())
+        .filter(|product_root| !product_root.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn scan_for_manual_input_schema_literals(
     root: &Path,
     dir: &Path,
@@ -264,6 +280,15 @@ fn scan_for_manual_input_schema_literals(
             match file_name.as_ref() {
                 ".git" | "target" | "tests" => continue,
                 _ => {}
+            }
+            // The roots of the repository's other products
+            // (ci/products.json) keep their own tool conventions.
+            if dir == root
+                && product_roots(root)
+                    .iter()
+                    .any(|product_root| *product_root == *file_name)
+            {
+                continue;
             }
 
             scan_for_manual_input_schema_literals(root, &path, offenders)?;

@@ -1,0 +1,234 @@
+/* Approval card (spec B7): a kit card (1 px rule, medium radius). The title
+   with its risk in words, the deadline as a countdown chip and a bar of the
+   time used, who asked and from where, the rationale, the decision status
+   and the decisions as kit buttons, the complete request in a disclosure.
+   Tokens only, so every variant applies. */
+.cc-approval {
+  container-type: inline-size;
+  container-name: cc-approval;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-text-sm);
+  line-height: 1.45;
+}
+.cc-approval__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+.cc-approval__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  flex: 1 1 24ch;
+  min-width: 0;
+}
+.cc-approval__title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-approval__risk { flex: none; }
+/* Whom the request waits for: the viewer ("For you") or another approver. */
+.cc-approval__audience { flex: none; }
+/* A request decided elsewhere stays where its card was, quieter, saying who
+   decided it; it offers nothing to decide. */
+.cc-approval--departed {
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
+}
+.cc-approval--departed .cc-approval__title { color: var(--_cc-foreground-muted); }
+.cc-approval__deadline { flex: none; margin-top: 1px; }
+.cc-approval__deadline[data-past="true"] { font-weight: 500; }
+
+/* The time used of the request's time to decide. */
+.cc-approval__time-used { display: flex; margin-top: 10px; }
+.cc-approval__time-used .cc-minibar__fill { transition: width var(--_cc-dur-base) linear; }
+
+/* Who asked, from which chat, and for how long the request has waited. */
+.cc-approval__asked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin: 10px 0 0;
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-muted);
+}
+.cc-approval__asked > * + *::before {
+  content: "·";
+  margin: 0 7px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-approval__asker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cc-approval__actor { font-weight: 500; color: var(--_cc-foreground); }
+.cc-approval__origin { min-width: 0; }
+.cc-approval__origin-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--_cc-border-strong);
+  text-underline-offset: 2px;
+}
+.cc-approval__origin-link:hover { color: var(--_cc-foreground); text-decoration-color: currentColor; }
+.cc-approval__origin-link:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-approval__waiting {
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.cc-approval__rationale {
+  margin: 10px 0 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--_cc-border-strong);
+  line-height: 1.55;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-approval__scope.cc-kv { margin-top: 12px; }
+/* A narrow card stacks its details, each label above its value, as a narrow
+   kit panel does. A card in a chat transcript has no kit panel around it, so
+   the card is its own size container. The query reads the content box:
+   325 px is the kit's narrow-pane 359 px less the card's inline padding and
+   border. A size container takes no width from its content: the card's
+   parent gives it one (a block, or a stretched flex or grid item, as in the
+   chat and the inbox). These selectors outrank the kit's .cc-kv rules, which
+   load later. */
+@container cc-approval (max-width: 325px) {
+  .cc-approval .cc-kv { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .cc-approval .cc-kv dd { margin-bottom: 6px; }
+}
+.cc-approval__details code {
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
+}
+.cc-approval__note {
+  margin: 8px 0 0;
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-meta);
+}
+.cc-approval__details pre {
+  max-height: 320px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-muted);
+}
+.cc-approval > .cc-notice { margin-top: 10px; }
+
+/* The decision row: its status, the decisions, and the request details at
+   the far end; the details open full width below. */
+.cc-approval__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 14px;
+}
+.cc-approval__status { display: inline-flex; flex: none; }
+.cc-approval__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+}
+.cc-approval__hint {
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-meta);
+}
+.cc-approval__footer > .cc-approval__details { flex: 0 1 auto; margin-left: auto; }
+.cc-approval__footer > .cc-approval__details[open] { flex-basis: 100%; margin-left: 0; }
+/* A request opened from elsewhere (a deep link) is selected: accent outline. */
+[data-approval-id][data-selected="true"] > .cc-approval {
+  outline: 2px solid var(--_cc-member-accent);
+  outline-offset: 2px;
+}
+[data-approval-id]:focus-visible > .cc-approval {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+}
+/* A host-provided attention item: the approval card's frame with the source
+   as a kit chip, the host's details and one Open link drawn as a kit button.
+   The detail labels are the host's words, so they wrap instead of widening
+   the label column. */
+.cc-host-attention .cc-kv dt {
+  max-width: 24ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.cc-host-attention .cc-approval__actions { margin-top: 14px; }
+/* A host link (Open, or Decide in a source's label) is a kit button whose
+   label can be long: it wraps inside the card instead of overflowing it, and
+   keeps the button's height on one line. */
+.cc-approval__actions .cc-host-attention__open {
+  flex: 0 1 auto;
+  max-width: 100%;
+  height: auto;
+  min-height: var(--_cc-panel-control-h);
+  padding-block: 5px;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* A reply meant for the signed-in person alone: the approval card's frame,
+   "Only you" as a kit chip, the reply in its own words (its line breaks
+   kept; a long one scrolls inside the card), when it came and its actions. */
+.cc-private-reply__text {
+  margin: 10px 0 0;
+  max-height: 16em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--_cc-foreground);
+}
+.cc-private-reply__text--hidden {
+  font-style: italic;
+  color: var(--_cc-foreground-muted);
+}
+.cc-private-reply .cc-approval__actions { margin-top: 14px; }
+.cc-approval-attention { padding: 7px 8px; border-bottom: 1px solid var(--line, var(--_cc-border-soft, #555)); }
+.cc-approval-attention__open { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-muted, var(--_cc-foreground-muted)); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
+.cc-approval-attention__open:hover { background: var(--bg-hover, var(--_cc-surface-hover)); color: var(--ink, var(--_cc-foreground)); }
+.cc-approval-attention__open:focus-visible { outline: 2px solid var(--accent, var(--_cc-focus-ring)); outline-offset: -2px; }
+.cc-approval-attention__icon { width: 17px; height: 17px; flex: none; }
+.cc-approval-attention__label { flex: 1; min-width: 0; font-weight: 550; }
+.cc-approval-attention__count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 5px; background: color-mix(in srgb, currentColor 7%, transparent); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cc-approval-attention__chevron { width: 12px; height: 12px; flex: none; opacity: .6; }
+.cc-approval-attention[data-pending="true"] .cc-approval-attention__open { color: var(--ink, var(--_cc-foreground)); }
+.cc-approval-attention[data-pending="true"] .cc-approval-attention__icon,
+.cc-approval-attention[data-pending="true"] .cc-approval-attention__count { color: var(--accent, var(--_cc-member-accent)); }
+.cc-approval-attention:is([data-state="stale"], [data-state="unavailable"]) .cc-approval-attention__count { color: var(--warn, var(--_cc-warning)); }
+.cc-approval-attention__status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }

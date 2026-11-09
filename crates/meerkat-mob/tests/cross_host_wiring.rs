@@ -35,7 +35,7 @@ use support::{
     spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
 };
 
-const WAIT: Duration = Duration::from_secs(60);
+const WAIT: Duration = Duration::from_mins(1);
 
 /// Bound on a send attempt whose ack must NOT arrive (receiver-side drop):
 /// real member runtimes are factory-built, so the router ack timeout is not

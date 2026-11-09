@@ -143,6 +143,7 @@ fn profile(peer_description: &str) -> Profile {
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -243,7 +244,7 @@ fn persistent_service(
 }
 
 async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_mins(5);
     loop {
         let members = handle.list_members().await;
         let active = members

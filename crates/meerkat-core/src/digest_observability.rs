@@ -249,7 +249,7 @@ pub(crate) fn write_canonical_json(
         serde_json::Value::Object(values) => {
             output.push(b'{');
             let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_unstable_by_key(|(left, _)| *left);
             for (index, (key, value)) in entries.into_iter().enumerate() {
                 if index != 0 {
                     output.push(b',');

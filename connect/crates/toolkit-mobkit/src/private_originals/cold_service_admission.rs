@@ -1,0 +1,672 @@
+//! Restore only approved service B's historical source custody. The source row
+//! is evidence, and native owns admission, actor/controller identity and phase.
+use super::service_approved_input::ServiceInputAdmission;
+use super::*;
+use crate::original_ingress::OriginalCancellationSource;
+use meerkat_mobkit::identity_first::ControllerPinSource;
+use meerkat_runtime::{
+    Input,
+    identifiers::IdempotencyKey,
+    input_state::InputLifecycleState,
+    meerkat_machine::{AdmittedOriginalRefusal, AuthenticatedOriginal},
+};
+
+/// Native Input intentionally has no Eq and omits process-only ingress/resume
+/// handles from serde. Keep the exact canonical serialized value and validate
+/// its typed roundtrip; no deserialization restores those handles.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct RetainedBoundInput(serde_json::Value);
+
+impl RetainedBoundInput {
+    pub(super) fn retain_exact_for_attempt(
+        slot: &OnceLock<Self>,
+        input: &Input,
+    ) -> Result<Option<Input>, PrivateOriginalError> {
+        let candidate = Self::from_bound(input)?;
+        if slot.set(candidate.clone()).is_ok() {
+            return Ok(None);
+        }
+        let saved = slot.get().ok_or(PrivateOriginalError::Unavailable)?;
+        if saved != &candidate {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        saved.decode().map(Some)
+    }
+    pub(crate) fn from_bound(input: &Input) -> Result<Self, PrivateOriginalError> {
+        if input.header().ingress_context.is_none() || input.header().retained_resume.is_some() {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        let value = Self(serde_json::to_value(input).map_err(|_| PrivateOriginalError::Conflict)?);
+        value.decode()?;
+        Ok(value)
+    }
+
+    /// Retain first-input bytes under the existing live source. Retry matching
+    /// uses native replay equivalence, but returns the original exact ID/time.
+    /// The caller must rebind current process ingress/controller before use.
+    pub(super) fn retain_for_attempt(
+        slot: &OnceLock<Self>,
+        input: &Input,
+    ) -> Result<Option<Input>, PrivateOriginalError> {
+        let candidate = Self::from_bound(input)?;
+        if slot.set(candidate).is_ok() {
+            return Ok(None);
+        }
+        let retained = slot.get().ok_or(PrivateOriginalError::Unavailable)?;
+        if !retained.same_binding(input)? {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        retained.decode().map(Some)
+    }
+
+    pub(super) fn from_peer_bound(
+        input: &Input,
+        peer: &peer_ingress::PeerSource,
+    ) -> Result<Self, PrivateOriginalError> {
+        peer.check_input(input, true)?;
+        if input.header().ingress_context.is_none() {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(Self(
+            serde_json::to_value(input).map_err(|_| PrivateOriginalError::Conflict)?,
+        ))
+    }
+    pub(super) fn decode_peer(
+        &self,
+        peer: &peer_ingress::PeerSource,
+    ) -> Result<Input, PrivateOriginalError> {
+        let input: Input =
+            serde_json::from_value(self.0.clone()).map_err(|_| PrivateOriginalError::Conflict)?;
+        peer.check_input(&input, true)?;
+        if input.header().authority_association.is_none()
+            || serde_json::to_value(&input).map_err(|_| PrivateOriginalError::Conflict)? != self.0
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(input)
+    }
+    pub(super) fn retain_peer_attempt(
+        slot: &OnceLock<Self>,
+        input: &Input,
+        peer: &peer_ingress::PeerSource,
+    ) -> Result<Option<Input>, PrivateOriginalError> {
+        let candidate = Self::from_peer_bound(input, peer)?;
+        if slot.set(candidate.clone()).is_ok() {
+            return Ok(None);
+        }
+        let saved = slot.get().ok_or(PrivateOriginalError::Unavailable)?;
+        let exact = saved.decode_peer(peer)?;
+        let mut repeated =
+            serde_json::to_value(input).map_err(|_| PrivateOriginalError::Conflict)?;
+        *repeated
+            .pointer_mut("/header/timestamp")
+            .ok_or(PrivateOriginalError::Conflict)? =
+            serde_json::to_value(exact.header().timestamp)
+                .map_err(|_| PrivateOriginalError::Conflict)?;
+        if repeated != saved.0 {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(Some(exact))
+    }
+    pub(crate) fn decode(&self) -> Result<Input, PrivateOriginalError> {
+        let input: Input =
+            serde_json::from_value(self.0.clone()).map_err(|_| PrivateOriginalError::Conflict)?;
+        if !matches!(input, Input::Prompt(_))
+            || input.header().authority_association.is_none()
+            || input.header().idempotency_key.is_none()
+            || serde_json::to_value(&input).map_err(|_| PrivateOriginalError::Conflict)? != self.0
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok(input)
+    }
+
+    fn same_binding(&self, input: &Input) -> Result<bool, PrivateOriginalError> {
+        let Input::Prompt(saved) = self.decode()? else {
+            return Err(PrivateOriginalError::Conflict);
+        };
+        let Input::Prompt(mut candidate) = input.clone() else {
+            return Err(PrivateOriginalError::Conflict);
+        };
+        // Match native prompt replay's observation-only ID/time treatment.
+        // The retained original values and the actual outgoing input remain
+        // untouched; key, association and every semantic slot must be exact.
+        candidate.header.id = saved.header.id;
+        candidate.header.timestamp = saved.header.timestamp;
+        Ok(serde_json::to_value(Input::Prompt(candidate))
+            .map_err(|_| PrivateOriginalError::Conflict)?
+            == self.0)
+    }
+}
+
+pub(super) fn source_event_key(
+    record: &SourceRecord,
+) -> Result<IdempotencyKey, PrivateOriginalError> {
+    if let Some(peer) = &record.peer_ingress {
+        return Ok(peer.event_key());
+    }
+    let coordinate = canonical_json(&serde_json::json!({
+        "schema": "toolkit.original-occurrence.v1", "realm": record.source.realm,
+        "ingress": record.source.ingress, "source_authority": record.source.source_authority,
+        "original": record.event.original, "occurrence": record.event.occurrence,
+    }))
+    .map_err(|_| PrivateOriginalError::Conflict)?;
+    Ok(IdempotencyKey::new(format!(
+        "toolkit-original/{}",
+        digest(&coordinate)
+    )))
+}
+
+pub(super) fn decode_source_input(
+    record: &SourceRecord,
+    input: &RetainedBoundInput,
+) -> Result<Input, PrivateOriginalError> {
+    match &record.peer_ingress {
+        Some(peer) => input.decode_peer(peer),
+        None => input.decode(),
+    }
+}
+
+pub(super) fn validate_retained_input(record: &SourceRecord) -> Result<(), PrivateOriginalError> {
+    let Some(saved) = &record.bound_service_input else {
+        return Ok(());
+    };
+    if record.console_child_input.is_none()
+        && record.peer_ingress.is_none()
+        && record.approved_task.is_none()
+        && record.setup_request.is_none()
+        && record.configured_setup.is_none()
+        && record.planning_source_evidence.is_none()
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    validate_source_input(record, saved)
+}
+
+/// Exact source correlation shared by selected service evidence and ordinary
+/// custody evidence. The caller separately enforces the field's purpose and
+/// custody fingerprint; these bytes never establish admission or live ingress.
+pub(super) fn validate_source_input(
+    record: &SourceRecord,
+    saved: &RetainedBoundInput,
+) -> Result<(), PrivateOriginalError> {
+    if record.console_child_input.is_some() {
+        return super::console_ingress::validate_console_child_input(record, &saved.decode()?);
+    }
+    if let Some(peer) = &record.peer_ingress {
+        let input = saved.decode_peer(peer)?;
+        if input.header().authority_association != record.final_association {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        return Ok(());
+    }
+    let Input::Prompt(input) = saved.decode()? else {
+        return Err(PrivateOriginalError::Conflict);
+    };
+    if input.header.authority_association != record.final_association
+        || input.header.idempotency_key.as_ref() != Some(&source_event_key(record)?)
+        || !matches!(&input.content, meerkat_core::ContentInput::Text(text)
+            if digest(text.as_bytes()) == record.event.content_sha256)
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    Ok(())
+}
+
+pub(super) struct HistoricalServiceAdmission {
+    pub admission: ServiceInputAdmission,
+    pub phase: InputLifecycleState,
+}
+
+pub(super) fn writer_error(error: OriginalWriterError) -> PrivateOriginalError {
+    match error {
+        OriginalWriterError::OperationCancelled | OriginalWriterError::OperationDenied => {
+            PrivateOriginalError::Denied
+        }
+        OriginalWriterError::Conflict
+        | OriginalWriterError::WrongOwner
+        | OriginalWriterError::UnsupportedMandate => PrivateOriginalError::Conflict,
+        _ => PrivateOriginalError::Unavailable,
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    // Same-crate control only: hold a cold operation inside its
+    // session-owner wake window at the stage the control selects.
+    pub(super) static WAKE_WINDOW: Arc<WakeWindow>;
+}
+
+/// Where a same-crate control holds an operation inside its wake window.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeWindowStage {
+    /// After the pre-wake publication check, before the owner is asked.
+    BeforeWake,
+    /// After the owner answered Ready, before the post-wake check.
+    AfterReady,
+}
+
+#[cfg(test)]
+pub(super) struct WakeWindow {
+    pub(super) stage: WakeWindowStage,
+    pub(super) held: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+async fn hold_wake_window(stage: WakeWindowStage) {
+    if let Ok(window) = WAKE_WINDOW.try_with(Arc::clone)
+        && window.stage == stage
+    {
+        window.held.notify_one();
+        window.release.notified().await;
+    }
+}
+
+impl PrivateOriginals {
+    pub(crate) fn bind_controller_pin_source(
+        &self,
+        pins: Arc<dyn ControllerPinSource>,
+    ) -> Result<(), PrivateOriginalError> {
+        // The existing runtime owns this service. A strong reverse link would
+        // cycle through the service's machine and its installed source policy.
+        self.controller_pin_source
+            .set(Arc::downgrade(&pins))
+            .map_err(|_| PrivateOriginalError::Denied)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn retain_bound_service_input(
+        &self,
+        reference: &PrivateOriginalRef,
+        original: &Arc<RetainedToolkitOriginal>,
+        input: &Input,
+    ) -> Result<(), PrivateOriginalError> {
+        self.retain_bound_service_input_from_console(reference, original, input, None)
+            .await
+    }
+    pub(super) async fn retain_bound_service_input_from_console(
+        &self,
+        reference: &PrivateOriginalRef,
+        original: &Arc<RetainedToolkitOriginal>,
+        input: &Input,
+        console: Option<(&super::console_ingress::ConsoleEntry, &Input)>,
+    ) -> Result<(), PrivateOriginalError> {
+        let _writer = self.owner.source_writer().await;
+        self.owner
+            .check_bound_source(original)
+            .map_err(writer_error)?;
+        let key = self.key(reference)?;
+        let stored = self
+            .store
+            .get(&key)
+            .await
+            .map_err(store_error)?
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let mut record = self.decode_record(&stored, reference)?;
+        if record.final_association.as_ref() != Some(original.association()) {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        if let Some(peer) = &record.peer_ingress {
+            let selected = RetainedBoundInput::from_peer_bound(input, peer)?;
+            if let Some(saved) = &record.bound_service_input {
+                return if saved == &selected {
+                    Ok(())
+                } else {
+                    Err(PrivateOriginalError::Conflict)
+                };
+            }
+            if record.operation_cancelled {
+                return Err(PrivateOriginalError::Denied);
+            }
+            record.bound_service_input = Some(selected);
+            validate_retained_input(&record)?;
+            self.store
+                .compare_and_swap(Transition {
+                    key,
+                    expected_revision: stored.revision,
+                    expected_digest: Some(stored.content_digest),
+                    claim: None,
+                    data: encode(record)?,
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .map_err(store_error)?;
+            return Ok(());
+        }
+        if record.planning_source_evidence.is_some() {
+            // This profile is an explicit host submission. A Console login is
+            // an independent live owner and cannot be recreated from evidence.
+            if record.console_child_input.is_some() {
+                let (entry, raw) = console.ok_or(PrivateOriginalError::Denied)?;
+                entry.validate_custody_input(&record, raw, input)?;
+                super::console_ingress::validate_console_child_input(&record, input)?;
+                if !self
+                    .retained
+                    .lock()
+                    .map_err(|_| PrivateOriginalError::Unavailable)?
+                    .iter()
+                    .any(|held| {
+                        Arc::ptr_eq(&held.original, original)
+                            && held
+                                .console_login
+                                .get()
+                                .is_some_and(|login| login.same_owner(entry.login()))
+                    })
+                {
+                    return Err(PrivateOriginalError::Denied);
+                }
+            } else if self
+                .retained
+                .lock()
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .iter()
+                .any(|held| {
+                    Arc::ptr_eq(&held.original, original) && held.console_login.get().is_some()
+                })
+            {
+                return Err(PrivateOriginalError::Denied);
+            }
+            self.check_planning_evidence_source(&record, reference)?;
+            self.check_workflow_waiter_binding(&record, reference)
+                .await?;
+        } else if record.approved_task.is_none() {
+            // Preserve ordinary fresh input behavior for other source classes.
+            // They receive no new cold-recovery evidence or classification.
+            if !self.stock_setup_source(&record, reference)? {
+                return Ok(());
+            }
+            self.check_historical_setup_selection(&record, reference)
+                .await?;
+        }
+        if record.operation_cancelled || self.approved_task_is_cancelled(&record).await? {
+            return Err(PrivateOriginalError::Denied);
+        }
+        if let Some(saved) = &record.bound_service_input {
+            let same = if record.console_child_input.is_some() {
+                saved == &RetainedBoundInput::from_bound(input)?
+            } else {
+                saved.same_binding(input)?
+            };
+            return if same {
+                Ok(())
+            } else {
+                Err(PrivateOriginalError::Conflict)
+            };
+        }
+        record.bound_service_input = Some(RetainedBoundInput::from_bound(input)?);
+        validate_retained_input(&record)?;
+        self.store
+            .compare_and_swap(Transition {
+                key,
+                expected_revision: stored.revision,
+                expected_digest: Some(stored.content_digest),
+                claim: None,
+                data: encode(record)?,
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .map_err(store_error)?;
+        Ok(())
+    }
+
+    /// Before a live operation on an admitted original reads the live owners
+    /// of `session` (its runtime registration, executor attachment and live
+    /// actor), wake the session's owner when no live actor serves it. A
+    /// restarted host restores its members Dormant until a live operation
+    /// wakes them (Core's on-demand member restore), and a session-keyed live
+    /// operation that finds no actor asks Core's session-owner wake before it
+    /// fails (`meerkat_core::session_owner_wake`). The owner wakes exactly
+    /// the member bound to that session: no new session, actor or turn.
+    ///
+    /// Only operations call this, after their canonical reads and with no
+    /// source writer held. A read or a cancellation never wakes a member.
+    /// `stamp` is the operation's publication observation: a cancellation or
+    /// any other authority change that entered since those reads refuses
+    /// before the wake, and the check is repeated once the wake returns. The
+    /// caller then reads the registration, attachment and actor again, and
+    /// its native callback repeats every authority check.
+    ///
+    /// A session whose registration and attachment are present is left to the
+    /// caller's own reads, so a live member's actor is observed once, by the
+    /// caller, as before.
+    ///
+    /// Every refusal stays this source's `Unavailable`, as for a missing live
+    /// owner before: a session no owner serves in this process, an owner that
+    /// no longer binds the session (`NotOwned`), a busy member (retryable)
+    /// and any other typed wake refusal alike.
+    pub(super) async fn wake_original_session_owner(
+        machine: &Arc<MeerkatMachine>,
+        pins: &dyn ControllerPinSource,
+        session: &meerkat_core::SessionId,
+        stamp: &meerkat_authorization::publication::LocalPublicationStamp,
+    ) -> Result<(), PrivateOriginalError> {
+        if machine
+            .current_session_registration_witness(session)
+            .await
+            .is_some()
+            && machine
+                .current_executor_attachment_witness(session)
+                .await
+                .is_some()
+        {
+            return Ok(());
+        }
+        if pins.live_actor(session).await.is_some() {
+            return Ok(());
+        }
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        #[cfg(test)]
+        hold_wake_window(WakeWindowStage::BeforeWake).await;
+        // The owner's wake can build the member (a deep construction chain).
+        // Run it on its own task, as every deep chain under an arbitrary
+        // caller is, so it never stacks beneath the operation's poll frames.
+        // A dropped caller aborts it; a late completion only wakes the member,
+        // which the owner's machine joins and fences.
+        let owned = session.clone();
+        let woke = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                .wake(&owned)
+                .await
+        })
+        .await;
+        match woke {
+            Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready)) => {}
+            Some(Ok(_)) | Some(Err(_)) | None => return Err(PrivateOriginalError::Unavailable),
+        }
+        #[cfg(test)]
+        hold_wake_window(WakeWindowStage::AfterReady).await;
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)
+    }
+
+    /// None is native NotAdmitted, never permission to submit again. Errors
+    /// retain conflict/unavailable/cancellation distinctions. This method does
+    /// not restore other original classes, a Console login or a live attachment.
+    pub(super) async fn restore_service_admission(
+        &self,
+        reference: &PrivateOriginalRef,
+    ) -> Result<Option<HistoricalServiceAdmission>, PrivateOriginalError> {
+        let writer = self.owner.try_source_writer().map_err(writer_error)?;
+        // Enclose the canonical reads in the existing publication sequence.
+        // This is conservative invalidation, not a new authority/revision owner.
+        let (_, stamp) = self
+            .owner
+            .publication()
+            .observe(|| ())
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        let stored = self
+            .store
+            .get(&self.key(reference)?)
+            .await
+            .map_err(store_error)?
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let record = self.decode_record(&stored, reference)?;
+        let task = record
+            .approved_task
+            .as_ref()
+            .ok_or(PrivateOriginalError::Conflict)?;
+        let association = record
+            .final_association
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let input = record
+            .bound_service_input
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?
+            .decode()?;
+        let login = self.service_console_login(&record)?;
+        let snapshot = self.service_task_snapshot(&record).await?;
+        if snapshot.approved_service() != Some(&self.service_selection(&stored, &record)?) {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        let mcp = match task {
+            service_approved_input::ApprovedTaskLink::Single(member) => vec![
+                self.historical_task_access(reference, &member.grant, association)
+                    .await?,
+            ],
+            service_approved_input::ApprovedTaskLink::Batch(_) => {
+                let (basis, mcp) = self.service_batch_basis(reference, task, false).await?;
+                if association.candidate().authority_basis != basis {
+                    return Err(PrivateOriginalError::Conflict);
+                }
+                mcp
+            }
+        };
+        // Reopen the exact source and its complete canonical cancellation chain
+        // under the existing writer. Pending local cancellation is checked again
+        // synchronously inside native's callback, not inferred from this read.
+        let mut sources = vec![];
+        let mut next = Some(reference.clone());
+        while let Some(current) = next {
+            let key = self.key(&current)?;
+            if sources.len() >= 64
+                || sources
+                    .iter()
+                    .any(|source: &OriginalCancellationSource| source.record.key == key)
+            {
+                return Err(PrivateOriginalError::Conflict);
+            }
+            let row = self
+                .store
+                .get(&key)
+                .await
+                .map_err(store_error)?
+                .ok_or(PrivateOriginalError::Unavailable)?;
+            let value = self.decode_record(&row, &current)?;
+            if current == *reference && value != record {
+                return Err(PrivateOriginalError::Conflict);
+            }
+            if value.operation_cancelled {
+                return Err(PrivateOriginalError::Denied);
+            }
+            next = value.approved_task.as_ref().map(|link| link.parent.clone());
+            sources.push(OriginalCancellationSource {
+                realm: value.source.realm.clone(),
+                original: meerkat_authorization_contracts::work_association::OriginalWorkRef {
+                    authority: value.source.source_authority,
+                    work: value.event.original,
+                },
+                record: Arc::new(row),
+                association: value.final_association,
+            });
+        }
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        // Do not hold the global source writer across an actor/B wait. Existing
+        // source cancellations must remain able to enter their own publication.
+        drop(writer);
+        let pins = self
+            .controller_pin_source
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let machine = self.machine()?;
+        let session = &task.original_task.origin_session_id;
+        Self::wake_original_session_owner(&machine, &*pins, session, &stamp).await?;
+        let registration = machine
+            .current_session_registration_witness(session)
+            .await
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let attachment = machine
+            .current_executor_attachment_witness(session)
+            .await
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let actor = pins
+            .live_actor(session)
+            .await
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let claims = association.candidate();
+        let custody = AuthenticatedOriginal {
+            original_work: claims.original_work.clone(),
+            occurrence_scope: claims.ingress_namespace.occurrence_scope.clone(),
+            original_authentication: claims.original_authentication.clone(),
+            root_event: claims.root_event.clone(),
+            contributing_work: claims.contributing_work.clone(),
+            target: claims.target.clone(),
+            authority_basis: claims.authority_basis.clone(),
+        };
+        // No caller-acquired B or pin_actor here. Core acquires the actual
+        // attachment owner's B, pins under it, then holds M/D through callback.
+        let observed = machine
+            .with_admitted_original(
+                &registration,
+                &attachment,
+                &actor.executor_actor_identity(),
+                &input,
+                |admitted| {
+                    let _writer = self.owner.try_source_writer().map_err(writer_error)?;
+                    if let Some(login) = &login {
+                        login.try_check().map_err(|reason| match reason {
+                            crate::private_host::ConsoleLoginRefusal::Unavailable => {
+                                PrivateOriginalError::Unavailable
+                            }
+                            _ => PrivateOriginalError::Denied,
+                        })?;
+                    }
+                    // Check before our own publication reservation invalidates the
+                    // old stamp. Keep the source writer through promotion; the final
+                    // originals check also covers settlement/release outside it.
+                    stamp
+                        .check_current()
+                        .map_err(|_| PrivateOriginalError::Unavailable)?;
+                    let retained = self
+                        .owner
+                        .promote_historical_task(association, custody, &sources, admitted)
+                        .map_err(writer_error)?;
+                    Ok::<_, PrivateOriginalError>((
+                        retained,
+                        HistoricalServiceAdmission {
+                            admission: ServiceInputAdmission {
+                                session_id: admitted.session_id().to_string(),
+                                input_id: admitted.input_id().to_string(),
+                            },
+                            phase: admitted.phase(),
+                        },
+                    ))
+                },
+            )
+            .await;
+        let (retained, admission) = match observed {
+            Ok(result) => result?,
+            Err(AdmittedOriginalRefusal::NotAdmitted) => return Ok(None),
+            Err(AdmittedOriginalRefusal::Conflict) => return Err(PrivateOriginalError::Conflict),
+            Err(AdmittedOriginalRefusal::Unavailable) => {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+        };
+        // The callback has released native locks. This existing holder retains
+        // the same original and exact MCP decision; it is no finish receipt.
+        self.hold_binding_with_mcp(reference.clone(), retained, mcp)
+            .await?;
+        Ok(Some(admission))
+    }
+}

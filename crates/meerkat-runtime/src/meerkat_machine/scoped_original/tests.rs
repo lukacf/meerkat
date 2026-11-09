@@ -265,6 +265,11 @@ struct Fixture {
 /// An authenticated original with two source contributors, admitted to its
 /// current destination under a host-policy mandate.
 fn fixture() -> Fixture {
+    fixture_with_clock(Arc::new(Clock))
+}
+
+/// [`fixture`] whose grant owner reads time from `clock`.
+fn fixture_with_clock(clock: Arc<dyn LocalAuthorizationClock>) -> Fixture {
     let input = input("caller");
     let ingress = Arc::clone(input.header().ingress_context.as_ref().expect("ingress"));
     let mut claims = input
@@ -300,7 +305,7 @@ fn fixture() -> Fixture {
                 generation: 1,
             },
             publication.clone(),
-            Arc::new(Clock),
+            clock,
         )
         .expect("real generated grant owner"),
     );
@@ -558,6 +563,7 @@ fn the_mandate_is_authorized_by_its_actual_owners() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("work-leaf"),
             f.claims.logical_executor.clone(),
@@ -697,6 +703,7 @@ fn an_unauthorized_requester_with_a_valid_lineage_is_refused() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("valid-leaf"),
             f.claims.logical_executor.clone(),
@@ -830,6 +837,7 @@ fn both_faces_of_the_invocation_policy_follow_one_grant_publication() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("invocation"),
             f.claims.requester.clone(),
@@ -849,6 +857,7 @@ fn both_faces_of_the_invocation_policy_follow_one_grant_publication() {
         invocation: ScopedInvocation::from_policy(Arc::clone(&policy)),
         operation_owner: Arc::new(NoOperations),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     assert!(configuration.require_scoped_destination);
@@ -867,7 +876,12 @@ fn both_faces_of_the_invocation_policy_follow_one_grant_publication() {
     assert!(admitted(&configuration).is_ok());
 
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("the host revokes the invocation grant");
     assert_eq!(
         refusal((configuration.ingress)(
@@ -917,6 +931,7 @@ fn every_contributor_is_an_admitted_original_whose_grant_is_a_conjunct() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("contributor-leaf"),
             f.claims.logical_executor.clone(),
@@ -940,7 +955,12 @@ fn every_contributor_is_an_admitted_original_whose_grant_is_a_conjunct() {
     );
 
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("the source owner's grant for one contributor is revoked");
     assert_eq!(
         refusal(f.admit(f.claims.clone())),
@@ -980,6 +1000,7 @@ impl Fixture {
     ) -> GrantLineageRef {
         self.grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &self.root,
                 id(grant),
                 source_executor(),
@@ -1018,6 +1039,7 @@ impl Fixture {
         let own = self
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &self.root,
                 id("helper-leaf"),
                 self.claims.logical_executor.clone(),
@@ -1114,7 +1136,12 @@ fn a_contributor_that_is_not_live_refuses_locally() {
         "live before the revocation"
     );
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("the source's grant is revoked");
     assert_eq!(refusal(f.admit(helper)), denied, "a revoked lineage");
 
@@ -1183,6 +1210,7 @@ fn a_contributor_that_is_not_live_refuses_locally() {
     .expect("another grant owner");
     let foreign = other
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-leaf"),
             source_executor(),
@@ -1254,6 +1282,7 @@ fn the_admitted_originals_own_basis_stays_bound_to_its_executor_and_subject() {
     let other_subject = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("helper-other-subject"),
             helper.logical_executor.clone(),
@@ -1436,6 +1465,7 @@ impl Fixture {
             invocation: ScopedInvocation::from_policy(Arc::new(AllowWork)),
             operation_owner: Arc::new(ExactOperation(operation)),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         let policy = GrantBackedWorkPolicy::new(
@@ -1615,7 +1645,12 @@ fn an_operation_refuses_on_a_contributor_that_is_no_longer_current() {
     let live = f.issue_source_grant("source-live", covering());
     let revoked = f.issue_source_grant("source-revoked", covering());
     f.grants
-        .revoke(&f.root, &revoked, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &revoked,
+            &mut AnyCustody,
+        )
         .expect("revoked");
     // The grant owner's time is 100: this window has ended.
     let expired = f.issue_source_grant(
@@ -1637,6 +1672,7 @@ fn an_operation_refuses_on_a_contributor_that_is_no_longer_current() {
     .expect("another grant owner");
     let foreign = other
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-live"),
             source_executor(),
@@ -1718,6 +1754,7 @@ fn a_same_executor_contributor_ceiling_is_its_executor_resolution() {
     let same = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("same-executor-leaf"),
             executor.clone(),
@@ -1827,6 +1864,7 @@ fn the_installed_work_owner_forwards_the_policy_mandate_under_the_contributor_ch
         invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
         operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = GrantBackedWorkPolicy::new(
@@ -1919,6 +1957,7 @@ fn a_contributor_narrowed_mandate_past_four_kib_is_material_and_past_the_bound_u
         invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
         operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = GrantBackedWorkPolicy::new(
@@ -2018,6 +2057,7 @@ fn the_contributor_ceilings_narrow_the_review_material() {
         invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
         operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let mandate = |claims: &InputAuthorityAssociationCandidate| {
@@ -2320,6 +2360,7 @@ fn a_current_source_original_is_retained_and_its_mandate_resolves() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-leaf"),
             f.claims.logical_executor.clone(),
@@ -2365,7 +2406,12 @@ fn a_current_source_original_is_retained_and_its_mandate_resolves() {
     assert!(current().is_ok(), "the exclusion published nothing");
 
     f.grants
-        .revoke(&f.root, &lineage, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &f.root,
+            &lineage,
+            &mut AnyCustody,
+        )
         .expect("revoked");
     assert_eq!(refusal(current()), Some(OperationRefusalKind::Denied));
     f.originals
@@ -2391,6 +2437,7 @@ fn a_source_original_read_during_an_owner_change_is_a_changed_policy() {
     let lineage = f
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &f.root,
             id("source-leaf"),
             f.claims.logical_executor.clone(),
@@ -2505,6 +2552,7 @@ impl Fixture {
             invocation: ScopedInvocation::from_policy(Arc::new(AllowWork)),
             operation_owner: Arc::new(ExactOperation(operation)),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         Arc::new(GrantBackedWorkPolicy::new(
@@ -2654,6 +2702,124 @@ fn an_owner_change_during_an_admission_lineage_read_is_a_changed_policy() {
         f.admit(f.claims.clone()).is_ok(),
         "admits once the change completes"
     );
+}
+
+/// The fixture grant owner's clock, which runs one armed owner change at its
+/// next time read. A lineage read takes the time inside its observation of
+/// the grant publication, before it takes the grant owner's state, so the
+/// change publishes and completes while that read is under way.
+#[derive(Default)]
+struct ChangingClock(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+impl ChangingClock {
+    fn arm(&self, change: impl FnOnce() + Send + 'static) {
+        *self.0.lock().expect("fixture") = Some(Box::new(change));
+    }
+
+    /// Whether the armed change ran.
+    fn ran(&self) -> bool {
+        self.0.lock().expect("fixture").is_none()
+    }
+}
+
+impl LocalAuthorizationClock for ChangingClock {
+    fn now(&self) -> Result<LocalAuthorizationTime, meerkat_authorization::clock::LocalClockError> {
+        let change = self.0.lock().expect("fixture").take();
+        if let Some(change) = change {
+            change();
+        }
+        Clock.now()
+    }
+}
+
+/// Arm `clock` with another actor's owner change on `f`'s grant
+/// publication: the revocation of `grant` when `revoke`, otherwise a change
+/// of some other owner fact.
+fn arm_completed_change(clock: &ChangingClock, f: &Fixture, grant: GrantLineageRef, revoke: bool) {
+    if revoke {
+        let grants = Arc::downgrade(&f.grants);
+        let root = f.root.clone();
+        clock.arm(move || {
+            grants
+                .upgrade()
+                .expect("the grant owner")
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &root,
+                    &grant,
+                    &mut AnyCustody,
+                )
+                .expect("another actor revokes the grant");
+        });
+    } else {
+        let publication = f.publication.clone();
+        clock.arm(move || {
+            drop(
+                publication
+                    .begin_owner_change()
+                    .expect("another actor's owner change"),
+            );
+        });
+    }
+}
+
+/// Another actor's owner change that publishes and completes while
+/// admission reads a grant lineage (the admitted original's own mandate, or
+/// a named contributor's liveness) leaves that read stale, with no change in
+/// progress any more. Admission makes the read once more from the owners: it
+/// admits while the grant holds, and refuses with the owners' current answer
+/// (`Denied`) when that change revoked the grant. A change still in progress
+/// keeps answering `PolicyChanged`
+/// (`an_owner_change_during_an_admission_lineage_read_is_a_changed_policy`).
+///
+/// RED on the base: every case answered `PolicyChanged`.
+#[test]
+fn an_owner_change_completed_during_an_admission_lineage_read_is_read_again() {
+    let read_again = |revoke: bool, during: Result<(), NativeAdmissionError>, case: &str| {
+        if revoke {
+            assert_eq!(
+                refusal(during),
+                Some(OperationRefusalKind::Denied),
+                "{case}: the owners' current answer"
+            );
+        } else {
+            assert!(
+                during.is_ok(),
+                "{case}: admitted after one more read: {during:?}"
+            );
+        }
+    };
+    for revoke in [false, true] {
+        // The admitted original's own grant-lineage mandate.
+        let clock = Arc::new(ChangingClock::default());
+        let f = fixture_with_clock(clock.clone());
+        let helper = f.helper_claims();
+        let WorkAuthorityBasis::GrantLineage { lineage } = &helper.authority_basis else {
+            panic!("the helper's own grant-lineage mandate")
+        };
+        arm_completed_change(&clock, &f, lineage[0].clone(), revoke);
+        let during = f.admit(helper.clone());
+        assert!(
+            clock.ran(),
+            "revoke={revoke}: the change ran during the read"
+        );
+        read_again(revoke, during, "the original's own mandate");
+
+        // A named contributor's lineage, under the fixture's own host-policy
+        // mandate, so that no other lineage is read first.
+        let clock = Arc::new(ChangingClock::default());
+        let f = fixture_with_clock(clock.clone());
+        let source = f.claims.contributing_work[1].clone();
+        let lineage = f.issue_source_grant("source-leaf", ExecutionRestrictions::unrestricted());
+        f.hold_contributor(&source, vec![lineage.clone()]);
+        arm_completed_change(&clock, &f, lineage, revoke);
+        let during = f.admit(f.claims.clone());
+        assert!(
+            clock.ran(),
+            "revoke={revoke}: the change ran during the read"
+        );
+        read_again(revoke, during, "a contributor's liveness");
+    }
 }
 
 /// A poisoned grant publication at the same admission reads stays

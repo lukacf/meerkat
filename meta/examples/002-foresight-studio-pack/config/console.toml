@@ -1,0 +1,129 @@
+title = "Foresight Studio"
+
+[brand]
+label = "Borealis Foresight"
+logo_url = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%230f172a'/%3E%3Cpath%20d='M14%2042c10-22%2026-28%2038-20-8%201-17%207-25%2020h25v8H14z'%20fill='%2338bdf8'/%3E%3Ccircle%20cx='43'%20cy='19'%20r='5'%20fill='%23facc15'/%3E%3C/svg%3E"
+logo_alt = "Borealis Foresight"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "demo / board-readiness"
+
+[layout]
+initial_preset = "two_columns"
+initial_control = "roster"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "board-risk"
+empty_text = "No board-critical signal yet."
+
+[[rail.filter_presets]]
+id = "board-risk"
+label = "Board Risk"
+alert_levels = ["critical"]
+
+[[rail.filter_presets]]
+id = "watched"
+label = "Watched"
+watched_only = true
+
+[[rail.filter_presets]]
+id = "review"
+label = "Review"
+alert_levels = ["elevated", "critical"]
+
+[sidebar]
+visible_controls = ["roster", "topology", "timeline", "routing", "logs", "health"]
+hidden_controls = []
+
+[[sidebar.buttons]]
+id = "risk-review"
+label = "Risk Review"
+control = "gating"
+
+[[sidebar.buttons]]
+id = "board-brief"
+label = "Board Brief"
+href = "https://example.test/foresight/board-brief"
+target = "_blank"
+
+[[sidebar.buttons]]
+id = "signal-lake"
+label = "Signal Lake"
+href = "https://example.test/foresight/signal-lake"
+target = "_blank"
+
+[agent_list]
+group_by = ["labels.console_group", "labels.group", "role"]
+subgroup_by = ["labels.org", "labels.lane"]
+section_order = ["Studio Leads", "Signal Pods", "Analysis Pods", "Review Board", "Synthesis", "Internal"]
+fallback_group = "Studio"
+fallback_subgroup = "Unassigned"
+collapse_single_subgroup = false
+default_pinned_agent_ids = ["risk-red-team"]
+
+[[agent_list.badges]]
+id = "lane"
+label = "Lane"
+field = "labels.lane"
+tone = "info"
+
+[[agent_list.badges]]
+id = "confidence"
+label = "Confidence"
+field = "labels.confidence"
+tone = "warning"
+
+[[agent_list.badges]]
+id = "artifact"
+label = "Artifact"
+field = "labels.artifact"
+
+[[agent_list.sections]]
+name = "Studio Leads"
+collapsed = false
+empty_title = "No studio leads"
+empty_text = "The roster provider has not supplied the director or scribe yet."
+
+[[agent_list.sections]]
+name = "Signal Pods"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Analysis Pods"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Review Board"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Synthesis"
+collapsed = false
+
+[actions]
+inspect_label = "Open dossier"
+chat_label = "Open thread"
+send_label = "Send brief"
+respawn_label = "Re-seat"
+retire_label = "Stand down"
+reset_label = "Reset studio"
+show_reset = true
+
+[realms.boardroom]
+title = "Boardroom Foresight"
+
+[realms.boardroom.environment]
+label = "boardroom / read-only demo"
+
+[realms.boardroom.layout]
+initial_control = "timeline"
+
+[realms.boardroom.agent_list]
+section_order = ["Studio Leads", "Review Board", "Synthesis", "Signal Pods", "Analysis Pods"]

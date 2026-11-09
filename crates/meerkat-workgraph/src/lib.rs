@@ -20,6 +20,7 @@ mod execution_machine;
 mod generated;
 mod machine;
 pub(crate) mod machines;
+mod read_page;
 mod rest_contract;
 mod service;
 mod store;
@@ -71,24 +72,25 @@ pub use types::{
     AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
     AttentionProjectionText, AttentionPruneRequest, AttentionPruneResult, AttentionReassignRequest,
     AttentionReassignResult, AttentionResumeRequest, BreakGlassAttentionReassignRequest,
-    CancelledChildJoinPolicy, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    ExternalWorkRef, FailedChildJoinPolicy, GoalAttentionTarget, GoalBindExistingRequest,
-    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
-    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
-    GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS, MobAgentOwner,
-    ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
-    ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
-    PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WORK_ADMISSION_KEY_MAX_BYTES, WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode,
-    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
-    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding,
-    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionEvidenceKind,
-    WorkExecutionEvidenceProjection, WorkExecutionMachineState, WorkExecutionTarget,
-    WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
-    WorkGraphItemsResponse, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemAdmissionState, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
-    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
+    BreakGlassReleaseWorkItemRequest, CancelledChildJoinPolicy, ClaimWorkItemRequest,
+    CloseWorkItemRequest, CreateWorkItemRequest, ExternalWorkRef, FailedChildJoinPolicy,
+    GoalAttentionTarget, GoalBindExistingRequest, GoalConfirmRequest, GoalConfirmResult,
+    GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult,
+    GoalStatusRequest, GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest,
+    MAX_WORK_CLAIM_LEASE_SECONDS, MobAgentOwner, ObserveLeaseExpiryRequest,
+    ObserveReadinessRequest, PolicyEscalateRequest, ProjectedAttentionAuthority,
+    PublicGoalCompletionPolicy, PublicGoalCreateRequest, PublicGoalRequestCloseRequest,
+    ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WORK_ADMISSION_KEY_MAX_BYTES,
+    WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus,
+    WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind,
+    WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding, WorkExecutionBindingFilter,
+    WorkExecutionBindingId, WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection,
+    WorkExecutionMachineState, WorkExecutionTarget, WorkGraphEvent, WorkGraphEventKind,
+    WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse,
+    WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem,
+    WorkItemAdmissionState, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwner,
+    WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, mob_agent_owner_id_parts,
 };
 
 pub const WORKGRAPH_CAPABILITY_DISABLED_DESCRIPTION: &str =
@@ -315,6 +317,34 @@ mod workgraph_workflow_skill_tests {
                 "only when the target must not be ready until the source is `{completed}`; a `failed` or `cancelled` blocker keeps the target blocked."
             )),
             "skill must not claim any terminal blocker satisfies a blocks edge"
+        );
+    }
+
+    #[test]
+    fn skill_states_how_to_withdraw_evidence_and_how_a_withdrawal_reads() {
+        // The skill names the wire field, so pin the field to the type: a
+        // renamed or dropped field fails here, not only in the prose.
+        let round_trip =
+            serde_json::from_value::<crate::types::WorkEvidenceRef>(serde_json::json!({
+                "kind": "finding",
+                "id": "e2",
+                "withdraws": ["e1"]
+            }))
+            .and_then(serde_json::to_value)
+            .expect("evidence ref round trip");
+        assert_eq!(
+            round_trip["withdraws"],
+            serde_json::json!(["e1"]),
+            "WorkEvidenceRef must carry `withdraws` on the wire"
+        );
+        let text = skill_text();
+        assert!(
+            text.contains("lists the earlier ref's `id` in `withdraws`"),
+            "skill must say how to withdraw evidence"
+        );
+        assert!(
+            text.contains("a ref whose `id` a later ref lists in `withdraws` is withdrawn"),
+            "skill must say how a withdrawal reads"
         );
     }
 }

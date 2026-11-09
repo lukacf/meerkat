@@ -356,6 +356,27 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
         Ok(())
     }
 
+    /// Whether every request a switch onto `target_model` would serve can
+    /// carry `session_id`'s transcript as it stands: the operator-instruction
+    /// entry rows the session wrote itself, where they stand, and its ordered
+    /// instruction activations. The routing machine denies a switch onto a
+    /// target that cannot: the refusal is permanent, so a request held for it
+    /// would never end. A host decides it before any client for the target
+    /// is built.
+    ///
+    /// The default carries every target, which is right only for a host
+    /// that never refuses a target permanently. A host that can (one whose
+    /// own swap guard refuses a target for the session's transcript) must
+    /// answer `false` for that target, or its committed routing requests
+    /// fail at the apply instead of ending Denied.
+    async fn switch_target_carries_session_transcript(
+        &self,
+        _session_id: &SessionId,
+        _target_model: &str,
+    ) -> Result<bool, RuntimeDriverError> {
+        Ok(true)
+    }
+
     /// Caller must hold the turn-finalization boundary.
     async fn apply_live_session_llm_identity(
         &self,
@@ -1219,6 +1240,10 @@ meerkat_machine_runtime_internal_inputs!(
         StageVisibilityFilter,
         SurfaceSetRemovalTimeout,
         ReplaceVisibilityState,
+        // The scoped tool grant gate: each build's gate and each boundary's
+        // adjudicated open set, applied by the visibility owner.
+        ReplaceToolGrantGate,
+        ApplyToolGrantOpenSet,
     ],
     DeferredSessionLifecycle => [
         AbandonDeferredSessionPromotion,
@@ -1348,6 +1373,50 @@ meerkat_machine_runtime_internal_inputs!(
         HoldInputController,
         ReleaseInputController,
     ],
+    // The failure arm of the until-changed switch-turn reconfigure, beside
+    // its completion arm: it withdraws the request the switch-turn staged.
+    LiveTopologyReconfiguration => [
+        AbortUntilChangedSwitchTurnReconfigure,
+    ],
+    // A host's settle of the run its session retained, applied directly by
+    // `MeerkatMachine::settle_retained_run`.
+    RunExecutionLifecycle => [
+        SettleRetainedRun,
+    ],
+    // The run marked resumable whose resumed-run admission could not decide,
+    // held until a later answer releases it.
+    RunExecutionLifecycle => [
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
+    ],
+    // The scoped tool grant gate's server gate: each model-request
+    // boundary's extension of the gate by the names a gated MCP server
+    // provides, applied by the visibility owner.
+    VisibilityAuthorityLifecycle => [
+        ExtendToolGrantGate,
+    ],
+    // A grant-time live attach's stage of an MCP server the build's grant
+    // gate gates.
+    ExternalSurfaceLifecycle => [
+        SurfaceStageGatedAdd,
+    ],
+    // A channel's close sweep closes its delegation intake, so a delegation
+    // the lifecycle seam carries past the close is refused admission.
+    LiveExecutionLifecycle => [
+        CloseLiveDelegationIntake,
+    ],
+    // A recovered ungoverned row's requester batch key, rehydrated as
+    // BindInputAuthority rehydrates a governed row's binding.
+    InputQueueLifecycle => [
+        BindInputRequesterBatchKey,
+    ],
+    // A host's compaction request, applied directly by
+    // `MeerkatMachine::request_compaction`, and its consumption by the
+    // agent's compaction check through the session's turn-state handle.
+    RunExecutionLifecycle => [
+        RequestCompaction,
+        ConsumeCompactionRequest,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {
@@ -1442,6 +1511,11 @@ meerkat_machine_fieldless_runtime_internal_inputs!(
     UserInterruptDispatch => [
         InterruptCurrentRun,
     ],
+    // A host's compaction request, applied directly by
+    // `MeerkatMachine::request_compaction` (appended last).
+    RuntimeOwner => [
+        RequestCompaction,
+    ],
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1519,6 +1593,11 @@ pub enum SupervisorBridgeCommandKind {
     // bound-supervisor ladder, as `ReadMemberHistory` does.
     HostFeatures,
     ReadMemberVisibleTools,
+    // Protocol V7 (a placed member's operator instructions): the
+    // host-addressed record and release of a member session's target,
+    // admitted and served by the host daemon, as `ReleaseMember` is.
+    RecordMemberInstructionTarget,
+    ReleaseMemberInstructionTarget,
 }
 
 impl SupervisorBridgeCommandKind {
@@ -1560,6 +1639,8 @@ impl SupervisorBridgeCommandKind {
         Self::MemberOperatorRequest,
         Self::HostFeatures,
         Self::ReadMemberVisibleTools,
+        Self::RecordMemberInstructionTarget,
+        Self::ReleaseMemberInstructionTarget,
     ];
 
     /// Wire enum variant identifier this kind mirrors.
@@ -1603,6 +1684,8 @@ impl SupervisorBridgeCommandKind {
             Self::MemberOperatorRequest => "MemberOperatorRequest",
             Self::HostFeatures => "HostFeatures",
             Self::ReadMemberVisibleTools => "ReadMemberVisibleTools",
+            Self::RecordMemberInstructionTarget => "RecordMemberInstructionTarget",
+            Self::ReleaseMemberInstructionTarget => "ReleaseMemberInstructionTarget",
         }
     }
 
@@ -1650,7 +1733,11 @@ impl SupervisorBridgeCommandKind {
             | Self::HostStatus
             | Self::IssueHostBindingDescriptor
             | Self::MemberOperatorRequest
-            | Self::HostFeatures => SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed,
+            | Self::HostFeatures
+            | Self::RecordMemberInstructionTarget
+            | Self::ReleaseMemberInstructionTarget => {
+                SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed
+            }
         }
     }
 
@@ -1709,8 +1796,12 @@ impl SupervisorBridgeCommandKind {
             | Self::HostStatus
             | Self::IssueHostBindingDescriptor
             // V7: the effect-free feature probe, answered by the host
-            // daemon's serving loop like `HostStatus`.
-            | Self::HostFeatures => {
+            // daemon's serving loop like `HostStatus`, and a placed member's
+            // operator-instruction record and release, served by it like
+            // `ReleaseMember`.
+            | Self::HostFeatures
+            | Self::RecordMemberInstructionTarget
+            | Self::ReleaseMemberInstructionTarget => {
                 SupervisorBridgeCommandRealization::RealizedOffDrain {
                 by: OffDrainResponder::HostDaemon,
                 }

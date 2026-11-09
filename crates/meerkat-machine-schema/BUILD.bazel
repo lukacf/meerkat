@@ -55,11 +55,12 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     proc_macro_deps = [
@@ -88,13 +89,14 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     proc_macro_deps = [
@@ -129,11 +131,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     tags = [
@@ -195,13 +198,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/auth_machine_oauth_flow.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "auth_machine_oauth_flow",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -249,13 +253,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/auth_machine_release.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "auth_machine_release",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -303,13 +308,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/catalog_typed_round_trip.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "catalog_typed_round_trip",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -357,13 +363,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/coverage_symbol_ref.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "coverage_symbol_ref",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -411,13 +418,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/coverage_validation.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "coverage_validation",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -465,13 +473,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/defer_input_totality.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "defer_input_totality",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -519,13 +528,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/delivery_refusal_settlement.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "delivery_refusal_settlement",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -573,13 +583,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/delivery_status_classification_totality.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "delivery_status_classification_totality",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -627,13 +638,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/docs_machine_authority_alignment.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "docs_machine_authority_alignment",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -687,14 +699,70 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/draining_registration_fence.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "draining_registration_fence",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "durable_decision_machine_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "durable_decision_machine",
+    crate_root = "tests/durable_decision_machine.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/durable_decision_machine.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "durable_decision_machine",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     tags = [
@@ -741,13 +809,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/forked_participant_lifecycle_machine.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "forked_participant_lifecycle_machine",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -795,13 +864,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/generation_guard_call_sites.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "generation_guard_call_sites",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -849,13 +919,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/gpt_live_authority_contract.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "gpt_live_authority_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -903,14 +974,70 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/grant_tlc_model.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "grant_tlc_model",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "host_store_writer_fence_machine_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "host_store_writer_fence_machine",
+    crate_root = "tests/host_store_writer_fence_machine.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/host_store_writer_fence_machine.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "host_store_writer_fence_machine",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     tags = [
@@ -957,13 +1084,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/identity_roundtrip.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "identity_roundtrip",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1011,13 +1139,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/input_field_domains.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "input_field_domains",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1065,13 +1194,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/live_context_readiness_guard_contract.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "live_context_readiness_guard_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1119,13 +1249,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/member_residency_guard_phase_scan.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "member_residency_guard_phase_scan",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1136,6 +1267,281 @@ rust_test(
     data = [
         ":package_runfiles",
     ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "mob_machine_identity_life_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mob_machine_identity_life",
+    crate_root = "tests/mob_machine_identity_life.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/mob_machine_identity_life.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "mob_machine_identity_life",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "mob_machine_member_custody_region_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mob_machine_member_custody_region",
+    crate_root = "tests/mob_machine_member_custody_region.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/mob_machine_member_custody_region.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "mob_machine_member_custody_region",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "mob_machine_member_dispatch_admission_region_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mob_machine_member_dispatch_admission_region",
+    crate_root = "tests/mob_machine_member_dispatch_admission_region.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/mob_machine_member_dispatch_admission_region.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "mob_machine_member_dispatch_admission_region",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "mob_machine_operator_instruction_region_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mob_machine_operator_instruction_region",
+    crate_root = "tests/mob_machine_operator_instruction_region.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/mob_machine_operator_instruction_region.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "mob_machine_operator_instruction_region",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "mob_store_restore_lifecycle_machine_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "mob_store_restore_lifecycle_machine",
+    crate_root = "tests/mob_store_restore_lifecycle_machine.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/mob_store_restore_lifecycle_machine.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "mob_store_restore_lifecycle_machine",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
@@ -1175,13 +1581,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/model_routing_handoff_lifecycle.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "model_routing_handoff_lifecycle",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1229,13 +1636,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/named_type_binding_covers_catalog.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "named_type_binding_covers_catalog",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1283,13 +1691,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/occurrence_completed_entry_lattice.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "occurrence_completed_entry_lattice",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1337,13 +1746,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/peer_endpoint_structural_equivalence.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "peer_endpoint_structural_equivalence",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1391,13 +1801,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/phase_target_contract.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "phase_target_contract",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1445,13 +1856,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/placed_lifecycle_origin_fence.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "placed_lifecycle_origin_fence",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1499,13 +1911,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/runtime_authority_reconciliation_totality.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "runtime_authority_reconciliation_totality",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1553,13 +1966,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/schema_construction_cache.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "schema_construction_cache",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1607,13 +2021,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/schema_contracts.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "schema_contracts",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1626,6 +2041,116 @@ rust_test(
         "//crates/meerkat-mcp:package_runfiles",
         "//crates/meerkat-runtime:package_runfiles",
     ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "session_document_activation_retirement_region_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "session_document_activation_retirement_region",
+    crate_root = "tests/session_document_activation_retirement_region.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/session_document_activation_retirement_region.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "session_document_activation_retirement_region",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "session_document_instruction_region_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "session_document_instruction_region",
+    crate_root = "tests/session_document_instruction_region.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/session_document_instruction_region.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "session_document_instruction_region",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
     env = {
         "RUST_MIN_STACK": "8388608",
         "RUST_TEST_THREADS": "1",
@@ -1665,13 +2190,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/stopped_phase_revival_lattice.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "stopped_phase_revival_lattice",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1719,13 +2245,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/strict_guard_map_reads.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "strict_guard_map_reads",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1773,14 +2300,180 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/temporary_council_lifecycle_machine.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "temporary_council_lifecycle_machine",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "tool_grant_gate_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "tool_grant_gate",
+    crate_root = "tests/tool_grant_gate.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/tool_grant_gate.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "tool_grant_gate",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "tool_grant_lifecycle_machine_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "tool_grant_lifecycle_machine",
+    crate_root = "tests/tool_grant_lifecycle_machine.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/tool_grant_lifecycle_machine.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "tool_grant_lifecycle_machine",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "medium",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-authorization-contracts:meerkat_authorization_contracts",
+        "//crates/meerkat-core:meerkat_core",
+        "//crates/meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "tool_grant_run_scope_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-machine-schema",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "tool_grant_run_scope",
+    crate_root = "tests/tool_grant_run_scope.rs",
+    crate_features = [],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
+    ],
+    srcs = [
+        "tests/tool_grant_run_scope.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.11",
+        "CARGO_BIN_NAME": "tool_grant_run_scope",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
     tags = [
@@ -1827,13 +2520,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/catalog/dsl/meerkat_machine.rs",
+        "src/catalog/dsl/mob_machine.rs",
     ],
     srcs = [
         "tests/transition_arm_exclusivity.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.8",
+        "CARGO_PKG_VERSION": "0.9.11",
         "CARGO_BIN_NAME": "transition_arm_exclusivity",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-machine-schema",
     },
@@ -1877,15 +2571,22 @@ test_suite(
         ":delivery_status_classification_totality_test",
         ":docs_machine_authority_alignment_test",
         ":draining_registration_fence_test",
+        ":durable_decision_machine_test",
         ":forked_participant_lifecycle_machine_test",
         ":generation_guard_call_sites_test",
         ":gpt_live_authority_contract_test",
         ":grant_tlc_model_test",
+        ":host_store_writer_fence_machine_test",
         ":identity_roundtrip_test",
         ":input_field_domains_test",
         ":live_context_readiness_guard_contract_test",
         ":meerkat_machine_schema_unit_test",
         ":member_residency_guard_phase_scan_test",
+        ":mob_machine_identity_life_test",
+        ":mob_machine_member_custody_region_test",
+        ":mob_machine_member_dispatch_admission_region_test",
+        ":mob_machine_operator_instruction_region_test",
+        ":mob_store_restore_lifecycle_machine_test",
         ":model_routing_handoff_lifecycle_test",
         ":named_type_binding_covers_catalog_test",
         ":occurrence_completed_entry_lattice_test",
@@ -1895,9 +2596,14 @@ test_suite(
         ":runtime_authority_reconciliation_totality_test",
         ":schema_construction_cache_test",
         ":schema_contracts_test",
+        ":session_document_activation_retirement_region_test",
+        ":session_document_instruction_region_test",
         ":stopped_phase_revival_lattice_test",
         ":strict_guard_map_reads_test",
         ":temporary_council_lifecycle_machine_test",
+        ":tool_grant_gate_test",
+        ":tool_grant_lifecycle_machine_test",
+        ":tool_grant_run_scope_test",
         ":transition_arm_exclusivity_test",
     ],
 )

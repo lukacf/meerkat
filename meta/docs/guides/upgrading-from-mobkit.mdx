@@ -1,0 +1,327 @@
+---
+title: "Upgrading from MobKit 0.8.x"
+description: "What changes when a MobKit 0.8.x deployment moves to Meta 0.9: storage adoption, mob.toml keys that are now refused or now take effect, and empty access and gating paths, with the exact errors to search for."
+icon: "arrow-up"
+---
+
+Meta 0.9 is MobKit renamed, on Meerkat 0.9. Most configs carry over unchanged,
+but a few inputs that MobKit 0.8.x accepted, or silently dropped, now refuse
+startup. Each item below names the error you see, why it appears, and what to
+do. Search this page for the text of your error.
+
+## 1. Adopt the predecessor storage
+
+**You see:** startup refuses with
+
+```text
+the state directory <dir> holds predecessor (pre-0.9) state (...); refusing to
+open renamed stores beside it - stop every process using this installation,
+then carry it over once with `meta_gateway storage-adopt-predecessor --state-dir <dir> --apply`
+```
+
+**Do:** stop every process that uses the installation, then run the adoption
+once. It is a read-only dry run by default:
+
+```bash
+meta_gateway storage-adopt-predecessor --state-dir <dir>          # list the steps
+meta_gateway storage-adopt-predecessor --state-dir <dir> --apply  # carry the state over
+```
+
+`--state-dir` is exactly the directory the refusal names: the
+`persistent_state` of `rpc_gateway` and the SDK builders, or the store
+directory of `meta_gateway`. `--apply` writes a `meta-adoption.json` journal
+and resumes from it: if a run is interrupted, startup refuses with
+`the predecessor adoption at <path> is unfinished`, and running the same
+command again finishes it. The gateway homes are separate inputs: a refusal
+that names `the predecessor (pre-0.9) gateway home` carries the exact
+`--predecessor-home` and `--gateway-home` arguments to add.
+
+Since 0.9.2, pass the mob definition the installation boots with as well,
+`--mob-config <mob.toml>` (or its `definition.json`; once per mob), so the dry
+run also checks it for keys that the MobKit release which created a store
+ignored and Meta 0.9 applies. See
+[Keys that now take effect](#4-keys-that-now-take-effect).
+
+In 0.9.1 a bare `--state-dir <dir>` touches only that directory: the
+predecessor database renames, the ledger domains and the metadata table, the
+composition manifests, the memory ledger file, the steward schedule, and the
+realm id recorded in the journal. It touches no gateway home and no runtime
+registry outside the directory. Add `--user-gateway-home` to also carry over
+the user-level gateway home (`$XDG_STATE_HOME/meerkat-meta`, else
+`~/.local/state/meerkat-meta`, from its predecessor sibling
+`meerkat-mobkit`), which 0.9.0 did by default. `--gateway-home`, with or
+without `--predecessor-home`, works as before, but `--predecessor-home`
+without `--gateway-home` is now a usage error (exit 2). An unfinished
+adoption resumes with the homes its journal recorded.
+
+### The composition manifest written by MobKit
+
+A persistent mob storage keeps a provenance file beside its event log,
+`<storage file>.composition.json` (for example
+`event_log.sqlite3.composition.json`). MobKit wrote its creator field as
+`created_by_mobkit`; Meta 0.9 names it `created_by_meta`.
+
+**You see (0.9.0):** an adopted store is refused at init with JSON-RPC
+`-32019`, data `kind: "malformed"`, when the mob storage is persistent (the
+default without `runtime_options.mob_storage`), its event log already holds
+events, and the launch is authoritative:
+
+```text
+Runtime bootstrap failed: failed to bootstrap mob runtime: the mob composition
+provenance at <state>/event_log.sqlite3.composition.json is not a readable
+manifest: missing field `created_by_meta` at line 61 column 1 (resuming blind
+could boot a stale composition that looks healthy; restore the file, or remove
+the mob storage to recreate it)
+```
+
+<Warning>
+Do not follow the 0.9.0 message's advice to remove the mob storage. That
+recreates it empty and discards the mob's identities, sessions and memories.
+The file is readable; only the field name changed. The 0.9.1 message no longer
+suggests it.
+</Warning>
+
+**Do (0.9.1):** upgrade. 0.9.1 reads `created_by_mobkit` as `created_by_meta`
+(a manifest that carries both keys is refused as malformed), and
+`storage-adopt-predecessor` renames the key inside its journaled `ledger`
+step, so a stock 0.8.x store lists one more action than on 0.9.0:
+
+```text
+CompositionManifest <path>: created_by_mobkit -> created_by_meta (planned)
+```
+
+A store that 0.9.0 already adopted shows that action with `complete=false`;
+`--apply` renames the key and completes the adoption. To check or rewrite
+manifests on their own, run
+`meta_repair --composition-manifests <state dir | manifest file> [--apply]`
+(a dry run by default; it exits 1 if any manifest is refused).
+
+**Do (0.9.0):** in each `*.composition.json`, rename that one key,
+`created_by_mobkit` to `created_by_meta`, and change nothing else in the file.
+The rename is the whole fix.
+
+### The extension document store and document MCP descriptors
+
+Hosts built with the `extension-state` feature keep their documents in
+`<state>/extension_state.sqlite3`. The file name and the schema did not
+change in 0.9; the store's schema ledger domain did, from
+`mobkit-extension-state` to `meta-extension-state`.
+
+**You see (0.9.0, 0.9.1):** the store fails to open with an unledgered
+objects error for the domain `meta-extension-state` (the tables
+`extension_documents` and `extension_receipts`), also after a completed
+adoption, because the adoption did not carry that domain over.
+
+**Do (0.9.2):** the store is predecessor state now. Startup refuses with the
+adoption message above; run `meta_gateway storage-adopt-predecessor` as
+described there. An installation an earlier 0.9 adoption already finished
+lists one more action, the store's ledger domain, and `--apply` renames it.
+Every document is kept. The stock `meta_gateway` adopts the store too: it
+does not need the `extension-state` feature.
+
+A document MCP descriptor that a mob definition persisted before 0.9 (a
+child profile created by an agent `mob_create`, for example) carries the
+public marker under its predecessor name `MOBKIT_MCP_DOCUMENT_BINDING`. 0.9.2
+resolves it to your host's document binding exactly as the current
+`META_MCP_DOCUMENT_BINDING` spelling, so such members keep their documents.
+Nothing needs to change in the stored definitions. A marked descriptor that
+no binding resolves refuses the member's build, in either spelling, with or
+without the `extension-state` feature.
+
+## 2. Profile prompt keys are refused
+
+**You see:**
+
+```text
+Invalid mob_config TOML: profile 'planner' declares 'system_prompt', which a
+mob profile cannot honour: a profile has no system_prompt; the member prompt
+is `profile.skills` resolved against an inline or path `[skills.<id>]` table,
+...
+```
+
+The same refusal names `prompt` and `instructions`. On `meta_gateway` 0.9.0
+the init refusal read only `failed to parse <workspace>/config/mob.toml`;
+0.9.1 includes the reason.
+
+**Why:** a profile has no prompt field. MobKit 0.8.31 and earlier dropped
+these keys without a warning, so the key had no effect on the members of that
+profile: their prompt came from the profile's `skills`, another supported
+source or the default, never from this key.
+
+**Do:** delete the key. That keeps exactly the behaviour the deployment had,
+and it never makes a persistent store `divergent`. To set the members' prompt,
+list a skill in the profile:
+
+```toml
+[profiles.planner]
+model = "gpt-5.5"
+skills = ["planner-prompt"]
+
+[skills.planner-prompt]
+source = "inline"
+content = """
+You turn each request into a short, ordered plan...
+"""
+```
+
+Identity-first hosts can also set a roster spec's `additional_instructions`
+(`DurableAgentSpec`) or an agent customizer's `draft.system_prompt`.
+
+Adding a skill, unlike deleting the refused key, changes the composition: on a
+persistent store it refuses as `divergent` (naming `profiles.<name>.skills`
+and `skills.<id>`) until you advance the stored definition once with the
+[one-shot mob definition update](/reference/configuration#one-shot-mob-definition-update).
+
+## 3. Other mob.toml shapes that now refuse
+
+MobKit 0.8.x dropped each of these without a warning.
+
+**`model_fallback` on a realm profile reference.** A profile that sets
+`realm_profile = "..."` and `model_fallback` refuses with:
+
+```text
+definition error: invalid_model_fallback: realm profile references cannot override
+model_fallback; configure the referenced profile or runtime.model_fallback
+```
+
+Move the fallback to the referenced realm profile, or to
+`[runtime] model_fallback`.
+
+**A `[runtime]` table with other keys.** `[runtime]` is now part of the mob
+definition and accepts only `model_fallback`. Any other key refuses with:
+
+```text
+mob definition parse error: TOML parse error at line <n>, column <c>
+...
+unknown field `<key>`, expected `model_fallback`
+```
+
+Remove the other keys; Meerkat host settings belong in its `config.toml`.
+
+**`[self_hosted]` or `[realm]` tables in mob.toml.** Refused with:
+
+```text
+mob.toml declares a top-level [self_hosted] table, which is meerkat host configuration
+that the mob definition parser ignores; move it into the meerkat config.toml and point
+the gateway at that file: ...
+```
+
+Move the table into the Meerkat `config.toml` and point the gateway at it; see
+[Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
+
+## 4. Keys that now take effect
+
+Earlier MobKit releases ignored these keys in `mob.toml`, so a config that
+carries them did nothing on those releases and changes behaviour on Meta 0.9.
+Review them before upgrading.
+
+- **`model_fallback`** (on a profile or under `[runtime]`) now configures the
+  model fallback chain. MobKit 0.8.33 and earlier ignored it. An unknown key
+  inside it, or an invalid chain, refuses the definition with
+  `invalid_model_fallback`.
+- **`tools.deny`** now denies the listed tools to the profile's members.
+  MobKit 0.8.45 and earlier ignored it. A name outside the known tool
+  vocabularies fails the member build (`DeclaredToolUnknown`), and an empty or
+  whitespace entry refuses the definition:
+
+  ```text
+  malformed_tool_deny: profiles.<name> tools.deny[<i>] "<entry>" is not a tool name
+  ```
+
+On an adopted persistent store these keys are also a composition change: a
+store created by a release that ignored them recorded its definition without
+them. Unless a later release's definition update recorded them, the store's
+definition still lacks them, and an authoritative resume (the default) that
+keeps them refuses as `divergent`, naming for example
+`profiles.<name>.tools.deny` or `profiles.<name>.model_fallback`. Resuming
+never applies them.
+
+**Check before adopting.** Give the adoption the definition the installation
+boots with (`mob.toml`, or `definition.json`):
+
+```bash
+meta_gateway storage-adopt-predecessor --state-dir <dir> --mob-config <mob.toml>
+```
+
+Adoption reads the definition each persistent mob storage holds now, from a
+private copy of its event log (the store itself is not opened), and names
+every such key that definition does not record, before it changes anything.
+A key that a later release's definition update recorded is already in effect
+and is not named. The composition manifest only tells which release created
+the store.
+
+```text
+refused, nothing changed: <dir>/event_log.sqlite3.composition.json: the mob
+definition in <mob.toml> sets keys that predecessor release 0.8.26, which
+created this store, ignored and Meta 0.9 applies, and that the definition
+this store holds does not record: profiles.planner.tools.deny. ...
+```
+
+With `--json`, each store's keys are listed under `ignored_keys` (`manifest`,
+`mob_id`, `source`, `created_by`, `keys`, `acknowledged`). A `--mob-config`
+that does not parse, or a `mob.toml` that declares a `[self_hosted]` or
+`[realm]` table, is refused before planning, naming the file.
+
+**Do:** for each named key, choose one:
+
+- Remove it to keep the behaviour the store has run with. The store then
+  resumes unchanged.
+- Keep it: rerun with `--acknowledge-ignored-keys`, which adopts and reports
+  the keys as acknowledged, then advance the stored definition once with the
+  [one-shot mob definition update](/reference/configuration#one-shot-mob-definition-update).
+  Until then an authoritative resume that keeps them refuses as `divergent`.
+
+## 5. Keys that only warn: safe to remove
+
+**You see** in the gateway log:
+
+```text
+mob profile declares keys the profile does not define; they are ignored mob_id=<mob> profile=director keys=["tools.mob_tasks"]
+```
+
+and, from `MobDefinition::parse_toml`, the diagnostic:
+
+```text
+profile 'director' declares 'tools.mob_tasks', which is not a key the profile accepts and is ignored
+```
+
+`tools.mob_tasks` is common in configs written for earlier releases; any
+unknown key under `[profiles.<name>]` or its `tools` table warns the same way.
+
+**Do:** remove the key. It is safe on a persistent store: the key never
+reaches the parsed definition, so it is not part of the composition Meta
+records and compares on resume. Removing or adding it never makes the store
+refuse as `divergent`, and a divergence refusal names only keys the definition
+accepts.
+
+## 6. Empty access and gating paths
+
+**You see:** an empty `runtime_options.access_config_path` or
+`runtime_options.gating_config_path` refuses `rpc_gateway` init, and the SDK
+builders throw on an empty path before they launch it:
+
+```text
+# rpc_gateway 0.9.0
+runtime_options.access_config_path is invalid: access config io error: : No such file or directory (os error 2)
+failed to read runtime_options.gating_config_path '': No such file or directory (os error 2)
+
+# rpc_gateway 0.9.1
+runtime_options.gating_config_path is empty. Since Meta 0.9.0 an empty path no longer switches gating off: ...
+
+# SDK builders
+gating requires a non-empty path...
+accessControl requires a non-empty path...    (TypeScript)
+access_control requires a non-empty path...   (Python)
+```
+
+**Why:** the MobKit 0.8.x SDKs dropped an empty path before it reached the
+gateway, so it read as "off". Meta 0.9 forwards any explicit path and loads it
+strictly, because an access or gating config that silently disappears would
+start the gateway without access control or gating.
+
+**Do:** to keep the feature off, omit the key or send `null`. With the Python
+or TypeScript SDK, do not call `gating(...)` or `accessControl(...)` /
+`access_control(...)`, and keep nothing at `config/gating.toml` or
+`config/access.toml` under the working directory: the builders load those
+files when they are present. See [Gating](/concepts/gating) and
+[Access control](/concepts/access-control).

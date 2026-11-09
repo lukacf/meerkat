@@ -23,6 +23,12 @@
 //! It is not durable across processes. A conformance factory hands out
 //! handles over one shared instance, which is how a test kills every Core
 //! object and reopens over the same store: the store outlives the "process".
+//!
+//! Its data never decays, so on its own it never answers
+//! [`HostStoreError::Unavailable`] for a read or [`HostStoreError::Corrupt`].
+//! A test that drives Core through a store that cannot serve a scope now, or
+//! whose stored data for a scope is corrupt, sets a read fault on that scope
+//! ([`InMemoryHostStore::set_read_fault`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -100,6 +106,44 @@ struct Realm {
     /// Every commit id that landed, with a fingerprint of its updates, so
     /// that a retry acts once and a reused id is caught.
     landed: BTreeMap<CommitId, u64>,
+    /// The read faults a test set, by scope.
+    read_faults: BTreeMap<ScopeRef, HostStoreReadFault>,
+    /// The read faults a test set for every scope of a kind.
+    kind_read_faults: BTreeMap<ScopeKind, HostStoreReadFault>,
+}
+
+impl Realm {
+    /// The read fault set for `scope`: its own, else its kind's.
+    fn read_fault(&self, scope: &ScopeRef) -> Option<HostStoreReadFault> {
+        self.read_faults
+            .get(scope)
+            .or_else(|| self.kind_read_faults.get(&scope.kind))
+            .copied()
+    }
+}
+
+/// A read fault the reference store answers for one scope while it is set
+/// ([`InMemoryHostStore::set_read_fault`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HostStoreReadFault {
+    /// Reads of the scope answer [`HostStoreError::Unavailable`]: the store
+    /// cannot serve them now.
+    Unavailable,
+    /// Reads of the scope answer [`HostStoreError::Corrupt`]: its stored data
+    /// cannot be served as it is.
+    Corrupt,
+}
+
+impl HostStoreReadFault {
+    fn error(self, scope: &ScopeRef) -> HostStoreError {
+        match self {
+            Self::Unavailable => {
+                HostStoreError::Unavailable(format!("{scope}: injected read fault"))
+            }
+            Self::Corrupt => HostStoreError::Corrupt(format!("{scope}: injected read fault")),
+        }
+    }
 }
 
 impl Realm {
@@ -159,6 +203,35 @@ impl InMemoryHostStore {
             timing,
             clock: StoreClock(Some(Arc::new(now))),
             realm: Mutex::default(),
+        }
+    }
+
+    /// Answer every head and row read of every scope of `kind` with `fault`
+    /// while it is set (`None` clears it). A scope's own fault
+    /// ([`Self::set_read_fault`]) wins. Commits and listings are untouched.
+    pub fn set_kind_read_fault(&self, kind: ScopeKind, fault: Option<HostStoreReadFault>) {
+        let mut realm = self.realm();
+        match fault {
+            Some(fault) => {
+                realm.kind_read_faults.insert(kind, fault);
+            }
+            None => {
+                realm.kind_read_faults.remove(&kind);
+            }
+        }
+    }
+
+    /// Make every read of `scope` (its head and its rows) answer `fault`, or
+    /// serve it again with `None`. Commits and listings are untouched.
+    pub fn set_read_fault(&self, scope: ScopeRef, fault: Option<HostStoreReadFault>) {
+        let mut realm = self.realm();
+        match fault {
+            Some(fault) => {
+                realm.read_faults.insert(scope, fault);
+            }
+            None => {
+                realm.read_faults.remove(&scope);
+            }
         }
     }
 
@@ -299,6 +372,51 @@ impl InMemoryHostStore {
         apply(&mut realm, update, batch.commit_id());
         Ok(())
     }
+
+    /// Decide `batch` as a commit decides it at its commit point, applying
+    /// nothing: `true` when its commit id already landed with the same
+    /// updates (a retry acts once), `false` when it may land, or the refusal
+    /// a commit would answer.
+    pub(crate) fn commit_point(&self, batch: &CommitBatch) -> Result<bool, HostStoreError> {
+        let realm = self.realm();
+        if let Some(landed) = realm.landed.get(batch.commit_id()) {
+            if *landed == fingerprint(batch) {
+                return Ok(true);
+            }
+            return Err(HostStoreError::Invalid(format!(
+                "commit id {} landed with different updates",
+                batch.commit_id()
+            )));
+        }
+        realm.check_acquired(batch.fence())?;
+        if batch.fence().get() < realm.fence {
+            return Err(HostStoreError::FencedOut {
+                current: FenceToken::new(realm.fence),
+            });
+        }
+        for update in batch.updates() {
+            check_update(&realm, update)?;
+        }
+        Ok(false)
+    }
+
+    /// Apply `batch`, checked as a commit checks it except for its fence: a
+    /// batch whose commit point came before a later acquire.
+    pub(crate) fn apply_unfenced(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        let print = fingerprint(batch);
+        let mut realm = self.realm();
+        if realm.landed.get(batch.commit_id()) == Some(&print) {
+            return Ok(());
+        }
+        for update in batch.updates() {
+            check_update(&realm, update)?;
+        }
+        for update in batch.updates() {
+            apply(&mut realm, update, batch.commit_id());
+        }
+        realm.landed.insert(batch.commit_id().clone(), print);
+        Ok(())
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -342,11 +460,11 @@ impl HostStore for InMemoryHostStore {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
-        Ok(self
-            .realm()
-            .scopes
-            .get(scope)
-            .map(ScopeState::versioned_head))
+        let realm = self.realm();
+        if let Some(fault) = realm.read_fault(scope) {
+            return Err(fault.error(scope));
+        }
+        Ok(realm.scopes.get(scope).map(ScopeState::versioned_head))
     }
 
     async fn list_heads(
@@ -379,7 +497,7 @@ impl HostStore for InMemoryHostStore {
         } else {
             None
         };
-        Ok(HeadPage { heads, next })
+        Ok(HeadPage::new(heads, next))
     }
 
     async fn read_rows(
@@ -389,6 +507,9 @@ impl HostStore for InMemoryHostStore {
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
         let realm = self.realm();
+        if let Some(fault) = realm.read_fault(scope) {
+            return Err(fault.error(scope));
+        }
         let Some(state) = realm.scopes.get(scope) else {
             return Ok(Vec::new());
         };

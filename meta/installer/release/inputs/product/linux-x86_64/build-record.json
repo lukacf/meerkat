@@ -1,0 +1,59 @@
+{
+ "binary": {
+  "path": "/srv/connect-0910-rpub/work/binary/toolkit_gateway",
+  "sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+  "size": 508941776
+ },
+ "binary_kind": "toolkit_gateway",
+ "cargo": {
+  "argv": [
+   "/srv/connect-0910-rpub/src/connect/scripts/repo-cargo",
+   "+1.97.0",
+   "build",
+   "--locked",
+   "--offline",
+   "--release",
+   "-j",
+   "16",
+   "--manifest-path",
+   "/srv/connect-0910-rpub/src/Cargo.toml",
+   "-p",
+   "meerkat-connect",
+   "--features",
+   "meerkat-connect/console,toolkit-mobkit/native-host",
+   "--bin",
+   "toolkit_gateway",
+   "--bin",
+   "meerkat-connect",
+   "--message-format=json-render-diagnostics"
+  ],
+  "cwd": "/srv/connect-0910-rpub/src",
+  "env": {
+   "MEERKAT_CONNECT_RESOURCES_SHA256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0"
+  },
+  "exit_code": 0,
+  "messages": {
+   "path": "/srv/connect-0910-rpub/work/records/native-build.stdout",
+   "sha256": "72cd86f5af4c1ac682b50b2dd84476afdbf73a5557541e92338cb6ba8983e1b5",
+   "size": 519117
+  },
+  "result_record": {
+   "path": "/srv/connect-0910-rpub/work/records/native-build.RESULT.json",
+   "sha256": "a2f57736b3508f88a84f20d5a2610bd4819c8bb8dbbaabdc3c584430738642bc",
+   "size": 777
+  },
+  "start_record": {
+   "path": "/srv/connect-0910-rpub/work/records/native-build.START.json",
+   "sha256": "cf608e942dc3c36dcc5c28d7e0d3efbdb6bb2110014990b71e45b0bb2736e65f",
+   "size": 1096
+  }
+ },
+ "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4",
+ "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
+ "schema_version": 1,
+ "source_manifest": {
+  "path": "/srv/connect-0910-rpub/work/source-manifest.json",
+  "sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095"
+ },
+ "target": "linux-x86_64"
+}

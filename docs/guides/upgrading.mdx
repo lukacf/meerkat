@@ -55,6 +55,1642 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.11
+
+This section is for systems running 0.9.10. The full list of changes is in
+the CHANGELOG under `## [0.9.11]`.
+
+### Complete rosters retire unlisted legacy members
+
+A complete declared apply (`MobHandle::apply_declared_roster` with
+`DeclaredRoster::complete`, Rust only) now also retires each member the
+roster does not list whose spawn row carries both legacy marks, the
+durable-identity continuity marker and the legacy `agent_identity` label
+naming its own identity, and that no host's intent row names. A local member
+bound to a session is adopted as an entry, and the apply's seal unlists the
+entry and retires the member with the cause `Unlisted`. A member placed on a
+member host, or bound to no session, is retired without becoming an entry,
+and its retirement records no cause. The answer names either as `Retired` in
+`DeclaredRosterOutcome::unlisted`, and a member whose retirement started
+already as `NotAdopted`. Such a member is one a host seated under its
+identity before identity entries existed, whose identity the roster dropped
+before the host first applied it; 0.9.10 left it serving as a worker. A
+member with one mark only, or one a host adopted, is left as it is, and a
+partial roster retires no member it does not list.
+
+The legacy label is also read in the one encoding of a name into a member id:
+it names a member whose id encodes the label's name (`team:alice`, seated as
+`mk--team_calice`). A listed identity's member labelled so is adopted where
+0.9.10 refused its name `NameHeldByWorker` unless the member carried the
+durable-identity marker.
+
+**Do:** before the first complete apply on 0.9.11, make the roster list every
+identity whose member you keep: a member with both legacy marks that the
+roster does not list is retired by that apply.
+
+### Decision executors claim each kind
+
+`DecisionExecutorLoop` claims the executor role of each decision kind it
+registers (`DecisionStore::claim_executor_kind`), where 0.9.10 claimed the
+whole store, so two runtimes on one store each execute their own kinds. A
+second loop of a kind no longer fails at start with
+`DecisionError::ExecutorHeld`: it starts, lists the kind in each pass's
+`DecisionExecutorPass::unclaimed`, reports the kind's decisions as
+`DecisionPassOutcome::KindNotClaimed` (the executor that holds the kind
+executes them), and claims the kind once the first executor of the kind
+ends. The SQLite store keeps one lock file per kind,
+`approval_decisions.executor.<kind>.lock`, beside
+`approval_decisions.executor.lock`, which every loop now holds shared.
+
+A 0.9.10 executor and a 0.9.11 executor never execute on one store at once.
+While a 0.9.10 executor runs, a 0.9.11 loop starts, executes nothing and
+lists every kind as unclaimed, and takes over when the 0.9.10 executor ends.
+While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
+(`ExecutorHeld`).
+
+**Do:**
+
+- Forward `claim_executor_kind` in a `DecisionStore` wrapper. Its default
+  refuses, so no `DecisionExecutorLoop` starts over a wrapper without it
+  (`DecisionError::Unavailable`). `claim_executor` is deprecated; keep
+  forwarding it while code that calls it remains.
+- Upgrade every process that executes decisions on one store together.
+- A host that took a second loop's start refusal as the sign of another
+  executor reads `DecisionExecutorPass::unclaimed` instead.
+- Before a rollback to 0.9.10 or 0.9.9, read the CHANGELOG's upgrade note on
+  durable decisions and a rollback: those releases read a decision decided in
+  a login on 0.9.11 as torn and do not execute it.
+
+### A kept input's max age counts from the stop
+
+The max age of a graceful stop that keeps queued work
+(`UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown's
+`RequeueMaxAge`; every default graceful shutdown uses 15 minutes) now counts
+from the stop that kept an input, not from the input's admission. The next
+start runs a kept input, or resumes a run the stop suspended, unless more
+than `max_age` has passed since that stop; a later graceful stop that keeps
+the input again counts from its own time. 0.9.10 counted from the admission,
+so every run admitted more than 15 minutes before a graceful restart ended
+`requeue_expired`, however short the restart.
+
+**Do:** nothing, unless you relied on `max_age` to limit how old an input may
+be when it runs: a kept input now runs after a restart shorter than
+`max_age`, whenever it was admitted.
+
+### Meta's roster pass declares through Core
+
+Meerkat Meta's roster pass (the bootstrap, each refresh and the held pass)
+declares the host's roster in Core's mob through Core's declared apply, and
+no longer seats, respawns, releases or retires members itself. A send, a
+dispatch or a materialization of an identity Core holds no member for
+declares that identity alone first. What changes for a host:
+
+- A member Meta 0.9.3 spawned carries the identity's `agent_identity` label
+  but not the durable-identity marker. When the roster lists its identity,
+  Core adopts the member as the identity's entry and keeps it as it is: Meta
+  no longer respawns it onto its session to give it the marker, so its
+  session resolves no principal for extension documents until the identity's
+  next fresh life. The roster pass no longer retires such a member when the
+  roster stops listing it either. Every Meta from 0.9.4 to 0.9.10 respawned
+  these members at its first roster pass, so a state directory Meta 0.9.10
+  last ran holds none.
+- A rotation (`reset`, `delete_identity`) a crash interrupted is finished by
+  Core, from its own record, when the mob next starts; Meta's roster pass no
+  longer drives it. Meta still writes its record of the rotation, which a
+  rollback's roster pass reads.
+- An identity a complete roster no longer lists is unlisted by Core's seal,
+  which retires its member; the pass answers each such identity in
+  `RestoreFlowResult::unlisted` (Rust).
+
+**Do:** coming from Meta 0.9.3 or earlier, run Meta 0.9.10 over the state
+directory once before 0.9.11.
+
+### A host's adoption of a declared identity
+
+A host's adoption of an identity a declared roster lists
+(`MobHandle::adopt_member_identity_declaration` over a declared identity
+entry, Rust only) takes the entry over: Core retires the member with the
+cause `MemberRetirementCause::HostAdopted` and materializes it again under
+the host's intent, on its own session, as no entry, and the end of that
+retirement ends the entry. The adoption ends the identity's entry, not the
+identity: the identity continues under the host's intent and keeps its
+scoped tool grants. In 0.9.10 the entry outlived the retirement,
+unseated and owed its seat, and Core refused the host's spawn of the
+identity (`IdentityMember`), so the identity was not served again. From the
+host's intent row on, a declared apply answers the identity host-adopted
+(`DeclaredEntryRefusal::HostAdopted`), and a complete roster's seal leaves
+its entry as it is, whether the roster lists the identity or not.
+
+**Do:** nothing on the upgrade; see the rollback below.
+
+### Host store implementers: token order and conflicted scopes
+
+Two rules of the host store SPI are new or newly enforced in 0.9.11, each
+with a row of the host store chapter in `meerkat-store-conformance`:
+
+- **Token order** (the `token_order` row). Every grant answers a token
+  above every earlier grant of the realm, in either acquire mode and to any
+  caller, a takeover of the caller's own recorded lease included. Core now
+  holds a re-acquire's grant to it: a grant at or below the token the
+  writer holds loses the realm until it is reopened, with a cause that
+  names your store's token order, not another writer.
+- **Conflicted scopes** (the `a_conflicted_scope_is_listed_typed` row). A
+  store that meets obligation 4 by failing a scope's load with a typed
+  conflict (two batches at one of its versions) reports that scope per
+  scope in its listings: `list_heads` answers it in `HeadPage::conflicts`
+  as `ScopeConflict::new(name, version, commit_ids)`, with the version that
+  holds the two batches (the `current` the load's `Conflict` names) and
+  their commit ids, ascending, without repeats and the same each time, or
+  none. Every `read_rows` of the scope answers the same conflict. It is never
+  listed among the heads and never fails the page, and a
+  page holds at most `limit` entries across both lists. A page the store
+  cannot decide yet (a pending acquire cut) answers `Unavailable`, never a
+  conflict. Core quarantines such a scope and opens the rest of the realm
+  (see [A Conflicted Scope](/reference/host-store-spi#a-conflicted-scope));
+  a store that still fails the page keeps the realm from opening.
+  `HeadPage` is `#[non_exhaustive]`: a struct literal no longer compiles.
+
+**Do:**
+
+- Build each listing page with `HeadPage::new(heads, next)`, and add the
+  conflicted scopes with `HeadPage::with_conflicts`.
+- Answer every grant with a token above every earlier one.
+- Run the host store chapter against your store before you upgrade. A
+  store that decides between two batches for one version only when it
+  folds them implements `HostStoreFactory::fold_now`, so the conflict row
+  sees what its loads and listings show once it folded.
+- To lift a quarantine, repair the scope in your store (keep one of the two
+  batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines
+  the scope again.
+
+### The downgrade cycle of store-owned identities
+
+A release before 0.9.9 does not read a mob's rows of schema version 2 and
+later: the rows of store-owned identities (present, pending their host's
+preparation or archived) and the tombstones of removed names
+(`IdentityRecordCensus::created_rows`, and the `identity-store-rows`
+finding of `rkat storage doctor`). A downgrade of a mob that holds any to
+such a release is supported through this cycle only, and a host's downgrade
+tooling refuses while the census counts any row. A downgrade to 0.9.9 or
+0.9.10 needs no cycle: they read the rows.
+
+1. Hold the mob's identity changes (`MobHandle::set_identity_changes_held`).
+2. Settle every identity awaiting its host's preparation
+   (`preparations_open`) and every held construction (`constructions_held`),
+   or remove the identity.
+3. Bring each stale seat up to date (`seats_stale`), or remove its identity.
+4. Export the set: `MobHandle::export_created_identities` answers a
+   `CreatedIdentitySetExport` (schema `meerkat.identity.created_set.v1`)
+   that holds every row as sealed, with each identity's session reference
+   (its member's session, or its archived session), sealed with a digest.
+   Keep it: the import needs it. Session contents, memory and decisions are
+   not in it.
+5. Purge: `MobHandle::purge_created_identities` with the export's digest,
+   as the host operator. One store transaction removes every row of the
+   set, and nothing else (no session, journal row or host-adopted intent),
+   only while the rows are still the export's. The mob then refuses every
+   identity change (`purged`) until it restarts. A purge or an import
+   commits at most 256 identities (`IDENTITY_CHANGE_BATCH_MAX`, tombstones
+   included): a mob with more rows is refused `batch_too_large`, with
+   nothing removed, and has no supported downgrade below 0.9.9 in this
+   release.
+6. Downgrade.
+7. After the roll-forward, import the export:
+   `MobHandle::import_created_identities`, as the host operator, under
+   imported consent. A retry of its operation replays it.
+
+Under the older release, after the purge, an adopted identity that its
+host's roster still lists is a roster identity again, on its session. The
+other store-owned members are plain members: its roster pass, a
+`retire_stale` reconcile or a former spawner's retirement may retire them,
+archiving their sessions. The names of removed identities are free there,
+and a roster may seat one.
+
+Rolled forward, a start reads each store-owned identity whose row was purged
+as unreadable: its name is reserved, nothing acts on it and nothing seats it
+until the import restores its row. The import re-creates each record and
+re-binds its session: a member seated under its name is bound in place, on
+its session, a plain member only when it is bound to the session the record
+names (a member on another session, a new worker the older release seated
+or the identity's own on a session the export does not name, is reported
+`name_taken_meanwhile` and left as it is: adopt it to take it into store
+custody); an identity with no member is seated again, Dormant, on its
+archived session, or on a fresh session with the history unavailable notice
+when the session store no longer holds it; pending, archived and removed
+names are restored as recorded; and an adopted identity whose roster
+declared it again returns to store custody by the adoption's step. A name
+another holder keeps (a roster or a member seated on it meanwhile, or
+another row) is left as that holder has it, and the import's receipt reports
+it (`name_taken_meanwhile`). A re-import under a new operation reports a
+record whose restored row differs from it (the import left out an owned edge
+another identity held, or the identity changed since) as
+`name_taken_meanwhile` too: the identity is store-owned already, its row is
+left as it is, and a retry under the import's own operation replays its
+receipt.
+
+### Machine schemas: CI samples for an input field of any type
+
+In `meerkat-machine-schema`, `InputFieldDomainKind` gains `CiSamples`, the
+values the CI profile samples for an input field of any type (the Deep
+profile and every composition explore the field's whole domain), and
+`InputFieldDomainError` gains `SampleTypeMismatch { index }`, which refuses
+a sample that is not a value of the field's type. Both are appended last.
+
+**Do:** add the new arm to each exhaustive match on either enum.
+
+### Upgrade the SDKs with the server
+
+A Python, TypeScript or Web SDK of 0.9.10 or earlier refuses the new
+`requested_compaction_skipped` event type, as it does any event type newer
+than its contract. A session publishes it when a host's compaction request
+(`session/compact`, `mob/compact_member`) is consumed by a check that has
+nothing to compact.
+
+**Do:** upgrade the SDKs together with the server, before any host asks a
+session to compact.
+
+### Tool grant run scopes and grant requests
+
+A grant can be scoped to one run of its subject (a session, or the session a
+member identity's member holds), and a person can approve a
+grant that a host (`tool_grants/request`) or a gated session's agent
+(`request_tool_grant`) asked for. Both write grant rows a 0.9.10 binary
+cannot read: it reads a run-scoped grant, and the grant an approved request
+issued (its id is a version 5 UUID), as unreadable, so it opens nothing there
+and lists it under `unreadable`. A 0.9.10 client decodes the status
+`run_ended`, the expiry drivers `run` and `recovery` and the audit event
+`run_ended` as `unknown`, reads the statuses `requested` and `declined` as
+they are (they exist since 0.9.9), and ignores a grant's `scope`.
+
+`rkat-rpc` runs the executor of `tool_grant.issue` decisions on its store and
+claims that kind: another process's loop of the kind executes none of them
+while it runs. Every grant-gated build mounts `request_tool_grant`, and a
+host that takes no grant requests answers its calls with a tool error.
+
+**Do:**
+
+- Upgrade every host that serves gated sessions, and every process that
+  executes decisions on their store, before relying on run scopes or
+  requests.
+- A client that compares a session's tools with its build's gate allows for
+  `request_tool_grant`.
+- Before rolling back to 0.9.10, revoke the grants approved requests issued,
+  or let them expire: 0.9.10 can neither read nor revoke them, and one still
+  within its window comes back live on the next upgrade. 0.9.10 executes no
+  grant request, so open and approved requests wait for the next upgrade.
+
+### Rolling back to 0.9.10
+
+0.9.10 reads what 0.9.11 writes, with the exceptions below. Roll back Core,
+Meta and Connect together, with every process that shares a realm, a store
+or a mob, and the SDKs with their servers.
+
+#### Configuration a 0.9.10 process refuses to load
+
+- `[governance.decisions]`: 0.9.10 refuses a `[governance]` section with a
+  `decisions` key and fails to load the realm's configuration document as a
+  whole. Remove the section before a rollback.
+
+- Meta access rules that name `schedule.manage`: an access configuration
+  saved by 0.9.11 names it wherever a rule grants `agent.send`, and Meta
+  0.9.10 refuses to load a configuration that names it. Remove
+  `schedule.manage` from the rules, or restore the configuration saved
+  before the upgrade.
+
+- Meta access rules that name `audit.view`: refused by earlier releases
+  (unknown action). Keep it out of a configuration a 0.9.10 gateway may
+  load.
+
+- Meta access rules that name `decisions.view`, `decisions.decide`,
+  `decisions.admin` or `decisions.*`, and an approver id whose only holders
+  are `ingress_subjects` or `people` entries: Meta 0.9.10 refuses to start
+  with that configuration. Remove those actions from the rules and give each
+  such approver id its `subjects` or `groups`, or restore the configuration
+  saved before the upgrade. An `rpc_gateway` 0.9.10 also refuses to start
+  with `runtime_options.decisions` (`unsupported runtime_options fields:
+  decisions`): leave it out of the launch.
+
+#### Records 0.9.10 reads as unreadable, one by one
+
+Nothing acts on such a record; everything else loads.
+
+- Durable decisions decided in a login on 0.9.11: 0.9.10 (and 0.9.9) reads
+  them as torn, lists them as unreadable, never executes them and leaves the
+  rows as stored. Back on 0.9.11 they read again and execute before their
+  deadline. A decision decided with no login, and every decision decided
+  before the upgrade, reads as before.
+
+- A decision whose row records a cleanup or a reply (an executed
+  `grant.child` decision): unreadable. Before a rollback, let the approval
+  branches end and their cleanups settle.
+
+- A decision row that holds a linked presentation (recorded, or in a
+  decided decision's evidence): unreadable. Rows without a link read as
+  before.
+
+- A scoped tool grant whose issuer carries a `decision_ref`: unreadable; it
+  opens nothing. Revoke it, or let it expire, before a rollback.
+
+- A scoped tool grant 0.9.11 ended with its identity (`subject_ended` in its
+  row): listed as unreadable; it opens and blocks nothing.
+
+- A scoped tool grant of an MCP server: unreadable; it opens nothing. Revoke
+  it, or let it expire, before a rollback.
+
+- A run-scoped tool grant, and its `granted` and `run_ended` audit rows:
+  unreadable; it opens nothing.
+
+- A grant an approved request issued (its id is a version 5 UUID), window
+  grants included: unreadable, listed under `unreadable`, and
+  `tool_grants/revoke` answers not found. One still within its window comes
+  back live at the next upgrade.
+
+- Identity-change receipts: an adoption's receipt (kind `adopt`) and a
+  purge's or an import's receipt read as unreadable, so a replay of that
+  operation there reads its receipt as unreadable.
+
+#### Identities refused one by one (the mob still loads)
+
+- Every identity 0.9.11 adopts records `profile_source` in its desired
+  material, which 0.9.10 cannot read; over time that is most identities.
+  Under 0.9.10 each such identity's intent row reads as malformed and the
+  identity as `RepairBlocked`; a write that needs its authority is refused
+  `IdentityAuthorityBlocked`, and a new adoption of it is refused too. The
+  mob still loads, and its other identities run. Recover by upgrading
+  again.
+
+#### Stores and owners 0.9.10 refuses as a whole
+
+- A grant journal that holds a grant issued under a child rule, an
+  approval-carried child or a spent use: 0.9.10's reader refuses the
+  journal, so that grant owner is unavailable there. Before a rollback,
+  revoke the approval-carried grants or let them expire. A journal of plain
+  grants reads on both releases.
+
+- A retained work whose basis selects a lineage for a hold of a decision
+  (`GrantTarget::DecisionHold`, the calling work of an access offer): 0.9.10
+  cannot decode it. Before a rollback, let such works end.
+
+- Connect: a Connect without the governed peer delivery change refuses to
+  open a source store that holds such a delivery's row (the row records the
+  sending work's requester, agent and works). Rows written before the
+  upgrade read as before.
+
+#### Members and servers that do not start
+
+- A member built by 0.9.11 records its grant gate in its session; a 0.9.10
+  member build names no gate, so its resume restores the recorded one: a
+  recorded family whose switch the profile leaves off fails the resume
+  (`FamilyDisabled`), and a recorded tool name nothing mounts fails it
+  (`UnknownTool`). The member is not resumed: it fails closed. Recover by
+  upgrading again, or respawn the member on 0.9.10, which starts it on a
+  fresh session with no recorded gate.
+
+- An MCP service-secret value stored by 0.9.11 (stored with its write
+  identity): 0.9.10 reports the slot as not stored and refuses the server's
+  launch. After a rollback, set the value again with 0.9.10. Values stored
+  by earlier versions launch as before.
+
+#### Protections 0.9.10 does not apply
+
+- Console sign-outs: 0.9.11 keeps them in the console session fence record
+  (`console-session-fences.json`); a 0.9.10 gateway keeps them in the file
+  but does not enforce them while it runs, so a login signed out on 0.9.11
+  is accepted there again while its tokens are valid. They apply again
+  after the upgrade.
+
+- Grant gates: 0.9.10 drops `tools.grant_gated` (leave a gated family's
+  switch off and 0.9.10 keeps the family off) and the role gate (a member
+  whose own profile switches on a family its role gates runs that family
+  with no grant there).
+
+- MCP server gates: 0.9.10 drops a gate's `mcp_servers` and
+  `unconfigured_mcp_servers`, so the servers they gate run ungated and a
+  gated server a profile configures starts at every build. Take the server
+  gates out, or the servers they gate, before a rollback.
+
+- Private replies: a rollback leaves the attention items stored and unread,
+  and shows a private reply in a person's side chat as a runtime event to
+  whoever may view that side chat; 0.9.10 has no private side chats, so
+  that is everyone who may view the agent it was forked from.
+
+- Private side chats: 0.9.10 does not read the `console.private_to` label
+  that 0.9.11 writes on a private side chat and on each member the side
+  chat created. It decides a side chat as the agent it was forked from, and
+  each member the side chat created by its spawn lineage (`spawned_by`), so
+  everyone who may view that agent sees them; on a console that enforces no
+  access configuration, everyone does. Before a rollback, close the private
+  side chats (**Close side chat** retires one) and retire the members they
+  created.
+
+- Personal accounts on MCP servers: 0.9.10 reads no account modes. A
+  `meta_gateway` 0.9.10 does not read `config/mcp_accounts.toml`, so a server
+  marked personal is an ordinary server there: every member whose profile
+  declares it gets it, with the installation's own credential for that
+  server if one is stored, and never a person's (the per-person credentials
+  stay stored, unread). An `rpc_gateway` 0.9.10 refuses a launch whose
+  `runtime_options` name `mcp_accounts` ("unsupported runtime_options
+  fields"). Before a rollback, remove `runtime_options.mcp_accounts` from
+  `rpc_gateway` launches, and take the personal servers out of the profiles,
+  or decide which installation credential they act with there.
+
+- Operator memory: where `agent_memory.operator_scope = "provisional"` is
+  set, 0.9.11 keys a person's operator memory by their caller scope
+  (`console-caller:v1:` keys) and recalls it only in that person's own
+  turns. 0.9.10 keys it by the console principal that last spoke to an
+  agent: it recalls none of the records 0.9.11 wrote (they stay stored, and
+  the next upgrade recalls them again), and it recalls the records written
+  before 0.9.11 under that principal in every turn of the agent, whoever
+  asks, until another principal speaks to it. What it writes uses those
+  older keys, which 0.9.11 no longer recalls. Before a rollback, set
+  `operator_scope` to `"off"` if a person's operator memory must not reach
+  other people's turns.
+
+#### Data 0.9.10 drops (it stays dropped after a re-upgrade)
+
+- Consent rows: Core 0.9.10 reads every row (it ignores
+  `consent.approver.authentication_scope_digest`), but `FileApprovalStore`
+  rewrites every row on each write, so its first write drops the login
+  digests recorded until then.
+
+- Requesters of stored inputs and transcript rows: an older Core drops the
+  field, so the input and its turn have no requester and nothing acts for
+  that person. A keyed retry, under 0.9.10, of an input 0.9.11 admitted
+  with a requester is refused as an idempotency conflict
+  (`InputIdempotencyConflict`), not deduplicated.
+
+- Detached jobs: an older Core that reads a stored job drops its requester;
+  one that writes it (a claim, a heartbeat, its completion) removes the
+  field for good. After upgrading again, the job's attempts name no
+  requester (a person-scoped tool refuses them), and a replay of the
+  submitting call is refused `DetachedJobError::SubmissionConflict`. A Meta
+  gateway rolled back while such a callback job runs does the same.
+
+#### State 0.9.10 reads its own way (one step, or none)
+
+- Held-completion marks and identity rotation records: Meta 0.9.11 still
+  writes them, with the contents 0.9.10 writes, for a rollback only. Nothing
+  to do.
+
+- Store-owned identities: 0.9.10 reads their owned edges as plain wiring (a
+  plain unwire ends one there; the next 0.9.11 start owns them again), and
+  an adopted identity as the store-owned identity its row records: its
+  roster keeps the member's former spawner, and retiring that spawner there
+  retires the adopted member and owes the identity its seat again.
+
+- Governed Console sends: Meta 0.9.10 reads a frame's `submitted` status as
+  `completed`, so a send in flight at the rollback shows completed even if
+  it then fails; nothing is sent twice.
+
+- Member continuations committed as external work: 0.9.10 ignores the
+  refusal mark on the committed row and admits the row as before.
+
+- Compactions: a compaction a 0.9.11 process staged and a 0.9.10 process
+  commits reports `CompactionCompleted` without the operator-instruction
+  snapshot observation (`OperatorInstructionsApplied`); 0.9.10 ignores the
+  intent's new field.
+
+- Gating state that `rpc_gateway` keeps in its `persistent_state`
+  directory: Meta 0.9.10 does not read it (it keeps gating in memory), so
+  after a rollback the pending approvals and the gating audit are missing
+  there, and a later start of 0.9.11 restores the state stored before the
+  rollback. Decide pending approvals before rolling back.
+
+- Memory records that name the console person who wrote them
+  (`"author": "operator"` with a `principal`): Meta 0.9.10 reads them as
+  written by the operator and shows no name; the record keeps the name.
+  Nothing to do first.
+
+- Credential directories stay owner-only (`0700`), which 0.9.10 reads as
+  the same user.
+
+- Forge: a rollback to a package an earlier Forge built leaves
+  `.mobkit/console-access.toml` as it is, but that package's console reads
+  `config/access.toml`, so administrators added in the console are missing
+  there and access fails closed. Do not add them again in that console (it
+  would rewrite `config/access.toml`, and Forge would then refuse to start,
+  change or update the installation); update forward instead.
+
+#### Mixed versions while processes roll back
+
+- Decision executors on one store: a 0.9.10 executor is refused at start
+  beside a running 0.9.11 loop (`ExecutorHeld`), and a 0.9.11 loop beside a
+  0.9.10 executor executes nothing until that executor ends. Roll back every
+  process that executes decisions on one store together.
+
+- `tool_grant.issue` decisions: 0.9.10 has no executor of the kind, so open
+  and approved requests, and the notices of ended ones, wait for the next
+  upgrade, where a request past its deadline expires. `rkat-rpc` 0.9.10
+  refuses a `tool_grants/grant` that names a `scope` (invalid params).
+
+- SDKs and servers: the Python and TypeScript SDKs through 0.9.10 fail a
+  member status read that carries `store_refused` with `INVALID_RESPONSE`,
+  so keep the SDKs at 0.9.11 while a 0.9.11 server runs. The 0.9.11 SDKs'
+  decision methods against a 0.9.10 server answer method not found
+  (`-32601`), and a 0.9.10 client reads any new status, audit event or
+  expiry driver as `unknown`.
+
+- Placed members: a placed member whose member host runs a release before
+  0.9.11 answers `member_host_unsupported` (blocked) until its host runs
+  0.9.11 and a write selects it again or it is seated again; a member placed
+  on such a host is not born with its mob's operator-instruction snapshot,
+  so its first turn runs without them.
+
+- Forge with a Meta console that predates `meta/console/whoami` (Meta
+  0.9.10 and earlier): the controller review goes to the first person who
+  signs in, administrator or not, and only that sign-in sees and answers
+  it. If that sign-in ends early, the review stays open but nobody can read
+  or answer it, and a new one starts only after the application restarts.
+
+#### Core: identities a host adopted
+
+0.9.10 does not know the cause `HostAdopted`: it replays that retirement as
+one the seal did not start, so it reads the identity a host took over as
+the declared entry again, seated by the member the host's intent
+materialized. The member keeps serving, and a declaration naming the
+identity is refused `HostAdopted`. But a complete roster that does not list
+the identity unlists the entry and retires the member once, and once the
+member retires for any other reason, Core refuses the host's spawn of the
+identity (`IdentityMember`) while the entry stands.
+
+**Do:** after rolling Core back to 0.9.10, unlist each identity that 0.9.10
+reads as a declared entry while a host's identity intent row names it
+(`MemberBindingHistory::identity_management` answers `IntentManaged`), with
+`MobHandle::unlist_declared_identity`: its member retires once (cause
+`Unlisted`), the entry ends, and the host's intent materializes the member
+again, as no entry.
+
+#### Meta: declared identities Core holds unseated
+
+Meta 0.9.10 reads what Meta 0.9.11 writes, with one boundary: an identity
+Core holds declared but unseated (its member retired by a seal or by a host,
+its session archived) stays unseated under 0.9.10, whose seat step is
+refused for it typed (`IdentityMember`) and writes nothing, so the identity
+is not served until it is seated again.
+
+**Do:** before rolling back, deliver to or warm (`meta/identity/warm`) each
+identity the roster lists that Core holds unseated, so that Core seats it;
+an identity left unseated is seated again by the first roster pass after the
+next upgrade.
+
+#### Below 0.9.10
+
+- The 0.9.9 exceptions are the ones above that name 0.9.9 (durable
+  decisions decided in a login), then the 0.9.10 notes' "Downgrading to
+  0.9.9" below.
+
+- Below 0.9.9: a mob that holds identity-store rows of schema version 2 or
+  later is downgraded through the downgrade cycle only (hold the identity
+  changes, settle the pending preparations, bring the stale seats up to
+  date, export, purge, downgrade, import after the roll-forward). A purge or
+  an import commits at most 256 identities, so a mob with more has no
+  supported downgrade below 0.9.9 in this release. 0.9.9 and 0.9.10 read
+  the rows themselves and need no cycle.
+
+## Upgrading to 0.9.10
+
+This section is for systems running 0.9.9. The full list of changes is in
+the CHANGELOG under `## [0.9.10]`.
+
+Meerkat 0.9.10 is Core 0.9.10, Meta 0.9.10 and Connect 0.9.10, released
+together. Meta Forge 0.3.1 ships with them and installs that set.
+
+### Before you upgrade
+
+- **Pin `=0.9.10`.** Move every `meerkat*` dependency to `=0.9.10` at once.
+  Meta 0.9.10 pins Core `=0.9.10`, so a host that embeds Meta moves Meta and
+  Core to 0.9.10 together (Meta 0.9.9 pinned Core `=0.9.9`). Connect 0.9.10
+  is built on Core 0.9.10 and Meta 0.9.10.
+- **Upgrade the SDKs with the server:** `meerkat-sdk`, `@rkat/sdk` and
+  `@rkat/web` for Core; `meerkat-meta` and `@rkat/meta-sdk` for Meta.
+- **Rust 1.97.0 or newer**, as for 0.9.9.
+- **No migration step.** 0.9.10 writes no durable state that 0.9.9 cannot
+  read, apart from the configuration forms listed under
+  [Downgrading to 0.9.9](#downgrading-to-0-9-9).
+
+### Fixes that need no action
+
+- **`session/create` or a first turn no longer hangs during a session
+  teardown.** When a session started to unregister during its first turn
+  (the first turn of an immediate `session/create`, the first `turn/start`
+  of a deferred session, or a cold session's rebuild), the session's
+  runtime loop waited on itself and the request never answered. The usual
+  trigger was an immediate `session/create` whose first agent build failed,
+  for example with `tool_grant_gate_refused`. Such a request now completes,
+  and the loop answers its own turn with the retryable
+  `runtime_teardown_in_progress` error data. Affects `rkat-rpc`, the Python
+  and TypeScript SDKs that drive it, `rkat mob deploy --surface rpc` and
+  other hosts of `meerkat_rpc::SessionRuntime`, from 0.8.22 through 0.9.9.
+- **Dormant members show their peer address in roster reads.** A member
+  seated dormant while its mob ran (a fresh dormant seat, or the next
+  incarnation after a rotation or a same-session respawn) now reads with its
+  peer id and transport key in `MobHandle::get_member`, `roster`,
+  `list_all_members`, `list_members` and the `mob_list_members` tool, as a
+  member restored dormant at a restart already did. The read wakes nothing.
+  A member on network comms still has no address until its first wake. If
+  your host took a missing peer id to mean "not woken yet", read the
+  member's state instead.
+- **Live voice delegations recover after a restart with dormant members.**
+  A host that composes the live delegation coordinator (`openai-live`) with
+  lazily restored members (`member_restore: on_demand`, the default)
+  retried its restart recovery every second, logging "ClientContext restart
+  inventory capture remains pending", for as long as any member stayed
+  dormant, and a live channel opened on that host waited with no limit.
+  Recovery now leaves dormant members dormant and recovers their
+  delegations once, when the member wakes or before the first live channel
+  opened on it. A live channel open waits at most 30 seconds for the
+  start-up recovery and is then refused with an error that names it: treat
+  that refusal as retryable once the mob restores.
+
+### Changes to check
+
+- **Approval files are private on Unix.** `FileApprovalStore` now creates
+  every file it writes (the `approvals.json` store, its lock file, and its
+  temporary and marker files) owner-only (`0600`), whatever the process
+  umask. A store file an earlier release left readable by others becomes
+  private on its next commit; an existing lock file is tightened in place,
+  and a tightening the filesystem refuses is logged as a warning. Other
+  platforms are unchanged. **Do:** if a process that runs as another user
+  or group reads these files (a backup or monitoring agent, for example),
+  run it as the store's user or read approvals through the API.
+- **Per-tool timeouts accept duration strings.** `[tools.tool_timeouts]`
+  entries take a duration string (`"840s"`, `"14m"`, `"1h 2m"`), as the
+  documentation said, as well as the `{ secs, nanos }` table. Before, a
+  string failed the whole config load. Meerkat still writes the table form,
+  also when `config/patch` or `rkat config patch` sets a string. **Do:**
+  before a rollback to 0.9.9 or earlier, turn hand-written strings back into
+  tables: those releases refuse the string form.
+- **A refusal before any tool effect reads as not dispatched.** A governed
+  tool call refused at its own effect entry
+  (`ToolDispatchContext::enter_reviewed_effect`) before any effect of the
+  call entered now reaches the model with `tool_invoked: false`, as a
+  refusal before the dispatcher already did; it read `"unknown"`. Affects
+  0.9.4 through 0.9.9. **Do (Rust):** `OperationRefused::dispatch()` of such
+  a refusal is `NotDispatched`, so comparing it with
+  `OperationRefused::new(kind)` no longer matches: compare `kind()` and
+  `dispatch()`. A tool that runs an effect of its own before its effect
+  entry forwards `OperationRefused::new(refusal.kind())`.
+
+### Rebuilds after a completed owner change
+
+Core's governed operations no longer settle a stale read as their outcome when
+the owner change that made it stale had already completed: a governed tool
+dispatch's prepared entry and its entry stagings, a model request, a
+compaction summary, a review's currentness check after its verdict and the
+`web_search` helper's model request take the wait after a stale read
+(`OwnerChangeChurn::wait_after_stale_read`). With no change in progress they
+pause 1 ms and rebuild from the owners, as one of their free rebuilds, within
+the same bounds (2 s and 3 free rebuilds per waiting state). The rebuilt
+decision is current, or its refusal is the owners' current answer, typed as
+before. A model request that reads stale keeps its operation through these
+rebuilds, where it rebuilt once at once and, when that read was stale too,
+sent the controller feedback request, so a host's operation refusal observer
+sees `WaitedForOwnerChange` where it saw `Rebuilt` and `ControllerFeedback`. A
+review whose currentness read was stale is superseded and reviewed once more,
+where it was retired as an authority change.
+
+Native admission (controller admission, a scoped original's own mandate and
+its named contributors' liveness, and the retained-resume checks that share
+them) never waits, because it runs inside the session's ingress transaction.
+It now makes a read that met an owner change once more, in place, when that
+change has completed (`LocalGrantAuthority::owner_change_in_progress` names
+none), and answers `ControllerReadinessUnavailable` with `PolicyChanged` as
+before for a change still in progress or another one met by that read.
+
+**Do:** keep treating native admission's `PolicyChanged` as retryable. Under
+back-to-back changes, wait outside your own locks with a bounded
+`meerkat_core::authorization::OwnerChangeChurn::wait_after_stale_read`, then
+resubmit once. A host or test that counted operation refusal observer
+dispositions for a model request that read stale, or matched an
+authority-change retirement for a review whose currentness read was stale,
+expects the new ones. See
+[Survive owner changes in progress](/rust/native-authorization#survive-owner-changes-in-progress).
+
+### Wrappers and decorators
+
+Forward this new method too. It has a default, so a wrapper without it
+compiles, but the default disables what it carries:
+
+- a `DecisionStore` wrapper: `claim_executor`. Its default refuses, so no
+  `DecisionExecutorLoop` starts over the wrapper (`DecisionError::Unavailable`).
+
+### A poisoned host store scope
+
+One poisoned host store scope no longer refuses store-wide reads realm-wide:
+each such read now depends only on the scope families it reads. A call that
+a poisoned scope or a poisoned realm refuses answers the typed
+`RuntimeStoreError::ScopeRefused { scopes }`, naming each refused scope with
+its poison cause, or `RuntimeStoreError::RealmRefused { cause }`, where it
+answered `ReadFailed` or `WriteFailed` with the refusal's text. Behaviour
+changes for a poisoned scope:
+
+- A committed session read that the store refuses until its realm is
+  reopened surfaces as `SessionError::Store`: its `SessionError::code` is
+  `SESSION_STORE_ERROR` (was `AGENT_ERROR`).
+- `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`).
+- A wire error built from it (`WireError::from`) carries `INTERNAL_ERROR`,
+  JSON-RPC `-32603` (was `AGENT_ERROR`, `-32013`).
+- The HTTP status stays 500, and a session method's JSON-RPC error over
+  `rkat-rpc` (and the `rkat` exit status) is `INTERNAL_ERROR` either way.
+- `MobHandle::wait_one`, `wait_all`, `wait_for_kickoff_complete` and
+  `wait_for_members_kickoff_complete` end with `MobError::SessionError`,
+  carrying the store's typed refusal, when a member they wait on is not
+  final and the store refuses its session. They polled that member's status
+  until the caller gave up, a kickoff wait until its timeout.
+- `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` answer while only scopes of other
+  families are poisoned, and refuse with
+  `RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })`
+  while a runtime scope is poisoned.
+- Meta: `HostStoreReadiness::is_ready()` no longer counts a scope-only
+  poison; a poisoned realm still makes it not ready.
+  `HostStoreReadiness::poisoned_scopes`, every poisoned scope with its
+  cause, is new.
+
+**Do:** a caller that matched `ReadFailed` or `WriteFailed` for these
+refusals matches the new variants; one that only formats the error keeps
+compiling. A Meta probe that must keep the earlier rule checks
+`readiness.is_ready() && !readiness.scope_poisoned`.
+
+### New
+
+- **GitHub Copilot configured once.** A `[realm.<realm>.copilot]` section
+  names a Copilot account's token source once (`env` or
+  `external_resolver`) and gives the realm the account's `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` routes, in place of nine explicit
+  tables. A route of a Copilot account can run a model only the account
+  lists (no catalog row or `[models.<id>]` entry needed); a model the
+  account does not offer is refused before any request, and no other route
+  is tried. Changes in behaviour:
+  - a request that names a route of a Copilot account and a model of
+    another provider family now runs on the account's route of that family,
+    where it failed with a provider-model mismatch;
+  - sessions on the zero-config Copilot routes (`global:copilot_openai`,
+    `global:copilot_anthropic`, `global:copilot_gemini`) carry the account
+    (`global:account:github_copilot`) as their credential identity and run
+    with provider-native tools off, as explicit Copilot routes always did.
+
+  **Do (Rust):** `RealmConfigSection` gains `copilot` (set it to `None` in
+  struct literals); `ProviderBindingError` gains
+  `CopilotAccountRouteConflict` and `CopilotAccountSourceUnsupported`, and
+  `FactoryError` gains `AccountModel`: add the match arms.
+- **The storage doctor counts the rows a rollback to 0.9.8 cannot read.**
+  `rkat storage doctor` reports an Info finding `identity-store-rows` for
+  each mob database that holds identity-store rows of schema version 2 or
+  later (the total, and how many are archived, tombstones and unreadable),
+  and its `operator-instruction-envelope` count also reads committed
+  boundary heads. Rust hosts: `MobStorage::read_identity_record_rows` and
+  `MobStorage::identity_record_rows` count them read-only with no running
+  mob (`IdentityRecordRows`).
+
+### Meta 0.9.10
+
+- **Pins Core `=0.9.10`.** A host that embeds Meta moves Meta and Core to
+  0.9.10 together. The Core fixes above reach Meta gateways where they use
+  the same paths: dormant member reads, governed refusals, per-tool timeouts
+  and the restart recovery of live voice delegations (a Meta gateway
+  composes it when `openai_live`, `experimental_live` or `console_voice` is
+  registered).
+- **Rollback census in the storage doctor.** `meta/storage/doctor` takes the
+  census the Meta 0.9.9 notes promised, read-only, as three Info findings
+  with counts only: `operator-instruction-envelope` (sessions of
+  `runtime.sqlite` at session envelope 5), `operator-instruction-mob-events`
+  (mob events at schema 10 in `event_log.sqlite3` and in each child mob
+  journal under `mobs/`) and `identity-store-rows` (identity-store rows of
+  schema version 2 and later). The doctor's result shape is unchanged, so no
+  SDK changes. `meta_gateway identity-census --json` adds
+  `identity_store_rows`. **Do:** before a rollback to Meta 0.9.7 or earlier,
+  run the doctor instead of the queries in the 0.9.9 notes.
+- **Known limitation: `meta/compact_member` after a failed turn.** When the
+  forced maintenance turn ends in a definite failure (a provider error, a
+  rate limit, or a request that compaction could not shrink), the temporary
+  compaction threshold (1024 tokens by default) stays on the member,
+  durably, and every later `compact_member` on that identity is refused as
+  busy until the gateway restarts. **Do:** after a failed `compact_member`,
+  call `meta/respawn` for the identity, then restart the gateway.
+- **Meta Forge 0.3.1** installs the matched Meta 0.9.10, Connect 0.9.10 and
+  `meerkat-toolkit` 0.9.10 set on Linux x86_64 and macOS arm64. It is the
+  first Forge release from this repository (tag `meta-installer-v0.3.1`);
+  Forge 0.3.0 and earlier stay in `lukacf/meerkat-meta`. **Do:** an
+  application that Forge 0.3.0 prepared with its Connect gateway is prepared
+  again at its next install step.
+
+### Connect 0.9.10
+
+Connect 0.9.10 is the first Connect release from this repository: GitHub
+release `connect-v0.9.10` in `lukacf/meerkat`, a prerelease that is never the
+repository's latest. Earlier releases (0.9.0 and 0.9.4, and the Linux
+component prereleases 0.9.5 and 0.9.6) stay in `lukacf/meerkat-connect`.
+Connect's version moves to 0.9.10 to match Core and Meta; there are no
+Connect 0.9.7 to 0.9.9 releases.
+
+- **Paired-host names.** Connect's paired-host contract no longer names one
+  host product. Options, tools, fields and stored names say `paired-host` or
+  `paired_host` (for example `--paired-host`, `--paired-host-memory-only`,
+  the `paired_host_*` tools, the cookies `paired_host_pair` and
+  `paired_host_device`, the digest prefix `paired-host-change-v1:sha256:`,
+  the keyring service id `ai.rkat.meerkat-connect.paired-host-device.v1` and
+  the Python extra `paired-host-live`). **Do:** pair each device again,
+  prepare again any change prepared before the upgrade, install the
+  `paired-host-live` extra, and update host and agent configuration that
+  names the earlier options, tools or fields.
+- **Build from the repository root.** Connect's six crates are members of
+  the root Cargo workspace (Rust 1.97.0) and take Core and Meta at the
+  workspace's exact pins (`=0.9.10`). Build with, for example,
+  `./scripts/repo-cargo build -p meerkat-connect`.
+- **SDK packages.** The Python SDK `meerkat-toolkit` 0.9.10 (its
+  `native-host` extra requires `meerkat-meta==0.9.10`) and the TypeScript
+  package `@rkat/toolkit` 0.9.10 (development and optional peer dependencies
+  `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10) are release assets, not
+  PyPI or npm packages.
+- **Bundled discovery catalog** revision `discovery-2026-10-28.1`: the
+  Telegram recipe is a generic bot frontend built on the Python SDK's public
+  frontend modules.
+- **Setup check fix.** When a setup check answered again for a validation it
+  had already accepted, with something that is not a valid proposal (for
+  example a file list that names both a declaration and an activation
+  document), the check was refused but the selection made from the earlier
+  proposal stayed in force. Such an answer now withdraws the earlier
+  proposal, so a selection made from it no longer applies.
+- **Private approval files.** The files Connect keeps through Core's file
+  approval store (its approval store and `native-decisions.json`) are
+  created owner-only (`0600`) whatever the umask (see
+  [Changes to check](#changes-to-check)).
+- **Going back.** A Connect built on Core 0.9.8 or older (Connect 0.9.0 to
+  0.9.6) can refuse sessions written at session envelope 5 and mob journals
+  at mob event schema 10, which Connect 0.9.10 can write. Before such a
+  rollback, run `rkat storage doctor` and handle what it lists under
+  `operator-instruction-envelope` and `operator-instruction-mob-events` as
+  [Downgrading to 0.9.8](#downgrading-to-0-9-8) describes.
+
+### Downgrading to 0.9.9
+
+0.9.9 reads what 0.9.10 writes, with these exceptions:
+
+- per-tool timeout strings in `[tools.tool_timeouts]`: 0.9.9 refuses the
+  config file, so turn them into `{ secs, nanos }` tables first;
+- a `[realm.<realm>.copilot]` section: 0.9.9 does not read it, so the routes
+  it declares are missing there; write the explicit Copilot tables first;
+- a session that runs a model only its Copilot account lists: 0.9.9 knows a
+  model only from the catalog or a `[models.<id>]` entry, so such a session
+  does not build there until the model has an entry.
+
+Approval files stay owner-only, which 0.9.9 reads as the same user. Going
+back further, to 0.9.8 or Meta 0.9.7, follows the 0.9.9 notes: run the
+0.9.10 storage doctors first (Core and Meta), which now count what blocks
+it.
+
+## Upgrading to 0.9.9
+
+This section is for systems running 0.9.8. The full list of changes is in
+the CHANGELOG under `## [0.9.9]`. 0.9.9 has no migration step: it opens every
+0.9.8 store as it is, and creates what it adds on first use (the
+`runtime-tool-grants` schema domain with the first scoped tool grant,
+`approval_decisions.sqlite3` with the first durable decision). Some of what
+it writes, though, 0.9.8 cannot read: read
+[Downgrading to 0.9.8](#downgrading-to-0-9-8) before you plan a rollback,
+and back up the state root as the steps above say.
+
+### Before you upgrade
+
+- **Rust 1.97.0 or newer.** Every crate of this release declares
+  `rust-version = "1.97.0"` (0.9.8 declared 1.94.0), and Cargo refuses to
+  build them, `cargo install rkat` included, with an older rustc.
+- **Pin `=0.9.9`.** Move every `meerkat*` dependency to `=0.9.9` at once.
+  Meta 0.9.9 pins Core `=0.9.9`, so a host that embeds Meta moves Meta and
+  Core to 0.9.9 together (Meta 0.9.7 pinned Core `=0.9.8`).
+- **Upgrade the SDKs with the server.** A Python, TypeScript or Web SDK of
+  0.9.8 or earlier refuses the new `tool_results_bounded_for_request` event
+  type, as it does any event type newer than its contract.
+- **Know when a session stops reading on 0.9.8.** 0.9.9 writes a session at
+  session envelope 5, which 0.9.8 refuses, once the session holds an
+  operator-instruction fact or a retired or moved instruction activation row.
+  A session in which a later activation of a key superseded an earlier one
+  gets there at its first compaction on 0.9.9, which retires the superseded
+  body; a mob member that receives operator instructions gets there at its
+  first run that applies them. Every other session stays at envelope 4 and
+  still reads on 0.9.8. `rkat storage doctor` on 0.9.9 lists the sessions at
+  envelope 5 (`operator-instruction-envelope`) and the mobs 0.9.8 cannot
+  restore (`operator-instruction-mob-events`) of a Core realm; for a Meta
+  state directory, see [Downgrading to 0.9.8](#downgrading-to-0-9-8).
+
+### Breaking changes and what to do
+
+#### Agent schedule tools answer pages of summaries
+
+The schedule tools' replies changed, for agents and for every generic call
+path that runs them: RPC `schedule/call`, REST `POST /schedule/call`, the MCP
+server's `meerkat_schedule_*` tools, the Python SDK's `call_schedule_tool` and
+the TypeScript SDK's `callScheduleTool`. `meerkat_schedule_list` returns one
+page of summaries (`{"schedules": [...], "page": {...}}`, 50 by default, at
+most 200) where it returned every live schedule whole; every tool that
+returns one schedule returns the public shape of `schedule/get`, without
+`machine_state`; and `meerkat_schedule_occurrences` pages every list reply
+(at most 200 rows), with summaries by default. The host listings
+(`schedule/list`, `schedule/get`, `GET /schedules`, `list_schedules`,
+`listSchedules`) return every schedule whole, as before. A schedule's
+`superseded_ack_ids` now lists only the occurrences its latest revise or
+delete superseded.
+
+**Do:** read one schedule whole with `meerkat_schedule_get`, or every schedule
+whole through the host listing; read the public fields where you read
+`machine_state`; follow `page.next_cursor`, and pass `view: "full"` for whole
+occurrences. Bulk readers use the typed host surfaces, not the agent tools:
+RPC `schedule/list` and `schedule/occurrences`, REST `GET /schedules` and
+`GET /schedules/{id}/occurrences`, the Python SDK's `list_schedules` and
+`list_schedule_occurrences`, and the TypeScript SDK's `listSchedules` and
+`listScheduleOccurrences`. See
+[Agent-side schedule tools](/guides/scheduling#agent-side-schedule-tools).
+
+#### WorkGraph reads come newest first and report their cut
+
+`list` and `snapshot` (the agent tools, `workgraph/list` and
+`workgraph/snapshot`, the REST routes and `rkat workgraph`) return the most
+recently updated items first, so a `limit` cut keeps the newest; they
+returned the least recently updated first. `ready` and `snapshot` no longer
+refuse a namespace with more than 1,000 live items, nor `snapshot` one with
+more than 1,000 edges touching a live item or 1,000 attention bindings: they
+read the whole namespace, and `limit` (default 100, at most 1,000) cuts the
+result. Every list, ready and snapshot result reports its cut
+(`total_items`, `truncated`) and names a `next_cursor` when it ended early;
+events results report `truncated`, `next_after_seq` and
+`event_high_water_mark`. `WorkGraphStore::list_items` of the built-in stores
+orders newest first as well.
+
+**Do:** a reader that needs every item follows `next_cursor` (`--cursor` on
+the CLI) instead of raising `limit`, and a reader that relied on the
+oldest-first order sorts the items itself. A result without the new fields
+comes from an older server and may still have been cut. In Rust, set the new
+fields where you build `WorkGraphSnapshot`, `WorkGraphItemsResponse`,
+`WorkItemsResult`, `WorkGraphEventsResponse` or `WorkEventsResult`
+literally; a filter literal that ends with `..Default::default()` keeps
+compiling. See
+[Filter Semantics](/reference/workgraph-reference#filter-semantics).
+
+#### Scoped tool grant gates need every host upgraded
+
+A session built with `grant_gated_tools` (Rust `SessionBuildOptions` or
+`AgentBuildConfig`, or JSON-RPC `session/create`) records its gate in its
+tooling metadata, which a binary older than scoped tool grants does not read:
+such a binary resumes a gated session with its gated tools ungated. An
+`rkat-rpc` older than scoped tool grants also ignores `grant_gated_tools` and
+builds the session ungated. The Python and TypeScript SDKs refuse to send a
+gate to a server whose contract is older than 0.9.9.
+
+**Do:** upgrade every host that serves gated sessions before relying on a
+gate, and do not roll such a host back. A JSON-RPC client that is not one of
+the SDKs checks the server's contract version (0.9.9 or later) before it
+sends a gate. See [Scoped tool grants](/concepts/tools#scoped-tool-grants).
+
+#### `rkat run` stops waiting for a stdin that stays silent
+
+With the default `--stdin auto`, `rkat run` and `rkat run --resume` read stdin
+on a thread of their own: input that has not started within 2 s is skipped
+with one warning, and input that started is read to end of file as before.
+Before, a run whose stdin was not a terminal and stayed open without writing
+blocked forever.
+
+**Do:** a producer that pipes into `rkat run` but starts writing more than
+2 s after launch passes `--stdin blob`, which still waits for end of file; a
+launcher that hands `rkat run` an open stdin it never writes can pass
+`--stdin off` to skip the wait. See
+[Stdin modes and Unix pipes](/cli/commands#stdin-modes-and-unix-pipes).
+
+#### Member turns run on the host's runtime
+
+The turns of runtime-backed mob members, and of the sessions an RPC
+`SessionRuntime` serves, now run on the host's runtime, as the turns of the
+sessions a host creates directly through a session service already did: a
+member's on the runtime of the task that provisions it (the mob actor's), an
+RPC session's on the runtime the `SessionRuntime` was built on. Before, a
+member's turns ran on Core's process-wide `meerkat-machine-cleanup` runtime,
+and a deferred or rebuilt RPC session's on `meerkat-runtime-serving`. The
+agent loop, model streaming, tool calls and whatever the tools spawn now use
+the host's worker threads and their stack, and a member tool that blocks its
+thread holds one of the host's workers. A host runtime that stops in the
+middle of a turn ends the turn as a crash would: its inputs stay non-terminal
+and the next start resumes them, and an RPC session runtime refuses an input
+that arrives while the session waits for that start (`host_runtime_stopped`).
+The two process-wide runtimes keep the cleanup
+and runtime-loop work, and their threads take 16 MiB again when
+`RKAT_WORKER_STACK_BYTES` is unset.
+
+**Do:** size the worker stacks of the runtime your mobs and RPC session
+runtimes run on for the tools you compose. A Tokio runtime built with default
+settings gives its workers 2 MiB (`tokio::runtime::Builder::thread_stack_size`
+sets it); Core's host binaries, and an embedding that runs its main future
+through `meerkat_runtime::host_stack::run_host`, run their workers on 8 MiB
+(`RKAT_WORKER_STACK_BYTES` sets it). Build an RPC `SessionRuntime` inside the
+Tokio runtime its sessions should run on, and keep that runtime running while
+you serve them: built outside a Tokio runtime it records none, and the actor
+of a deferred or rebuilt session is then created on Core's serving runtime,
+as before. A `MobSessionService` wrapper forwards
+`runtime_turn_lost_its_host_runtime` (see
+[Wrappers and decorators](#wrappers-and-decorators)). See
+[Worker Stack Budget](/guides/deploying#worker-stack-budget).
+
+#### Compaction projects each request's input
+
+The compaction check now projects each request's input tokens: the
+provider's count for the last answered request plus an estimate of only the
+rows appended since, so a large tool result that would carry the next request
+past the threshold compacts first. A request the provider refused for not
+fitting the model's context, or one that carried the run's own tool results
+shortened (`tool_results_bounded_for_request`), makes the next run's first
+check compact the whole transcript once. The anchor and the refusal ride the
+session's compaction cadence in two optional fields that 0.9.8 ignores.
+
+**Do:** nothing for the default compactor. A custom `Compactor` that wants
+the projection or the refusal reads the new `CompactionContext` fields. To
+leave more room for what one boundary appends, set a lower explicit
+`auto_compact_threshold` (config, or a mob profile's): the derived threshold
+is four-fifths of the model's context window. See
+[Capacity and cadence](/concepts/memory-and-compaction#capacity-and-cadence).
+
+#### Text that models and tests read
+
+- A `policy_denied` tool error reads `Tool call denied (<code>): <message>`
+  to the model, from the denial itself, for an application consequence policy
+  and a scoped tool grant gate alike.
+- The compaction summary request names each image or video in a user row or
+  tool result as `[image (<media type>) omitted from this summary request]` or
+  `[video (<media type>) omitted from this summary request]`, where it wrote
+  `[image: <media type>]` and `[video: <media type>]`, and the compaction
+  prompt gains a paragraph saying that such a placeholder tells nothing about
+  what the agent could see. The prompt still contains `CONTEXT COMPACTION`.
+
+**Do:** update a client or test that matches either text.
+
+#### Consent, approvals and governed steps
+
+- Approval reads and decisions run host code. `ApprovalService::get`, `list`
+  and `decide_consent` call the host's authorization `prepare` and
+  `review_operation_context` (and, at a decision or a spend, the route's
+  `eligibility`) on the caller's thread, outside the approval owner's locks,
+  for a consent whose retained decision an owner publication change made
+  stale. `decide_consent` can answer a retryable `StoreUnavailable`, with
+  nothing recorded.
+- A pending or approved human consent is kept across unrelated authorization
+  changes and past the end of its decision's own validity window. It is
+  withdrawn as `ContextChanged` when its binding, review tier or presented
+  material changes, and as `AuthorityChanged` when its owners refuse the
+  operation (an owner change gave `context_changed` before) or its approver
+  was revoked or forbidden by policy since deciding.
+- The native work owner's operation-time steps answer another actor's hold
+  of the work's authorization publication writer as a refusal to rebuild
+  (`Refused(ReprepareRequired)`), where they answered `Unavailable`, and
+  Core's governed dispatch steps answer `AuthorizationRefused`
+  (`ReprepareRequired`) where they answered
+  `OperationAuthorizationUnavailable`. A scoped original's admission answers
+  an owner change it meets as `policy_changed`, where it answered
+  `policy_unavailable`.
+
+**Do:** never hold a lock your authorization owners take while you read or
+decide approvals, and retry `StoreUnavailable`. Match the refusal to rebuild
+where you matched the unavailable answer for this contention, or take the
+steps through their waiting forms
+(`run_if_current_within_after_owner_change`,
+`issue_child_if_current_within_after_owner_change`,
+`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`,
+`GovernedHelperAdmissionFence::create_idempotent_after_owner_change`). A
+consent route that answers eligibility only for logins within their own
+expiry keeps answering for a login through an approval decided in it, until
+that login is logged out, replaced or retired; a route that resolves
+eligibility with `PublishedConsentEligibility::observe` overrides
+`HumanConsentRoute::eligibility_answer` with
+`PublishedConsentEligibility::observe_answer`. See
+[Human consent](/guides/authorization-integration#human-consent) and
+[Owner changes in progress](/guides/authorization-integration#owner-changes-in-progress).
+
+#### Mob hosts (Rust)
+
+- A dormant seat on in-process comms takes the members' comms identity root
+  from the mob's session service when the host declares none (see
+  [Dormant seats and comms keys](/guides/mobs#dormant-seats-and-comms-keys-rust-hosts)).
+  A service that reports `NotKept`, or a root it cannot resolve, has every
+  seat refused unless the host declares a root.
+- `MobHandle::rotate_member` is durable from its start, and a restarted mob
+  finishes it itself. It no longer takes over a retirement of the member that
+  started without a rotation: the call is refused retryable
+  (`MobError::LifecycleOperationPending`) until that retirement finishes or is
+  re-driven (`MobHandle::redrive_retirement`).
+- A retire that races a spawn of the same identity is refused
+  `MobError::LifecycleOperationPending`, retryable once the spawn settles.
+- A spawn, a spawn policy's auto-spawn or a dormant seat of a local session
+  member in a mob with no runtime (every profile `TurnDriven`, on a session
+  service without a runtime adapter) is refused before anything of it exists,
+  with `MobError::MissingMemberCapability` (`outbound_comms_runtime`), where it
+  failed `Internal` after the member's session was created.
+
+**Do:** drop a comms identity root you passed only to match your factory's;
+keep `MobBuilder::with_network_member_comms` for members on TCP or UDS. After
+a restart, read a member once before you re-issue an unanswered
+`rotate_member`: a higher generation means the rotation finished, a member
+`MobHandle::list_members_including_retiring` lists as Retiring means the mob
+finishes it, and the generation the call saw, not Retiring, means it never
+started. Retry `LifecycleOperationPending`. See
+[Respawn rotation and scoped release](/reference/mob-architecture#respawn-rotation-and-scoped-release).
+
+#### Host store authors
+
+A host store meets obligation 5 (fencing) at commit: it refuses a batch whose
+token is below one acquired before the batch's commit point with
+`FencedOut`. A store that only hides such a batch at load answers the stale
+writer's commit `Ok`, and is outside the host store contract. On a host store
+realm, a stopped store writer no longer fails turns: a dispatch, a round
+commit or a closing save waits for the writer's re-acquire, and a store fence
+gap suspends the run until the fence is back.
+
+**Do:** make the fence check and the commit one transaction, as an
+append-only store must. See
+[Obligations](/reference/host-store-spi#obligations) and
+[Keeping A Realm In Your Own Database](/guides/durable-runs#keeping-a-realm-in-your-own-database).
+
+#### Rust API: new fields and variants
+
+These public types gained fields or variants, so code that builds them
+literally or matches them exhaustively follows them:
+
+- `SessionBuildOptions` and `AgentBuildConfig` gain `grant_gated_tools` and
+  `mob_incarnation` (`Default` and `AgentBuildConfig::new` fill both, which
+  keeps every build unchanged); `meerkat-rpc`'s `CreateSessionParams` gains
+  `grant_gated_tools`; `SessionTooling` gains `grant_gated`,
+  `SessionToolVisibilityState` gains `tool_grant_gated_names` and
+  `tool_grant_open_names`, and `CoreApplyFailureCause` gains `reason`.
+- `AgentErrorReason` gains `ToolGrantGateRefused` and `BuildAgentError` gains
+  `GrantGate`; both enums are exhaustive. `AgentBuildPolicyError` gains
+  `ToolGrantGateWithoutAdjudication`.
+- `SystemMessage` gains `instruction_entry` and `retired_instruction_body`
+  (`None` keeps the previous behaviour), and `WireSessionMessage::System` the
+  same two wire fields. `SessionLlmRequestPolicy` gains
+  `operator_instruction_lowering`.
+- `CompactionContext` gains `projected_input_tokens` and
+  `last_context_refusal_boundary_index`, `SessionCompactionCadence` gains
+  `last_context_refusal_boundary_index` and `last_answered_request`, and
+  `meerkat_core::agent::compact::build_compaction_context` takes the last
+  answered request as its third parameter. `None` measures as before.
+- `TranscriptEditError` is `#[non_exhaustive]` and gains
+  `SystemRowPruneRefused`.
+- `ForkInstructionRefusalCause` gains `HeadBodyRetired` (wire
+  `head_body_retired`), which the generated Python, TypeScript and Web SDK
+  refusal-cause unions list too.
+- `OpenAiAuthMethod`, `AnthropicAuthMethod` and `GoogleAuthMethod` gain
+  `GitHubCopilotToken` (wire `github_copilot_token`).
+- `MemberRespawnReceipt` is no longer `UnwindSafe` or `RefUnwindSafe`.
+- `MobEventKind` gains `OperatorInstructionCommitted` and
+  `MemberInstructionTargetsRecorded`, and its `MemberRetirementStarted` and
+  `MemberRetired` gain fields that serde skips.
+- The mob, runtime, auth, session document and session persistence version
+  machine types in `meerkat-machine-kernels`, `meerkat-machine-schema`,
+  `meerkat-mob`, `meerkat-runtime` and `meerkat-core` gain inputs, signals,
+  effects, state fields and transitions, and `InputFieldDomainKind` gains
+  `CiValues`. Every new variant is appended after the released ones, so no
+  implicit discriminant moves, except in two enums. In
+  `generated::mob::TransitionId` (`meerkat-machine-kernels`), the 14 member
+  custody transitions it gains (`RecordMemberCustodyUnrestored*` and
+  `ResolveMemberCustodyRestored*`) sit directly before
+  `RetireMemberArchiveOnly`, so the implicit discriminants of
+  `RetireMemberArchiveOnly` and of every released variant after it move. In
+  `meerkat-runtime`'s `MeerkatMachineRuntimeInternalInput`,
+  `ReplaceToolGrantGate` and `ApplyToolGrantOpenSet` sit directly before
+  `AbandonDeferredSessionPromotion`, so the implicit discriminants of
+  `AbandonDeferredSessionPromotion` and of every released variant after it
+  move. Neither enum has a `repr`, and neither serializes its discriminant
+  (`TransitionId` (de)serializes by variant name), so only an integer cast
+  observes this: code that casts these variants to integers, or stores such
+  integers, must re-read them, since an integer from 0.9.8 can name another
+  variant.
+
+**Do:** add the fields and the arms. Wrap a `MemberRespawnReceipt` that a
+closure inside `std::panic::catch_unwind` captures in
+`std::panic::AssertUnwindSafe` where that is sound. The CHANGELOG's
+`### Breaking` names every change.
+
+### Wrappers and decorators
+
+Implement the new required methods; they have no default, so a wrapper
+without them no longer compiles:
+
+- a `SessionAgentBuilder` or `MobSessionService` wrapper:
+  `session_comms_identity_root` (required, no default). Forward it to the
+  builder or service you wrap: a mob seats its dormant members under the
+  root it reports. A builder or service that builds no comms of its own
+  answers `SessionCommsIdentityRoot::NotKept`.
+- a `SessionRuntimeLlmReconfigureService` implementation:
+  `live_session_own_operator_instruction_entry_placement`, which says where
+  the operator-instruction entry rows a live session wrote itself stand.
+
+Forward these new methods too. They have defaults, so a wrapper without them
+compiles, but the default disables what they carry:
+
+- a `MobSessionService` wrapper: `record_member_instruction_target`,
+  `release_member_instruction_target` and `read_member_instructions`. Their
+  defaults refuse `durability_unavailable`, so a mob's operator instructions
+  never reach the members behind the wrapper (each is reported blocked), a
+  retiring member's target is never released (the mob logs it), and the
+  status read reports every member unreadable.
+- a `SessionAgent` wrapper: `release_instruction_target_control`, the live
+  session's half of that release. Its default refuses the same way.
+- a `SessionAgentBuilder` wrapper: `instruction_lowering_for_identity`. Its
+  default (`None`) leaves the status read unable to report that a model
+  cannot carry operator instructions (`lowering_unavailable`).
+- a `MobSessionService` wrapper: `runtime_turn_lost_its_host_runtime`, as you
+  forward `live_session_actor_registered`. Its default answers `false`, so a
+  member of a stopped host runtime served through the wrapper can have an
+  input that reaches it after the stop recorded as a failed run.
+- a `MobSessionService` wrapper over a durable session owner:
+  `bind_seated_member_session`. Its default refuses, so a dormant resume seat
+  over a session that names no member binding is refused.
+- an `AgentToolDispatcher` wrapper: `adjudicates_tool_grants` and
+  `observes_bindings_only`. Without the first, an agent with a scoped tool
+  grant gate refuses to build over the wrapper
+  (`ToolGrantGateWithoutAdjudication`).
+- an `AuthLeaseHandle` wrapper: `publish_source_credential`. Its default
+  fails closed, so a `github_copilot_token` route that reads its token from
+  the environment, a command or a resolver fails to resolve over the wrapper.
+- a `RuntimeStore` decorator: `load_tool_grant`, `list_tool_grants`,
+  `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
+  `append_tool_grant_audit` and `read_tool_grant_audit`. Their defaults
+  answer `Unsupported`, so the grant service refuses every grant behind the
+  decorator and a gated name stays closed.
+- a `SessionCheckpointer` wrapper: `dispatch_fence_ready`. Its default checks
+  the fence without waiting, so a run behind the wrapper fails where it would
+  wait for a stopped host store writer's re-acquire.
+- a custom mob storage: `MobIdentityStore::scan_created_identities_page`. Its
+  default reads none, which is right only for a storage that never holds a
+  created identity entry.
+- a `WorkGraphStore` that serves pages: `list_public_events` and
+  `latest_event_seq`, as the built-in stores do. The default
+  `list_public_events` pages through `list_events`.
+- an `HttpAuthorizer` wrapper: `redact_response_diagnostic`. Its default
+  changes nothing, so a credential a provider echoes back reaches the errors
+  and logs of the requests signed through the wrapper.
+- an `AuthLeaseHandle` wrapper: `mark_publication_refused` too. Its default
+  fails closed, so GitHub's refusal of a `github_copilot_token` route's token
+  fails to be recorded over the wrapper, and the request fails without
+  withdrawing the token.
+
+### Declared identity entries
+
+0.9.9 adds the declared apply (`MobHandle::apply_declared_roster`, Rust
+only): a host declares its roster of identity entries, and Core seats,
+restamps, holds and retires them (see
+[The declared apply](/reference/mob-architecture#the-declared-apply)). A
+host that never calls it and never spawns or seats with entry custody sees no
+change.
+
+- **An entry outlives a retirement.** A host's `retire` of a declared
+  identity that its roster still lists ends the identity's member, and the
+  entry stays, unseated and owed its seat: the next apply seats it again, on
+  the session the retirement archived. To take a declared identity out of
+  the roster (unlist it), apply a complete roster without it, or unlist it
+  alone (`MobHandle::unlist_declared_identity`): its member retires and the
+  entry ends, and listing it again brings it back. Removing an identity
+  (`MobHandle::remove_identity`) is permanent: it tombstones the name.
+- **Identities retired before the upgrade come back on a fresh session.** The
+  session an identity's retirement archived is recorded by 0.9.9 only. An
+  identity retired under 0.9.8 or earlier has no record, so when the host
+  lists it again the apply seats it on a fresh session, and its earlier
+  history stays on its archived session. Core reads no label and no journal
+  row to find that session.
+- **Apply the roster after every start.** Between a start and the first
+  apply after it, Core knows only the entries its journal records: the seated
+  ones, and those whose member a retirement other than an unlisting ended.
+  An entry no member ever held, a role hold and a held creation are not
+  recorded, and the first apply declares them again. Until then, a member
+  whose role the host moved while the process was down is not held, and a
+  peer delivery can wake it under its previous role.
+- **Consume a first-boot request only once it is carried out.** The answer
+  names the requests the apply carried out
+  (`DeclaredRosterOutcome::first_boot_requests_carried_out`). Keep every
+  other request for the next apply: a deferred, refused or failed answer did
+  not carry it out.
+- **One apply at a time.** An apply called while another apply of the same
+  mob runs is refused `MobError::LifecycleOperationPending`, retryable, and
+  writes nothing.
+
+**Do:** apply the host's complete roster once after every start, before the
+host wakes or seats its identities; consume exactly the first-boot requests
+the answer names; unlist an identity to take it out of the roster
+(`remove_identity` is permanent: it tombstones the name).
+
+### Created identity entries
+
+0.9.9 reads a second origin of identity entry, `Created`: an entry Core keeps
+as a row of its own in the identity store (schema version 2, beside the
+host-adopted identity intents of version 1). A start recovers every created
+entry row, and a name whose row is removed or that this build cannot read is
+reserved, never free (see
+[Identity entries](/reference/mob-architecture#identity-entries)). The origin
+is provenance and the custody of the entry's desired record only: a created
+entry's member is built from its profile like any other member, with its own
+roster labels, tools, grants and wiring. A created entry is a store-owned
+identity, which Core's own changes create, update, archive and remove (see
+below). A mob that holds no created entry row sees no change but the new
+read answers.
+
+- **The entry reads have new answers.** `identity_entry` answers
+  `IdentityEntryRead::Unreadable` and `Removed`, the entries page lists
+  unreadable names apart (`IdentityEntryPage::unreadable`), and the census
+  counts created entries and removed and unreadable names;
+  `IdentityCensus::is_complete()` is false while a name is unreadable. The
+  member binding history answers `MemberIdentityManagement::CreatedEntry` for
+  a created entry. The enums are `#[non_exhaustive]`.
+- **The declared apply notes created names and refuses reserved ones.** A
+  host roster that lists a created entry's name is answered
+  `DeclaredEntryOutcome::Noted` (`DeclaredEntryNote::OwnedByStore`) for that
+  identity alone, a quiet steady state that changes and retires nothing; a
+  removed or unreadable name is answered `Refused`
+  (`DeclaredEntryRefusal::NameTombstoned`, `NameUnreadable`). Its seal never
+  unlists a created entry.
+- **A host store opens over a row it cannot read.** A mob storage on the
+  host store SPI reads its identity intents one entry at a time: an entry
+  whose row this build cannot decode is kept as stored, read as unreadable
+  for its identity alone and written back untouched on every rewrite of the
+  group. Before, one such row failed the whole mob's open. An entry it
+  cannot attribute to an identity (an envelope or a key it cannot read)
+  still fails the open.
+- **A SQLite mob adopts beside a created row.** An identity-first adoption
+  reads the host-adopted intent rows alone, so a created entry's row no
+  longer refuses the adoption of another identity, and the intent list
+  leaves created rows out.
+
+### Store-owned identity changes
+
+0.9.9 adds Core's own identity changes (Rust only): a create of store-owned
+identities, their update, archive and unarchive, the removal of an identity
+of either custody, and the host's preparation of an identity before its first
+seat with its held constructions (see
+[Store-owned identity changes](/reference/mob-architecture#store-owned-identity-changes)
+and
+[Host preparation and held constructions](/reference/mob-architecture#host-preparation-and-held-constructions)).
+A host that calls none of them sees no change.
+
+- **A removal is for good, for either custody.** `MobHandle::remove_identity`
+  of a roster-owned identity writes its name's tombstone to the identity
+  store: the name is never an identity or a member again, and a roster that
+  still lists it is answered `DeclaredEntryRefusal::NameTombstoned` for that
+  identity. Drop the identity from the roster when you remove it. To take a
+  roster-owned identity out and keep its name and session for later, unlist
+  it (`MobHandle::unlist_declared_identity`, or a complete roster without
+  it) and list it again.
+- **An archived identity refuses deliveries.** A delivery to an archived
+  store-owned identity is refused `MobError::IdentityArchived` until its
+  unarchive, and one to an identity awaiting its host's preparation is
+  refused retryable (`MobError::MemberWakeRefused`, `HostPreparationPending`).
+- **A store-owned update names the spec it was decided against.**
+  `StoreOwnedIdentityUpdate` carries the identity's expected spec digest, and
+  a change decided against another spec is refused
+  `IdentityChangeRefusal::StaleSpec` with the identity's current digest and
+  revision: read the record again (`MobHandle::identity_record`) and decide
+  the change anew.
+- **`SpawnMemberAdmissionObservations` gains two fields.** The public fields
+  `binding_present` and `placement_present` (a runtime binding or a placement
+  on the request, which a grant with manage scope alone admits) are new, so a
+  struct literal outside `meerkat-mob` must set them (`false` keeps the
+  previous answer) or end with `..Default::default()`.
+
+**Do:** drop a removed identity from the host's roster; read the record again
+after a `StaleSpec` refusal before deciding the change anew.
+
+### WorkGraph evidence refs (Rust)
+
+`WorkEvidenceRef` is `#[non_exhaustive]` and gains the field `withdraws` (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)),
+so a struct literal outside `meerkat-workgraph` no longer compiles. Build a ref
+with `WorkEvidenceRef::new(kind, id)` and the builders `with_label`,
+`with_summary` and `with_withdraws`, or assign the public fields after `new`.
+The constructor sets no confirmation or execution provenance. A ref without
+withdrawals keeps its wire form, so stored items, keyed-create digests and
+attention continuation keys do not change.
+
+### Quarantined mob stores
+
+A persisted mob store that does not restore no longer fails the restore of
+every mob of the realm: it is quarantined (kept exactly as found, with no
+actor), and the other mobs restore (see
+[Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members)).
+A call that addresses a quarantined mob fails with the new refusal kind
+`mob_quarantined`, and `mob/list` lists the mob under `quarantined`. A mob
+start likewise no longer stops for one member whose session read fails: that
+member is degraded (`custody_deferred` with `store_unavailable` or
+`store_unreadable`). The quarantine is not durable: every start derives it
+again, and 0.9.8 reads the same stores (a store that does not restore fails
+its whole restore again).
+
+**Do:** a client that branches on mob refusal kinds handles
+`mob_quarantined` (the SDKs read it with `mob_quarantined` and
+`mobQuarantined`). A host that must still fail its boot on such a store
+reads `MobMcpState::quarantined_mobs` (or `mob/list`'s `quarantined`) after
+the restore and refuses while it is not empty. **Do (Rust):**
+`MobMcpState::unrestored_mobs` is gone (read `quarantined_mobs` or
+`mob_inventory`), `held_child_mobs` returns a `Result`, and a
+`MobListResult` literal sets `quarantined`. A host store implementation
+answers `HostStoreError::Corrupt` for stored data that does not decode or
+fails its integrity check.
+
+### Downgrading to 0.9.8
+
+Check for mobs that used operator instructions first. A mob that recorded an
+operator instruction journals rows at mob event schema 10. Core 0.9.8 and
+0.9.7 refuse such a journal ("unsupported stored mob event
+schema_version=10; expected 9"), and their realm restore (the mob roots of
+the rkat CLI, RPC and MCP hosts) stops at the first such mob, so every mob of
+that realm fails to restore and every mob verb answers the error. A Meta
+gateway whose own mob recorded an operator instruction does not resume its
+mob. Before any downgrade of a realm to 0.9.8 or 0.9.7 (for a Meta state
+directory, see below):
+
+1. Run `rkat storage doctor` on 0.9.9 or later.
+2. For each mob listed under `operator-instruction-mob-events`, destroy the
+   mob, or move its database (`mobs/<name>.db` in the realm's state
+   directory, the path the finding names) out of that directory.
+3. Only then start the older binary.
+
+The doctor reads the mob databases on disk only. For a realm on a host store,
+look in the host's store for mob events at schema 10. A member session that
+recorded its mob's snapshot is written at session envelope 5, which 0.9.8
+refuses session by session; the doctor lists those sessions under
+`operator-instruction-envelope`.
+
+A Meta gateway's state directory is not a Core realm, and
+`rkat storage doctor` covers neither of the files that matter here: it does
+not read `runtime.sqlite`, where Meta keeps its sessions, or
+`event_log.sqlite3`, the gateway's own mob journal. Its
+`schema-from-the-future` error for `sessions.sqlite3` (ledger domain
+`session-store` at version 999999) is expected: that file is the retired
+stamp that `meta_gateway storage-migrate-native` leaves for Meta 0.9.3 to
+refuse. From Meta 0.9.10, Meta's storage doctor (`meta/storage/doctor`)
+takes this census of a state directory, read-only, as Info findings that
+carry counts only:
+
+- `operator-instruction-envelope`: the sessions of `runtime.sqlite` at
+  envelope 5;
+- `operator-instruction-mob-events`: the mob events at schema 10, in the
+  gateway's own journal and in each child mob's journal under `mobs/`;
+- `identity-store-rows`: the identity-store rows of schema version 2 or
+  later in the same mob stores (see below).
+
+Each reports one finding for the state directory with its total, 0
+included, and one for each file that counts above 0 or could not be
+counted, whose `path` names the file. On Meta 0.9.9, take the first two with
+two read-only queries (`sqlite3 -readonly <file> "<query>"`) on a state
+directory in the default disk layout:
+
+- the sessions at envelope 5, on `runtime.sqlite` (`meta/status_identity`
+  names the `session_id` of each identity):
+
+  ```sql
+  SELECT session_id FROM session_heads WHERE version = 5
+  UNION
+  SELECT session_id FROM sessions
+   WHERE session_id NOT IN (SELECT session_id FROM session_heads)
+     AND json_extract(CAST(session_json AS TEXT), '$.version') = 5;
+  ```
+
+- the mob events at schema 10, on `event_log.sqlite3` and on each child mob
+  database under `mobs/` that has a `mob_events` table:
+
+  ```sql
+  SELECT count(*) FROM mob_events
+   WHERE json_extract(CAST(event_json AS TEXT), '$.schema_version') = 10;
+  ```
+
+Destroy, or move out of `mobs/`, each child mob database that counts rows.
+The gateway's own journal is not in `mobs/`: a gateway whose own journal
+counts rows does not start its mob on Meta 0.9.7 or 0.9.6. On Meta 0.9.9,
+nothing an SDK host can call writes an identity-store row of schema
+version 2, so such a host has none to count; a Rust host counts its mob's
+with `MobHandle::identity_record_census()`.
+
+Durable decisions live in their own file, `approval_decisions.sqlite3`,
+beside `approvals.json` under the store path; 0.9.9 creates it with the first
+hold and changes no other file for them. 0.9.8 never opens that file and reads
+`approvals.json` as before, so a downgrade keeps every approval and leaves the
+decisions untouched. Nothing serves the decisions under 0.9.8: none expires,
+executes or settles its notice. Back on 0.9.9, an open decision past its
+deadline expires at its first read, or when a deadline driver reads the due
+ones, and owes its notice. An approved decision is listed as owed and runs only
+before its deadline; past it, it expires the same way, unless its execution
+permit was outstanding at the downgrade: that decision waits for its owner to
+settle the permit (record the commit, or release or refuse the permit).
+
+0.9.8 does not know a same-session successor's rotation (a
+`MobHandle::respawn_member`, the declared apply's role migration or
+runtime-mode restamp, and `MobHandle::respawn` of an identity entry's
+member), which 0.9.9 records on the retirement's start row. One that a crash
+interrupted after its start and before its end is, for 0.9.8, a plain
+retirement: 0.9.8 skips the record, restores the member under its old role
+and comms name, and its start re-drives the retirement to its end, which
+retires the member and archives the session the successor was to keep. No
+successor is seated, under the new role or the old one: the member ends
+whole, it is never split across two names, but it is gone. Before a
+downgrade, finish every pending same-session successor on 0.9.9. Its member
+is listed Retiring (`MobHandle::list_members_including_retiring`); an
+identity entry's reads `rotation_in_flight` as `Some(SameSession)`
+(`MobHandle::identity_entry`, counted by `IdentityCensus::rotation_in_flight`).
+A start of the mob on 0.9.9 finishes it, as do `respawn_member` again under
+the profile it started with and `MobHandle::redrive_retirement`; one whose
+profile left the definition finishes once that profile is restored.
+
+0.9.8 reads the rows the declared apply writes as plain member rows: its
+seats are member spawn rows, and its unlisted retirements plain retirements.
+0.9.8 ignores the fields it does not know on them: an entry, the cause on a
+retirement's start row, whether a retirement archived the member's session
+on its end row, and the history notice on a seat's row. A retirement the
+apply's seal started and a crash interrupted finishes under 0.9.8 as a plain
+retirement. Entries the apply holds unseated, role holds (with the run-start
+holds they place) and held creations live in memory only, so 0.9.8 sees none
+of them.
+
+A created identity entry's row is a row 0.9.8 does not know. On SQLite, 0.9.8
+reads it as an identity intent row it cannot read, for that identity alone:
+its member binding history answers `IntentUnreadable`. Its identity-first
+adoption, though, decodes every intent row of the mob, so 0.9.7 and 0.9.8
+refuse every new identity-first adoption in a mob that holds a created
+entry's row, while their reads stay per identity. A worker reconcile of
+0.9.8 that retires stale members can retire a created entry's member; once
+the host runs 0.9.9 again, the start re-seats the entry on the session that
+retirement archived. A host store is
+different: 0.9.8 decodes a mob's identity intents as a whole and does not
+open the mob's storage while one of them is a created entry's row. Before a
+downgrade, a mob on a host store must hold no created identity entry.
+
+A removal writes a row of the same schema for either custody (a removed
+roster-owned identity's tombstone included), and so do an archive and a
+store-owned identity's pending preparation, so the paragraph above applies to
+every mob that holds one. This release has no step that deletes these rows:
+a removal writes the name's tombstone and an archive keeps its row, so a mob
+that holds any (`IdentityRecordCensus::created_rows` above zero) has no
+supported downgrade before the export and purge steps, which 0.9.11 adds
+([the downgrade cycle](#the-downgrade-cycle-of-store-owned-identities)).
+`MobHandle::identity_record_census()` counts the rows and what a downgrade
+must settle first: the mob's rows (`created_rows`, the archived ones, the
+tombstones and the unreadable ones), the identities awaiting their host's
+preparation (`preparations_open`), the held constructions
+(`constructions_held`) and the seated store-owned identities whose member's
+last seat row predates their row's labels or profile (`seats_stale`: 0.9.8
+rebuilds such a member from its seat row; a respawn with the row's labels,
+`MemberRespawn::with_labels`, or a restamp brings the seat row up to date).
+Change receipts are rows of the identity store's receipts table under keys
+0.9.8 never asks for.
+
+From 0.9.10 the rows are also counted with no running mob, by the same
+rule, read-only. `MobStorage::read_identity_record_rows` counts a store
+file's rows per mob (`IdentityRecordRows`: `created_rows`, `archived`,
+`tombstones`, `unreadable`), and `MobStorage::identity_record_rows` counts a
+storage's mob, a host store's included. `rkat storage doctor` reports them
+for each mob database that holds any, and Meta's storage doctor for a Meta
+state directory, as the Info finding `identity-store-rows` with the counts
+only.
+
+0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
+ignores `withdraws` and drops the field when it rewrites such an item (any
+mutation of the item, including a host sweep such as a lease-expiry
+observation). The withdrawing refs stay as ordinary evidence, and the refs
+they withdrew read as current again. Two more effects reach only requests and
+items that carry withdrawals. 0.9.8 digests a keyed create without the field,
+so replaying a key whose request carried `withdraws` answers `Conflict`
+instead of `Replayed`. An item with withdrawals projects without the field, so
+its attention continuation key changes once and a continuation recorded under
+0.9.9 does not match it. Keys, items and continuations without withdrawals
+are unaffected.
+
+A session whose document 0.9.9 writes at session envelope 5 does not
+downgrade: one that carries operator-instruction facts, one in which a
+compaction, or a system-row prune with
+`retire_superseded_activation_bodies`, retired a superseded instruction
+activation body (or a fork child that copied such a row), and one in which
+a rewrite moved an instruction activation row to another offset. 0.9.8 refuses such a session;
+`rkat storage doctor` lists them (Info finding
+`operator-instruction-envelope`) before you roll back, and on a Meta state
+directory Meta's storage doctor counts them under the same code from Meta
+0.9.10. Every other session stays at envelope 4 and reads on 0.9.8
+unchanged.
+
+0.9.8 does not read a session's scoped tool grant gate, which 0.9.9 records
+in the session's tooling metadata: 0.9.8 resumes a gated session with its
+gated tools ungated. Grant rows and their audit log live in the
+`runtime-tool-grants` schema domain, which 0.9.8 leaves alone. A turn that
+failed because its session's build refused the gate records
+`AgentErrorReason::ToolGrantGateRefused` in its failed-turn completion row,
+and 0.9.8 decodes `AgentErrorReason` strictly, so it cannot read a runtime
+store whose completion row carries it.
+
+A 0.9.8 mob controller cannot decode a 0.9.9 member host's
+`head_body_retired` refusal of a placed fork under `reactivate_inherited`:
+the create fails closed with an untyped internal error ("failed to decode
+command bridge reply") and creates nothing on either side. A 0.9.8 temporary
+council that meets it ends `participant_seating_failed` and keeps a cleanup
+debt for that seat that nothing clears, not even an upgrade of that
+controller. Upgrade mob controllers together with their member hosts before
+relying on `reactivate_inherited` for placed forks of members whose
+instruction activations a compaction may have retired.
+
 ## Upgrading to 0.9.8
 
 This section is for systems running 0.9.7. The full list of changes is in

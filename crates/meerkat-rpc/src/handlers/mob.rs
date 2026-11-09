@@ -55,7 +55,7 @@ fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse 
 /// (-32026), StaleCursor (-32027), StaleFence (-32028) — each with its
 /// typed BARE detail struct as `data`. Everything else keeps the
 /// `invalid_params` string rendering byte-identical.
-trait MobWireErrorSource: std::fmt::Display {
+pub(crate) trait MobWireErrorSource: std::fmt::Display {
     fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail>;
     fn wire_error_code(&self) -> Option<meerkat_contracts::ErrorCode> {
         self.wire_detail().map(|detail| detail.code())
@@ -108,12 +108,21 @@ impl MobWireErrorSource for MobAppendSystemContextError {
         MobAppendSystemContextError::wire_detail(self)
     }
 
+    /// A mob refusal keeps its structured data (an identity entry's
+    /// `identity_member`, for one), as every other mob door renders it.
+    fn structured_data(&self) -> Option<serde_json::Value> {
+        match self {
+            MobAppendSystemContextError::Mob(error) => MobError::structured_data(error),
+            MobAppendSystemContextError::Session(_) => None,
+        }
+    }
+
     fn wire_error_code(&self) -> Option<meerkat_contracts::ErrorCode> {
         MobAppendSystemContextError::wire_error_code(self)
     }
 }
 
-fn mob_call_error<E: MobWireErrorSource>(id: Option<RpcId>, err: &E) -> RpcResponse {
+pub(crate) fn mob_call_error<E: MobWireErrorSource>(id: Option<RpcId>, err: &E) -> RpcResponse {
     match err.wire_detail() {
         Some(detail) => match detail.detail_value() {
             Ok(data) => RpcResponse::error_with_data(
@@ -262,6 +271,9 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
         model: profile.model,
         provider: profile.provider,
         self_hosted_server_id: profile.self_hosted_server_id,
+        // Host-set: the wire profile names no auth binding, so a caller's
+        // profile leaves its members on their realm's binding.
+        auth_binding: None,
         image_generation_provider: profile.image_generation_provider,
         auto_compact_threshold: profile.auto_compact_threshold,
         resume_overrides: profile
@@ -285,6 +297,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
             mcp_servers: vec![],
             rust_bundles: Vec::new(),
             bundles: Vec::new(),
+            grant_gated: tools.grant_gated.into(),
         },
         peer_description: profile.peer_description,
         external_addressable: profile.external_addressable,
@@ -446,15 +459,15 @@ pub(crate) async fn handle_create_with_member_external_tools(
 }
 
 pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
-    let mobs = match state.mob_list().await {
-        Ok(mobs) => mobs,
-        Err(err) => return mob_call_error(id, &err),
-    };
-    let mobs = mobs
-        .into_iter()
-        .map(|(mob_id, observation)| meerkat_mob_mcp::wire_mob_status_row(&mob_id, &observation))
-        .collect::<Vec<_>>();
-    RpcResponse::success(id, MobListResult { mobs })
+    // One inventory read: the managed mobs and, when any persisted store
+    // did not restore, the quarantined ones (each id in one of them).
+    match state.mob_inventory().await {
+        Ok(inventory) => {
+            let result: MobListResult = meerkat_mob_mcp::wire_mob_list_result(&inventory);
+            RpcResponse::success(id, result)
+        }
+        Err(err) => mob_call_error(id, &err),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1467,6 +1480,103 @@ pub async fn handle_append_system_context(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Operator instructions (host verbs; never agent tools)
+// ---------------------------------------------------------------------------
+
+/// The JSON-RPC answer of an operator-instruction failure: a typed refusal
+/// carries its closed code in `data.instruction_set_code`; a mob that cannot
+/// answer maps as every mob verb does.
+fn operator_instruction_error_response(
+    id: Option<RpcId>,
+    failure: &meerkat_mob::OperatorInstructionError,
+) -> RpcResponse {
+    match (failure, failure.code()) {
+        (meerkat_mob::OperatorInstructionError::Mob(error), _) => mob_call_error(id, error),
+        (_, Some(code)) => super::instruction_set_error_response(id, code, failure.to_string()),
+        (_, None) => RpcResponse::error(id, error::INTERNAL_ERROR, failure.to_string()),
+    }
+}
+
+pub async fn handle_set_instruction(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobSetInstructionParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let write = meerkat_mob::OperatorInstructionWrite {
+        slot: params.slot(),
+        revision: params.revision,
+        body: params.body,
+        content_sha256: params.content_sha256,
+        target: meerkat_mob::OperatorInstructionTarget::from_wire(params.target),
+    };
+    match state.mob_set_instruction(&mob_id, write).await {
+        Ok(receipt) => RpcResponse::success(id, receipt.to_wire()),
+        Err(failure) => operator_instruction_error_response(id, &failure),
+    }
+}
+
+pub async fn handle_revoke_instruction(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobRevokeInstructionParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    match state
+        .mob_revoke_instruction(&mob_id, params.slot(), params.revision)
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(id, receipt.to_wire()),
+        Err(failure) => operator_instruction_error_response(id, &failure),
+    }
+}
+
+pub async fn handle_instruction_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobInstructionStatusParams = match parse_params(params) {
+        Ok(params) => params,
+        Err(response) => return response.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(mob_id) => mob_id,
+        Err(response) => return response,
+    };
+    let query = meerkat_mob::OperatorInstructionStatusQuery {
+        namespace: params.namespace,
+        key: params.key,
+        agent_identity: params.agent_identity.map(AgentIdentity::from),
+        profile: params.profile.map(meerkat_mob::ProfileName::from),
+        offset: params
+            .offset
+            .map_or(0, |offset| usize::try_from(offset).unwrap_or(usize::MAX)),
+        limit: params
+            .limit
+            .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
+    };
+    match state.mob_instruction_status(&mob_id, query).await {
+        Ok(page) => RpcResponse::success(id, page.to_wire()),
+        Err(failure) => operator_instruction_error_response(id, &failure),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MobFlowsParams {
     pub mob_id: String,
@@ -1978,6 +2088,60 @@ pub async fn handle_fork_helper(
 }
 
 // ---------------------------------------------------------------------------
+// mob/fork_member
+// ---------------------------------------------------------------------------
+
+/// Fork a member's session at a message boundary into a new member. A source
+/// whose turn is in flight is refused `SESSION_BUSY` (`data.kind`
+/// `fork_source_unavailable`, `cause` `running`) and nothing is seated; a
+/// committed fork whose seat failed keeps its session id in the refusal's
+/// data.
+pub async fn handle_fork_member(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobForkMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let source_identity = AgentIdentity::from(params.source_member_id.as_str());
+    match state
+        .mob_fork_member(
+            &mob_id,
+            &source_identity,
+            AgentIdentity::from(params.agent_identity.as_str()),
+            params.profile.map(meerkat_mob::ProfileName::from),
+            params.runtime_mode.map(mob_runtime_mode_from_wire),
+            params.message_index,
+        )
+        .await
+    {
+        Ok(fork) => {
+            let identity = fork.agent_identity.to_string();
+            RpcResponse::success(
+                id,
+                meerkat_contracts::MobForkMemberResult {
+                    member_ref: meerkat_contracts::WireMemberRef::encode(
+                        mob_id.as_str(),
+                        &identity,
+                    ),
+                    agent_identity: identity,
+                    session_id: fork.session_id.to_string(),
+                    source_session_id: fork.source_session_id.to_string(),
+                    message_count: fork.message_count,
+                },
+            )
+        }
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mob/force_cancel
 // ---------------------------------------------------------------------------
 
@@ -2117,6 +2281,39 @@ pub async fn handle_rotate_supervisor(
             },
         ),
         Err(err) => mob_rotate_supervisor_error(id, &err),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/restore_retry
+// ---------------------------------------------------------------------------
+
+/// Re-attempt the restore of a quarantined persisted mob, for example after
+/// its store was repaired. A re-attempt that fails answers the
+/// `mob_quarantined` refusal; a mob that is not quarantined answers
+/// `not_quarantined`.
+pub async fn handle_restore_retry(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_restore_retry(&mob_id).await {
+        Ok(outcome) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobRestoreRetryResult {
+                mob_id: mob_id.to_string(),
+                outcome: meerkat_mob_mcp::wire_mob_restore_retry_outcome(outcome),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 
@@ -3483,6 +3680,35 @@ pub async fn handle_stop_member_run(
     }
 }
 
+/// Handle `mob/compact_member`: ask a live member's next compaction check to
+/// compact, without a respawn. A dormant member is refused, never woken.
+pub async fn handle_compact_member(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobCompactMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state.mob_compact_member(&mob_id, identity).await {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobCompactMemberResult {
+                mob_id: params.mob_id,
+                agent_identity: params.agent_identity,
+                outcome: receipt.wire_outcome(),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
 /// `mob/member_live_open` without an execution-identity authority: a
 /// request that names an `execution_identity` refuses as a strict
 /// `live/open` does on a host that composes no authority.
@@ -3728,6 +3954,40 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// A governed runtime's refusal of an operator-instruction write answers
+    /// like every other refusal: `INVALID_PARAMS` with its closed code in
+    /// `data.instruction_set_code`, so a client tells it from a transient
+    /// failure; a malformed instruction history is the server's fault
+    /// (`INTERNAL_ERROR`).
+    #[test]
+    fn prepared_authorization_required_answers_invalid_params_with_its_code() {
+        let response = operator_instruction_error_response(
+            Some(RpcId::Num(7)),
+            &meerkat_mob::OperatorInstructionError::Refused(
+                meerkat_core::InstructionWriteError::PreparedAuthorizationRequired,
+            ),
+        );
+        let refusal = response.error.expect("a typed refusal");
+        assert_eq!(refusal.code, error::INVALID_PARAMS);
+        assert_eq!(
+            refusal.data,
+            Some(serde_json::json!({
+                "instruction_set_code": "prepared_authorization_required"
+            }))
+        );
+        let malformed = super::super::instruction_set_rpc_error(
+            meerkat_core::InstructionSetErrorCode::MalformedInstructionHistory,
+            "malformed".to_string(),
+        );
+        assert_eq!(malformed.code, error::INTERNAL_ERROR);
+        assert_eq!(
+            malformed.data,
+            Some(serde_json::json!({
+                "instruction_set_code": "malformed_instruction_history"
+            }))
+        );
+    }
+
     /// A spawn's override profile keeps its durable worker flag across the
     /// wire form, both ways.
     #[test]
@@ -3766,6 +4026,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

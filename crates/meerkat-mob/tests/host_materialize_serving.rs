@@ -2124,7 +2124,7 @@ async fn revival_cleanup_rollback_does_not_deadlock_with_a_raw_unregister_saga()
 
     // A raw unregister of the revived session: its saga takes the live
     // lifecycle lease, then its surface cleanup waits for B.
-    adapter.test_set_unregister_caller_wait_grace(Duration::from_secs(60));
+    adapter.test_set_unregister_caller_wait_grace(Duration::from_mins(1));
     let saga_holds_lease = adapter.test_signal_next_unregister_saga_live_lease();
     let unregister = tokio::spawn({
         let adapter = std::sync::Arc::clone(&adapter);

@@ -94,6 +94,11 @@ pub struct MaintenanceAgentBuilder;
 impl SessionAgentBuilder for MaintenanceAgentBuilder {
     type Agent = RefusingSessionAgent;
 
+    /// It builds no agents, so it keeps no comms identity.
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         _req: &CreateSessionRequest,

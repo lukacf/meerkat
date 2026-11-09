@@ -4,17 +4,25 @@
 //! `<root>/<realm_id>/<binding_id>.json`; profile override credentials live at
 //! `<root>/<realm_id>/<binding_id>@<profile_id>.json`; shared account
 //! credentials live at `<root>/<realm_id>/account~<account_id>.json`.
-//! Permissions: 0o600 on Unix; atomic rename (`.tmp` → target) on save.
+//! Permissions on Unix: a realm directory the store creates is 0o700, set
+//! explicitly whatever the process umask, and credential files are 0o600. A
+//! save writes `<stem>.json.tmp` and renames it onto the target.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
+//!
+//! Every write is fenced: `save` and `clear` refuse a guard that does not
+//! cover the credential fence C(r), `<root>/<realm_id>/admission.lock`, of
+//! the written credential's realm, before any byte is written
+//! ([`TokenStoreError::AdmissionFence`]).
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
+use meerkat_core::AdmissionGuard;
 use meerkat_core::auth::token_store::TokenStoreObservation;
 
-use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
+use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError, require_credential_fence};
 
 pub struct FileTokenStore {
     root: PathBuf,
@@ -37,6 +45,46 @@ impl FileTokenStore {
         let stem = key.storage_stem();
         self.realm_dir(key.realm().as_str())
             .join(format!("{stem}.json"))
+    }
+
+    /// Refuse a write `guard` does not cover: the fence of `key`'s realm
+    /// under this store's root.
+    pub(crate) fn require_fence(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
+        require_credential_fence(guard, Some(&self.root), key)
+    }
+
+    /// Write `key`'s file, for a caller that already required its fence.
+    pub(crate) async fn write(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        let dir = self.realm_dir(key.realm().as_str());
+        create_owner_only_dir(&dir).await?;
+        let final_path = self.path_for(key);
+        let tmp_path = final_path.with_extension("json.tmp");
+
+        let mut bytes = serde_json::to_vec_pretty(tokens)?;
+        bytes.push(b'\n');
+
+        write_file_with_mode(&tmp_path, &bytes).await?;
+        tokio::fs::rename(&tmp_path, &final_path).await?;
+        Ok(())
+    }
+
+    /// Remove `key`'s file, for a caller that already required its fence. A
+    /// missing file is already clean.
+    pub(crate) async fn remove(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+        let path = self.path_for(key);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(TokenStoreError::from(e)),
+        }
     }
 
     /// Remove `key`'s file synchronously, for cleanup that runs on a thread
@@ -69,27 +117,19 @@ impl TokenStore for FileTokenStore {
         Ok(Some(tokens))
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        let dir = self.realm_dir(key.realm().as_str());
-        tokio::fs::create_dir_all(&dir).await?;
-        let final_path = self.path_for(key);
-        let tmp_path = final_path.with_extension("json.tmp");
-
-        let mut bytes = serde_json::to_vec_pretty(tokens)?;
-        bytes.push(b'\n');
-
-        write_file_with_mode(&tmp_path, &bytes).await?;
-        tokio::fs::rename(&tmp_path, &final_path).await?;
-        Ok(())
+    async fn save(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        self.require_fence(guard, key)?;
+        self.write(key, tokens).await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        let path = self.path_for(key);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(TokenStoreError::from(e)),
-        }
+    async fn clear(&self, guard: &AdmissionGuard, key: &TokenKey) -> Result<(), TokenStoreError> {
+        self.require_fence(guard, key)?;
+        self.remove(key).await
     }
 
     /// A file read never raises operating-system UI: status reads the file.
@@ -189,6 +229,43 @@ impl TokenStore for FileTokenStore {
     }
 }
 
+/// Create the credential directory `dir`, and the directories above it that
+/// are missing. A credential directory's listing names secret slots (a realm
+/// directory lists which slots of the realm hold a value, and the refresh
+/// lock directory keeps a lock file named after every slot that took a
+/// lock), so on Unix `dir` is owner-only when this call creates it: 0o700,
+/// set explicitly after the creation so the process umask does not decide
+/// it. A `dir` that already exists keeps its mode, and the directories above
+/// it get the mode the umask gives them, as before.
+#[cfg(unix)]
+pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = dir.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    // Created no wider than 0o700, so no other user can list it at any time.
+    let mut builder = tokio::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(dir).await {
+        Ok(()) => tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await,
+        // An earlier call, or a concurrent one, created it: it stays as it
+        // is. Anything else at the path is an error, as before.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match tokio::fs::metadata(dir).await {
+                Ok(metadata) if metadata.is_dir() => Ok(()),
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dir).await
+}
+
 #[cfg(unix)]
 async fn write_file_with_mode(path: &Path, bytes: &[u8]) -> Result<(), TokenStoreError> {
     use tokio::io::AsyncWriteExt;
@@ -243,16 +320,27 @@ mod tests {
         }
     }
 
+    /// A guard over the credential fence of `realm` under `root`, as the
+    /// coordinator hands its closures.
+    fn covering(root: &Path, realm: &str) -> std::sync::Arc<AdmissionGuard> {
+        AdmissionGuard::try_acquire(vec![
+            meerkat_core::AdmissionFence::credentials(root, &RealmId::parse(realm).unwrap())
+                .unwrap(),
+        ])
+        .unwrap()
+    }
+
     // RCT-19: the on-disk layout is keyed by the OWNING realm.
     #[tokio::test]
     async fn file_token_store_path_for_uses_owning_realm() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileTokenStore::new(dir.path());
+        let guard = covering(dir.path(), "global");
         let key = TokenKey::new(
             RealmId::parse("global").unwrap(),
             BindingId::parse("anthropic").unwrap(),
         );
-        store.save(&key, &token("sek")).await.unwrap();
+        store.save(&guard, &key, &token("sek")).await.unwrap();
         let expected = dir.path().join("global").join("anthropic.json");
         assert!(
             expected.exists(),
@@ -274,8 +362,22 @@ mod tests {
             BindingId::parse("account").unwrap(),
         );
 
-        store.save(&account_key, &token("github")).await.unwrap();
-        store.save(&binding_key, &token("binding")).await.unwrap();
+        store
+            .save(
+                &covering(dir.path(), "global"),
+                &account_key,
+                &token("github"),
+            )
+            .await
+            .unwrap();
+        store
+            .save(
+                &covering(dir.path(), "global"),
+                &binding_key,
+                &token("binding"),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             store
@@ -312,11 +414,12 @@ mod tests {
             BindingId::parse("connector-client").unwrap(),
             Some(meerkat_core::connection::ProfileId::parse("desktop").unwrap()),
         );
+        let guard = covering(dir.path(), "global");
         store
-            .save(&secret_key, &token("client-secret"))
+            .save(&guard, &secret_key, &token("client-secret"))
             .await
             .unwrap();
-        store.save(&legacy, &token("legacy")).await.unwrap();
+        store.save(&guard, &legacy, &token("legacy")).await.unwrap();
         assert_eq!(
             store
                 .load(&legacy)
@@ -338,11 +441,15 @@ mod tests {
         let binding = BindingId::parse("remote-AbC123dEf456GhI7").unwrap();
         let client_key = TokenKey::mcp_oauth_client(realm.clone(), binding.clone());
         let credential_key = TokenKey::new(realm, binding);
+        let guard = covering(dir.path(), "mcp-oauth");
         store
-            .save(&client_key, &token("client-secret"))
+            .save(&guard, &client_key, &token("client-secret"))
             .await
             .unwrap();
-        store.save(&credential_key, &token("access")).await.unwrap();
+        store
+            .save(&guard, &credential_key, &token("access"))
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .load(&client_key)
@@ -382,7 +489,14 @@ mod tests {
         let key = TokenKey::from_auth_binding(&owner);
         assert_eq!(key.realm().as_str(), "global");
 
-        store.save(&key, &token("owner-secret")).await.unwrap();
+        store
+            .save(
+                &covering(dir.path(), "global"),
+                &key,
+                &token("owner-secret"),
+            )
+            .await
+            .unwrap();
         let loaded = store.load(&key).await.unwrap().expect("found at owner");
         assert_eq!(loaded.primary_secret.as_deref(), Some("owner-secret"));
 
@@ -394,5 +508,81 @@ mod tests {
             store.load(&consuming).await.unwrap().is_none(),
             "a consuming child realm must not see the global-owned token"
         );
+    }
+
+    /// The realm directories the store creates are owner-only on Unix
+    /// whatever the process umask: a realm directory lists which secret slots
+    /// of the realm hold a value.
+    #[cfg(unix)]
+    mod private_realm_directories {
+        use super::*;
+        use crate::auth_store::umask_test_support::{mode_bits, under_each_umask};
+        use std::os::unix::fs::PermissionsExt;
+
+        /// A realm directory the store creates for a save is 0700 under any
+        /// umask, and the credential file in it stays 0600. RED before: the
+        /// store created it with the process umask (`create_dir_all`), so
+        /// under umask 022 it was 0755, and another local user could list
+        /// which secret slots of the realm hold a value.
+        #[test]
+        fn a_realm_directory_the_store_creates_is_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_realm_directory_the_store_creates_is_owner_only_under_any_umask",
+                || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("a runtime");
+                    let dir = tempfile::tempdir().expect("a temporary directory");
+                    let root = dir.path().join("credentials");
+                    let store = FileTokenStore::new(&root);
+                    let key = TokenKey::new(
+                        RealmId::parse("global").unwrap(),
+                        BindingId::parse("anthropic").unwrap(),
+                    );
+                    // The save's guard takes the realm's credential fence,
+                    // whose acquisition creates the realm directory first.
+                    let guard = covering(&root, "global");
+                    runtime
+                        .block_on(store.save(&guard, &key, &token("sek")))
+                        .expect("the save");
+                    let realm_dir = root.join("global");
+                    assert_eq!(
+                        mode_bits(&realm_dir),
+                        0o700,
+                        "the realm directory the store created is owner-only"
+                    );
+                    assert_eq!(
+                        mode_bits(&realm_dir.join("anthropic.json")),
+                        0o600,
+                        "the credential file stays owner-only"
+                    );
+                },
+            );
+        }
+
+        /// A realm directory that already exists keeps its mode: a save
+        /// writes its credential file into it and changes nothing else.
+        #[tokio::test]
+        async fn a_save_into_an_existing_realm_directory_keeps_its_mode() {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let realm_dir = dir.path().join("global");
+            std::fs::create_dir(&realm_dir).expect("the realm directory");
+            std::fs::set_permissions(&realm_dir, std::fs::Permissions::from_mode(0o750))
+                .expect("the realm directory's mode");
+            let store = FileTokenStore::new(dir.path());
+            let key = TokenKey::new(
+                RealmId::parse("global").unwrap(),
+                BindingId::parse("anthropic").unwrap(),
+            );
+            let guard = covering(dir.path(), "global");
+            store
+                .save(&guard, &key, &token("sek"))
+                .await
+                .expect("the save");
+            assert_eq!(mode_bits(&realm_dir), 0o750);
+            assert_eq!(mode_bits(&realm_dir.join("anthropic.json")), 0o600);
+        }
     }
 }

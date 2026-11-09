@@ -269,6 +269,1931 @@ async fn live_delegation_worker_start_resolves_after_its_channel_closed() {
         .expect("the committed start replays idempotently after the close");
 }
 
+/// One client delegation admitted on `channel`, as its generated admission
+/// leaves it: schedule state Created, reconciliation Provisional, no worker.
+fn seed_admitted_live_delegation(
+    state: &mut mm_dsl::MeerkatMachineState,
+    channel: &str,
+    interaction_id: &str,
+    operation: &mm_dsl::OperationId,
+    provider_turn: &str,
+) {
+    state
+        .live_interaction_channel_by_id
+        .insert(interaction_id.to_string(), channel.to_string());
+    state
+        .live_delegation_operation_by_interaction
+        .insert(interaction_id.to_string(), operation.clone());
+    state
+        .live_delegation_channel_by_operation
+        .insert(operation.clone(), channel.to_string());
+    state.live_delegation_schedule_state_by_operation.insert(
+        operation.clone(),
+        mm_dsl::LiveDelegationScheduleState::Created,
+    );
+    state
+        .live_delegation_interaction_by_operation
+        .insert(operation.clone(), interaction_id.to_string());
+    state
+        .live_delegation_provider_turn_by_operation
+        .insert(operation.clone(), provider_turn.to_string());
+    state.live_delegation_reconciliation_by_operation.insert(
+        operation.clone(),
+        mm_dsl::LiveDelegationReconciliation::Provisional,
+    );
+}
+
+/// Turbo S S107: a client delegation is admitted under its channel's exact
+/// binding, then the channel closes (its runtime binding is removed) before
+/// the delegation's worker starts. The delegation still starts after the
+/// close, on its operation's own retired channel: its canonical transcript
+/// reconciles (confirmed, or as a conflict or missing transcript), its worker
+/// start and consequential effect are authorized, the start resolves, and a
+/// start that failed on a busy source before the close requeues. The closed
+/// channel holds no worker count. A still-bound channel with a stale fence is
+/// refused as before, and a retired channel cannot be claimed for an
+/// operation that belongs to another channel.
+#[tokio::test]
+async fn live_delegation_admitted_before_its_channel_closed_starts_after_the_close() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-admitted-start-after-close");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-admitted-after-close");
+    let fence_token = 31;
+    let generation = 4;
+    let delegation = |provider_delegation: &str, provider_turn: &str| {
+        let interaction_id = meerkat_core::InteractionId::new();
+        let correlation = meerkat_core::LiveUserTurnCorrelation::new(
+            channel.clone(),
+            interaction_id,
+            meerkat_core::OpaqueProviderCorrelation::new(provider_delegation, provider_turn)
+                .expect("opaque provider correlation"),
+        )
+        .expect("live turn correlation");
+        let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+            OperationId::new(),
+            correlation,
+        );
+        let dsl_operation = mm_dsl::OperationId::from_domain(operation.operation_id());
+        (interaction_id.to_string(), operation, dsl_operation)
+    };
+    // The delegation that starts after the close.
+    let (interaction, operation, dsl_operation) =
+        delegation("provider-delegation", "provider-turn");
+    let provisional = meerkat_core::ProvisionalLiveHandoff::new(
+        operation.domain_correlation().clone(),
+        "write the ode",
+        meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+    )
+    .expect("provisional handoff");
+    // A delegation whose worker start failed on a busy source before the
+    // close (nothing physical started; the start resolved not started).
+    let (busy_interaction, busy_operation, dsl_busy) =
+        delegation("provider-delegation-busy", "provider-turn-busy");
+    // Two delegations whose canonical transcript does not confirm.
+    let (conflict_interaction, _, dsl_conflict) =
+        delegation("provider-delegation-conflict", "provider-turn-conflict");
+    let (missing_interaction, _, dsl_missing) =
+        delegation("provider-delegation-missing", "provider-turn-missing");
+    // A confirmed delegation whose worker never starts: it probes the worker
+    // start under a stale fence while the channel is still bound.
+    let (ready_interaction, ready_operation, dsl_ready) =
+        delegation("provider-delegation-ready", "provider-turn-ready");
+    let ready_provisional = meerkat_core::ProvisionalLiveHandoff::new(
+        ready_operation.domain_correlation().clone(),
+        "draft the agenda",
+        meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+    )
+    .expect("provisional handoff");
+
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        state.active_runtime_id = Some(mm_dsl::AgentRuntimeId::from_domain(&runtime_id));
+        state.active_fence_token = Some(mm_dsl::FenceToken::from_domain(fence_token));
+        state.active_runtime_generation = Some(mm_dsl::Generation::from_domain(generation));
+        state
+            .live_active_channel_by_session
+            .insert(session_id.to_string(), dsl_channel.clone());
+        state
+            .live_channel_session_by_channel
+            .insert(dsl_channel.clone(), session_id.to_string());
+        state.live_channel_identity_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::SessionLlmIdentity {
+                model: "experimental-live".to_string(),
+                provider: mm_dsl::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params_repr: None,
+                auth_binding: None,
+            },
+        );
+        state.live_execution_runtime_id_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+        );
+        state.live_execution_fence_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::FenceToken::from_domain(fence_token),
+        );
+        state.live_execution_generation_by_channel.insert(
+            dsl_channel.clone(),
+            mm_dsl::Generation::from_domain(generation),
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &interaction,
+            &dsl_operation,
+            "provider-turn",
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &busy_interaction,
+            &dsl_busy,
+            "provider-turn-busy",
+        );
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_busy.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        state
+            .live_delegation_worker_identity_by_operation
+            .insert(dsl_busy.clone(), "live-worker-busy".to_string());
+        state
+            .live_delegation_worker_phase_by_operation
+            .insert(dsl_busy.clone(), mm_dsl::LiveDelegationWorkerPhase::Failed);
+        state.live_delegation_schedule_state_by_operation.insert(
+            dsl_busy.clone(),
+            mm_dsl::LiveDelegationScheduleState::Failed,
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &conflict_interaction,
+            &dsl_conflict,
+            "provider-turn-conflict",
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &missing_interaction,
+            &dsl_missing,
+            "provider-turn-missing",
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &ready_interaction,
+            &dsl_ready,
+            "provider-turn-ready",
+        );
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_ready.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed admitted live delegations on a bound channel");
+    }
+    let reconcile = |channel_id: &str,
+                     fence: u64,
+                     interaction_id: &str,
+                     operation_id: &mm_dsl::OperationId,
+                     provider_turn: &str,
+                     committed: bool,
+                     digest_matches: bool| {
+        mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: channel_id.to_string(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: interaction_id.to_string(),
+            operation_id: operation_id.clone(),
+            provider_turn_correlation: provider_turn.to_string(),
+            final_transcript_committed: committed,
+            normalized_digest_matches: digest_matches,
+        }
+    };
+    let apply = |input: mm_dsl::MeerkatMachineInput| {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+    };
+    let state = || {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone()
+    };
+
+    // While the channel is still bound, a stale fence is refused as before.
+    assert!(
+        apply(reconcile(
+            &dsl_channel,
+            fence_token + 1,
+            &interaction,
+            &dsl_operation,
+            "provider-turn",
+            true,
+            true,
+        ))
+        .is_err(),
+        "a still-bound channel refuses a stale fence"
+    );
+    assert!(
+        machine
+            .authorize_live_delegation_worker_start(
+                &session_id,
+                &runtime_id,
+                fence_token + 1,
+                generation,
+                &ready_operation,
+                &ready_provisional,
+                "live-worker-stale-fence",
+            )
+            .await
+            .is_err(),
+        "a still-bound channel refuses a worker start under a stale fence"
+    );
+    assert_eq!(
+        state()
+            .live_delegation_schedule_state_by_operation
+            .get(&dsl_ready)
+            .copied(),
+        Some(mm_dsl::LiveDelegationScheduleState::Created),
+        "the refused start bound no worker"
+    );
+
+    // The channel closes before any worker starts: close removes the
+    // channel's runtime binding, its session binding and its worker count.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        state
+            .live_execution_runtime_id_by_channel
+            .remove(&dsl_channel);
+        state.live_execution_fence_by_channel.remove(&dsl_channel);
+        state
+            .live_execution_generation_by_channel
+            .remove(&dsl_channel);
+        state
+            .live_active_channel_by_session
+            .remove(&session_id.to_string());
+        state.live_channel_session_by_channel.remove(&dsl_channel);
+        state
+            .live_delegation_active_worker_count_by_channel
+            .remove(&dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed with its delegations admitted");
+    }
+
+    // A retired channel cannot be claimed for an operation that belongs to
+    // another channel.
+    assert!(
+        apply(reconcile(
+            "some-other-retired-channel",
+            fence_token,
+            &interaction,
+            &dsl_operation,
+            "provider-turn",
+            true,
+            true,
+        ))
+        .is_err(),
+        "no aliasing through another retired channel id"
+    );
+
+    let reconciled = apply(reconcile(
+        &dsl_channel,
+        fence_token,
+        &interaction,
+        &dsl_operation,
+        "provider-turn",
+        true,
+        true,
+    ));
+    assert!(
+        reconciled.is_ok(),
+        "the canonical transcript reconciles after the close: {reconciled:?}"
+    );
+    assert_eq!(
+        state()
+            .live_delegation_reconciliation_by_operation
+            .get(&dsl_operation)
+            .copied(),
+        Some(mm_dsl::LiveDelegationReconciliation::Confirmed)
+    );
+    for (interaction_id, operation_id, provider_turn, committed, expected) in [
+        (
+            &conflict_interaction,
+            &dsl_conflict,
+            "provider-turn-conflict",
+            true,
+            mm_dsl::LiveDelegationReconciliation::MaterialConflict,
+        ),
+        (
+            &missing_interaction,
+            &dsl_missing,
+            "provider-turn-missing",
+            false,
+            mm_dsl::LiveDelegationReconciliation::Missing,
+        ),
+    ] {
+        let reconciled = apply(reconcile(
+            &dsl_channel,
+            fence_token,
+            interaction_id,
+            operation_id,
+            provider_turn,
+            committed,
+            false,
+        ));
+        assert!(
+            reconciled.is_ok(),
+            "a {expected:?} transcript reconciles after the close: {reconciled:?}"
+        );
+        assert_eq!(
+            state()
+                .live_delegation_reconciliation_by_operation
+                .get(operation_id)
+                .copied(),
+            Some(expected)
+        );
+    }
+
+    let admission = machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &operation,
+            &provisional,
+            "live-worker-after-close",
+        )
+        .await;
+    assert!(
+        admission.is_ok(),
+        "the worker start is authorized after the close: {:?}",
+        admission.as_ref().err()
+    );
+    let admission = admission.expect("worker start authority");
+    {
+        let state = state();
+        assert_eq!(
+            state
+                .live_delegation_worker_phase_by_operation
+                .get(&dsl_operation)
+                .copied(),
+            Some(mm_dsl::LiveDelegationWorkerPhase::StartAuthorized)
+        );
+        assert_eq!(
+            state
+                .live_delegation_schedule_state_by_operation
+                .get(&dsl_operation)
+                .copied(),
+            Some(mm_dsl::LiveDelegationScheduleState::Claimed)
+        );
+        assert!(
+            !state
+                .live_delegation_active_worker_count_by_channel
+                .contains_key(&dsl_channel),
+            "a closed channel holds no worker count"
+        );
+    }
+    let consequential = apply(
+        mm_dsl::MeerkatMachineInput::AuthorizeLiveConsequentialEffect {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: interaction.clone(),
+            operation_id: dsl_operation.clone(),
+            authority_id: "consequential-after-close".to_string(),
+        },
+    );
+    assert!(
+        consequential.is_ok(),
+        "the consequential effect is authorized after the close: {consequential:?}"
+    );
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &admission,
+            true,
+        )
+        .await
+        .expect("the start resolves after the close");
+    assert_eq!(
+        state()
+            .live_delegation_worker_phase_by_operation
+            .get(&dsl_operation)
+            .copied(),
+        Some(mm_dsl::LiveDelegationWorkerPhase::Running),
+        "the job runs"
+    );
+
+    let requeued = machine
+        .requeue_live_delegation(
+            &crate::live_execution::LiveDelegationRuntimeBinding::new(
+                session_id.clone(),
+                channel.clone(),
+                runtime_id.clone(),
+                fence_token,
+                generation,
+            ),
+            &busy_operation,
+        )
+        .await;
+    assert!(
+        requeued.is_ok(),
+        "a start that failed on a busy source requeues after the close: {requeued:?}"
+    );
+    let state = state();
+    assert_eq!(
+        state
+            .live_delegation_schedule_state_by_operation
+            .get(&dsl_busy)
+            .copied(),
+        Some(mm_dsl::LiveDelegationScheduleState::Created)
+    );
+    assert!(
+        !state
+            .live_delegation_worker_identity_by_operation
+            .contains_key(&dsl_busy),
+        "the requeued operation may bind a fresh worker"
+    );
+}
+
+/// A bound live channel on `session_id` under the generated execution
+/// binding, as a context channel's open leaves it.
+fn seed_bound_live_channel(
+    state: &mut mm_dsl::MeerkatMachineState,
+    session_id: &SessionId,
+    channel: &str,
+    runtime_id: &crate::identifiers::LogicalRuntimeId,
+    fence_token: u64,
+    generation: u64,
+) {
+    state.active_runtime_id = Some(mm_dsl::AgentRuntimeId::from_domain(runtime_id));
+    state.active_fence_token = Some(mm_dsl::FenceToken::from_domain(fence_token));
+    state.active_runtime_generation = Some(mm_dsl::Generation::from_domain(generation));
+    state
+        .live_active_channel_by_session
+        .insert(session_id.to_string(), channel.to_string());
+    state
+        .live_channel_session_by_channel
+        .insert(channel.to_string(), session_id.to_string());
+    state.live_channel_identity_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::SessionLlmIdentity {
+            model: "experimental-live".to_string(),
+            provider: mm_dsl::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params_repr: None,
+            auth_binding: None,
+        },
+    );
+    state.live_execution_runtime_id_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::AgentRuntimeId::from_domain(runtime_id),
+    );
+    state.live_execution_fence_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::FenceToken::from_domain(fence_token),
+    );
+    state.live_execution_generation_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::Generation::from_domain(generation),
+    );
+}
+
+/// The channel's close as the generated close leaves it: no runtime, fence,
+/// generation or session binding, and no worker count.
+fn seed_closed_live_channel(
+    state: &mut mm_dsl::MeerkatMachineState,
+    session_id: &SessionId,
+    channel: &str,
+) {
+    state.live_execution_runtime_id_by_channel.remove(channel);
+    state.live_execution_fence_by_channel.remove(channel);
+    state.live_execution_generation_by_channel.remove(channel);
+    state
+        .live_active_channel_by_session
+        .remove(&session_id.to_string());
+    state.live_channel_session_by_channel.remove(channel);
+    state
+        .live_delegation_active_worker_count_by_channel
+        .remove(channel);
+}
+
+/// One client delegation on `channel` for the kernel rows below: its
+/// interaction, exact operation and generated operation id.
+fn live_delegation_identity(
+    channel: &meerkat_core::LiveChannelId,
+    provider_delegation: &str,
+    provider_turn: &str,
+) -> (
+    String,
+    meerkat_core::exact_operation::ExactOperationIdentity<meerkat_core::LiveUserTurnCorrelation>,
+    mm_dsl::OperationId,
+) {
+    let interaction_id = meerkat_core::InteractionId::new();
+    let correlation = meerkat_core::LiveUserTurnCorrelation::new(
+        channel.clone(),
+        interaction_id,
+        meerkat_core::OpaqueProviderCorrelation::new(provider_delegation, provider_turn)
+            .expect("opaque provider correlation"),
+    )
+    .expect("live turn correlation");
+    let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+        OperationId::new(),
+        correlation,
+    );
+    let dsl_operation = mm_dsl::OperationId::from_domain(operation.operation_id());
+    (interaction_id.to_string(), operation, dsl_operation)
+}
+
+/// A continuation the user spoke while their delegation waited for a worker
+/// is held for it, and that worker starts only after the channel closed
+/// (Turbo S S107). The steer still folds into the start: it is authorized,
+/// its delivery resolves, and it reconciles (confirmed, as a conflict, or
+/// missing) on the operation's own retired channel. A still-bound channel
+/// refuses a steer under a stale fence as before, and a retired channel
+/// cannot steer an operation that belongs to another channel.
+#[tokio::test]
+async fn live_delegation_steers_a_worker_started_after_its_channel_closed() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-steer-after-close");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-steer-after-close");
+    let fence_token = 31;
+    let generation = 4;
+    let binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token,
+        generation,
+    );
+    let stale_binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token + 1,
+        generation,
+    );
+    // A worker started while the channel is bound probes the stale fence; the
+    // one that starts after the close is steered.
+    let (bound_interaction, bound_operation, dsl_bound) =
+        live_delegation_identity(&channel, "provider-delegation-bound", "provider-turn-bound");
+    let (interaction, operation, dsl_operation) =
+        live_delegation_identity(&channel, "provider-delegation", "provider-turn");
+    let provisional = |operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+        meerkat_core::LiveUserTurnCorrelation,
+    >| {
+        meerkat_core::ProvisionalLiveHandoff::new(
+            operation.domain_correlation().clone(),
+            "write the brief",
+            meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+        )
+        .expect("provisional handoff")
+    };
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        for (interaction_id, operation_id, provider_turn) in [
+            (&bound_interaction, &dsl_bound, "provider-turn-bound"),
+            (&interaction, &dsl_operation, "provider-turn"),
+        ] {
+            seed_admitted_live_delegation(
+                &mut state,
+                &dsl_channel,
+                interaction_id,
+                operation_id,
+                provider_turn,
+            );
+            state.live_delegation_reconciliation_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationReconciliation::Confirmed,
+            );
+        }
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed confirmed live delegations on a bound channel");
+    }
+    let state = || {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone()
+    };
+
+    // While the channel is still bound, a steer under a stale fence is
+    // refused as before.
+    machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &bound_operation,
+            &provisional(&bound_operation),
+            "live-worker-bound",
+        )
+        .await
+        .expect("worker start under the exact binding");
+    assert!(
+        machine
+            .authorize_live_delegation_steer(
+                &stale_binding,
+                &bound_operation,
+                "continuation-stale",
+                "digest-stale",
+            )
+            .await
+            .is_err(),
+        "a still-bound channel refuses a steer under a stale fence"
+    );
+
+    // The channel closes; the queued delegation's worker starts after it.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed with a delegation still queued");
+    }
+    machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &operation,
+            &provisional(&operation),
+            "live-worker-after-close",
+        )
+        .await
+        .expect("the worker start is authorized after the close");
+
+    // A retired channel cannot steer an operation of another channel.
+    let foreign = {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            mm_dsl::MeerkatMachineInput::AuthorizeLiveDelegationSteer {
+                channel_id: "some-other-retired-channel".to_string(),
+                runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+                generation: mm_dsl::Generation::from_domain(generation),
+                interaction_id: interaction.clone(),
+                operation_id: dsl_operation.clone(),
+                provider_turn_correlation: "provider-turn".to_string(),
+                continuation_id: "continuation-foreign".to_string(),
+                continuation_digest: "digest-foreign".to_string(),
+            },
+        )
+        .map(|_| ())
+    };
+    assert!(
+        foreign.is_err(),
+        "no aliasing through another retired channel id"
+    );
+
+    for (continuation, delivered, committed, digest_matches, expected) in [
+        (
+            "continuation-confirmed",
+            true,
+            true,
+            true,
+            meerkat_core::LiveHandoffReconciliation::Confirmed,
+        ),
+        (
+            "continuation-conflict",
+            true,
+            true,
+            false,
+            meerkat_core::LiveHandoffReconciliation::MaterialConflict,
+        ),
+        (
+            "continuation-missing",
+            false,
+            false,
+            false,
+            meerkat_core::LiveHandoffReconciliation::Missing,
+        ),
+    ] {
+        let steer = machine
+            .authorize_live_delegation_steer(
+                &binding,
+                &operation,
+                continuation,
+                &format!("digest-{continuation}"),
+            )
+            .await;
+        assert!(
+            steer.is_ok(),
+            "{continuation}: the steer is authorized after the close: {:?}",
+            steer.as_ref().err()
+        );
+        let steer = steer.expect("steer authority");
+        machine
+            .resolve_live_delegation_steer_delivery(&steer, &binding, delivered)
+            .await
+            .expect("the steer's delivery resolves after the close");
+        let reconciled = machine
+            .reconcile_live_delegation_steer(&steer, &binding, committed, digest_matches)
+            .await
+            .expect("the steer reconciles after the close");
+        assert_eq!(reconciled, expected, "{continuation}");
+        assert_eq!(
+            state()
+                .live_delegation_steer_delivered_by_continuation
+                .get(continuation)
+                .copied(),
+            Some(delivered),
+            "{continuation}"
+        );
+    }
+}
+
+/// Unregistering a session keeps its delegation custody, but a delegation of
+/// a closed channel no longer reconciles or starts once the session is gone:
+/// the post-close arms need the registered session, exactly as the bound
+/// arms need the channel's binding. The authority an in-flight runtime call
+/// still holds between the unregistration's commit and the removal of the
+/// runtime entry is refused.
+#[tokio::test]
+async fn live_delegation_post_close_arms_need_a_registered_session() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register");
+    let channel = meerkat_core::LiveChannelId::new("live-post-close-unregistered");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:post-close-unregistered");
+    let fence_token = 31;
+    let generation = 4;
+    // One delegation still to reconcile, one confirmed and ready to start.
+    let (interaction, _, dsl_operation) =
+        live_delegation_identity(&channel, "provider-delegation", "provider-turn");
+    let (ready_interaction, _, dsl_ready) =
+        live_delegation_identity(&channel, "provider-delegation-ready", "provider-turn-ready");
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        // The channel already closed: no binding, only the admitted custody.
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &interaction,
+            &dsl_operation,
+            "provider-turn",
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &ready_interaction,
+            &dsl_ready,
+            "provider-turn-ready",
+        );
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_ready.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("a closed channel's admitted delegations");
+    }
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("the session unregisters");
+    let after = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        .clone();
+    assert!(after.session_id.is_none(), "the session is unregistered");
+    assert_eq!(
+        after
+            .live_delegation_schedule_state_by_operation
+            .get(&dsl_operation)
+            .copied(),
+        Some(mm_dsl::LiveDelegationScheduleState::Created),
+        "unregistration keeps the admitted custody"
+    );
+    let apply = |input: mm_dsl::MeerkatMachineInput| {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+    };
+    let reconciled = apply(
+        mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: interaction.clone(),
+            operation_id: dsl_operation.clone(),
+            provider_turn_correlation: "provider-turn".to_string(),
+            final_transcript_committed: true,
+            normalized_digest_matches: true,
+        },
+    );
+    assert!(
+        reconciled.is_err(),
+        "an unregistered session's closed channel reconciles nothing"
+    );
+    let started = apply(
+        mm_dsl::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: ready_interaction.clone(),
+            operation_id: dsl_ready.clone(),
+            provider_turn_correlation: "provider-turn-ready".to_string(),
+            worker_identity: "live-worker-after-unregister".to_string(),
+            worker_ownership: crate::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+        },
+    );
+    assert!(
+        started.is_err(),
+        "an unregistered session's closed channel starts no worker"
+    );
+}
+
+/// A worker of a closed channel that hands its item back blocked settles
+/// Cancelled in the machine: a requeue needs the channel's binding, so
+/// nothing could ever serve it again. That holds for a blocked terminal
+/// recorded after the close and for one recorded while the channel was still
+/// bound and reconciled after the close. A blocked hand-back recorded while
+/// the channel is bound stays Blocked, to requeue once its item is ready.
+#[tokio::test]
+async fn a_blocked_hand_back_on_a_closed_channel_settles_cancelled() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-blocked-after-close");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-blocked-after-close");
+    let fence_token = 31;
+    let generation = 4;
+    // A worker that blocks after the close, and one that blocked while the
+    // channel was bound and is reconciled after the close.
+    let (late_interaction, _, dsl_late) =
+        live_delegation_identity(&channel, "provider-delegation-late", "provider-turn-late");
+    let (early_interaction, _, dsl_early) =
+        live_delegation_identity(&channel, "provider-delegation-early", "provider-turn-early");
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        for (interaction_id, operation_id, provider_turn, worker) in [
+            (
+                &late_interaction,
+                &dsl_late,
+                "provider-turn-late",
+                "live-worker-late",
+            ),
+            (
+                &early_interaction,
+                &dsl_early,
+                "provider-turn-early",
+                "live-worker-early",
+            ),
+        ] {
+            seed_admitted_live_delegation(
+                &mut state,
+                &dsl_channel,
+                interaction_id,
+                operation_id,
+                provider_turn,
+            );
+            state.live_delegation_reconciliation_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationReconciliation::Confirmed,
+            );
+            state
+                .live_delegation_worker_identity_by_operation
+                .insert(operation_id.clone(), worker.to_string());
+            state.live_delegation_worker_phase_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationWorkerPhase::Running,
+            );
+            state.live_delegation_schedule_state_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationScheduleState::Running,
+            );
+        }
+        state
+            .live_delegation_active_worker_count_by_channel
+            .insert(dsl_channel.clone(), 2);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("two running workers on a bound channel");
+    }
+    let apply = |input: mm_dsl::MeerkatMachineInput| {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+    };
+    let schedule_state = |operation_id: &mm_dsl::OperationId| {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .live_delegation_schedule_state_by_operation
+            .get(operation_id)
+            .copied()
+    };
+
+    // While the channel is bound, a blocked hand-back stays Blocked.
+    apply(
+        mm_dsl::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: early_interaction.clone(),
+            operation_id: dsl_early.clone(),
+            worker_identity: "live-worker-early".to_string(),
+            terminal: mm_dsl::LiveDelegationWorkerTerminalKind::Blocked,
+        },
+    )
+    .expect("a bound blocked hand-back is recorded");
+    assert_eq!(
+        schedule_state(&dsl_early),
+        Some(mm_dsl::LiveDelegationScheduleState::Blocked),
+        "a blocked hand-back on a bound channel waits to requeue"
+    );
+
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed under its workers");
+    }
+    for (interaction_id, operation_id, worker) in [
+        (&late_interaction, &dsl_late, "live-worker-late"),
+        (&early_interaction, &dsl_early, "live-worker-early"),
+    ] {
+        apply(
+            mm_dsl::MeerkatMachineInput::ReconcileRevokedLiveDelegationWorkerAfterRestart {
+                session_id: session_id.to_string(),
+                channel_id: dsl_channel.clone(),
+                interaction_id: interaction_id.clone(),
+                operation_id: operation_id.clone(),
+                worker_identity: worker.to_string(),
+                terminal: mm_dsl::LiveDelegationWorkerTerminalKind::Blocked,
+            },
+        )
+        .expect("the closed channel's worker settles");
+        assert_eq!(
+            schedule_state(operation_id),
+            Some(mm_dsl::LiveDelegationScheduleState::Cancelled),
+            "{worker}: a blocked hand-back on a closed channel settles Cancelled"
+        );
+    }
+}
+
+/// Restart recovery takes a worker's terminal from the Mob's durable work: a
+/// completed turn. While the channel was bound the coordinator recorded that
+/// completion as its classification against the worker's item: a blocked
+/// hand-back, or Failed or Cancelled from the item. The restart
+/// reconciliation accepts the completed observation against each recorded
+/// classification and settles the operation as the in-process close settles
+/// the same recorded terminal (a blocked hand-back Cancelled, the others as
+/// recorded), late and never result-eligible, and an exact replay converges.
+/// An observation that contradicts a recorded completion is refused.
+#[tokio::test]
+async fn restart_recovery_settles_a_recorded_classification_of_a_completed_turn() {
+    use mm_dsl::LiveDelegationScheduleState as State;
+    use mm_dsl::LiveDelegationWorkerTerminalKind as Terminal;
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-restart-classified");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-restart-classified");
+    let fence_token = 31;
+    let generation = 4;
+    // (name, recorded terminal, schedule state it settles in after a restart)
+    let cases = [
+        ("blocked", Terminal::Blocked, State::Cancelled),
+        ("failed", Terminal::Failed, State::Failed),
+        ("cancelled", Terminal::Cancelled, State::Cancelled),
+        ("completed", Terminal::Completed, State::Completed),
+    ];
+    let identities = cases
+        .iter()
+        .map(|(name, ..)| {
+            let (interaction, _, operation) = live_delegation_identity(
+                &channel,
+                &format!("provider-delegation-{name}"),
+                &format!("provider-turn-{name}"),
+            );
+            (interaction, operation, format!("live-worker-{name}"))
+        })
+        .collect::<Vec<_>>();
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        for ((name, ..), (interaction_id, operation_id, worker)) in cases.iter().zip(&identities) {
+            seed_admitted_live_delegation(
+                &mut state,
+                &dsl_channel,
+                interaction_id,
+                operation_id,
+                &format!("provider-turn-{name}"),
+            );
+            state.live_delegation_reconciliation_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationReconciliation::Confirmed,
+            );
+            state
+                .live_delegation_worker_identity_by_operation
+                .insert(operation_id.clone(), worker.clone());
+            state.live_delegation_worker_phase_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationWorkerPhase::Running,
+            );
+            state
+                .live_delegation_schedule_state_by_operation
+                .insert(operation_id.clone(), State::Running);
+        }
+        state
+            .live_delegation_active_worker_count_by_channel
+            .insert(dsl_channel.clone(), 4);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("four running workers on a bound channel");
+    }
+    let apply = |input: mm_dsl::MeerkatMachineInput| {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+    };
+    let state = || {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone()
+    };
+    let restart_input = |index: usize, terminal: Terminal| {
+        let (interaction_id, operation_id, worker) = &identities[index];
+        mm_dsl::MeerkatMachineInput::ReconcileRevokedLiveDelegationWorkerAfterRestart {
+            session_id: session_id.to_string(),
+            channel_id: dsl_channel.clone(),
+            interaction_id: interaction_id.clone(),
+            operation_id: operation_id.clone(),
+            worker_identity: worker.clone(),
+            terminal,
+        }
+    };
+
+    // While the channel is bound, the coordinator records each worker's
+    // classified terminal; the bound realization then retires the worker.
+    for ((name, recorded, _), (interaction_id, operation_id, worker)) in
+        cases.iter().zip(&identities)
+    {
+        apply(
+            mm_dsl::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+                channel_id: dsl_channel.clone(),
+                runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+                generation: mm_dsl::Generation::from_domain(generation),
+                interaction_id: interaction_id.clone(),
+                operation_id: operation_id.clone(),
+                worker_identity: worker.clone(),
+                terminal: *recorded,
+            },
+        )
+        .unwrap_or_else(|error| panic!("{name}: the bound terminal is recorded: {error:?}"));
+    }
+    // The process stops; the restart finds the channel revoked and each
+    // worker retired.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        for (_, operation_id, _) in &identities {
+            state.live_delegation_worker_phase_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationWorkerPhase::Retired,
+            );
+        }
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("retired workers of a revoked channel");
+    }
+
+    for (index, (name, recorded, settled)) in cases.iter().enumerate().take(3) {
+        let operation_id = &identities[index].1;
+        apply(restart_input(index, Terminal::Completed)).unwrap_or_else(|error| {
+            panic!(
+                "{name}: restart recovery accepts the completed turn behind the recorded classification: {error:?}"
+            )
+        });
+        let after = state();
+        assert_eq!(
+            after
+                .live_delegation_schedule_state_by_operation
+                .get(operation_id)
+                .copied(),
+            Some(*settled),
+            "{name}: settles as the close settles the recorded terminal"
+        );
+        assert_eq!(
+            after
+                .live_delegation_worker_terminal_by_operation
+                .get(operation_id)
+                .copied(),
+            Some(*recorded),
+            "{name}: the recorded classification stands"
+        );
+        assert!(
+            after
+                .live_delegation_late_terminal_operations
+                .contains(operation_id),
+            "{name}: late"
+        );
+        assert!(
+            !after
+                .live_delegation_result_eligible_operations
+                .contains(operation_id),
+            "{name}: never result-eligible"
+        );
+        apply(restart_input(index, Terminal::Completed))
+            .unwrap_or_else(|error| panic!("{name}: an exact replay converges: {error:?}"));
+        let replayed = state();
+        assert_eq!(
+            replayed
+                .live_delegation_schedule_state_by_operation
+                .get(operation_id)
+                .copied(),
+            Some(*settled),
+            "{name}: the replay changes nothing"
+        );
+        assert_eq!(
+            replayed
+                .live_delegation_worker_phase_by_operation
+                .get(operation_id)
+                .copied(),
+            after
+                .live_delegation_worker_phase_by_operation
+                .get(operation_id)
+                .copied(),
+            "{name}: the replay changes nothing"
+        );
+    }
+
+    // A recorded completion: an observation that contradicts it is refused,
+    // the matching one reconciles.
+    assert!(
+        apply(restart_input(3, Terminal::Failed)).is_err(),
+        "an observation that contradicts a recorded completion is refused"
+    );
+    apply(restart_input(3, Terminal::Completed)).expect("a recorded completion reconciles");
+    assert_eq!(
+        state()
+            .live_delegation_schedule_state_by_operation
+            .get(&identities[3].1)
+            .copied(),
+        Some(State::Completed)
+    );
+}
+
+/// Every arm a delegation of a closed channel takes after the close needs its
+/// session still registered: the transcript reconciliation (confirmed,
+/// conflict, missing), the worker start and its resolution, the busy-source
+/// requeue, the consequential effect, and the steer's authorization,
+/// delivery and reconciliation (confirmed, conflict, missing); so does the
+/// shell's mirror of the start resolution check. Each is accepted on the
+/// closed channel while the session is registered and refused once the real
+/// unregistration committed.
+#[tokio::test]
+async fn every_post_close_arm_needs_a_registered_session() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register");
+    let channel = meerkat_core::LiveChannelId::new("live-post-close-arms-registered");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:post-close-arms-registered");
+    let fence_token = 31;
+    let generation = 4;
+    let binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token,
+        generation,
+    );
+    // One delegation per post-close step: still to reconcile; confirmed and
+    // ready to start; its start authorized; its start failed; running with a
+    // steer awaiting delivery.
+    let (provisional_interaction, _, dsl_provisional) = live_delegation_identity(
+        &channel,
+        "provider-delegation-provisional",
+        "provider-turn-provisional",
+    );
+    let (ready_interaction, _, dsl_ready) =
+        live_delegation_identity(&channel, "provider-delegation-ready", "provider-turn-ready");
+    let (starting_interaction, starting, dsl_starting) = live_delegation_identity(
+        &channel,
+        "provider-delegation-starting",
+        "provider-turn-starting",
+    );
+    let (failed_interaction, failed, dsl_failed) = live_delegation_identity(
+        &channel,
+        "provider-delegation-failed",
+        "provider-turn-failed",
+    );
+    let (steered_interaction, steered, dsl_steered) = live_delegation_identity(
+        &channel,
+        "provider-delegation-steered",
+        "provider-turn-steered",
+    );
+    let handoff = |operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+        meerkat_core::LiveUserTurnCorrelation,
+    >| {
+        meerkat_core::ProvisionalLiveHandoff::new(
+            operation.domain_correlation().clone(),
+            "write the plan",
+            meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+        )
+        .expect("provisional handoff")
+    };
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        for (interaction_id, operation_id, provider_turn, confirmed) in [
+            (
+                &provisional_interaction,
+                &dsl_provisional,
+                "provider-turn-provisional",
+                false,
+            ),
+            (&ready_interaction, &dsl_ready, "provider-turn-ready", true),
+            (
+                &starting_interaction,
+                &dsl_starting,
+                "provider-turn-starting",
+                true,
+            ),
+            (
+                &failed_interaction,
+                &dsl_failed,
+                "provider-turn-failed",
+                true,
+            ),
+            (
+                &steered_interaction,
+                &dsl_steered,
+                "provider-turn-steered",
+                true,
+            ),
+        ] {
+            seed_admitted_live_delegation(
+                &mut state,
+                &dsl_channel,
+                interaction_id,
+                operation_id,
+                provider_turn,
+            );
+            if confirmed {
+                state.live_delegation_reconciliation_by_operation.insert(
+                    operation_id.clone(),
+                    mm_dsl::LiveDelegationReconciliation::Confirmed,
+                );
+            }
+        }
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("admitted delegations on a bound channel");
+    }
+    // While the channel is bound: one start authorized, one start failed, and
+    // one worker running with a steer awaiting delivery.
+    machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &starting,
+            &handoff(&starting),
+            "live-worker-starting",
+        )
+        .await
+        .expect("a worker start authorized");
+    let failed_admission = machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &failed,
+            &handoff(&failed),
+            "live-worker-failed",
+        )
+        .await
+        .expect("a worker start authorized");
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &failed_admission,
+            false,
+        )
+        .await
+        .expect("the start failed");
+    let steered_admission = machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &steered,
+            &handoff(&steered),
+            "live-worker-steered",
+        )
+        .await
+        .expect("a worker start authorized");
+    machine
+        .resolve_live_delegation_worker_start(
+            &runtime_id,
+            fence_token,
+            generation,
+            &steered_admission,
+            true,
+        )
+        .await
+        .expect("the worker runs");
+    machine
+        .authorize_live_delegation_steer(
+            &binding,
+            &steered,
+            "continuation-steered",
+            "digest-steered",
+        )
+        .await
+        .expect("a steer awaiting delivery");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        // The generated close also drops the channel's identity; the
+        // session's unregistration requires every channel's close.
+        state.live_channel_identity_by_channel.remove(&dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed under its delegations");
+    }
+
+    let runtime = || mm_dsl::AgentRuntimeId::from_domain(&runtime_id);
+    let fence = || mm_dsl::FenceToken::from_domain(fence_token);
+    let generation_of = || mm_dsl::Generation::from_domain(generation);
+    let transcript = |committed: bool, matches: bool| {
+        mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: dsl_channel.clone(),
+            runtime_id: runtime(),
+            fence_token: fence(),
+            generation: generation_of(),
+            interaction_id: provisional_interaction.clone(),
+            operation_id: dsl_provisional.clone(),
+            provider_turn_correlation: "provider-turn-provisional".to_string(),
+            final_transcript_committed: committed,
+            normalized_digest_matches: matches,
+        }
+    };
+    let steer = |committed: bool, matches: bool| {
+        mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationSteer {
+            channel_id: dsl_channel.clone(),
+            runtime_id: runtime(),
+            fence_token: fence(),
+            generation: generation_of(),
+            operation_id: dsl_steered.clone(),
+            continuation_id: "continuation-steered".to_string(),
+            continuation_committed: committed,
+            committed_digest_matches: matches,
+        }
+    };
+    let inputs = || {
+        vec![
+            (
+                "ReconcileLiveDelegationTranscriptConfirmed",
+                transcript(true, true),
+            ),
+            (
+                "ReconcileLiveDelegationTranscriptMaterialConflict",
+                transcript(true, false),
+            ),
+            (
+                "ReconcileLiveDelegationTranscriptMissing",
+                transcript(false, false),
+            ),
+            (
+                "AuthorizeLiveDelegationWorkerStart",
+                mm_dsl::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: runtime(),
+                    fence_token: fence(),
+                    generation: generation_of(),
+                    interaction_id: ready_interaction.clone(),
+                    operation_id: dsl_ready.clone(),
+                    provider_turn_correlation: "provider-turn-ready".to_string(),
+                    worker_identity: "live-worker-ready".to_string(),
+                    worker_ownership:
+                        crate::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+                },
+            ),
+            (
+                "ResolveLiveDelegationWorkerStart",
+                mm_dsl::MeerkatMachineInput::ResolveLiveDelegationWorkerStart {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: runtime(),
+                    fence_token: fence(),
+                    generation: generation_of(),
+                    interaction_id: starting_interaction.clone(),
+                    operation_id: dsl_starting.clone(),
+                    worker_identity: "live-worker-starting".to_string(),
+                    started: true,
+                },
+            ),
+            (
+                "RequeueUnstartedLiveDelegation",
+                mm_dsl::MeerkatMachineInput::RequeueLiveDelegation {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: runtime(),
+                    fence_token: fence(),
+                    generation: generation_of(),
+                    interaction_id: failed_interaction.clone(),
+                    operation_id: dsl_failed.clone(),
+                },
+            ),
+            (
+                "AuthorizeLiveConsequentialEffect",
+                mm_dsl::MeerkatMachineInput::AuthorizeLiveConsequentialEffect {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: runtime(),
+                    fence_token: fence(),
+                    generation: generation_of(),
+                    interaction_id: ready_interaction.clone(),
+                    operation_id: dsl_ready.clone(),
+                    authority_id: "authority-ready".to_string(),
+                },
+            ),
+            (
+                "AuthorizeLiveDelegationSteer",
+                mm_dsl::MeerkatMachineInput::AuthorizeLiveDelegationSteer {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: runtime(),
+                    fence_token: fence(),
+                    generation: generation_of(),
+                    interaction_id: starting_interaction.clone(),
+                    operation_id: dsl_starting.clone(),
+                    provider_turn_correlation: "provider-turn-starting".to_string(),
+                    continuation_id: "continuation-new".to_string(),
+                    continuation_digest: "digest-new".to_string(),
+                },
+            ),
+            (
+                "ResolveLiveDelegationSteerDelivery",
+                mm_dsl::MeerkatMachineInput::ResolveLiveDelegationSteerDelivery {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: runtime(),
+                    fence_token: fence(),
+                    generation: generation_of(),
+                    operation_id: dsl_steered.clone(),
+                    continuation_id: "continuation-steered".to_string(),
+                    delivered: true,
+                },
+            ),
+            ("ReconcileLiveDelegationSteerConfirmed", steer(true, true)),
+            (
+                "ReconcileLiveDelegationSteerMaterialConflict",
+                steer(true, false),
+            ),
+            ("ReconcileLiveDelegationSteerMissing", steer(false, false)),
+        ]
+    };
+
+    // While the session is registered, the closed channel serves each arm.
+    let registered = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        .clone();
+    let arms = inputs();
+    assert_eq!(arms.len(), 12, "every post-close arm");
+    for (arm, input) in arms {
+        let mut probe = mm_dsl::MeerkatMachineAuthority::recover_from_state(registered.clone())
+            .expect("the registered session's closed channel");
+        let accepted = mm_dsl::MeerkatMachineMutator::apply(&mut probe, input).map(|_| ());
+        assert!(
+            accepted.is_ok(),
+            "{arm}: accepted on the closed channel while the session is registered: {accepted:?}"
+        );
+    }
+    assert!(
+        runtime_control::live_delegation_worker_start_binding_admits(
+            &registered,
+            &runtime_id,
+            fence_token,
+            generation,
+            &starting,
+            "live-worker-starting",
+        ),
+        "the shell's start resolution check admits the registered session's closed channel"
+    );
+
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("the session unregisters");
+    let unregistered = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        .clone();
+    assert!(
+        unregistered.session_id.is_none(),
+        "the session is unregistered"
+    );
+    for (arm, input) in inputs() {
+        let refused = {
+            let mut authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+        };
+        assert!(
+            refused.is_err(),
+            "{arm}: an unregistered session's closed channel refuses it"
+        );
+    }
+    assert!(
+        !runtime_control::live_delegation_worker_start_binding_admits(
+            &unregistered,
+            &runtime_id,
+            fence_token,
+            generation,
+            &starting,
+            "live-worker-starting",
+        ),
+        "the shell's start resolution check refuses once the session is unregistered"
+    );
+}
+
+/// The coordinator's close sweep closes the channel's delegation intake under
+/// the channel's exact binding: from then on neither admission arm admits a
+/// delegation on the channel, while a delegation admitted before keeps its
+/// custody and still starts after the close. A stale binding cannot close the
+/// intake, closing it again changes nothing, and the intake of a channel that
+/// is already unbound cannot be closed (nothing is admitted on it anyway).
+#[tokio::test]
+async fn a_closed_delegation_intake_admits_nothing() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-intake-closed");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-intake-closed");
+    let fence_token = 31;
+    let generation = 4;
+    let binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token,
+        generation,
+    );
+    let stale_binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token + 1,
+        generation,
+    );
+    // One delegation admitted before the close; one provider turn whose
+    // delegation reaches the machine after it.
+    let (admitted_interaction, admitted, dsl_admitted) = live_delegation_identity(
+        &channel,
+        "provider-delegation-admitted",
+        "provider-turn-admitted",
+    );
+    let (late_interaction, late, _) =
+        live_delegation_identity(&channel, "provider-delegation-late", "provider-turn-late");
+    let handoff = |operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+        meerkat_core::LiveUserTurnCorrelation,
+    >| {
+        meerkat_core::ProvisionalLiveHandoff::new(
+            operation.domain_correlation().clone(),
+            "book the small room",
+            meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+        )
+        .expect("provisional handoff")
+    };
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &admitted_interaction,
+            &dsl_admitted,
+            "provider-turn-admitted",
+        );
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_admitted.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        // The provider's next user turn is active on the channel.
+        state
+            .live_interaction_channel_by_id
+            .insert(late_interaction.clone(), dsl_channel.clone());
+        state
+            .live_active_interaction_by_channel
+            .insert(dsl_channel.clone(), late_interaction.clone());
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("an admitted delegation and an active turn on a bound channel");
+    }
+    let state = || {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone()
+    };
+    let joined = || mm_dsl::MeerkatMachineInput::AdmitLiveInteractionDelegation {
+        session_id: session_id.to_string(),
+        channel_id: dsl_channel.clone(),
+        runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+        fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+        generation: mm_dsl::Generation::from_domain(generation),
+        interaction_id: "interaction-joined".to_string(),
+        operation_id: mm_dsl::OperationId::from_domain(&OperationId::new()),
+        provider_turn_correlation: "provider-turn-joined".to_string(),
+        delegation_identity_present: true,
+        actionable_input_present: true,
+        exact_join: true,
+    };
+    // The joined admission arm needs a channel without an active turn.
+    let without_active_turn = || {
+        let mut state = state();
+        state
+            .live_active_interaction_by_channel
+            .remove(&dsl_channel);
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the same channel without an active turn")
+    };
+
+    // While the intake is open, both admission arms admit.
+    {
+        let mut probe =
+            mm_dsl::MeerkatMachineAuthority::recover_from_state(state()).expect("an open intake");
+        assert!(
+            mm_dsl::MeerkatMachineMutator::apply(
+                &mut probe,
+                mm_dsl::MeerkatMachineInput::AdmitLiveDelegation {
+                    channel_id: dsl_channel.clone(),
+                    runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                    fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+                    generation: mm_dsl::Generation::from_domain(generation),
+                    interaction_id: late_interaction.clone(),
+                    operation_id: mm_dsl::OperationId::from_domain(late.operation_id()),
+                    provider_turn_correlation: "provider-turn-late".to_string(),
+                    delegation_identity_present: true,
+                    actionable_input_present: true,
+                    exact_join: true,
+                },
+            )
+            .is_ok(),
+            "an open intake admits the provider turn's delegation"
+        );
+    }
+    {
+        let mut probe = without_active_turn();
+        assert!(
+            mm_dsl::MeerkatMachineMutator::apply(&mut probe, joined()).is_ok(),
+            "an open intake admits a joined turn and delegation"
+        );
+    }
+
+    // A stale binding cannot close the intake.
+    assert!(
+        machine
+            .close_live_delegation_intake(&stale_binding)
+            .await
+            .is_err(),
+        "a stale binding cannot close the channel's intake"
+    );
+    assert!(
+        !machine
+            .live_delegation_intake_closed(&session_id, &channel)
+            .await
+            .expect("intake readable")
+    );
+
+    // The close sweep closes it; closing again changes nothing.
+    machine
+        .close_live_delegation_intake(&binding)
+        .await
+        .expect("the close sweep closes the channel's intake");
+    machine
+        .close_live_delegation_intake(&binding)
+        .await
+        .expect("closing again changes nothing");
+    assert!(
+        machine
+            .live_delegation_intake_closed(&session_id, &channel)
+            .await
+            .expect("intake readable")
+    );
+
+    // Neither admission arm admits on the closed intake.
+    assert!(
+        machine
+            .admit_live_delegation(&binding, &late, &handoff(&late))
+            .await
+            .is_err(),
+        "a closed intake refuses the provider turn's delegation"
+    );
+    {
+        let mut probe = without_active_turn();
+        assert!(
+            mm_dsl::MeerkatMachineMutator::apply(&mut probe, joined()).is_err(),
+            "a closed intake refuses a joined turn and delegation"
+        );
+    }
+
+    // The delegation admitted before the close keeps its custody and starts
+    // after the channel closed.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed with a delegation admitted before");
+    }
+    machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &admitted,
+            &handoff(&admitted),
+            "live-worker-admitted",
+        )
+        .await
+        .expect("a delegation admitted before the intake closed starts after the close");
+
+    // An unbound channel's intake cannot be closed: it admits nothing anyway.
+    let other_channel = meerkat_core::LiveChannelId::new("live-intake-never-bound");
+    assert!(
+        machine
+            .close_live_delegation_intake(
+                &crate::live_execution::LiveDelegationRuntimeBinding::new(
+                    session_id.clone(),
+                    other_channel,
+                    runtime_id.clone(),
+                    fence_token,
+                    generation,
+                )
+            )
+            .await
+            .is_err(),
+        "an unbound channel's intake cannot be closed"
+    );
+}
+
 #[cfg(feature = "live")]
 #[tokio::test]
 async fn live_delegation_runtime_reconciles_already_committed_worker_edges() {
@@ -1308,6 +3233,7 @@ async fn assert_fenced_registration_target_and_authority_contract(
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: "recover me".into(),
         typed_turn_appends: Vec::new(),
@@ -1719,7 +3645,7 @@ fn store_with_held_rehydration(binding: &str) -> Arc<crate::handles::FailingOAut
     let store = Arc::new(crate::handles::FailingOAuthSnapshotStore::default());
     let store_dyn: Arc<dyn crate::store::RuntimeStore> = store.clone();
     let flows = crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
-        Duration::from_secs(600),
+        Duration::from_mins(10),
         Arc::new(crate::handles::RuntimeAuthLeaseHandle::new()),
         &store_dyn,
     );
@@ -1972,7 +3898,7 @@ fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_sto
             target.clone(),
             device_provider,
             "device-code".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         )
         .expect("persistent runtime authority admits device OAuth state");
     drop(first);
@@ -2025,7 +3951,7 @@ fn persistent_oauth_device_consume_prunes_durable_snapshot_for_sqlite_store() {
             target.clone(),
             provider,
             "consumed-device-code".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         )
         .expect("persistent runtime authority admits device OAuth state");
     machine
@@ -2210,7 +4136,7 @@ fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {
             target.clone(),
             device_provider,
             "released-device-code".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         )
         .expect("persistent runtime authority admits device OAuth state");
     machine
@@ -2294,7 +4220,7 @@ fn oauth_device_expiry_clears_runtime_lifecycle_membership() {
             target,
             provider,
             device_code.to_string(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .expect("registry expiry should expire the AuthMachine flow membership");
 }
@@ -3130,6 +5056,7 @@ fn make_prompt(text: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),
@@ -3154,6 +5081,7 @@ fn make_queued_external_event(label: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "batch_commit_atomicity".into(),
         payload: serde_json::json!({ "label": label }),
@@ -3879,7 +5807,7 @@ async fn held_teardown_session() -> HeldTeardownSession {
         .expect("the registered session exposes its exact registration");
     // The watcher waits for the unregister it joins under its caller grace;
     // keep that wait open for the whole test.
-    machine.test_set_unregister_caller_wait_grace(Duration::from_secs(3600));
+    machine.test_set_unregister_caller_wait_grace(Duration::from_hours(1));
     HeldTeardownSession {
         store,
         machine,
@@ -3897,10 +5825,14 @@ async fn held_teardown_session() -> HeldTeardownSession {
 /// store's execution custody free for an immediate reopen.
 ///
 /// The unregister is held in its executor cleanup until the test has seen the
-/// watcher dispatch its wait, and the current-thread runtime runs the watcher
-/// to its first suspension before this test resumes, so no scheduling decides
-/// what is observed. Every wait is bounded, and the unregister is released and
-/// joined before anything observed is judged.
+/// watcher dispatch its wait, so the watcher is still waiting when the test
+/// counts the machine's handles. The runtime loop and the watcher run on
+/// runtimes of their own and upgrade their weak handles for moments (the
+/// watcher reports its wait before its kickoff drops the machine), so the
+/// count is read until it settles at this test's one handle, within a bound:
+/// a watcher that waited with the machine would hold it for the whole wait.
+/// Every wait is bounded, and the unregister is released and joined before
+/// anything observed is judged.
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
@@ -3912,7 +5844,6 @@ async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
         cleanup_started,
         release_cleanup,
     } = held_teardown_session().await;
-    let handles = Arc::strong_count(&machine);
     let watcher_wait = machine.test_witness_next_unregister_wait();
 
     // The shutdown owner starts the exact unregister and follows its result.
@@ -3927,7 +5858,16 @@ async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
     let watcher_dispatched = tokio::time::timeout(Duration::from_secs(5), watcher_wait).await;
     let cleanup_reached =
         tokio::time::timeout(Duration::from_secs(5), cleanup_started.notified()).await;
-    let handles_while_waiting = Arc::strong_count(&machine);
+    let handles_while_waiting = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let handles = Arc::strong_count(&machine);
+            if handles == 1 || tokio::time::Instant::now() >= deadline {
+                break handles;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
 
     // Release and join the unregister before judging what was observed.
     release_cleanup.notify_one();
@@ -3947,7 +5887,7 @@ async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
     );
     cleanup_reached.expect("the unregister reaches its held executor cleanup");
     assert_eq!(
-        handles_while_waiting, handles,
+        handles_while_waiting, 1,
         "the watcher waits for the unregister without retaining the machine"
     );
     joined
@@ -5852,7 +7792,7 @@ async fn mixed_directed_max_attempt_failure_terminalizes_only_exhausted_contribu
     /// reruns, on a runner executing roughly twenty concurrent jobs. The bound
     /// exists so a genuinely stuck choreography fails instead of hanging the
     /// suite, and a generous one serves that identically.
-    const STEP_BOUND: Duration = Duration::from_secs(60);
+    const STEP_BOUND: Duration = Duration::from_mins(1);
 
     struct MixedMaxAttemptsExecutor {
         apply_calls: Arc<AtomicUsize>,
@@ -6289,6 +8229,7 @@ async fn idle_explicit_steer_peer_request_runs_through_runtime_loop() {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::Request {
             request_id: "req-123".into(),
@@ -6585,6 +8526,7 @@ fn make_progress_input(label: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::ResponseProgress {
             request_id: format!("req-{label}"),
@@ -6997,7 +8939,7 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
         &session_id,
         CommsDrainMode::PersistentHost,
         comms_runtime,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .await;
 
@@ -13979,6 +15921,1925 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
     );
 }
 
+/// An until-changed switch-turn releases the session mutation gate while its
+/// LLM reconfigure runs, so another caller can admit an input in that gap.
+/// When the reconfigure then fails, the switch-turn caller still gets the
+/// error and the switch is withdrawn, but the admitted input keeps its
+/// generated phase beside its ledger row and is answered once an executor
+/// serves the session: a failed switch withdraws only its own request.
+#[tokio::test]
+async fn until_changed_switch_turn_failure_keeps_an_input_admitted_in_its_gap() {
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for NoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "baseline".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "persistent-target".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist: true,
+    }));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    // Pause the switch-turn in its gap: it has staged the request and released
+    // the session mutation gate for the reconfigure, which has not run yet.
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_uuid = uuid(601);
+    let request_key = request_uuid.to_string();
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(request_uuid),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    };
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                request,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state in the gap");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the switch-turn staged its request before it released the gate"
+    );
+    assert_eq!(
+        staged.model_routing_pending_switch_phase,
+        Some(mm_dsl::RoutingSwitchTurnPhase::ApplyingPersistentReconfigure)
+    );
+
+    // Another caller admits an input while the reconfigure is in flight.
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "admitted while the model switch is in flight",
+        None,
+    ));
+    let input_id = input.id().clone();
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("admit an input while the switch-turn holds no gate");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("the admitted input registers a completion waiter");
+    let queued = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the admission");
+    assert_eq!(
+        queued.input_phases.get(&input_id.to_string()).copied(),
+        Some(mm_dsl::InputPhase::Queued),
+        "the admitted input is queued in generated state"
+    );
+
+    // The reconfigure runs and fails: the host refuses to persist it.
+    release_tx.send(()).expect("release the reconfigure");
+    let switch_error = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect_err("a failed reconfigure fails the switch-turn");
+    assert!(
+        switch_error
+            .to_string()
+            .contains("injected persist failure"),
+        "the switch-turn caller gets the reconfigure error: {switch_error:?}"
+    );
+
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the failed switch");
+    assert_eq!(
+        after.input_phases.get(&input_id.to_string()).copied(),
+        Some(mm_dsl::InputPhase::Queued),
+        "the input admitted in the switch-turn gap keeps its generated phase"
+    );
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(after.model_routing_pending_switch_phase, None);
+    assert_eq!(after.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("registered session entry");
+        let driver = entry.driver.lock().await;
+        assert!(
+            driver.ledger().get(&input_id).is_some(),
+            "the admitted input keeps its ledger row"
+        );
+    }
+
+    // The admitted input is answered once an executor serves the session.
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await
+        .expect("an executor attaches after the failed switch");
+    let answered = tokio::time::timeout(Duration::from_secs(5), completion.wait())
+        .await
+        .expect("the admitted input is answered once an executor serves the session")
+        .expect("the admitted input completes");
+    assert!(
+        matches!(
+            answered,
+            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult
+        ),
+        "the admitted input completes normally: {answered:?}"
+    );
+}
+
+/// A target the host cannot resolve fails an until-changed switch-turn
+/// before its reconfigure runs, with the session mutation gate still held.
+/// The switch-turn caller gets the refusal, generated authority withdraws
+/// the staged request (no pending switch, no terminal, the baseline kept),
+/// and a later switch-turn is admitted instead of meeting a stuck request.
+#[tokio::test]
+async fn until_changed_switch_turn_prepare_failure_withdraws_its_request() {
+    struct UnresolvableTargetHost;
+
+    #[async_trait::async_trait]
+    impl SessionLlmReconfigureHost for UnresolvableTargetHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: meerkat_core::SessionLlmIdentity {
+                    model: "baseline".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                },
+                current_visibility_state: Default::default(),
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: BTreeSet::new(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Err(RuntimeDriverError::ValidationFailed {
+                reason: "injected unresolvable target".to_string(),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _identity: &meerkat_core::SessionLlmIdentity,
+            _capability_surface: Option<&SessionLlmCapabilitySurface>,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "an unresolved target is never applied".to_string(),
+            ))
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            _visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "an unresolved target is never applied".to_string(),
+            ))
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "an unresolved target is never persisted".to_string(),
+            ))
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(UnresolvableTargetHost));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let request_uuid = uuid(602);
+    let request_key = request_uuid.to_string();
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(request_uuid),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("unresolvable-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    };
+    let error = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        request,
+    )
+    .await
+    .expect_err("an unresolvable target fails the switch-turn");
+    assert!(
+        error.to_string().contains("injected unresolvable target"),
+        "the switch-turn caller gets the target refusal: {error:?}"
+    );
+
+    let state = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the failed switch");
+    assert_eq!(state.model_routing_pending_switch_request_id, None);
+    assert_eq!(state.model_routing_pending_switch_phase, None);
+    assert_eq!(state.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(
+        state.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+
+    // A stuck pending request would deny this as a scoped-override conflict.
+    let next_request = finite_switch_request(
+        603,
+        "turn-target",
+        meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+    );
+    let next = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        next_request,
+    )
+    .await
+    .expect("a finite switch-turn is decided after the withdrawal");
+    assert!(
+        matches!(
+            next,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the withdrawn request leaves no pending switch behind: {next:?}"
+    );
+}
+
+/// A stop can land in an until-changed switch-turn's reconfigure gap: it
+/// terminalizes the input queued then and leaves the session stopped, and the
+/// stopped session refuses the reconfigure. The switch-turn caller gets that
+/// refusal, the request is withdrawn in the stopped phase (no pending switch,
+/// no approval entry, no terminal, the baseline kept), and the stop stands:
+/// the session stays stopped and the input keeps the phase the stop gave it.
+#[tokio::test]
+async fn until_changed_switch_turn_failure_after_a_stop_in_its_gap_keeps_the_stop() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "baseline".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "persistent-target".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist: false,
+    }));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_uuid = uuid(604);
+    let request_key = request_uuid.to_string();
+    let request = SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(request_uuid),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::Approved,
+        approval_reason: Some(
+            meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold,
+        ),
+    };
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                request,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state in the gap");
+    assert_eq!(
+        staged
+            .model_routing_approval_phases
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingApprovalPhase::Approved),
+        "the approved request recorded its approval before it released the gate"
+    );
+    assert_eq!(
+        staged
+            .model_routing_approval_parent_kind
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingApprovalParentKind::SwitchTurn)
+    );
+
+    // In the gap another caller admits an input, then the session is stopped.
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "admitted before a stop in the model switch gap",
+        None,
+    ));
+    let input_id = input.id().clone();
+    assert!(
+        adapter
+            .accept_input(&session_id, input)
+            .await
+            .expect("admit an input while the switch-turn holds no gate")
+            .is_accepted()
+    );
+    adapter
+        .stop_runtime_executor(&session_id, "stop in the switch-turn gap")
+        .await
+        .expect("stop the session while the switch-turn holds no gate");
+    let stopped = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the stop");
+    assert_eq!(stopped.lifecycle_phase, mm_dsl::MeerkatPhase::Stopped);
+    assert_eq!(
+        stopped.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the stop leaves the staged request to its switch-turn"
+    );
+    let stopped_input_phase = stopped.input_phases.get(&input_id.to_string()).copied();
+    assert!(
+        stopped_input_phase.is_some(),
+        "the stop keeps a phase for the input it terminalized"
+    );
+
+    // The reconfigure runs against the stopped session, which refuses it.
+    release_tx.send(()).expect("release the reconfigure");
+    let switch_error = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect_err("a stopped session fails the switch-turn's reconfigure")
+        .to_string();
+    assert!(
+        switch_error.contains("ReconfigureSessionLlmIdentity") && switch_error.contains("Stopped"),
+        "the switch-turn caller gets the reconfigure's own refusal: {switch_error}"
+    );
+
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the failed switch");
+    assert_eq!(
+        after.input_phases.get(&input_id.to_string()).copied(),
+        stopped_input_phase,
+        "the input admitted in the gap keeps the phase the stop gave it"
+    );
+    assert_eq!(
+        after.lifecycle_phase,
+        mm_dsl::MeerkatPhase::Stopped,
+        "the failed switch leaves the stop standing"
+    );
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(after.model_routing_pending_switch_phase, None);
+    assert_eq!(after.model_routing_approval_phases.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_approval_parent_kind.get(&request_key),
+        None
+    );
+    assert_eq!(after.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("the stopped session keeps its registration");
+    assert_eq!(snapshot.control.phase, RuntimeState::Stopped);
+}
+
+/// A reconfigure host for the until-changed rows below: the session starts on
+/// `baseline`, and every reconfigure resolves `persistent-target`.
+fn until_changed_reconfigure_host(fail_persist: bool) -> Arc<TestLlmReconfigureHost> {
+    let identity = |model: &str| meerkat_core::SessionLlmIdentity {
+        model: model.to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        auth_binding: None,
+    };
+    Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(identity("baseline"))),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: identity("persistent-target"),
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(true),
+        base_tool_names: BTreeSet::new(),
+        fail_persist,
+    })
+}
+
+/// An until-changed switch-turn onto `persistent-target` that needs no
+/// approval.
+fn until_changed_switch_request(n: u128) -> SwitchTurnRequest {
+    SwitchTurnRequest {
+        request_id: meerkat_core::image_generation::SwitchTurnRequestId::new(uuid(n)),
+        intent: meerkat_core::image_generation::SwitchTurnIntent {
+            target_model: model("persistent-target"),
+            duration: meerkat_core::image_generation::SwitchTurnDuration::UntilChanged,
+            origin: meerkat_core::image_generation::SwitchTurnOrigin::SystemPolicy {
+                reason: meerkat_core::image_generation::SwitchTurnPolicyReason::SafetyHandoff,
+            },
+        },
+        target_realtime: realtime_policy(true),
+        approval: ModelRoutingApprovalDisposition::NotRequired,
+        approval_reason: None,
+    }
+}
+
+/// One until-changed switch-turn is pending at a time. A second request that
+/// arrives while the first is in its reconfigure gap is refused with the
+/// scoped-override conflict a finite switch meets, and the first completes:
+/// its reconfigure applies, it sets the baseline and it is recorded as
+/// applied. Before, the second request replaced the first's pending switch,
+/// so the first's completion was refused after its reconfigure had applied.
+///
+/// The refused request stays denied: its approved retry after the first
+/// completes is answered with the recorded denial and stages nothing, and a
+/// later request applies. Before, the retry was staged but answered as
+/// denied, its reconfigure never ran, and the switch it left pending refused
+/// every later switch until the session was reloaded.
+#[tokio::test]
+async fn until_changed_switch_turn_refuses_a_second_request_while_one_is_pending() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let first_key = uuid(605).to_string();
+    let first_switch = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(605),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the first switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // In the gap a second until-changed request arrives.
+    let second_key = uuid(606).to_string();
+    let second_result = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(606),
+    )
+    .await
+    .expect("the second switch-turn is answered");
+    assert!(
+        matches!(
+            second_result,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "a second until-changed request is refused while one is pending: {second_result:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state in the gap");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(first_key.clone()),
+        "the first request stays the pending switch"
+    );
+
+    release_tx.send(()).expect("release the first reconfigure");
+    let first_result = tokio::time::timeout(Duration::from_secs(5), first_switch)
+        .await
+        .expect("the first switch-turn settles")
+        .expect("the first switch-turn task does not panic")
+        .expect("the first switch-turn applies after the second is refused");
+    assert!(
+        matches!(
+            first_result,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the first switch-turn applies: {first_result:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the switch");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after.model_routing_switch_terminal.get(&first_key).copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&second_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::Denied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+
+    // The refused request is retried, now that nothing is pending.
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(606),
+    )
+    .await
+    .expect("the retry of the refused request is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "the retry of a denied request is answered with its recorded denial: {retried:?}"
+    );
+    let after_retry = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the retry");
+    assert_eq!(
+        after_retry.model_routing_pending_switch_request_id, None,
+        "the retry of a denied request stages nothing"
+    );
+    assert_eq!(
+        after_retry
+            .model_routing_switch_denials
+            .get(&second_key)
+            .copied(),
+        Some(mm_dsl::RoutingDenialReason::ScopedOverrideConflict)
+    );
+
+    // Generated authority stages no request under an id that holds a denial.
+    let staged_again = adapter
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                request_id: second_key.clone(),
+                target_model: "persistent-target".to_string(),
+                target_realtime_capable: true,
+                requires_approval: false,
+                approval_available: true,
+                approval_denied: false,
+                approval_reason: None,
+                realtime_detach_allowed: false,
+                target_carries_transcript: true,
+            },
+            "RequestSwitchTurn(approved request under a denied id)",
+        )
+        .await;
+    assert!(
+        staged_again.is_err(),
+        "an approved until-changed request under a denied id matches no arm"
+    );
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state after the refused input")
+            .model_routing_pending_switch_request_id,
+        None
+    );
+
+    // A later request is not refused behind the retried one.
+    let later_key = uuid(617).to_string();
+    let later = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(617),
+    )
+    .await
+    .expect("a later switch-turn is answered");
+    assert!(
+        matches!(
+            later,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "a later switch-turn applies: {later:?}"
+    );
+    let settled = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the later switch");
+    assert_eq!(settled.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        settled
+            .model_routing_switch_terminal
+            .get(&later_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+}
+
+/// A stop can land after an until-changed switch-turn's reconfigure applied
+/// and before the switch-turn takes the session mutation gate again. The
+/// switch still completes: the baseline follows the reconfigured model, the
+/// request is recorded as applied and leaves no pending switch, and the stop
+/// stands. Before, the stopped session refused the baseline and the
+/// completion, so the caller got an error after its reconfigure had applied
+/// and the pending switch stayed.
+#[tokio::test]
+async fn until_changed_switch_turn_completes_after_a_stop_that_follows_its_reconfigure() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_post_reconfigure_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(607).to_string();
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(607),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn's reconfigure returns")
+        .expect("the post-reconfigure hold reports its entry");
+
+    // The reconfigure has applied. Before the switch-turn takes the gate
+    // again, the session is stopped.
+    adapter
+        .stop_runtime_executor(&session_id, "stop after the switch-turn reconfigure")
+        .await
+        .expect("stop the session while the switch-turn holds no gate");
+    let stopped = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the stop");
+    assert_eq!(stopped.lifecycle_phase, mm_dsl::MeerkatPhase::Stopped);
+    assert_eq!(
+        stopped.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the stop leaves the staged request to its switch-turn"
+    );
+
+    release_tx.send(()).expect("release the switch-turn");
+    let switch_result = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect("the switch-turn completes on the stopped session");
+    assert!(
+        matches!(
+            switch_result,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the switch-turn applies: {switch_result:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the switch");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(after.model_routing_pending_switch_phase, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target"),
+        "the baseline follows the reconfigured model"
+    );
+    assert_eq!(
+        after.lifecycle_phase,
+        mm_dsl::MeerkatPhase::Stopped,
+        "the stop stands"
+    );
+}
+
+/// A session unregistered in an until-changed switch-turn's reconfigure gap
+/// fails the reconfigure, and the switch-turn then cannot take the session
+/// mutation gate again. Nothing is left to withdraw, and the caller gets the
+/// reconfigure's own error, not the gate's refusal.
+#[tokio::test]
+async fn until_changed_switch_turn_failure_after_an_unregister_in_its_gap_keeps_its_error() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let switch_turn = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(608),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // In the gap the session is unregistered.
+    adapter
+        .unregister_session(&session_id)
+        .await
+        .expect("unregister the session while the switch-turn holds no gate");
+
+    release_tx.send(()).expect("release the reconfigure");
+    let switch_error = tokio::time::timeout(Duration::from_secs(5), switch_turn)
+        .await
+        .expect("the switch-turn settles")
+        .expect("the switch-turn task does not panic")
+        .expect_err("the reconfigure of an unregistered session fails");
+    assert!(
+        matches!(switch_error, RuntimeDriverError::Internal(_)),
+        "the caller gets the reconfigure's own error, not the gate's refusal: {switch_error:?}"
+    );
+    assert!(
+        adapter.session_dsl_state(&session_id).await.is_err(),
+        "the session is gone, so nothing is left to withdraw"
+    );
+}
+
+/// A caller that drops an until-changed switch-turn inside its reconfigure gap
+/// leaves the switch pending. Another request is refused while it is pending,
+/// and a retry of the same request finishes it: the switch applies, the
+/// baseline follows it and nothing stays pending.
+#[tokio::test]
+async fn until_changed_switch_turn_abandoned_in_its_gap_is_finished_by_its_retry() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(609).to_string();
+    let abandoned = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(609),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // The caller drops the switch-turn while it waits in the gap.
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("the abandoned switch-turn does not finish")
+            .is_cancelled()
+    );
+    drop(release_tx);
+    let stranded = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the caller left");
+    assert_eq!(
+        stranded.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the abandoned request stays the pending switch"
+    );
+
+    let other = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(610),
+    )
+    .await
+    .expect("another switch-turn is answered");
+    assert!(
+        matches!(
+            other,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "another request is refused while the abandoned one is pending: {other:?}"
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(609),
+    )
+    .await
+    .expect("the retry of the abandoned request is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the retry finishes the abandoned request: {retried:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the retry");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
+/// A finite switch-turn waits for the next assistant-turn boundary. An
+/// until-changed request that arrives meanwhile is refused with the
+/// scoped-override conflict, and the finite switch is kept: it activates at
+/// the next turn. Before, the until-changed request replaced the staged
+/// finite switch, which then never took effect although its caller had been
+/// told it applied.
+#[tokio::test]
+async fn until_changed_switch_turn_is_refused_while_a_finite_switch_waits_for_its_turn() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let finite_key = uuid(611).to_string();
+    let finite = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite_switch_request(
+            611,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        ),
+    )
+    .await
+    .expect("the finite switch-turn is answered");
+    assert!(
+        matches!(
+            finite,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the finite switch-turn is accepted for the next turn: {finite:?}"
+    );
+
+    let until_changed_key = uuid(612).to_string();
+    let until_changed = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(612),
+    )
+    .await
+    .expect("the until-changed switch-turn is answered");
+    assert!(
+        matches!(
+            until_changed,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "an until-changed request is refused while a finite switch waits for its turn: {until_changed:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refusal");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(finite_key.clone()),
+        "the finite switch stays the pending switch"
+    );
+    assert!(staged.model_routing_pending_switch_turns.is_some());
+    assert_eq!(
+        staged
+            .model_routing_switch_terminal
+            .get(&until_changed_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::Denied)
+    );
+    assert_eq!(
+        staged.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("the next assistant turn is admitted");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("read the routing status");
+    assert_eq!(
+        status.effective_model.as_str(),
+        "turn-target",
+        "the finite switch activates at the next turn"
+    );
+}
+
+/// A retry of a pending until-changed request finishes it, but an
+/// until-changed request that reuses the id of a staged finite switch never
+/// takes that switch over: no arm accepts it, so the caller gets an error and
+/// nothing is recorded under the id, and the finite switch stays staged and
+/// activates at the next turn.
+#[tokio::test]
+async fn until_changed_switch_turn_reusing_a_staged_finite_id_is_refused() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let request_key = uuid(613).to_string();
+    <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite_switch_request(
+            613,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        ),
+    )
+    .await
+    .expect("the finite switch-turn is accepted for the next turn");
+
+    let reused = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(613),
+    )
+    .await;
+    assert!(
+        matches!(reused, Err(RuntimeDriverError::Internal(_))),
+        "an until-changed request that reuses a staged finite switch's id is refused: {reused:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refusal");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the finite switch stays the pending switch"
+    );
+    assert!(staged.model_routing_pending_switch_turns.is_some());
+    assert_eq!(
+        staged.model_routing_pending_switch_target_model.as_deref(),
+        Some("turn-target")
+    );
+    assert_eq!(staged.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(staged.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        staged.model_routing_baseline_model.as_deref(),
+        Some("baseline")
+    );
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("the next assistant turn is admitted");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("read the routing status");
+    assert_eq!(
+        status.effective_model.as_str(),
+        "turn-target",
+        "the finite switch activates at the next turn"
+    );
+}
+
+/// A retry of a pending until-changed request that cannot be accepted (not
+/// approved, or onto a target that cannot carry the session's transcript)
+/// records no denial: a denial under the request's id would answer the retry
+/// that finishes it as denied and leave the switch pending. Its caller gets
+/// an error, nothing is recorded under the id, and an approved retry then
+/// finishes the switch. Before, the refused retry was recorded as denied, and
+/// every later retry of the request was answered as denied.
+#[tokio::test]
+async fn until_changed_switch_turn_refused_retry_of_a_pending_request_records_no_denial() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(614).to_string();
+    let abandoned = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(614),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // The caller drops the switch-turn while it waits in the gap.
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("the abandoned switch-turn does not finish")
+            .is_cancelled()
+    );
+    drop(release_tx);
+
+    let mut denied_retry = until_changed_switch_request(614);
+    denied_retry.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_retry.approval_reason =
+        Some(meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold);
+    let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_retry,
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(RuntimeDriverError::Internal(_))),
+        "a retry of the pending request whose approval is denied is an error, not a denial: {denied:?}"
+    );
+
+    let mut unavailable_retry = until_changed_switch_request(614);
+    unavailable_retry.approval = ModelRoutingApprovalDisposition::RequiredButUnavailable;
+    let unavailable = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        unavailable_retry,
+    )
+    .await;
+    assert!(
+        matches!(unavailable, Err(RuntimeDriverError::Internal(_))),
+        "a retry of the pending request whose approval is unavailable is an error, not a denial: {unavailable:?}"
+    );
+
+    // The input a retry carries when its host reports that the target cannot
+    // carry the session's transcript.
+    let uncarried = adapter
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::RequestUntilChangedSwitchTurn {
+                request_id: request_key.clone(),
+                target_model: "persistent-target".to_string(),
+                target_realtime_capable: true,
+                requires_approval: false,
+                approval_available: true,
+                approval_denied: false,
+                approval_reason: None,
+                realtime_detach_allowed: false,
+                target_carries_transcript: false,
+            },
+            "RequestSwitchTurn(retry onto a target that cannot carry the transcript)",
+        )
+        .await;
+    assert!(
+        uncarried.is_err(),
+        "a retry of the pending request onto a target that cannot carry the transcript matches no arm"
+    );
+
+    let refused = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refused retries");
+    assert_eq!(
+        refused.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the refused retries leave the request pending"
+    );
+    assert_eq!(
+        refused.model_routing_switch_terminal.get(&request_key),
+        None
+    );
+    assert_eq!(refused.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        refused.model_routing_approval_phases.get(&request_key),
+        None
+    );
+    assert_eq!(
+        refused
+            .model_routing_switch_approval_reasons
+            .get(&request_key),
+        None
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(614),
+    )
+    .await
+    .expect("the approved retry is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "an approved retry finishes the request after the refused ones: {retried:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the approved retry");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(after.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
+/// A finite request that reuses the id of a pending until-changed switch is
+/// not answered as a denial: a denial under the pending switch's id would
+/// answer the retry that finishes it as denied, and the switch would stay
+/// pending. Whichever refusal it would meet (a pending switch, its approval
+/// denied or unavailable, a target that cannot carry the session's
+/// transcript), its caller gets an error and nothing is recorded under the
+/// id; the until-changed request's approved retry then finishes the switch.
+#[tokio::test]
+async fn finite_switch_turn_reusing_a_pending_until_changed_id_records_no_denial() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+
+    let request_key = uuid(615).to_string();
+    let abandoned = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(615),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    // The caller drops the switch-turn while it waits in the gap.
+    abandoned.abort();
+    assert!(
+        abandoned
+            .await
+            .expect_err("the abandoned switch-turn does not finish")
+            .is_cancelled()
+    );
+    drop(release_tx);
+
+    let finite_reuse = || {
+        finite_switch_request(
+            615,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    };
+    let conflicting = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite_reuse(),
+    )
+    .await;
+    assert!(
+        matches!(conflicting, Err(RuntimeDriverError::Internal(_))),
+        "a finite request with the pending switch's id is an error, not a conflict denial: {conflicting:?}"
+    );
+
+    let mut denied_reuse = finite_reuse();
+    denied_reuse.approval = ModelRoutingApprovalDisposition::DeniedByUser;
+    denied_reuse.approval_reason =
+        Some(meerkat_core::image_generation::SwitchTurnApprovalReason::CostExceedsThreshold);
+    let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        denied_reuse,
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(RuntimeDriverError::Internal(_))),
+        "a finite request with the pending switch's id whose approval is denied is an error: {denied:?}"
+    );
+
+    let mut unavailable_reuse = finite_reuse();
+    unavailable_reuse.approval = ModelRoutingApprovalDisposition::RequiredButUnavailable;
+    let unavailable = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        unavailable_reuse,
+    )
+    .await;
+    assert!(
+        matches!(unavailable, Err(RuntimeDriverError::Internal(_))),
+        "a finite request with the pending switch's id whose approval is unavailable is an error: {unavailable:?}"
+    );
+
+    // The input a finite request carries when its host reports that the
+    // target cannot carry the session's transcript.
+    let uncarried = adapter
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::RequestFiniteSwitchTurn {
+                request_id: request_key.clone(),
+                target_model: "turn-target".to_string(),
+                turns: 1,
+                target_realtime_capable: true,
+                requires_approval: false,
+                approval_available: true,
+                approval_denied: false,
+                approval_reason: None,
+                realtime_detach_allowed: false,
+                target_carries_transcript: false,
+            },
+            "RequestSwitchTurn(finite request onto a target that cannot carry the transcript)",
+        )
+        .await;
+    assert!(
+        uncarried.is_err(),
+        "a finite request with the pending switch's id onto a target that cannot carry the transcript matches no arm"
+    );
+
+    let refused = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the refused requests");
+    assert_eq!(
+        refused.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the refused requests leave the until-changed switch pending"
+    );
+    assert_eq!(refused.model_routing_pending_switch_turns, None);
+    assert_eq!(
+        refused.model_routing_pending_switch_target_model.as_deref(),
+        Some("persistent-target")
+    );
+    assert_eq!(
+        refused.model_routing_switch_terminal.get(&request_key),
+        None
+    );
+    assert_eq!(refused.model_routing_switch_denials.get(&request_key), None);
+    assert_eq!(
+        refused.model_routing_approval_phases.get(&request_key),
+        None
+    );
+    assert_eq!(
+        refused
+            .model_routing_switch_approval_reasons
+            .get(&request_key),
+        None
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        until_changed_switch_request(615),
+    )
+    .await
+    .expect("the approved retry is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the until-changed request's approved retry finishes it: {retried:?}"
+    );
+    let after = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the approved retry");
+    assert_eq!(after.model_routing_pending_switch_request_id, None);
+    assert_eq!(
+        after
+            .model_routing_switch_terminal
+            .get(&request_key)
+            .copied(),
+        Some(mm_dsl::RoutingSwitchTurnTerminal::PersistentReconfigureApplied)
+    );
+    assert_eq!(
+        after.model_routing_baseline_model.as_deref(),
+        Some("persistent-target")
+    );
+}
+
+/// A retry of a finite switch-turn that waits for its turn is not answered
+/// as a denial: the conflict refusal it met recorded a denial under the
+/// staged switch's id, and answered its caller as denied, although the
+/// switch still activates at the next turn. The retry is an error that
+/// records nothing, and the switch activates as it was accepted.
+#[tokio::test]
+async fn finite_switch_turn_retry_of_a_staged_request_records_no_denial() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let request_key = uuid(616).to_string();
+    let finite = || {
+        finite_switch_request(
+            616,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    };
+    let accepted = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite(),
+    )
+    .await
+    .expect("the finite switch-turn is answered");
+    assert!(
+        matches!(
+            accepted,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the finite switch-turn is accepted for the next turn: {accepted:?}"
+    );
+
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite(),
+    )
+    .await;
+    assert!(
+        matches!(retried, Err(RuntimeDriverError::Internal(_))),
+        "a retry of the staged finite switch is an error, not a conflict denial: {retried:?}"
+    );
+    let staged = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the retry");
+    assert_eq!(
+        staged.model_routing_pending_switch_request_id,
+        Some(request_key.clone()),
+        "the finite switch stays the pending switch"
+    );
+    assert!(staged.model_routing_pending_switch_turns.is_some());
+    assert_eq!(staged.model_routing_switch_terminal.get(&request_key), None);
+    assert_eq!(staged.model_routing_switch_denials.get(&request_key), None);
+
+    <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("the next assistant turn is admitted");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("read the routing status");
+    assert_eq!(
+        status.effective_model.as_str(),
+        "turn-target",
+        "the finite switch activates at the next turn"
+    );
+}
+
+/// A finite switch-turn refused while another switch is pending stays
+/// denied: its retry after that switch completes is answered with the
+/// recorded denial, stages nothing, and the next turn keeps the session's
+/// model. Before, the retry was staged and its caller told it was denied,
+/// although its target took the next turn.
+#[tokio::test]
+async fn finite_switch_turn_retry_of_a_denied_request_stays_denied() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session(session_id.clone())
+        .await
+        .expect("register session");
+    adapter.set_session_llm_reconfigure_host(until_changed_reconfigure_host(false));
+    <MeerkatMachine as SessionServiceRuntimeExt>::configure_model_routing_baseline(
+        &adapter,
+        &session_id,
+        model("baseline"),
+        true,
+    )
+    .await
+    .expect("configure the routing baseline");
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    *adapter
+        .test_switch_turn_reconfigure_gap_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, release_rx));
+    let pending_switch = {
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+                &adapter,
+                &session_id,
+                until_changed_switch_request(618),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the until-changed switch-turn reaches its reconfigure gap")
+        .expect("the gap hold reports its entry");
+
+    let finite_key = uuid(619).to_string();
+    let finite = || {
+        finite_switch_request(
+            619,
+            "turn-target",
+            meerkat_core::image_generation::FiniteScopedTurnDuration::OneTurn,
+        )
+    };
+    let denied = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite(),
+    )
+    .await
+    .expect("the finite switch-turn is answered");
+    assert!(
+        matches!(
+            denied,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "a finite request is refused while another switch is pending: {denied:?}"
+    );
+
+    release_tx
+        .send(())
+        .expect("release the until-changed reconfigure");
+    let applied = tokio::time::timeout(Duration::from_secs(5), pending_switch)
+        .await
+        .expect("the until-changed switch-turn settles")
+        .expect("the until-changed switch-turn task does not panic")
+        .expect("the until-changed switch-turn applies");
+    assert!(
+        matches!(
+            applied,
+            meerkat_core::image_generation::SwitchTurnControlResult::Applied { .. }
+        ),
+        "the until-changed switch-turn applies: {applied:?}"
+    );
+
+    // The refused finite request is retried, now that nothing is pending.
+    let retried = <MeerkatMachine as SessionServiceRuntimeExt>::request_switch_turn(
+        &adapter,
+        &session_id,
+        finite(),
+    )
+    .await
+    .expect("the retry of the refused request is answered");
+    assert!(
+        matches!(
+            retried,
+            meerkat_core::image_generation::SwitchTurnControlResult::Denied {
+                reason:
+                    meerkat_core::image_generation::SwitchTurnDenialReason::ScopedOverrideConflict,
+                ..
+            }
+        ),
+        "the retry of a denied request is answered with its recorded denial: {retried:?}"
+    );
+    let after_retry = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("read the session state after the retry");
+    assert_eq!(
+        after_retry.model_routing_pending_switch_request_id, None,
+        "the retry of a denied request stages nothing"
+    );
+    assert_eq!(
+        after_retry
+            .model_routing_switch_denials
+            .get(&finite_key)
+            .copied(),
+        Some(mm_dsl::RoutingDenialReason::ScopedOverrideConflict)
+    );
+
+    // Generated authority stages no request under an id that holds a denial.
+    let staged_again = adapter
+        .apply_session_dsl_input(
+            &session_id,
+            mm_dsl::MeerkatMachineInput::RequestFiniteSwitchTurn {
+                request_id: finite_key.clone(),
+                target_model: "turn-target".to_string(),
+                turns: 1,
+                target_realtime_capable: true,
+                requires_approval: false,
+                approval_available: true,
+                approval_denied: false,
+                approval_reason: None,
+                realtime_detach_allowed: false,
+                target_carries_transcript: true,
+            },
+            "RequestSwitchTurn(finite request under a denied id)",
+        )
+        .await;
+    assert!(
+        staged_again.is_err(),
+        "a finite request under a denied id matches no arm"
+    );
+    assert_eq!(
+        adapter
+            .session_dsl_state(&session_id)
+            .await
+            .expect("read the session state after the refused input")
+            .model_routing_pending_switch_request_id,
+        None
+    );
+
+    // The next assistant turn has no switch to admit, so the refused target
+    // does not take it.
+    let admitted =
+        <MeerkatMachine as SessionServiceRuntimeExt>::admit_model_routing_assistant_turn(
+            &adapter,
+            &session_id,
+        )
+        .await;
+    assert!(
+        admitted.is_err(),
+        "no switch is staged for the next assistant turn: {admitted:?}"
+    );
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::session_model_routing_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("read the routing status");
+    assert_eq!(
+        status.effective_model.as_str(),
+        "persistent-target",
+        "the denied finite switch does not take the next turn"
+    );
+}
+
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -18305,138 +22166,174 @@ async fn a_queued_cancel_point_whose_first_archival_fails_keeps_the_error_and_te
     );
 }
 
-/// #1471: a boundary cancel taken after the runtime loop started a run but
-/// before the executor entered it (here: blocked at the top of `apply`) is not
-/// lost. The executor receives a cooperative cancel bound to that exact run
-/// while the run is still in flight, nothing reaches the ambient
-/// executor-wide cancel, and nothing hard-cancels the run.
-#[tokio::test]
-async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
-    struct ExactBoundaryHandle {
-        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
-        exact_cancel_seen: Arc<Notify>,
+/// A boundary-cancel probe executor. Its first `apply` parks until the row
+/// releases it; every later `apply` returns at once. It records the exact-run
+/// cancels its boundary handle receives (when it has a handle), the
+/// executor-wide cancels the runtime loop applies, and the hard cancels. With
+/// `refuse_idle_cancel`, its executor-wide cancel refuses when no run is in
+/// `apply`, as an executor that forwards `SessionError::NotRunning` does.
+#[derive(Clone, Default)]
+struct BoundaryCancelProbe {
+    apply_started: Arc<Notify>,
+    allow_apply: Arc<Notify>,
+    applies: Arc<AtomicUsize>,
+    in_apply: Arc<AtomicBool>,
+    exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
+    exact_cancel_seen: Arc<Notify>,
+    executor_wide_cancels: Arc<AtomicUsize>,
+    hard_cancels: Arc<AtomicUsize>,
+}
+
+impl BoundaryCancelProbe {
+    fn exact_cancels(&self) -> Vec<RunId> {
+        self.exact_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
-    #[async_trait::async_trait]
-    impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for ExactBoundaryHandle {
-        async fn cancel_after_boundary(
-            &self,
-            expected_run_id: &RunId,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            self.exact_cancels
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(expected_run_id.clone());
-            self.exact_cancel_seen.notify_one();
-            Ok(())
-        }
+    fn executor_wide_cancels(&self) -> usize {
+        self.executor_wide_cancels.load(Ordering::SeqCst)
     }
 
-    struct CountingInterruptHandle {
-        hard_cancels: Arc<AtomicUsize>,
+    fn hard_cancels(&self) -> usize {
+        self.hard_cancels.load(Ordering::SeqCst)
+    }
+}
+
+struct BoundaryCancelProbeHandle {
+    probe: BoundaryCancelProbe,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for BoundaryCancelProbeHandle {
+    async fn cancel_after_boundary(
+        &self,
+        expected_run_id: &RunId,
+        _reason: String,
+    ) -> Result<(), CoreExecutorError> {
+        self.probe
+            .exact_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(expected_run_id.clone());
+        self.probe.exact_cancel_seen.notify_one();
+        Ok(())
+    }
+}
+
+struct BoundaryCancelProbeInterrupt {
+    probe: BoundaryCancelProbe,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for BoundaryCancelProbeInterrupt {
+    async fn hard_cancel_run_if_current(
+        &self,
+        _expected_run_id: &RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.probe.hard_cancels.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    }
+}
+
+struct BoundaryCancelProbeExecutor {
+    probe: BoundaryCancelProbe,
+    with_boundary_handle: bool,
+    refuse_idle_cancel: bool,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for BoundaryCancelProbeExecutor {
+    fn boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
+        self.with_boundary_handle.then(|| {
+            Arc::new(BoundaryCancelProbeHandle {
+                probe: self.probe.clone(),
+            }) as Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>
+        })
     }
 
-    #[async_trait::async_trait]
-    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
-        async fn hard_cancel_run_if_current(
-            &self,
-            _expected_run_id: &RunId,
-            _reason: String,
-        ) -> Result<bool, CoreExecutorError> {
-            self.hard_cancels.fetch_add(1, Ordering::SeqCst);
-            Ok(true)
-        }
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(BoundaryCancelProbeInterrupt {
+            probe: self.probe.clone(),
+        }))
     }
 
-    struct GatedExecutor {
-        apply_started: Arc<Notify>,
-        allow_apply: Arc<Notify>,
-        ambient_cancels: Arc<AtomicUsize>,
-        exact_cancels: Arc<std::sync::Mutex<Vec<RunId>>>,
-        exact_cancel_seen: Arc<Notify>,
-        hard_cancels: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl CoreExecutor for GatedExecutor {
-        fn boundary_handle(
-            &self,
-        ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
-            Some(Arc::new(ExactBoundaryHandle {
-                exact_cancels: Arc::clone(&self.exact_cancels),
-                exact_cancel_seen: Arc::clone(&self.exact_cancel_seen),
-            }))
-        }
-
-        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
-            Some(Arc::new(CountingInterruptHandle {
-                hard_cancels: Arc::clone(&self.hard_cancels),
-            }))
-        }
-
-        async fn apply(
-            &mut self,
-            run_id: RunId,
-            primitive: RunPrimitive,
-        ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            let allowed = self.allow_apply.notified();
-            self.apply_started.notify_one();
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let first = self.probe.applies.fetch_add(1, Ordering::SeqCst) == 0;
+        self.probe.in_apply.store(true, Ordering::SeqCst);
+        if first {
+            let allowed = self.probe.allow_apply.notified();
+            self.probe.apply_started.notify_one();
             allowed.await;
-            Ok(CoreApplyOutput::with_untyped_snapshot(
-                RunBoundaryReceiptDraft {
-                    run_id,
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                },
-                None,
-                None,
-            ))
         }
-
-        async fn cancel_after_boundary(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            self.ambient_cancels.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn stop_runtime_executor(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            Ok(())
-        }
+        self.probe.in_apply.store(false, Ordering::SeqCst);
+        Ok(CoreApplyOutput::with_untyped_snapshot(
+            RunBoundaryReceiptDraft {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+            },
+            None,
+            None,
+        ))
     }
 
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.probe
+            .executor_wide_cancels
+            .fetch_add(1, Ordering::SeqCst);
+        if self.refuse_idle_cancel && !self.probe.in_apply.load(Ordering::SeqCst) {
+            return Err(CoreExecutorError::control_failed_runtime(
+                "session not running: no run is active",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+/// Register a session served by a [`BoundaryCancelProbeExecutor`], admit one
+/// prompt, and wait until its run is parked at the top of the executor's
+/// `apply`. Returns the machine, the session, the parked run and the prompt's
+/// completion.
+async fn a_run_parked_before_the_probe_executor_enters(
+    probe: &BoundaryCancelProbe,
+    with_boundary_handle: bool,
+    refuse_idle_cancel: bool,
+) -> (
+    Arc<MeerkatMachine>,
+    SessionId,
+    RunId,
+    crate::completion::CompletionHandle,
+) {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    let apply_started = Arc::new(Notify::new());
-    let allow_apply = Arc::new(Notify::new());
-    let ambient_cancels = Arc::new(AtomicUsize::new(0));
-    let exact_cancels = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let exact_cancel_seen = Arc::new(Notify::new());
-    let hard_cancels = Arc::new(AtomicUsize::new(0));
     adapter
         .register_session_with_executor(
             session_id.clone(),
-            Box::new(GatedExecutor {
-                apply_started: Arc::clone(&apply_started),
-                allow_apply: Arc::clone(&allow_apply),
-                ambient_cancels: Arc::clone(&ambient_cancels),
-                exact_cancels: Arc::clone(&exact_cancels),
-                exact_cancel_seen: Arc::clone(&exact_cancel_seen),
-                hard_cancels: Arc::clone(&hard_cancels),
+            Box::new(BoundaryCancelProbeExecutor {
+                probe: probe.clone(),
+                with_boundary_handle,
+                refuse_idle_cancel,
             }),
         )
         .await
-        .expect("register the gated executor");
-
-    let started = apply_started.notified();
-    let (outcome, _completion) = adapter
+        .expect("register the probe executor");
+    let started = probe.apply_started.notified();
+    let (outcome, completion) = adapter
         .accept_input_with_completion(&session_id, make_prompt("cancelled before entry"))
         .await
         .expect("admit the prompt");
@@ -18451,9 +22348,66 @@ async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
         .expect("machine state")
         .current_run_id
         .expect("the started run");
+    let run_id = RunId::from_uuid(uuid::Uuid::parse_str(&run_id.0).expect("run id"));
+    (
+        adapter,
+        session_id,
+        run_id,
+        completion.expect("the admitted prompt has a completion"),
+    )
+}
+
+/// Wait for one input's completion (hang guard only) and require that it
+/// completed.
+async fn expect_input_completed(completion: crate::completion::CompletionHandle, context: &str) {
+    let outcome = tokio::time::timeout(Duration::from_secs(30), completion.wait())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: the input's completion arrives"))
+        .unwrap_or_else(|error| panic!("{context}: the input's completion resolves: {error:?}"));
+    assert!(
+        matches!(
+            outcome,
+            CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult
+        ),
+        "{context}: the input completes: {outcome:?}"
+    );
+}
+
+/// Admit one more prompt on `session_id` and wait until it completed: the
+/// session still serves input, and every runtime-loop effect queued before it
+/// has been realized.
+async fn expect_the_session_serves_a_next_input(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    context: &str,
+) {
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(session_id, make_prompt("the next turn"))
+        .await
+        .unwrap_or_else(|error| panic!("{context}: the session admits its next input: {error:?}"));
+    assert!(outcome.is_accepted(), "{context}: {outcome:?}");
+    expect_input_completed(
+        completion.unwrap_or_else(|| panic!("{context}: the next input has a completion")),
+        context,
+    )
+    .await;
+}
+
+/// #1471: a boundary cancel taken after the runtime loop started a run but
+/// before the executor entered it (here: parked at the top of `apply`) is not
+/// lost. The executor receives a cooperative cancel bound to that exact run
+/// while the run is in flight, and nothing hard-cancels the run. Nothing
+/// reaches the executor-wide cancel either, while the run is in flight or
+/// after it: the row checks once the run and a next input have completed, so
+/// every runtime-loop effect the cancel could have left has been realized.
+#[tokio::test]
+async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
+    let probe = BoundaryCancelProbe::default();
+    let (adapter, session_id, run_id, first) =
+        a_run_parked_before_the_probe_executor_enters(&probe, true, false).await;
 
     // The cancel lands while the executor has not entered the run yet.
-    let delivered = exact_cancel_seen.notified();
+    let delivered = probe.exact_cancel_seen.notified();
     adapter
         .cancel_after_boundary(&session_id)
         .await
@@ -18461,28 +22415,107 @@ async fn boundary_cancel_before_the_executor_enters_reaches_that_exact_run() {
     tokio::time::timeout(Duration::from_secs(30), delivered)
         .await
         .expect("the run-bound cancel reaches the executor while the run is in flight");
-    allow_apply.notify_one();
-
-    let exact = exact_cancels
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     assert_eq!(
-        exact,
-        vec![RunId::from_uuid(
-            uuid::Uuid::parse_str(&run_id.0).expect("run id")
-        )],
+        probe.executor_wide_cancels(),
+        0,
+        "nothing reaches the executor-wide cancel while the run is in flight"
+    );
+    probe.allow_apply.notify_one();
+    expect_input_completed(first, "the cancelled run").await;
+    expect_the_session_serves_a_next_input(&adapter, &session_id, "after the cancelled run").await;
+
+    assert_eq!(
+        probe.exact_cancels(),
+        vec![run_id],
         "the cancel is bound to that exact run"
     );
     assert_eq!(
-        ambient_cancels.load(Ordering::SeqCst),
+        probe.executor_wide_cancels(),
         0,
-        "nothing reaches the ambient executor-wide cancel"
+        "nothing reaches the executor-wide cancel, after the run either"
+    );
+    assert_eq!(probe.hard_cancels(), 0, "nothing hard-cancels the run");
+}
+
+/// A boundary cancel taken while a run is current leaves the session
+/// serving. The executor here refuses an executor-wide cancel when no run is
+/// active, as an executor that forwards `SessionError::NotRunning` does; it is
+/// never asked for one, so after the cancelled run the runtime keeps running
+/// and admits and completes the next input.
+#[tokio::test]
+async fn a_boundary_cancelled_run_leaves_the_session_serving_its_next_input() {
+    let probe = BoundaryCancelProbe::default();
+    let (adapter, session_id, run_id, first) =
+        a_run_parked_before_the_probe_executor_enters(&probe, true, true).await;
+
+    let delivered = probe.exact_cancel_seen.notified();
+    adapter
+        .cancel_after_boundary(&session_id)
+        .await
+        .expect("cancel after boundary");
+    tokio::time::timeout(Duration::from_secs(30), delivered)
+        .await
+        .expect("the run-bound cancel reaches the executor while the run is in flight");
+    probe.allow_apply.notify_one();
+    expect_input_completed(first, "the cancelled run").await;
+
+    expect_the_session_serves_a_next_input(&adapter, &session_id, "after the cancelled run").await;
+    let state = adapter.existing_session_runtime_state(&session_id).await;
+    assert!(
+        !matches!(
+            state,
+            Some(RuntimeState::Stopped | RuntimeState::Destroyed) | None
+        ),
+        "the runtime keeps running after a boundary-cancelled run: {state:?}"
+    );
+    assert_eq!(probe.exact_cancels(), vec![run_id]);
+    assert_eq!(
+        probe.executor_wide_cancels(),
+        0,
+        "the executor-wide cancel is never asked for"
+    );
+}
+
+/// An exact-run boundary cancel taken before the executor enters the run, on
+/// an executor with no boundary handle, is held by the run's turn state
+/// (#1471) until the run enters, and nothing reaches the executor-wide
+/// cancel, while the run is in flight or after it.
+#[tokio::test]
+async fn an_exact_boundary_cancel_without_a_boundary_handle_is_held_by_the_runs_turn() {
+    let probe = BoundaryCancelProbe::default();
+    let (adapter, session_id, run_id, first) =
+        a_run_parked_before_the_probe_executor_enters(&probe, false, false).await;
+
+    let admitted = adapter
+        .cancel_after_boundary_run_if_current(&session_id, &run_id)
+        .await
+        .expect("an exact-run cancel of the current run");
+    assert!(admitted, "the parked run is current");
+    let held = adapter
+        .session_dsl_state(&session_id)
+        .await
+        .expect("machine state")
+        .cancel_after_boundary;
+    assert!(held, "the run's turn holds the cancel until the run enters");
+    assert_eq!(
+        probe.executor_wide_cancels(),
+        0,
+        "nothing reaches the executor-wide cancel while the run is in flight"
+    );
+    probe.allow_apply.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(30), first.wait())
+        .await
+        .expect("the cancelled run's completion arrives");
+    expect_the_session_serves_a_next_input(&adapter, &session_id, "after the cancelled run").await;
+
+    assert!(
+        probe.exact_cancels().is_empty(),
+        "the executor has no boundary handle"
     );
     assert_eq!(
-        hard_cancels.load(Ordering::SeqCst),
+        probe.executor_wide_cancels(),
         0,
-        "nothing hard-cancels the run"
+        "nothing reaches the executor-wide cancel, after the run either"
     );
 }
 
@@ -19847,7 +23880,7 @@ async fn wedged_durability_degradation_interrupt_is_process_owned_and_deduplicat
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_effect() {
+async fn cancel_after_boundary_on_a_running_attached_runtime_calls_only_the_live_handle() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
         live_boundary_cancel_calls: Arc<AtomicUsize>,
@@ -19986,7 +24019,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
     assert_eq!(
         boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "in-loop boundary cancel should remain queued until apply returns"
+        "nothing reaches the executor-wide cancel while the run is in flight"
     );
 
     allow_finish.notify_waiters();
@@ -19999,9 +24032,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
         .expect("queued work should complete after its apply is released")
     {
         CompletionOutcome::CompletedWithoutResult => {}
-        other => panic!(
-            "expected attached queued prompt to complete normally before queued boundary cancel drains, got {other:?}"
-        ),
+        other => panic!("expected the attached steered prompt to complete normally, got {other:?}"),
     }
 
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -20013,7 +24044,6 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
             if snapshot.control.phase == RuntimeState::Attached
                 && snapshot.control.current_run_id.is_none()
                 && snapshot.inputs.current_run_id.is_none()
-                && boundary_cancel_calls.load(Ordering::SeqCst) == 1
             {
                 break;
             }
@@ -20021,12 +24051,16 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
         }
     })
     .await
-    .expect("attached runtime should eventually drain the queued boundary cancel");
+    .expect("the attached runtime returns to Attached after the run");
     assert_eq!(
         apply_calls.load(Ordering::SeqCst),
         1,
-        "queued boundary cancel should not replay the already-running attached steered turn"
+        "the boundary cancel does not replay the already-running attached steered turn"
     );
+
+    // The next input's apply runs without waiting for a release.
+    allow_finish.notify_one();
+    expect_no_executor_wide_boundary_cancel(&adapter, &session_id, &boundary_cancel_calls).await;
 }
 
 /// Cancellation, retry, and ownership pins for the machine-owned stop /
@@ -22637,7 +26671,7 @@ mod stop_teardown_coordinator_class {
     }
 }
 
-/// Ask 21c defensive class tests (meerkat-studio P0): runtime-owned post-stop
+/// Ask 21c defensive class tests (downstream P0): runtime-owned post-stop
 /// cleanup that re-enters the machine to unregister the exact executor
 /// attachment must never run while the
 /// runtime-loop task holds the session mutation gate — that is a
@@ -23741,14 +27775,21 @@ async fn start_boundary_cancel_callback_race(
     .await
 }
 
-async fn wait_for_queued_boundary_cancel(calls: &AtomicUsize) {
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while calls.load(Ordering::SeqCst) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the exact queued boundary-cancel effect should be applied");
+/// A boundary cancel taken while a run is current reaches that run only
+/// through the exact-run boundary handle. Once the session has served a next
+/// input (the loop realizes its queued effects between runs, before it takes
+/// that input), nothing has reached the executor-wide cancel.
+async fn expect_no_executor_wide_boundary_cancel(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    executor_wide_calls: &AtomicUsize,
+) {
+    expect_the_session_serves_a_next_input(adapter, session_id, "after the cancelled run").await;
+    assert_eq!(
+        executor_wide_calls.load(Ordering::SeqCst),
+        0,
+        "a run-bound boundary cancel never reaches the executor-wide cancel"
+    );
 }
 
 /// #1471: an exact-run boundary cancel records the request in the run's
@@ -24410,7 +28451,7 @@ async fn exact_run_boundary_cancel_remains_admitted_after_unregister_drain_begin
         .expect("first apply should still be blocked");
 }
 
-/// M1 regression (meerkat-studio P0): a boundary handle that (wrongly)
+/// M1 regression (downstream P0): a boundary handle that (wrongly)
 /// re-enters `MeerkatMachine::cancel_after_boundary` from inside the
 /// machine's own dispatch used to recurse unboundedly — each lap re-staged
 /// the unguarded CancelAfterBoundary self-loop, re-emitted the
@@ -24589,10 +28630,13 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
 
 /// The live callback runs without the session mutation gate, so unrelated
 /// machine inputs may commit while it is in flight. That state movement is
-/// not evidence that this cancel reached a boundary: the exact dispatch must
-/// still be queued when its generation remains current.
+/// not evidence that this cancel reached a boundary: the exact dispatch still
+/// completes, once, through the live handle, its dispatch stays pending for
+/// the rest of the run (the fact that keeps a repeat cancel in the run from
+/// dispatching again), and nothing reaches the executor-wide cancel after
+/// the run.
 #[tokio::test]
-async fn cancel_after_boundary_unrelated_advance_during_callback_still_enqueues_exact_effect() {
+async fn cancel_after_boundary_unrelated_advance_during_callback_still_dispatches_once() {
     let mut race = start_boundary_cancel_callback_race(false).await;
     let cancel_adapter = Arc::clone(&race.adapter);
     let cancel_session = race.session_id.clone();
@@ -24624,11 +28668,19 @@ async fn cancel_after_boundary_unrelated_advance_during_callback_still_enqueues_
         .await
         .expect("cancel should return after callback release")
         .expect("cancel task should not panic")
-        .expect("successful live callback should commit its queued effect");
+        .expect("a successful live callback completes the dispatch");
     assert_eq!(
         race.handle_calls.load(Ordering::SeqCst),
         1,
         "unrelated state movement must not cause a duplicate live dispatch"
+    );
+    assert!(
+        race.adapter
+            .session_dsl_state(&race.session_id)
+            .await
+            .expect("running session should retain DSL authority")
+            .boundary_cancel_dispatch_pending,
+        "the unrelated advance leaves the delivered dispatch pending for the rest of the run"
     );
 
     race.first_apply_release
@@ -24636,7 +28688,12 @@ async fn cancel_after_boundary_unrelated_advance_during_callback_still_enqueues_
         .expect("race should expose its first-apply release")
         .send(())
         .expect("first apply should still be blocked");
-    wait_for_queued_boundary_cancel(&race.queued_effect_calls).await;
+    expect_no_executor_wide_boundary_cancel(
+        &race.adapter,
+        &race.session_id,
+        &race.queued_effect_calls,
+    )
+    .await;
 }
 
 /// A callback failure must compensate only its exact pending dispatch. An
@@ -24695,7 +28752,12 @@ async fn cancel_after_boundary_callback_failure_after_unrelated_advance_rearms_r
         .expect("race should expose its first-apply release")
         .send(())
         .expect("first apply should still be blocked");
-    wait_for_queued_boundary_cancel(&race.queued_effect_calls).await;
+    expect_no_executor_wide_boundary_cancel(
+        &race.adapter,
+        &race.session_id,
+        &race.queued_effect_calls,
+    )
+    .await;
 }
 
 /// Destroy may commit while the live embedder callback is outside the
@@ -24911,11 +28973,11 @@ async fn assert_boundary_cancel_callback_cannot_cross_same_id_replacement(fail_o
     assert_eq!(
         replacement.queued_effect_calls.load(Ordering::SeqCst),
         0,
-        "the old queued runtime effect must never reach the replacement executor"
+        "the old cancel must never reach the replacement's executor-wide cancel"
     );
 
-    // The replacement-owned callback and queued effect remain healthy after
-    // the stale old callback returns.
+    // The replacement-owned callback remains healthy after the stale old
+    // callback returns.
     replacement
         .callback_release
         .take()
@@ -24933,7 +28995,12 @@ async fn assert_boundary_cancel_callback_cannot_cross_same_id_replacement(fail_o
         .expect("replacement race should expose its first-apply release")
         .send(())
         .expect("replacement first apply should still be blocked");
-    wait_for_queued_boundary_cancel(&replacement.queued_effect_calls).await;
+    expect_no_executor_wide_boundary_cancel(
+        &replacement.adapter,
+        &replacement.session_id,
+        &replacement.queued_effect_calls,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -24986,11 +29053,12 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_started.notify_one();
-            self.allow_finish
-                .take()
-                .expect("blocking executor should only apply once")
-                .await
-                .expect("test release sender should stay alive until apply is released");
+            // Only the first apply blocks; a later one runs at once.
+            if let Some(allow_finish) = self.allow_finish.take() {
+                allow_finish
+                    .await
+                    .expect("test release sender should stay alive until apply is released");
+            }
 
             Ok(CoreApplyOutput::with_untyped_snapshot(
                 RunBoundaryReceiptDraft {
@@ -25063,7 +29131,7 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
         .await
         .expect("attached steered prompt should request immediate processing");
 
-    // The first cancel dispatches: live wake first, one queued effect.
+    // The first cancel dispatches: one live wake to the exact run.
     adapter
         .cancel_after_boundary(&session_id)
         .await
@@ -25093,7 +29161,7 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
     assert_eq!(
         queued_boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "runtime loop is still blocked inside apply, so the queued effect has not drained"
+        "nothing reaches the executor-wide cancel while the run is in flight"
     );
 
     allow_finish_tx
@@ -25104,22 +29172,13 @@ async fn cancel_after_boundary_repeat_burst_converges_to_single_dispatch() {
         other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
     }
 
-    // Exactly one queued effect was committed for the whole burst; it
-    // drains once the loop is released.
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if queued_boundary_cancel_calls.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the single committed boundary-cancel effect should drain after release");
+    // The whole burst delivered one live wake and no runtime-loop effect.
+    expect_no_executor_wide_boundary_cancel(&adapter, &session_id, &queued_boundary_cancel_calls)
+        .await;
     assert_eq!(
-        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
         1,
-        "the converged burst must commit exactly one queued boundary-cancel effect"
+        "the converged burst delivers exactly one live wake"
     );
 }
 
@@ -25261,6 +29320,7 @@ async fn apply_input_intermediate_peer_input_during_running_turn_wakes_without_b
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
         content: "interrupt while running".into(),
@@ -25532,6 +29592,7 @@ async fn service_peer_admission_wakes_without_live_cancel_after_boundary() {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
         content: "interrupt through service ext ingest".into(),
@@ -25995,6 +30056,7 @@ fn interrupt_yielding_peer_input(
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
         content: body.into(),
@@ -26056,6 +30118,7 @@ fn directed_interrupt_yielding_peer_input(body: &str) -> (Input, InputId) {
             idempotency_key: Some(crate::identifiers::IdempotencyKey::new(canonical_id)),
             supersession_key: None,
             correlation_id: Some(crate::identifiers::CorrelationId::from_uuid(input_id.0)),
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
         content: body.into(),
@@ -33735,7 +37798,7 @@ async fn meerkat_machine_spine_snapshot_tracks_comms_drain_state() {
         &session_id,
         CommsDrainMode::PersistentHost,
         comms_runtime,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .await;
 
@@ -35443,6 +39506,7 @@ fn runtime_recovery_compaction_session(
         messages_after: 1,
         summary_source: None,
         estimated_history_tokens_after: None,
+        instruction_snapshot: None,
     };
     session
         .add_compaction_projection_intent(intent.clone())
@@ -38669,6 +42733,308 @@ async fn a_resumed_run_takes_a_durable_join_while_its_contributors_stay_below_th
     joined.expect("a resumed run that holds 255 contributors takes the join");
 }
 
+/// A person the host authenticated: an opaque, qualified requester.
+fn requester_person(subject: &str) -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject,
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+            .expect("trust domain"),
+    )
+    .expect("qualified requester")
+}
+
+/// A typed text prompt in the Steer lane from `requester`.
+fn steer_prompt_from(text: &str, requester: Option<meerkat_core::PrincipalRef>) -> Input {
+    let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+    metadata.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+    let mut input = Input::Prompt(crate::input::PromptInput::new(text, Some(metadata)));
+    input.header_mut().requester = requester;
+    input
+}
+
+/// What a crash, or a graceful stop that kept the run, leaves of a person's
+/// durable run in `store`: the run's continuable tail (round zero's first
+/// commit, its staged call only in the run cursor, which binds the run's
+/// input) and the run's input, from `requester`, bound to the run and applied
+/// pending consumption. Returns the session and the run.
+async fn a_person_s_kept_run(
+    store: &crate::store::InMemoryRuntimeStore,
+    requester: meerkat_core::PrincipalRef,
+) -> (SessionId, RunId) {
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("the person's prompt")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let base = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone()))
+                    .expect("seal the committed base"),
+            ),
+        )
+        .await
+        .expect("the committed base commits")
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("the committed base has a WholeBlob authority");
+
+    let mut input = make_prompt("the person's prompt");
+    input.header_mut().requester = Some(requester.clone());
+    let staged_call = BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "kept-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string())
+                .expect("raw tool arguments"),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(uuid::Uuid::now_v7().to_string()))
+                .expect("an assistant message id"),
+        ),
+    };
+    let mut round = committed;
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            vec![input.id().clone()],
+            0,
+            meerkat_core::RunResumePoint::ToolsPending {
+                assistant_message: staged_call,
+            },
+        ))
+        .expect("the run cursor is recorded");
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            crate::store::PreparedWholeBlobProvisionalTail::prepare(
+                base,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(round)).expect("seal the run's tail"),
+            )
+            .expect("the run's tail prepares"),
+        )
+        .await
+        .expect("the run's tail is written");
+
+    let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+    state.durability = Some(crate::input::InputDurability::Durable);
+    state.requester = Some(requester);
+    let policy = crate::DefaultPolicyTable::resolve(&input, true);
+    state.policy = Some(crate::input_state::PolicySnapshot {
+        version: policy.policy_version,
+        decision: policy,
+    });
+    state.runtime_semantics = Some(
+        crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(&input, true)
+            .expect("generated admission semantics"),
+    );
+    state.persisted_input = Some(input);
+    let row = crate::input_state::StoredInputState {
+        state,
+        seed: crate::input_state::InputStateSeed {
+            phase: crate::input_state::InputLifecycleState::AppliedPendingConsumption,
+            last_run_id: Some(run_id.clone()),
+            last_boundary_sequence: Some(1),
+            admission_sequence: None,
+            terminal_outcome: None,
+            attempt_count: 1,
+            recovery_lane: Some(meerkat_core::types::HandlingMode::Queue),
+        },
+    };
+    let record = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("kept-run-record"))
+        .recover_input_state_persistence_record(row)
+        .expect("the kept row passes the generated recovery authority");
+    store
+        .persist_input_state(&runtime_id, &record)
+        .await
+        .expect("the kept row persists");
+    (session_id, run_id)
+}
+
+/// A person's run in flight at a restart resumes as that person's run: the
+/// restart's recovery binds its kept input's requester key again
+/// (`BindInputRequesterBatchKey`), and `ResumeRun` stages the run's batch
+/// under that key. So a requester-less steer may not join the resumed run;
+/// it waits for a run of its own.
+#[tokio::test]
+async fn a_person_s_run_resumed_after_a_restart_keeps_the_person_s_key() {
+    let person = requester_person("a");
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let (session_id, run_id) = a_person_s_kept_run(&store, person.clone()).await;
+    let machine = MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    )
+    .expect("persistent machine");
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("the restart recovers the run's durable state");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        Some(run_id.clone()),
+        "the restart keeps the person's run resumable"
+    );
+    let driver = {
+        let sessions = machine.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session")
+                .driver,
+        )
+    };
+    let mut entry = driver.lock().await;
+    assert!(
+        matches!(
+            crate::meerkat_machine::driver::machine_begin_resumed_run(&mut entry, &run_id)
+                .expect("the run resumes"),
+            crate::meerkat_machine::driver::ResumedRunStart::Started { .. }
+        ),
+        "the person's run resumes under its own id"
+    );
+    assert_eq!(
+        entry
+            .shared_dsl_authority()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .authority_staged_batch,
+        Some(crate::input_authority::requester_batch_key(&person).expect("the person's key")),
+        "the resumed run stages its batch under the person's key"
+    );
+    let steer = steer_prompt_from("a requester-less steer", None);
+    let steer_id = steer.id().clone();
+    assert!(
+        entry
+            .as_driver_mut()
+            .accept_input(steer)
+            .await
+            .expect("the requester-less steer is accepted")
+            .is_accepted()
+    );
+    assert!(
+        !entry
+            .driver_ingress()
+            .live_boundary_joins_run_batch(&steer_id, &run_id),
+        "a requester-less steer may not join the person's resumed run"
+    );
+}
+
+/// Two people's steers waiting in the Steer lane at once (both admitted
+/// while the runtime is idle) are two runs: the generated plan's steer batch
+/// takes the earlier person's steer alone. Staging is never asked to mix
+/// requesters, which it refuses, and a refused batch would be planned again
+/// until the attempt cap ended both steers.
+#[tokio::test]
+async fn a_steer_batch_serves_one_requester() {
+    let mut driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(LogicalRuntimeId::new(
+        "steer-batch-serves-one-requester",
+    )));
+    let from_a = steer_prompt_from("from a", Some(requester_person("a")));
+    let from_b = steer_prompt_from("from b", Some(requester_person("b")));
+    let a = from_a.id().clone();
+    for steer in [from_a, from_b] {
+        assert!(
+            driver
+                .as_driver_mut()
+                .accept_input(steer)
+                .await
+                .expect("the steer is accepted")
+                .is_accepted()
+        );
+    }
+    assert_eq!(
+        driver.driver_ingress().steer_queue().len(),
+        2,
+        "both steers wait in the Steer lane"
+    );
+    let plan = crate::meerkat_machine::machine_authorize_runtime_loop_batch(&driver)
+        .expect("the runtime loop has a batch");
+    assert_eq!(
+        plan.input_ids(),
+        std::slice::from_ref(&a),
+        "the steer batch serves the earlier person alone"
+    );
+    assert_eq!(
+        plan.source(),
+        crate::meerkat_machine::driver::RuntimeLoopBatchSource::Steer
+    );
+}
+
+/// Request-only context of a person's input never enters a run that staged
+/// no batch (a direct service turn, which the runtime loop did not stage).
+/// The machine refuses it at the input-owned receipt
+/// (`ResolveLiveBoundaryContextReceipt`), as it refuses the durable join, so
+/// the refusal does not rest on the runtime asking its own predicate first.
+/// The same context without a requester is taken.
+#[tokio::test]
+async fn a_person_s_request_only_context_never_enters_a_run_that_staged_nothing() {
+    async fn receipt_in_unstaged_run(
+        requester: Option<meerkat_core::PrincipalRef>,
+    ) -> (Result<(), String>, bool) {
+        let mut ephemeral =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("request-only-context-unstaged-run"));
+        let run_id = RunId::new();
+        ephemeral
+            .contract_begin_run_authority(run_id.clone())
+            .expect("a run begins that stages no batch");
+        let mut driver = DriverEntry::Ephemeral(ephemeral);
+        let mut completion = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        completion.header_mut().requester = requester;
+        let completion_id = completion.id().clone();
+        assert!(
+            driver
+                .as_driver_mut()
+                .accept_input(completion)
+                .await
+                .expect("the background completion is accepted")
+                .is_accepted()
+        );
+        let receipt = MeerkatMachine::preview_dsl_input_on_shared_authority(
+            &driver.shared_dsl_authority(),
+            mm_dsl::MeerkatMachineInput::ResolveLiveBoundaryContextReceipt {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+                input_id: completion_id.to_string(),
+            },
+            "ResolveLiveBoundaryContextReceipt",
+        )
+        .map(|_| ());
+        let shell_predicate = driver
+            .driver_ingress()
+            .live_boundary_joins_run_batch(&completion_id, &run_id);
+        (receipt, shell_predicate)
+    }
+
+    let (receipt, shell_predicate) = receipt_in_unstaged_run(Some(requester_person("a"))).await;
+    let refusal = receipt.expect_err("the machine refuses a person's context in an unstaged run");
+    assert!(
+        refusal.contains("guard rejected"),
+        "a generated guard refuses the receipt: {refusal}"
+    );
+    assert!(!shell_predicate, "the runtime's predicate agrees");
+
+    let (receipt, shell_predicate) = receipt_in_unstaged_run(None).await;
+    receipt.expect("context without a requester enters the run");
+    assert!(shell_predicate, "the runtime's predicate agrees");
+}
+
 #[tokio::test]
 async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_state() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
@@ -38846,6 +43212,7 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         directed_interaction_id: None,
         convention: Some(crate::input::PeerConvention::Message),
@@ -38884,6 +43251,7 @@ async fn runtime_input_hooks_follow_committed_accept_dedup_and_reject_outcomes()
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         directed_interaction_id: None,
         convention: Some(crate::input::PeerConvention::ResponseProgress {
@@ -49604,6 +53972,7 @@ fn runtime_parity_peer_message(text: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::Message),
         content: text.into(),
@@ -49898,6 +54267,7 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
                     idempotency_key: None,
                     supersession_key: None,
                     correlation_id: None,
+                    requester: None,
                 },
                 convention: Some(crate::input::PeerConvention::ResponseTerminal {
                     request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -53649,6 +58019,36 @@ fn v7_fork_child_commands_are_classified() {
         SupervisorBridgeCommandKind::ReadMemberVisibleTools.realization(),
         SupervisorBridgeCommandRealization::Realized,
     );
+}
+
+/// Protocol V7 (a placed member's operator instructions): the record and the
+/// release of a member session's target are host-addressed, admitted and
+/// served off the member drain by the host daemon, as `ReleaseMember` is; a
+/// member drain that receives one keeps its fail-closed reply.
+#[test]
+fn v7_operator_instruction_target_commands_are_classified() {
+    use crate::meerkat_machine_types::{
+        OffDrainResponder, SupervisorBridgeCommandAdmissionRoute, SupervisorBridgeCommandKind,
+        SupervisorBridgeCommandRealization,
+    };
+
+    for kind in [
+        SupervisorBridgeCommandKind::RecordMemberInstructionTarget,
+        SupervisorBridgeCommandKind::ReleaseMemberInstructionTarget,
+    ] {
+        assert_eq!(
+            kind.admission_route(),
+            SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed,
+            "{kind:?} is host-addressed: MobHostBindingAuthority admits it"
+        );
+        assert_eq!(
+            kind.realization(),
+            SupervisorBridgeCommandRealization::RealizedOffDrain {
+                by: OffDrainResponder::HostDaemon,
+            },
+            "{kind:?} is served by the mob host daemon"
+        );
+    }
 }
 
 /// Multi-host mobs phase 6 (§7.4, DEC-P6E-1): the observation pair and
@@ -58823,6 +63223,7 @@ fn interrupted_request_identity_is_the_one_its_run_stamped() {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: correlation.map(crate::CorrelationId::from_uuid),
+                requester: None,
             },
             content: "interrupted request".into(),
             typed_turn_appends: Vec::new(),
@@ -58977,7 +63378,7 @@ mod terminal_completion_batch_bound {
                 .await
                 .expect("the session is registered");
             let stopped = tokio::time::timeout(
-                Duration::from_secs(120),
+                Duration::from_mins(2),
                 self.machine
                     .stop_runtime_executor_until_terminal_if_current(&registration, reason),
             )
@@ -59048,7 +63449,7 @@ mod terminal_completion_batch_bound {
             waiters: Vec<CompletionHandle>,
             context: &str,
         ) -> Vec<Result<CompletionOutcome, CompletionWaitError>> {
-            self.settle_within(waiters, context, Duration::from_secs(120))
+            self.settle_within(waiters, context, Duration::from_mins(2))
                 .await
         }
 
@@ -59411,7 +63812,7 @@ mod terminal_completion_batch_bound {
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             crate::traits::RuntimeControlPlane::retire(
                 fixture.machine.as_ref(),
                 &fixture.runtime_id(),
@@ -59698,7 +64099,7 @@ mod terminal_completion_batch_bound {
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
         tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             crate::traits::RuntimeControlPlane::retire(
                 fixture.machine.as_ref(),
                 &fixture.runtime_id(),
@@ -59708,7 +64109,7 @@ mod terminal_completion_batch_bound {
         .expect("the retire returns within 60 s")
         .expect("retire while the held loop owns the drain");
         let abandoned_count = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture
                 .machine
                 .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
@@ -59766,7 +64167,7 @@ mod terminal_completion_batch_bound {
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
         let report = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             crate::traits::RuntimeControlPlane::retire(
                 fixture.machine.as_ref(),
                 &fixture.runtime_id(),
@@ -59780,7 +64181,7 @@ mod terminal_completion_batch_bound {
             "the held loop owns the drain: retire abandons nothing"
         );
         let abandoned_count = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture
                 .machine
                 .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
@@ -60153,7 +64554,7 @@ mod terminal_completion_batch_bound {
         let deadline = meerkat_core::time_compat::Instant::now()
             + meerkat_core::time_compat::Duration::from_secs(2);
         let cleanup = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture.machine.abandon_retired_pending_inputs_before(
                 &fixture.session_id,
                 "retired cleanup",
@@ -60218,7 +64619,7 @@ mod terminal_completion_batch_bound {
             retired_with_pending_mixed_inputs(&fixture, Arc::clone(&publisher) as _, BACKLOG, 0)
                 .await;
         let abandoned_count = tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             fixture
                 .machine
                 .abandon_retired_pending_inputs(&fixture.session_id, "retired cleanup"),
@@ -60390,7 +64791,7 @@ mod terminal_completion_batch_bound {
             .expect("prepare the archive lease")
             .expect("the registered session has an archive lease");
         let retired = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             fixture
                 .machine
                 .retire_session_with_archive_lease_and_post_commit_hook_before(

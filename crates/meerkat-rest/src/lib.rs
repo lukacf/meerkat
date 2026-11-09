@@ -4091,6 +4091,7 @@ fn make_runtime_external_event_input(
                 idempotency_key,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: event_type.to_string(),
             payload,
@@ -4851,6 +4852,14 @@ fn config_runtime_err_to_api(err: meerkat_core::ConfigRuntimeError) -> ApiError 
                 "Generation conflict: expected {expected}, current {current}"
             ))
         }
+        // A held or unusable admission fence: the write did not start and
+        // wrote nothing; typed, never a server error.
+        error @ meerkat_core::ConfigRuntimeError::AdmissionInProgress => {
+            ApiError::AdmissionInProgress(error.to_string())
+        }
+        error @ meerkat_core::ConfigRuntimeError::AdmissionFenceUnavailable(_) => {
+            ApiError::AdmissionFenceUnavailable(error.to_string())
+        }
         // The store refused the caller's candidate config (a new or changed
         // realm MCP server with an environment reference, or an invalid
         // written config); document and store failures stay server errors.
@@ -5537,6 +5546,9 @@ struct WorkGraphItemsQuery {
     include_terminal: bool,
     #[serde(default)]
     limit: Option<usize>,
+    /// The `next_cursor` of the previous page.
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -5549,6 +5561,9 @@ struct WorkGraphReadyQuery {
     labels: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// The `next_cursor` of the previous page (`GET /workgraph/ready`).
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -5575,6 +5590,7 @@ impl From<WorkGraphItemsQuery> for meerkat::WorkItemFilter {
             labels: value.labels,
             include_terminal: value.include_terminal,
             limit: value.limit,
+            cursor: value.cursor,
         }
     }
 }
@@ -5589,6 +5605,7 @@ impl From<WorkGraphItemsQuery> for meerkat::WorkGraphSnapshotFilter {
             labels: value.labels,
             include_terminal: value.include_terminal,
             limit: value.limit,
+            cursor: value.cursor,
         }
     }
 }
@@ -5600,6 +5617,7 @@ impl From<WorkGraphReadyQuery> for meerkat::ReadyWorkFilter {
             namespace: value.namespace,
             labels: value.labels,
             limit: value.limit,
+            cursor: value.cursor,
         }
     }
 }
@@ -6017,6 +6035,7 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
+        mcp_auth_resolver_override: None,
         session_comms_runtime_override: None,
         prepared_controller: None,
         host_prompt_sections: Default::default(),
@@ -6042,6 +6061,7 @@ async fn create_session_inner(
         // REST is not a mob runtime. On resume the factory preserves the
         // persisted mob_member_binding from the resumed session metadata.
         mob_member_binding: None,
+        mob_incarnation: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -6067,6 +6087,8 @@ async fn create_session_inner(
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         initial_turn_metadata: None,
         initial_work_authorization: None,
+        grant_gated_tools: None,
+        grant_gated_tools_where_mounted: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -6358,9 +6380,9 @@ async fn workgraph_list_items(
 ) -> Result<Json<meerkat::WorkGraphItemsResponse>, ApiError> {
     state
         .workgraph_service
-        .list(query.into())
+        .list_page(query.into())
         .await
-        .map(|items| Json(meerkat::WorkGraphItemsResponse { items }))
+        .map(Json)
         .map_err(workgraph_error_to_api)
 }
 
@@ -6384,9 +6406,9 @@ async fn workgraph_ready(
 ) -> Result<Json<meerkat::WorkGraphItemsResponse>, ApiError> {
     state
         .workgraph_service
-        .ready(query.into())
+        .ready_page(query.into())
         .await
-        .map(|items| Json(meerkat::WorkGraphItemsResponse { items }))
+        .map(Json)
         .map_err(workgraph_error_to_api)
 }
 
@@ -6408,9 +6430,9 @@ async fn workgraph_events(
 ) -> Result<Json<meerkat::WorkGraphEventsResponse>, ApiError> {
     state
         .workgraph_service
-        .events(query.into())
+        .events_page(query.into())
         .await
-        .map(|events| Json(meerkat::WorkGraphEventsResponse { events }))
+        .map(Json)
         .map_err(workgraph_error_to_api)
 }
 
@@ -7316,6 +7338,7 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: Default::default(),
@@ -7339,6 +7362,7 @@ async fn continue_session_inner(
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
             auth_binding: auth_binding_override.clone(),
             mob_member_binding: None,
+            mob_incarnation: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -7370,6 +7394,8 @@ async fn continue_session_inner(
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
             initial_work_authorization: None,
+            grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let model = match req.model.clone() {
@@ -9015,6 +9041,14 @@ pub enum ApiError {
         message: String,
         details: Value,
     },
+    /// `ADMISSION_IN_PROGRESS` (409): a realm admission fence the write
+    /// needs is held beyond its bound. Nothing started or was written; it
+    /// may be retried once the hold ends, which can be only when the process
+    /// holding it restarts.
+    AdmissionInProgress(String),
+    /// `ADMISSION_FENCE_UNAVAILABLE` (503): a realm admission fence the
+    /// write needs could not be used. Nothing started or was written.
+    AdmissionFenceUnavailable(String),
 }
 
 /// `ApiError::SessionBusyWithData` for a typed retryable runtime teardown
@@ -9079,7 +9113,9 @@ fn api_error_message(error: &ApiError) -> String {
         | ApiError::Internal(message)
         | ApiError::ServiceUnavailable(message)
         | ApiError::Gone(message)
-        | ApiError::ResultDisclosureRefused(message) => message.clone(),
+        | ApiError::ResultDisclosureRefused(message)
+        | ApiError::AdmissionInProgress(message)
+        | ApiError::AdmissionFenceUnavailable(message) => message.clone(),
         ApiError::BadRequestWithData { message, .. }
         | ApiError::InternalWithData { message, .. }
         | ApiError::SessionBusyWithData { message, .. }
@@ -9229,6 +9265,18 @@ impl IntoResponse for ApiError {
                 message,
                 Some(details),
             ),
+            ApiError::AdmissionInProgress(message) => (
+                admission_status(meerkat_contracts::ErrorCode::AdmissionInProgress),
+                meerkat_contracts::ErrorCode::AdmissionInProgress.to_string(),
+                message,
+                None,
+            ),
+            ApiError::AdmissionFenceUnavailable(message) => (
+                admission_status(meerkat_contracts::ErrorCode::AdmissionFenceUnavailable),
+                meerkat_contracts::ErrorCode::AdmissionFenceUnavailable.to_string(),
+                message,
+                None,
+            ),
         };
 
         let body = Json(ErrorResponse {
@@ -9239,6 +9287,11 @@ impl IntoResponse for ApiError {
 
         (status, body).into_response()
     }
+}
+
+/// The HTTP status of an admission fence refusal, from its public code.
+fn admission_status(code: meerkat_contracts::ErrorCode) -> StatusCode {
+    StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]
@@ -10963,6 +11016,28 @@ mod tests {
         Ok(created.session_id)
     }
 
+    /// The executor contract for the REST session executor: a boundary
+    /// cancel the runtime loop applies while no run is active is a no-op, so
+    /// the session keeps serving input.
+    #[tokio::test]
+    async fn rest_session_executor_idle_boundary_cancel_conformance() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        ensure_rest_session_runtime_executor(&state, &session_id)
+            .await
+            .expect("attach the REST runtime executor");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &state.runtime_adapter,
+            &session_id,
+        )
+        .await;
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
+    }
+
     async fn create_deferred_rest_runtime_session(state: &AppState) -> SessionId {
         try_create_deferred_rest_runtime_session(state)
             .await
@@ -11002,6 +11077,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -11046,6 +11122,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -11362,7 +11439,7 @@ mod tests {
         use tower::ServiceExt;
 
         // Bounds a failure only; the passing path never waits for it.
-        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
 
         let temp = TempDir::new().unwrap();
         let mut state = load_rest_state_with_capacity(&temp, 4).await;
@@ -11624,7 +11701,7 @@ mod tests {
     #[tokio::test]
     async fn rest_graceful_shutdown_keeps_a_durable_sessions_turns_for_the_next_start() {
         // Bounds a failure only; the passing path never waits for it.
-        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_mins(1);
 
         let temp = TempDir::new().unwrap();
         let session_id = {
@@ -13877,6 +13954,53 @@ mod tests {
         assert!(matches!(patch_err, ApiError::BadRequest(_)));
     }
 
+    /// While an admission holds the realm document's fence, a REST config
+    /// write refuses with HTTP 409 and the code `ADMISSION_IN_PROGRESS`, and
+    /// nothing is written: the generation stays where it was.
+    #[tokio::test]
+    async fn test_config_writes_refuse_admission_in_progress() {
+        use http_body_util::BodyExt as _;
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let Json(initial) = get_config(State(state.clone())).await.unwrap();
+        let fences = state.config_runtime.admission_fences();
+        for fence in &fences {
+            fence.ensure_exists().unwrap();
+        }
+        let mut held = meerkat_core::AdmissionHold::try_acquire(fences).unwrap();
+        let (set, patch) = tokio::join!(
+            set_config(
+                State(state.clone()),
+                Json(SetConfigRequest::Wrapped {
+                    config: initial.config.clone(),
+                    expected_generation: None,
+                }),
+            ),
+            patch_config(
+                State(state.clone()),
+                Json(PatchConfigRequest::Wrapped {
+                    patch: serde_json::json!({"max_tokens": 3072}),
+                    expected_generation: None,
+                }),
+            ),
+        );
+        for error in [
+            set.expect_err("a held fence refuses the set"),
+            patch.expect_err("a held fence refuses the patch"),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "ADMISSION_IN_PROGRESS", "{body}");
+        }
+        held.release();
+        let Json(after) = get_config(State(state)).await.unwrap();
+        assert_eq!(after.generation, initial.generation);
+    }
+
     /// A requirement no platform backend enforces (descendant termination),
     /// so a host that installs it refuses every confined launch on any OS.
     const UNENFORCEABLE_CONFINEMENT: &str = r#"[confinement.all]
@@ -14247,10 +14371,12 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["reason"], "mcp_server_not_configured", "{body}");
+        let refusal =
+            meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource.to_string();
         assert!(
             body["error"]
                 .as_str()
-                .is_some_and(|text| text.contains("confined process")),
+                .is_some_and(|text| text.contains(&refusal)),
             "{body}"
         );
     }
@@ -14536,6 +14662,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -14830,6 +14957,76 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert_eq!(payload["details"], json!({"timeout_ms": 5_000}));
     }
 
+    /// `GET /workgraph/items` continues a walk from the `next_cursor` its
+    /// previous page returned.
+    #[tokio::test]
+    async fn rest_workgraph_items_cursor_round_trip() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        async fn get(app: &axum::Router, uri: &str) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "GET {uri}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mut created = Vec::new();
+        for title in ["first", "second", "third"] {
+            let item = state
+                .workgraph_service
+                .create(meerkat::CreateWorkItemRequest {
+                    title: title.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("seed WorkGraph item");
+            created.push(item.id.to_string());
+        }
+        created.sort();
+        let app = router(state);
+
+        let first = get(&app, "/workgraph/items?limit=2").await;
+        assert_eq!(first["truncated"], json!(true), "{first}");
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("a truncated page names its next cursor")
+            .to_string();
+        let second = get(&app, &format!("/workgraph/items?limit=2&cursor={cursor}")).await;
+        assert_eq!(second["truncated"], json!(false), "{second}");
+        assert!(second.get("next_cursor").is_none(), "{second}");
+        let mut walked = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["items"].as_array().unwrap())
+            .map(|item| item["id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        walked.sort();
+        assert_eq!(walked, created);
+    }
+
     #[tokio::test]
     async fn test_workgraph_rest_routes_are_read_only() {
         use axum::body::Body;
@@ -14889,6 +15086,18 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+            if matches!(
+                descriptor.route,
+                meerkat::WorkGraphRestRoute::Items
+                    | meerkat::WorkGraphRestRoute::Ready
+                    | meerkat::WorkGraphRestRoute::Snapshot
+            ) {
+                // The one open item, uncut: each page says so.
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(page["total_items"], json!(1), "GET {uri}: {page}");
+                assert_eq!(page["truncated"], json!(false), "GET {uri}: {page}");
+            }
         }
 
         let events_path = meerkat::workgraph_rest_path_catalog()
@@ -18233,6 +18442,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -19478,6 +19688,22 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
 
             async fn patch(
                 &self,
+                _delta: ConfigDelta,
+            ) -> Result<Config, meerkat_core::ConfigError> {
+                Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+            }
+
+            async fn set_held(
+                &self,
+                _guard: &meerkat_core::AdmissionGuard,
+                _config: Config,
+            ) -> Result<(), meerkat_core::ConfigError> {
+                Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+            }
+
+            async fn patch_held(
+                &self,
+                _guard: &meerkat_core::AdmissionGuard,
                 _delta: ConfigDelta,
             ) -> Result<Config, meerkat_core::ConfigError> {
                 Err(meerkat_core::ConfigError::Validation("boom".to_string()))

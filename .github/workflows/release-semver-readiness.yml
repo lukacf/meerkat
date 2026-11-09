@@ -41,8 +41,10 @@ jobs:
     runs-on: ubuntu-24.04
     # Only crates that differ from the published baseline are rebuilt and the
     # baseline is one checkout of its tag, so a release measurement is a
-    # minutes-scale job. Anything longer is a regression, not a slow day.
-    timeout-minutes: 45
+    # minutes-scale job. A baseline whose attached rustdoc JSON was built by
+    # another rustc (v0.9.8's, by 1.94.1) is also rebuilt from that checkout,
+    # which roughly doubles the job, so it has 90 minutes.
+    timeout-minutes: 90
     steps:
       - name: Checkout candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

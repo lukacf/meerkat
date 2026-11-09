@@ -9,11 +9,16 @@
 //! persisted or restored, so a stored approval record can never reconstruct
 //! a review allow or spendable consent. Human consent for a retained R3
 //! candidate (see [`consent`]) is one such attempt plus its approval record.
+//!
+//! A durable decision (see [`decision`]) is a separate kind: one held
+//! operation with its own records, store and owner, sharing nothing with
+//! these approvals.
 
 pub mod consent;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod consent_test_support;
+pub mod decision;
 mod owner_loss;
 pub mod review;
 
@@ -332,12 +337,23 @@ pub enum ApprovalAssurance {
     DeviceTrusted,
 }
 
-/// The authenticated approver recorded on a consent decision.
+/// The authenticated approver recorded on a consent decision: the one record
+/// of who decided. The decision's `actor` is only its principal's id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ApprovalConsentApprover {
+    /// The decider's qualified principal: its kind, trust domain and id.
     pub principal: PrincipalRef,
     pub assurance: ApprovalAssurance,
+    /// The digest of the host authentication scope (the login or session)
+    /// the decision event was authenticated in, when the host named one
+    /// ([`consent::HostAuthenticationScope::digest`]): `sha256:` and 64
+    /// lowercase hex digits. Never the scope itself. Absent on a row decided
+    /// before the digest was recorded; a Core that predates it ignores the
+    /// field and drops it when it rewrites the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub authentication_scope_digest: Option<decision::Sha256Digest>,
 }
 
 /// Passive owner scope of a consent approval, committed with its issuance:
@@ -2871,6 +2887,10 @@ mod review_owner_tests {
             &self,
             _binding: &PreparedAuthorizationBinding,
         ) -> Result<(), OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

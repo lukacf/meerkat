@@ -67,6 +67,7 @@ fn generated_image_comms_profile(
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -125,6 +126,7 @@ fn image_relay_profile(model: &str, peer_description: &str, image_generation: bo
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -338,7 +340,7 @@ async fn spawn_generated_image_comms_members(
                 ]),
         )
         .await?;
-    handle.wait_for_ready(Some(Duration::from_secs(60))).await?;
+    handle.wait_for_ready(Some(Duration::from_mins(1))).await?;
     Ok(())
 }
 
@@ -381,7 +383,7 @@ async fn spawn_image_relay_members(handle: &MobHandle) -> Result<(), Box<dyn std
                 ]),
         )
         .await?;
-    handle.wait_for_ready(Some(Duration::from_secs(60))).await?;
+    handle.wait_for_ready(Some(Duration::from_mins(1))).await?;
     Ok(())
 }
 
@@ -1009,7 +1011,7 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         &handle,
         service.as_ref(),
         &["maker", "reviewer"],
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Duration::from_secs(5),
     )
     .await
@@ -1036,14 +1038,10 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         .await
         .expect("kick off maker image generation turn");
 
-    let maker_image = wait_for_first_generated_image(
-        &handle,
-        service.as_ref(),
-        "maker",
-        Duration::from_secs(120),
-    )
-    .await
-    .expect("maker should generate an image in turn 1");
+    let maker_image =
+        wait_for_first_generated_image(&handle, service.as_ref(), "maker", Duration::from_mins(2))
+            .await
+            .expect("maker should generate an image in turn 1");
 
     maker
         .send(
@@ -1063,7 +1061,7 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         .await
         .expect("kick off maker generated-image comms send turn");
 
-    wait_for_generated_image_comms_success(&handle, service.as_ref(), Duration::from_secs(360))
+    wait_for_generated_image_comms_success(&handle, service.as_ref(), Duration::from_mins(6))
         .await
         .expect("generated image request/response comms loop should complete");
 
@@ -1113,7 +1111,7 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
         &handle,
         service.as_ref(),
         &["maker", "relay", "reader"],
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         Duration::from_secs(5),
     )
     .await
@@ -1126,11 +1124,15 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
         .member(&AgentIdentity::from("maker"))
         .await
         .expect("maker member");
+    let openai_image_model =
+        meerkat_models::default_image_generation_model(meerkat_core::Provider::OpenAI)
+            .expect("the catalog has an OpenAI image-generation default")
+            .model_id;
     maker
         .send(
             ContentInput::Text(format!(
                 "Run the provider image relay smoke now. Use exactly this tool sequence, in this order:\n\
-                 1. Call generate_image exactly once. The request must use provider openai, model gpt-image-2, \
+                 1. Call generate_image exactly once. The request must use provider openai, model {openai_image_model}, \
                  prompt \"Create a simple white poster with only the exact large black text RKAT 7319 centered. \
                  No other letters, numbers, watermarks, captions, or symbols.\", size 1024x1024, quality low, \
                  format png, count 1.\n\
@@ -1148,7 +1150,7 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
         .expect("kick off image relay smoke");
 
     let relayed_blob =
-        wait_for_image_relay_readout_success(&handle, service.as_ref(), Duration::from_secs(420))
+        wait_for_image_relay_readout_success(&handle, service.as_ref(), Duration::from_mins(7))
             .await
             .expect("image relay readout should complete");
 

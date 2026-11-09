@@ -79,7 +79,9 @@ meerkat-store = { workspace = true, features = ["sqlite", "jsonl"] }
 # service over a Jsonl session store. Enabling `meerkat-store/jsonl` alone
 # would add a `RealmBackend` variant the facade's own cfg-gated match does not
 # cover, so the facade's matching feature is enabled with it.
-meerkat = { workspace = true, features = ["session-store", "jsonl-store"] }
+# memory-store-session lets a delegate helper that inherits its parent's
+# tool categories (the `delegate` default) build its semantic memory.
+meerkat = { workspace = true, features = ["session-store", "jsonl-store", "memory-store-session"] }
 
 [package.metadata.cargo-machete]
 ignored = ["chrono", "meerkat-client", "thiserror", "tempfile"]  # proc macros / transitive

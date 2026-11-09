@@ -27,7 +27,11 @@ import type {
   ForkNoticeTools,
   ForkToolsNotComparedReason,
   GeminiImageMetadata,
+  InstructionContentDigest,
+  InstructionEntryKind,
+  InstructionKey,
   InstructionKeyRef,
+  InstructionNamespace,
   InteractionId,
   InterruptedInputKind,
   InterruptedToolRunDisposition,
@@ -42,6 +46,10 @@ import type {
   OperationId,
   OutputSchema,
   PeerId,
+  PrincipalId,
+  PrincipalKind,
+  PrincipalQualification,
+  PrincipalRef,
   ProfileId,
   PromptText,
   Provider,
@@ -76,6 +84,7 @@ import type {
   TranscriptEditRewriteRange,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,
+  TrustDomainId,
 } from './types.js';
 
 export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
@@ -86,6 +95,34 @@ export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "
  * [`AgentError::ContentFiltered`](crate::error::AgentError::ContentFiltered).
  */
 export type ContentFilteredStop = "refusal" | "content_filter";
+
+/**
+ * Why a build's scoped tool grant gate was refused: a gate no grant could
+ * honour. The agent factory answers it, and a session service surfaces it as
+ * [`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an
+ * invalid-params error carrying this refusal, tagged by `kind`.
+ */
+export type GrantGateRefusal = {
+  family: string;
+  kind: "unknown_family";
+} | {
+  family: string;
+  kind: "family_disabled";
+} | {
+  family: string;
+  kind: "family_not_mounted";
+} | {
+  kind: "tool_not_mounted";
+  tool: string;
+} | {
+  kind: "unknown_tool";
+  tool: string;
+} | {
+  kind: "policy_refused";
+  tool: string;
+} | {
+  kind: "no_grant_service";
+};
 
 /**
  * Typed reason a hook execution failed (engine-level fault, not a guardrail
@@ -248,6 +285,9 @@ export type AgentErrorReason = {
   detail?: ProviderStopDetail | null;
   reason_type: "content_filtered";
   stop: ContentFilteredStop;
+} | {
+  reason_type: "tool_grant_gate_refused";
+  refusal: GrantGateRefusal;
 };
 
 export type AgentErrorReport = {
@@ -625,6 +665,42 @@ export interface DisputedTurnUsageAccountingIdentity {
   reported_model: string;
   reported_provider: Provider;
 }
+
+/**
+ * A slot's revision: at least 1, strictly increasing per slot within the
+ * owner that mints it.
+ */
+export type InstructionRevision = number;
+
+/**
+ * One slot of the active set an entry leaves in effect.
+ */
+export interface InstructionActiveRef {
+  body_bytes: number;
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+}
+
+/**
+ * One change a delta entry carries.
+ */
+export type InstructionChange = {
+  body_bytes: number;
+  change: "activate";
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  supersedes?: InstructionRevision | null;
+} | {
+  change: "revoke";
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  revokes: InstructionRevision;
+};
 
 /**
  * Typed reason an interaction stream was abandoned before normal terminal
@@ -1104,6 +1180,13 @@ export type ReasoningLoweringOutcome = {
 };
 
 /**
+ * Why the compaction check that consumed a host's compaction request
+ * compacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports
+ * it. The vocabulary may grow.
+ */
+export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
+
+/**
  * Typed input fact for a run boundary.
  *
  * A run either starts from caller-provided content or resumes from tool
@@ -1294,6 +1377,20 @@ export type ObjectiveId = string;
 export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 /**
+ * The original requester of a turn: the principal its inputs share, and
+ * whether it reached them directly.
+ *
+ * The principal is opaque to Core. A host supplies it for the inputs it
+ * admits (the authenticated caller it acts for), or a governed input's work
+ * association names it. Core carries it and never interprets it: it has no
+ * person, account or assurance concept for it.
+ */
+export interface TurnRequester {
+  carried?: boolean;
+  principal: PrincipalRef;
+}
+
+/**
  * Stable runtime identity for a transcript message.
  *
  * These fields are optional so older persisted sessions deserialize without a
@@ -1304,6 +1401,7 @@ export type TranscriptMessageIdentity = {
   interaction_id?: InteractionId | null;
   objective_id?: ObjectiveId | null;
   realtime_origin?: RealtimeMessageOrigin | null;
+  requester?: TurnRequester | null;
   run_id?: RunId | null;
   turn_input?: TranscriptTurnInput | null;
 };
@@ -1719,6 +1817,18 @@ export type AgentEvent = {
   results: BoundedToolResult[];
   run_id: RunId;
   type: "tool_results_bounded_for_request";
+} | {
+  reason: RequestedCompactionSkipReason;
+  run_id: RunId;
+  type: "requested_compaction_skipped";
+} | {
+  active?: InstructionActiveRef[];
+  changes?: InstructionChange[];
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  run_id?: RunId | null;
+  session_id: SessionId;
+  type: "operator_instructions_applied";
 };
 
 /**

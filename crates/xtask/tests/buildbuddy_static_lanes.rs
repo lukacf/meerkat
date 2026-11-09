@@ -95,6 +95,22 @@ fn tracked_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The roots of the repository's products other than Core
+/// (`ci/products.json`), as path prefixes ending in `/`. Core's
+/// whole-checkout scans leave them to their products.
+fn product_root_prefixes(root: &Path) -> Vec<String> {
+    let registry: serde_json::Value =
+        serde_json::from_str(&read(root.join("ci/products.json"))).expect("parse ci/products.json");
+    registry["products"]
+        .as_array()
+        .expect("ci/products.json lists products")
+        .iter()
+        .filter_map(|product| product["root"].as_str())
+        .filter(|product_root| !product_root.is_empty())
+        .map(|product_root| format!("{product_root}/"))
+        .collect()
+}
+
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -193,8 +209,8 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         "xtask BUILD must declare machine_verify_all_tlc_test"
     );
     // The lane is split so each part fits a CI job limit: the machine-verify
-    // sweep and eight hand-written audit shards, run in parallel; together
-    // they are exactly `make machine-verify` (`--part all`).
+    // sweep and twenty-four hand-written audit shards, run in parallel;
+    // together they are exactly `make machine-verify` (`--part all`).
     for (target, part) in [
         ("machine_verify_audits_a_tlc_test", "audits-a"),
         ("machine_verify_audits_b_tlc_test", "audits-b"),
@@ -204,6 +220,22 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         ("machine_verify_audits_f_tlc_test", "audits-f"),
         ("machine_verify_audits_g_tlc_test", "audits-g"),
         ("machine_verify_audits_h_tlc_test", "audits-h"),
+        ("machine_verify_audits_i_tlc_test", "audits-i"),
+        ("machine_verify_audits_j_tlc_test", "audits-j"),
+        ("machine_verify_audits_k_tlc_test", "audits-k"),
+        ("machine_verify_audits_l_tlc_test", "audits-l"),
+        ("machine_verify_audits_m_tlc_test", "audits-m"),
+        ("machine_verify_audits_n_tlc_test", "audits-n"),
+        ("machine_verify_audits_o_tlc_test", "audits-o"),
+        ("machine_verify_audits_q_tlc_test", "audits-q"),
+        ("machine_verify_audits_r_tlc_test", "audits-r"),
+        ("machine_verify_audits_s_tlc_test", "audits-s"),
+        ("machine_verify_audits_t_tlc_test", "audits-t"),
+        ("machine_verify_audits_u_tlc_test", "audits-u"),
+        ("machine_verify_audits_v_tlc_test", "audits-v"),
+        ("machine_verify_audits_w_tlc_test", "audits-w"),
+        ("machine_verify_audits_x_tlc_test", "audits-x"),
+        ("machine_verify_audits_y_tlc_test", "audits-y"),
     ] {
         assert!(
             build.contains(&format!("name = \"{target}\""))
@@ -547,8 +579,18 @@ fn public_version_surfaces_are_in_sync() {
         .expect("workspace dependencies");
     // Internal requirements are exact (`=X.Y.Z`): 0.x patch releases may
     // break API, so a published crate pins its siblings to its own release.
+    // A product's crates (ci/products.json: meta/, connect/) carry that
+    // product's own version line.
     let exact_requirement = format!("={cargo_version}");
+    let products = product_root_prefixes(&root);
     for (name, value) in dependencies {
+        let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        if products
+            .iter()
+            .any(|prefix| path.starts_with(prefix.as_str()))
+        {
+            continue;
+        }
         if name.starts_with("meerkat") {
             let Some(dep_version) = value.get("version").and_then(|v| v.as_str()) else {
                 continue;
@@ -805,10 +847,15 @@ fn retired_session_control_names_are_absent() {
 fn deprecated_backend_references_stay_rejected_only() {
     let root = repo_root();
     // Tracked files only: a local virtualenv's lexer keyword lists name redb.
+    // Core's tree only: a product root's own history mentions it.
     let files = tracked_files(&root);
+    let products = product_root_prefixes(&root);
     let mut matches = Vec::new();
     for file in files {
         let rel = relative(&root, &file);
+        if products.iter().any(|prefix| rel.starts_with(prefix)) {
+            continue;
+        }
         if rel == "CHANGELOG.md"
             || rel == "scripts/deprecated_backend_scan.sh"
             || rel.starts_with("artifacts/")

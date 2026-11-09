@@ -1,0 +1,61 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Meta keeps its container images and its GitHub Actions under Renovate, pinned like Core's: the release build container and the Bazel platform images by digest, every action by commit SHA.",
+  "extends": [
+    "helpers:pinGitHubActionDigests"
+  ],
+  "enabledManagers": [
+    "custom.regex",
+    "github-actions"
+  ],
+  "schedule": [
+    "before 9am on Monday"
+  ],
+  "prConcurrentLimit": 1,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Container images pinned by digest where no built-in manager reads them: the release workflow's build container expression and the Bazel execution platforms.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/release\\.yml$/",
+        "/^tools/bazel/platforms/BUILD\\.bazel$/"
+      ],
+      "matchStrings": [
+        "(?:docker://)?(?<depName>docker\\.io/[a-z0-9._/-]+):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The build container builds every Linux release binary and the platform images run remote builds: a new digest is proposed a week after its release, in a group of its own, and never automerged.",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "groupName": "pinned images",
+      "groupSlug": "pinned-images",
+      "minimumReleaseAge": "7 days",
+      "automerge": false
+    },
+    {
+      "description": "A digest update of a pinned action (its tag now names another commit) waits for approval on the dependency dashboard: minimumReleaseAge holds back new versions only, and a moved tag keeps its original date.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "GitHub Actions run with the workflow token, OIDC and release secrets: pinned to commit SHAs (helpers:pinGitHubActionDigests; the CI workflow tests check these rules), new versions proposed a week after their release, in a group of their own, and never automerged. Keep this rule last.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github actions",
+      "groupSlug": "github-actions",
+      "minimumReleaseAge": "7 days",
+      "automerge": false
+    }
+  ]
+}

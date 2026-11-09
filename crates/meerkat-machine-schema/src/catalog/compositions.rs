@@ -2419,6 +2419,8 @@ fn seam_begin_spawn_exec_input() -> CompositionWitnessInput {
             witness_field("placed_operation_owner_session_id", Expr::None),
             witness_field("effective_profile_override_present", Expr::Bool(false)),
             witness_field("effective_model_override_present", Expr::Bool(false)),
+            witness_field("entry_custody", Expr::Bool(false)),
+            witness_field("created_custody", Expr::Bool(false)),
         ],
     )
 }
@@ -2445,6 +2447,7 @@ fn seam_commit_spawn_membership_input() -> CompositionWitnessInput {
             witness_field("ack_engine_version", Expr::None),
             witness_field("placed_spawn_id", Expr::None),
             witness_field("provision_operation_id", Expr::None),
+            witness_field("definition_wiring_exempt", Expr::Bool(false)),
         ],
     )
 }
@@ -3277,6 +3280,7 @@ fn auth_freshness_expiry_witness() -> CompositionWitness {
                 vec![
                     witness_field("expires_at_ts", some_u64(1)),
                     witness_field("credential_published_at_millis", Expr::U64(1)),
+                    witness_field("credential_material_fingerprint", Expr::None),
                 ],
             ),
             observe(0),
@@ -3317,6 +3321,7 @@ fn auth_expiring_refresh_witness() -> CompositionWitness {
                 vec![
                     witness_field("expires_at_ts", some_u64(2)),
                     witness_field("credential_published_at_millis", Expr::U64(1)),
+                    witness_field("credential_material_fingerprint", Expr::None),
                 ],
             ),
             witness_input(
@@ -3417,6 +3422,7 @@ fn auth_release_drains_oauth_flow_witness(kind: OAuthFlowKind) -> CompositionWit
                 vec![
                     witness_field("expires_at_ts", some_u64(2)),
                     witness_field("credential_published_at_millis", Expr::U64(1)),
+                    witness_field("credential_material_fingerprint", Expr::None),
                 ],
             ),
             witness_input("auth_machine", admit_input, admit_fields),
@@ -5198,6 +5204,11 @@ pub fn auth_lease_bundle_composition() -> CompositionSchema {
                     marker_field: "expires_at".into(),
                     obligation_field: fld_id("expires_at"),
                 },
+                // The marker's generation is the lease's marker generation:
+                // the adopted marker generation when the lease records one
+                // (a publication it took from another process's record below
+                // its own generation), else the lifecycle event's
+                // `credential_generation`, which this binding names.
                 generation: DurableMarkerFieldBinding {
                     marker_field: "generation".into(),
                     obligation_field: fld_id("credential_generation"),

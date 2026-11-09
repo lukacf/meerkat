@@ -48,7 +48,7 @@ const WORKERS: [&str; 4] = [
 const FINISHED: &str = "ops-finished-worker";
 const HELD_PROMPT: &str = "spawn the review workers";
 /// Bounds a failure only; the passing path never waits for it.
-const FAILURE_BOUND: Duration = Duration::from_secs(60);
+const FAILURE_BOUND: Duration = Duration::from_mins(1);
 /// The longest one spawn stage may take while the coordinator's turn runs:
 /// a stall threshold, well below any spawn or tool timeout.
 const STAGE_STALL_BOUND: Duration = Duration::from_secs(5);
@@ -167,6 +167,7 @@ fn mob_definition() -> MobDefinition {
             model: "gpt-5.5".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),

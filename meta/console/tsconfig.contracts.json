@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "types": [],
+    "paths": {
+      "@modelcontextprotocol/ext-apps/app-bridge": ["./node_modules/@modelcontextprotocol/ext-apps/dist/src/app-bridge.d.ts"],
+      "@console-core": ["../packages/console-core/src/index.ts"],
+      "@console-core/*": ["../packages/console-core/src/*"],
+      "@console-components": ["../packages/console-components/src/index.ts"],
+      "@console-components/*": ["../packages/console-components/src/*"],
+      "react": ["./node_modules/@types/react/index.d.ts"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom/index.d.ts"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"],
+      "*": ["./node_modules/*"]
+    }
+  },
+  "files": ["fixtures/public-contracts.tsx", "fixtures/shared-conversation-host.tsx", "fixtures/scoped-stock-host.tsx"]
+}

@@ -249,6 +249,11 @@ pub struct SessionRuntimeBindings {
     /// The session registration's MCP observation slot, when the runtime has
     /// one: the factory installs each finished construction's MCP adapter.
     mcp_observation: Option<crate::mcp_observation::McpObservationSlot>,
+    /// The session's scoped tool grants, when the runtime has a grant
+    /// service: a build's grant gate reads them at every model-request
+    /// boundary and before every gated dispatch. `None` refuses a gated
+    /// build.
+    tool_grants: Option<Arc<dyn crate::tool_grant::SessionToolGrants>>,
     runtime_authority: Arc<dyn Any + Send + Sync>,
 }
 
@@ -310,6 +315,7 @@ impl SessionRuntimeBindings {
             configured_mcp_attachment: None,
             tool_surface_gate: None,
             mcp_observation: None,
+            tool_grants: None,
             runtime_authority,
         }
     }
@@ -342,6 +348,23 @@ impl SessionRuntimeBindings {
     /// one.
     pub fn mcp_observation_slot(&self) -> Option<&crate::mcp_observation::McpObservationSlot> {
         self.mcp_observation.as_ref()
+    }
+
+    /// Carry the session's scoped tool grants. Set by the runtime when it
+    /// prepares bindings on a machine with a grant service.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __with_tool_grants(
+        mut self,
+        grants: Arc<dyn crate::tool_grant::SessionToolGrants>,
+    ) -> Self {
+        self.tool_grants = Some(grants);
+        self
+    }
+
+    /// The session's scoped tool grants, if the runtime has a grant service.
+    pub fn tool_grants(&self) -> Option<&Arc<dyn crate::tool_grant::SessionToolGrants>> {
+        self.tool_grants.as_ref()
     }
 
     /// The tool-surface gate installed for this session's registration, if
@@ -515,6 +538,7 @@ impl SessionRuntimeBindings {
             configured_mcp_attachment: self.configured_mcp_attachment.clone(),
             tool_surface_gate: self.tool_surface_gate.clone(),
             mcp_observation: self.mcp_observation.clone(),
+            tool_grants: self.tool_grants.clone(),
             runtime_authority,
         }
     }
@@ -554,6 +578,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
                 "compaction_commit_coordinator",
                 &"<dyn CompactionCommitCoordinator>",
             )
+            .field("tool_grants", &self.tool_grants.is_some())
             .finish()
     }
 }

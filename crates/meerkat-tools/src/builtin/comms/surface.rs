@@ -404,7 +404,7 @@ mod tests {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    std::time::Duration::from_secs(600),
+                    std::time::Duration::from_mins(10),
                 ),
             ])
             .expect("deadline chain"),
@@ -579,6 +579,10 @@ mod tests {
             &self,
             _: &meerkat_core::PreparedAuthorizationBinding,
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
     }

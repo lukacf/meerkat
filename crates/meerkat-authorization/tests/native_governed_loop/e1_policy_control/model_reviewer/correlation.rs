@@ -188,8 +188,11 @@ fn protected_graph(
             );
             assert_eq!(record.contributors.len(), 1);
             assert_eq!(&record.contributors[0].input_id, input);
-            assert!(record.contributors[0].requester == principal("requester"));
-            assert!(record.contributors[0].logical_executor == principal("executor"));
+            assert_eq!(record.contributors[0].requester, principal("requester"));
+            assert_eq!(
+                record.contributors[0].logical_executor,
+                principal("executor")
+            );
             assert_eq!(
                 record.observation.context_revision,
                 start.observation.context_revision
@@ -544,6 +547,7 @@ async fn exercise(
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -556,6 +560,7 @@ async fn exercise(
     bounds.resource_domains = DomainRestriction::exact([domain(), input_domain()]);
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("reviewable-operations"),
             principal("executor"),
@@ -584,6 +589,7 @@ async fn exercise(
     });
     let authorization = |original: &InputId| NativeGrantWorkConfiguration {
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: false,
         grants: grants.clone(),
         ingress: ingress.clone(),
@@ -1065,7 +1071,7 @@ async fn concurrent_review_children_keep_exact_candidate_joins_after_sqlite_reop
     .await;
     let cleanup = Cleanup::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise(&controller, &reviewer, &database, &cleanup),
     ))
     .catch_unwind()

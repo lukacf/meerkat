@@ -1,0 +1,107 @@
+/* Meta Console - host styles
+   Rams-inspired visual refresh. Three variants via data-cc-variant on root:
+   rams (default), terminal, graphite.
+
+   The rules live in ./styles/<part>.css, one file per panel or shell part,
+   imported below in the order the parts first appear in the cascade. This
+   file keeps the imports and the rules tests read here. */
+
+@import url("./fonts/fonts.css");
+@import url("./pending-stack.css");
+@import url("./styles/base.css");
+@import url("./styles/topbar.css");
+@import url("./styles/shell.css");
+@import url("./styles/sidebar.css");
+@import url("./styles/dock.css");
+@import url("./styles/signals.css");
+@import url("./styles/chat.css");
+@import url("./styles/operator.css");
+@import url("./styles/agent-details.css");
+@import url("./styles/schedules.css");
+@import url("./styles/roster.css");
+@import url("./styles/routing.css");
+@import url("./styles/logs.css");
+@import url("./styles/today.css");
+@import url("./styles/approvals.css");
+@import url("./styles/access.css");
+@import url("./styles/memory.css");
+@import url("./styles/workgraph.css");
+@import url("./styles/health.css");
+@import url("./styles/voice.css");
+
+/* Topology: styled by the shared topology.css (console-components). */
+
+/* ── Rules tests read in this file ───────────────────────────────
+   They stay here, after the imports; every other rule lives in
+   ./styles/<part>.css. */
+
+/* component-boundary.test.ts reads --bg-sunken here (the Logs stream's
+   sunken surface). */
+/* ── Bridge: map design's short variable names to our _cc_ tokens ─
+   Keeps the pasted design CSS below largely unchanged. */
+
+[data-testid="meerkat-console"] {
+  --bg:          var(--_cc-surface-canvas);
+  --bg-sunken:   var(--_cc-surface-soft);
+  --bg-elev-1:   var(--_cc-surface-card);
+  --bg-elev-2:   var(--_cc-surface-hover);
+  --line:        var(--_cc-border-soft);
+  --line-strong: var(--_cc-border-strong);
+  --ink:         var(--_cc-foreground);
+  --ink-muted:   var(--_cc-foreground-muted);
+  --ink-dim:     var(--_cc-foreground-subtle);
+  --ink-faint:   color-mix(in oklch, var(--_cc-foreground-subtle) 55%, transparent);
+  --accent:      var(--_cc-member-accent);
+  --accent-soft: var(--_cc-member-accent-soft);
+  --ok:          var(--_cc-positive);
+  --warn:        var(--_cc-warning);
+  --crit:        var(--_cc-negative);
+  --danger:      var(--_cc-negative);
+  --focus:       var(--_cc-link);
+  /* Text-safe inks (tokens.css): small meta text and tone-coloured text. */
+  --ink-meta:    var(--_cc-foreground-meta);
+  --ok-ink:      var(--_cc-positive-ink);
+  --warn-ink:    var(--_cc-warning-ink);
+  --crit-ink:    var(--_cc-negative-ink);
+  --info-ink:    var(--_cc-link-ink);
+  --focus-ring:  var(--_cc-focus-ring);
+  --motion-hover: 120ms ease;
+  --sans:        var(--_cc-font-display);
+  --mono:        var(--_cc-font-mono);
+  --disp:        var(--_cc-font-display);
+  --r-xs: var(--_cc-radius-xs);
+  --r-sm: var(--_cc-radius-sm);
+  --r-md: var(--_cc-radius-md);
+  --r-lg: var(--_cc-radius-lg);
+  --r-pill: var(--_cc-radius-pill);
+  --r-round: var(--_cc-radius-round);
+  font-family: var(--sans);
+  letter-spacing: -0.003em;
+}
+
+/* Topbar.test.ts reads the .meta-topbar__mob-status rules here. */
+.meta-topbar__mob-status {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ok) 18%, transparent);
+}
+.meta-topbar__mob-status[data-status="stopped"] {
+  background: var(--crit);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--crit) 18%, transparent);
+}
+.meta-topbar__mob-status[data-status="unknown"] {
+  background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--warn) 18%, transparent);
+}
+[data-cc-variant="terminal"] .meta-topbar__mob-status { border-radius: 0; }
+
+/* component-boundary.test.ts reads .logs__body and .logline--warn here
+   (the warning row's contrast guard). */
+.logs__body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+.logline--warn { background: color-mix(in oklch, var(--warn) 5%, transparent); }

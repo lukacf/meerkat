@@ -526,7 +526,8 @@ impl AdmittedWorkPolicyOwner for StockInvocationPolicy {
                 LineageResolutionRefusal::Refused(
                     GrantRefusal::ControllerInUse
                     | GrantRefusal::Duplicate
-                    | GrantRefusal::Unavailable,
+                    | GrantRefusal::Unavailable
+                    | GrantRefusal::AdmissionFence,
                 ) => OperationAuthorizationError::Unavailable,
             })?;
         let bounds = review_bounds_text(
@@ -1151,7 +1152,14 @@ mod tests {
         restrictions: ExecutionRestrictions,
     ) -> GrantLineageRef {
         grants
-            .issue_root(&operator(), id(grant), executor(), None, restrictions)
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &operator(),
+                id(grant),
+                executor(),
+                None,
+                restrictions,
+            )
             .expect("an issued stock grant")
     }
 
@@ -1546,7 +1554,7 @@ mod tests {
     fn deadlines() -> meerkat_core::ToolDeadlineChain {
         meerkat_core::ToolDeadlineChain::new(vec![meerkat_core::ToolDeadlineContributor::finite(
             meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
         )])
         .expect("deadline chain")
     }
@@ -1694,14 +1702,14 @@ mod tests {
             .operation_values
             .into_iter()
             .map(|values| {
-                assert!(values.resource_domain.authority == operator());
-                assert!(
-                    values.processor
-                        == ProcessorRef::Principal {
-                            principal: executor(),
-                        }
+                assert_eq!(values.resource_domain.authority, operator());
+                assert_eq!(
+                    values.processor,
+                    ProcessorRef::Principal {
+                        principal: executor(),
+                    }
                 );
-                assert!(values.audience == association.candidate().target.audience);
+                assert_eq!(values.audience, association.candidate().target.audience);
                 (
                     values.action.feature,
                     values.action.action,
@@ -1947,6 +1955,10 @@ mod tests {
                 &self,
                 _binding: &PreparedAuthorizationBinding,
             ) -> Result<(), OperationAuthorizationError> {
+                Ok(())
+            }
+
+            fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
                 Ok(())
             }
         }
@@ -2521,7 +2533,12 @@ mod tests {
 
         // Revoking the narrow grant refuses exactly the operations it selects.
         grants
-            .revoke(&operator(), &narrow_lineage, &mut NoController)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &operator(),
+                &narrow_lineage,
+                &mut NoController,
+            )
             .expect("revoked");
         for (label, work, binding) in [
             ("its own work", &narrow, &read),
@@ -3305,7 +3322,7 @@ mod tests {
                 lineage: vec![lineage],
             };
         });
-        assert!(invoked.candidate().target.logical_owner == operator());
+        assert_eq!(invoked.candidate().target.logical_owner, operator());
         policy
             .authorize_invocation(&ingress_context(caller()), &invoked)
             .expect("the host admits its caller");
@@ -3634,7 +3651,7 @@ mod tests {
         )
         .expect("the binding's own claims")
         .association;
-        assert!(reported.candidate().requester == ingress());
+        assert_eq!(reported.candidate().requester, ingress());
         policy
             .authorize_invocation(&ingress_context(ingress()), &reported)
             .expect("the ingress reports its own outcome");

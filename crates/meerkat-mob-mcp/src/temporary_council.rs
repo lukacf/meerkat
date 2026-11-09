@@ -115,7 +115,7 @@ pub const TEMPORARY_COUNCIL_CLEANUP_BUDGET: Duration = Duration::from_secs(30);
 /// previous executor. Active execution is protected through the council's
 /// absolute deadline plus its cleanup budget, so a healthy bounded turn cannot
 /// outlive its claim.
-pub const TEMPORARY_COUNCIL_CLAIM_LEASE: Duration = Duration::from_secs(120);
+pub const TEMPORARY_COUNCIL_CLAIM_LEASE: Duration = Duration::from_mins(2);
 
 /// UUIDv5 namespace for deterministic council delivery correlation ids.
 ///
@@ -2438,7 +2438,7 @@ impl CouncilRun {
             // absolute maximum remains authoritative if that margin cannot fit.
             let ttl = remaining
                 .saturating_add(self.state.temporary_council_cleanup_budget())
-                .max(Duration::from_secs(60))
+                .max(Duration::from_mins(1))
                 .min(MAX_FORKED_PARTICIPANT_TTL);
             // 2a. Persist the INTENT to acquire BEFORE calling the source
             //     owner. A crash or a failed post-create commit then leaves an

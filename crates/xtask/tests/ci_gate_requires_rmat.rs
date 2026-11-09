@@ -98,16 +98,19 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         vec![
             "bazel-graph",
             "changes",
+            "ci-lanes-selftest",
             "clippy",
             "clippy-rest",
             "closure-check",
             "closure-tests",
             "closure-tests-rest",
+            "connect-checks",
             "example-web",
             "feature-check",
             "feature-check-rest",
             "fmt-governance",
             "gate",
+            "governance-docs-gate",
             "governance-gates",
             "governed-jsonl",
             "integration",
@@ -116,6 +119,8 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "main-unit-archive-run",
             "main-unit-rest",
             "mcp-confinement-positive",
+            "path-classifier-selftest",
+            "published-floor",
             "ratchets",
             "rustdoc",
             "sdk-host",
@@ -253,6 +258,8 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     for lane in [
         "changes",
         "fmt-governance",
+        "ci-lanes-selftest",
+        "path-classifier-selftest",
         "ratchets",
         "governance-gates",
         "tlc-audits",
@@ -320,6 +327,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "make verify-version-parity",
         "make verify-lock-consistency",
         "make ci-lanes-selftest",
+        "make path-classifier-selftest",
         "make verify-schema-freshness",
         "make verify-sdk-codegen-freshness",
         "make machine-check-drift",
@@ -388,20 +396,16 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
             "{job} runs exactly when the plan selects it"
         );
     }
-    // The workspace rustdoc runs two parallel legs: default features and
-    // --all-features.
-    let rustdoc_legs = jobs
-        .get("rustdoc")
-        .and_then(|job| job.pointer("/strategy/matrix/features"))
-        .and_then(serde_json::Value::as_array)
-        .expect("the rustdoc job's features matrix");
+    // The rustdoc job runs one entry per row and leg of the plan's
+    // rustdoc_matrix: Core's members with default features and with
+    // --all-features, each product's packages the change reaches with
+    // --all-features (the planner self-test pins each row's legs).
     assert_eq!(
-        rustdoc_legs,
-        &vec![
-            serde_json::Value::from("default"),
-            serde_json::Value::from("all")
-        ],
-        "the rustdoc lane runs a default-features leg and an all-features leg"
+        jobs.get("rustdoc")
+            .and_then(|job| job.pointer("/strategy/matrix"))
+            .and_then(serde_json::Value::as_str),
+        Some("${{ fromJSON(needs.changes.outputs.rustdoc_matrix) }}"),
+        "the rustdoc job runs every row and leg the plan names"
     );
     // Each of these lanes runs in two waves (long rows first): the job holds
     // the first wave, its -rest copy the rest.
@@ -451,10 +455,12 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
         "a push plan left lanes to a later push",
         "forbid_failure \"Closure check\" \"${CLOSURE_CHECK_RESULT}\"",
         "forbid_failure \"Rustdoc\" \"${RUSTDOC_RESULT}\"",
-        // Every crate documented with rustdoc's lints denied, once per leg.
+        // Every crate of the row (Core's members, or a product's packages)
+        // documented with rustdoc's lints denied, once per leg.
         "RUSTDOCFLAGS: -Dwarnings",
-        "default) ./scripts/repo-cargo doc --workspace --no-deps --keep-going ;;",
-        "all) ./scripts/repo-cargo doc --workspace --no-deps --keep-going --all-features ;;",
+        "RUSTDOC_FLAGS: ${{ matrix.flags }}",
+        "default) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going ;;",
+        "all) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going --all-features ;;",
         "forbid_failure \"Governed JSONL\" \"${GOVERNED_JSONL_RESULT}\"",
         "forbid_failure \"MCP confinement positive\" \"${MCP_CONFINEMENT_POSITIVE_RESULT}\"",
         "left to the push (main or release/**): ${DEFERRED_TO_PUSH}",
@@ -630,9 +636,11 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
     // Unit and integration execution jobs consume portable Nextest archives
     // built once per compatible Cargo profile. The archive contract self-test
     // pins the complete build scopes and fail-closed partitions; clippy covers
-    // the whole workspace with all features (test-target lints run nightly).
+    // Core's members (the other products' packages excluded) with all
+    // features (test-target lints run nightly).
     for lane in [
-        "clippy --workspace --all-features",
+        "core_selection=\"$(node scripts/core-workspace-args.mjs)\"",
+        "clippy \"${core_workspace[@]}\" --all-features",
         "uses: ./.github/actions/build-nextest-archive",
         "uses: ./.github/actions/run-nextest-archive",
         "family: unit",
@@ -662,8 +670,6 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
 #[test]
 fn nightly_covers_the_deferred_heavy_lanes() {
     let nightly_yml = workflow_yml_path("nightly.yml");
-    let nightly = std::fs::read_to_string(&nightly_yml)
-        .unwrap_or_else(|e| panic!("read {}: {e}", nightly_yml.display()));
     let doc = read_workflow(&nightly_yml);
 
     // Schedule plus manual dispatch. Read as YAML 1.2, the bare `on:` key is
@@ -678,9 +684,28 @@ fn nightly_covers_the_deferred_heavy_lanes() {
     );
     assert!(triggers.contains_key("workflow_dispatch"));
 
+    // What the jobs run, read from their steps and from the workflows they
+    // call, never from the file's text: a text search passed for a lane named
+    // only in a comment (the header names `make test-unit`) or inside a longer
+    // command (`make lint` in `make lint-feature-matrix`, `make
+    // machine-verify` in `make machine-verify-deep-compositions`).
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .expect("nightly jobs mapping");
+    let commands: Vec<String> = jobs
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|job| {
+            job_step_text(job)
+                .lines()
+                .map(|line| line.trim().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
     // Together with the per-push cargo lane this must cover the complete
     // `make ci` target set — these are the targets deliberately moved off
-    // the hot path, not dropped.
+    // the hot path, not dropped. Each is a whole step command.
     for lane in [
         "make lint",
         "make lint-feature-matrix",
@@ -694,14 +719,40 @@ fn nightly_covers_the_deferred_heavy_lanes() {
         "make test-unit",
         "make test-int",
         "make e2e-fast",
-        "make machine-verify",
-        "test-sdk-python test-sdk-typescript",
-        "uses: ./.github/workflows/mob-dense-topology.yml",
-        "uses: ./.github/workflows/buildbuddy.yml",
-        "mode: full-fresh",
+        // The TLC lane's machine-verify part, exactly: the bounded adaptive
+        // witness and the `machine-verify --all` sweep, which no per-change
+        // lane runs. ci.yml's tlc-audits job runs the lane's audit shards on
+        // every machine-authority change
+        // (ci_runs_the_bounded_tlc_audits_on_machine_authority_changes).
+        "make machine-verify MACHINE_VERIFY_PART=machine-verify",
+        "make -j2 test-sdk-python test-sdk-typescript",
     ] {
-        assert!(nightly.contains(lane), "nightly must run `{lane}`");
+        assert!(
+            commands.iter().any(|command| command == lane),
+            "a nightly job step must run `{lane}`"
+        );
     }
+    // The dense Mob topology and the whole Bazel graph, in full-fresh mode,
+    // as jobs that call those workflows.
+    let calls = |workflow: &str| {
+        jobs.values()
+            .filter(|job| job.get("uses").and_then(serde_json::Value::as_str) == Some(workflow))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        calls("./.github/workflows/mob-dense-topology.yml").len(),
+        1,
+        "nightly must call the dense Mob topology workflow"
+    );
+    let graph = calls("./.github/workflows/buildbuddy.yml");
+    assert_eq!(graph.len(), 1, "nightly must call the BuildBuddy graph");
+    assert_eq!(
+        graph[0]
+            .pointer("/with/mode")
+            .and_then(serde_json::Value::as_str),
+        Some("full-fresh"),
+        "nightly runs the whole Bazel graph in full-fresh mode"
+    );
 }
 
 #[test]
@@ -901,15 +952,17 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         parts,
         [
             "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g",
-            "audits-h"
+            "audits-h", "audits-i", "audits-j", "audits-k", "audits-l", "audits-m", "audits-n",
+            "audits-o", "audits-q", "audits-r", "audits-s", "audits-t", "audits-u", "audits-v",
+            "audits-w", "audits-x", "audits-y"
         ],
         "every audit shard runs"
     );
     assert_eq!(
         job.get("timeout-minutes")
             .and_then(serde_json::Value::as_u64),
-        Some(20),
-        "a TLC shard times out at 20 minutes, well over its expected 6-10"
+        Some(60),
+        "a TLC shard times out at 60 minutes: one audit (in audits-s) cannot be split and runs past 30 hosted"
     );
     let job_text = job_step_text(job);
     for required in [
@@ -926,6 +979,52 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     assert!(
         ci.contains("require_ran \"Bounded TLC audits\" \"${TLC_AUDITS_RESULT}\""),
         "the CI gate must require the TLC audits on a machine-authority change"
+    );
+}
+
+/// The runtime authority bypass audit reads every production Rust source of
+/// the workspace (among them the callers of the session service's mob-only
+/// operator-instruction entry points, which any crate could add), so it runs
+/// on every pull request that changes Rust or a governance path, in the
+/// `ratchets` job, which every pull request runs and the CI gate requires.
+#[test]
+fn ci_runs_the_runtime_authority_bypass_audit_on_every_rust_change() {
+    let ci_yml = workflow_yml_path("ci.yml");
+    let doc = read_workflow(&ci_yml);
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .expect("ci workflow jobs mapping");
+    let ratchets = jobs
+        .get("ratchets")
+        .and_then(serde_json::Value::as_object)
+        .expect("ratchets job");
+    assert!(
+        ratchets.get("if").is_none(),
+        "the ratchets job runs on every pull request"
+    );
+    let steps = ratchets
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("ratchets steps");
+    let audit = steps
+        .iter()
+        .find(|step| {
+            step.get("run").and_then(serde_json::Value::as_str)
+                == Some("make runtime-authority-bypass")
+        })
+        .expect("the ratchets job runs the runtime authority bypass audit");
+    assert_eq!(
+        audit.get("if").and_then(serde_json::Value::as_str),
+        Some(
+            "${{ needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.governance_gates == 'true' }}"
+        ),
+        "the audit runs on every Rust change and on every governance change"
+    );
+    let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
+    assert!(
+        ci.contains("require_success \"Generation ratchets\""),
+        "the CI gate requires the ratchets job"
     );
 }
 
@@ -952,16 +1051,31 @@ fn ci_runs_the_typed_governance_gates_on_governance_changes() {
     );
     let job_text = job_step_text(job);
     assert!(
-        job_text.contains(
-            "make rmat-audit seam-inventory runtime-authority-bypass machine-authority-docs-gate"
-        ),
-        "governance-gates must run every typed governance gate; job:\n{job_text}"
+        job_text.contains("make rmat-audit seam-inventory"),
+        "governance-gates must run the audit gates; job:\n{job_text}"
+    );
+    // The machine-authority docs gate runs in a job of its own, on the same
+    // condition, so the two halves run in parallel.
+    let docs = jobs
+        .get("governance-docs-gate")
+        .and_then(serde_json::Value::as_object)
+        .expect("governance-docs-gate job");
+    assert_eq!(
+        docs.get("if").and_then(serde_json::Value::as_str),
+        Some("${{ needs.changes.outputs.governance_gates == 'true' }}"),
+        "the docs gate runs exactly on governance changes"
+    );
+    let docs_text = job_step_text(docs);
+    assert!(
+        docs_text.contains("make machine-authority-docs-gate"),
+        "governance-docs-gate must run the machine-authority docs gate; job:\n{docs_text}"
     );
     let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
     for contract in [
         "governance_gates: ${{ steps.plan.outputs.governance_gates }}",
         "GOVERNANCE_GATES: ${{ needs.changes.outputs.governance_gates }}",
         "require_ran \"Typed governance gates\" \"${GOVERNANCE_GATES_RESULT}\"",
+        "require_ran \"Typed governance gates (machine-authority docs)\" \"${GOVERNANCE_DOCS_GATE_RESULT}\"",
     ] {
         assert!(ci.contains(contract), "CI must carry `{contract}`");
     }

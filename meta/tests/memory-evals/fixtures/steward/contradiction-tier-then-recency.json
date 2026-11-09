@@ -1,0 +1,69 @@
+{
+  "name": "steward-contradiction-tier-then-recency",
+  "records": [
+    {
+      "id": "mem-app-window",
+      "kind": "Fact",
+      "title": "Deploy window is Tuesday 10:00 UTC",
+      "description": "Matters when scheduling deploys.",
+      "body": "Deploys go out Tuesdays at 10:00 UTC, set by the platform team.",
+      "scope_kind": "mob",
+      "scope_key": "mob:ops",
+      "trust": "application",
+      "status": "active"
+    },
+    {
+      "id": "mem-agent-window",
+      "kind": "Fact",
+      "title": "Deploy window is Friday afternoon",
+      "description": "Matters when scheduling deploys.",
+      "body": "I observed a deploy going out on a Friday afternoon, so Friday seems to be the window.",
+      "scope_kind": "mob",
+      "scope_key": "mob:ops",
+      "trust": "agent_observed",
+      "status": "active"
+    }
+  ],
+  "proposals": [],
+  "mob_context": { "mob": "mob:ops", "purpose": "operate and deploy the production service" },
+  "scripted_reply": {
+    "ops": [
+      {
+        "op": "supersede",
+        "id": "resolved-window",
+        "prior": "mem-agent-window",
+        "kind": "fact",
+        "title": "Deploy window is Tuesday 10:00 UTC (agent Friday observation superseded)",
+        "description": "Matters when scheduling deploys.",
+        "body": "The deploy window is Tuesday 10:00 UTC per the application-tier record; the single Friday observation was a one-off and loses on trust tier.",
+        "tags": [],
+        "trust": "agent_observed",
+        "derived_from": ["mem-app-window"],
+        "rationale": "same-scope contradiction resolved by trust tier (application > agent_observed), rule stated per §8.5"
+      }
+    ],
+    "proposal_verdicts": [],
+    "quarantine_verdicts": [],
+    "open_loop_escalations": [],
+    "contradictions": [
+      {
+        "record_ids": ["mem-app-window", "mem-agent-window"],
+        "operational": true,
+        "entity": "mob:ops",
+        "topic": "deploy window",
+        "reason": "members disagree on the deploy window; acting on Friday would miss the sanctioned Tuesday slot"
+      }
+    ],
+    "working_set": ["mem-app-window"]
+  },
+  "expected": {
+    "validator": "ok",
+    "ops": { "supersede": 1 },
+    "contradictions": { "operational": 1 },
+    "live": {
+      "must_supersede": ["mem-agent-window"],
+      "must_not_tombstone": ["mem-app-window"]
+    }
+  },
+  "notes": "Contradiction resolution is trust tier first, then recency, then evidence weight (§8.5): the application-tier Tuesday record wins over the newer agent observation; the losing record is superseded (never the winner), with the rule recorded in the rationale. The operational conflict is also emitted for the gating ledger (memory disagreement becomes a governance input)."
+}

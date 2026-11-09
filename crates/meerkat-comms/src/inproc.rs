@@ -938,6 +938,12 @@ impl InprocRegistry {
     /// caps the whole send: how long the sender's own liveness may depend on
     /// the receiver's drain, and on a wake the receiver needs first; see
     /// [`Self::send_resolving_wake`].
+    ///
+    /// `governed_origin` is the governed work the envelope was sent under, if
+    /// any: the receiver's queue keeps it with the item, unchanged.
+    // One argument over the lint's threshold: the process-local origin rides
+    // beside the envelope it describes, never inside it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_to_pubkey_any_namespace_with_id_wait(
         &self,
         from_keypair: &Keypair,
@@ -946,6 +952,7 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
         budget: std::time::Duration,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<InprocDelivery, InprocSendError> {
         self.send_resolving_wake(
             RouteScope::AnyNamespace,
@@ -955,6 +962,7 @@ impl InprocRegistry {
             kind,
             sign_envelope,
             budget,
+            governed_origin,
         )
         .await
     }
@@ -971,11 +979,12 @@ impl InprocRegistry {
     /// the peer re-registers elsewhere and delivery crosses the namespace
     /// boundary. A wake route is looked up in the same namespace, so a member
     /// is never woken from another namespace.
-    // One argument over the lint's threshold, and the extra one is the
-    // `namespace` delivery authority that distinguishes this send from its
-    // any-namespace sibling. Bundling the envelope arguments into a params
-    // struct would only move the same values behind a name that adds no
-    // meaning, so the sibling signatures are kept identical instead.
+    // Over the lint's threshold: the extra arguments are the `namespace`
+    // delivery authority that distinguishes this send from its any-namespace
+    // sibling, and the process-local governed origin that rides beside the
+    // envelope. Bundling the envelope arguments into a params struct would
+    // only move the same values behind a name that adds no meaning, so the
+    // sibling signatures are kept identical instead.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_to_pubkey_in_namespace_with_id_wait(
         &self,
@@ -986,6 +995,7 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
         budget: std::time::Duration,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<InprocDelivery, InprocSendError> {
         self.send_resolving_wake(
             RouteScope::Namespace(namespace),
@@ -995,6 +1005,7 @@ impl InprocRegistry {
             kind,
             sign_envelope,
             budget,
+            governed_origin,
         )
         .await
     }
@@ -1035,6 +1046,7 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
         budget: std::time::Duration,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<InprocDelivery, InprocSendError> {
         let started = Instant::now();
         let remaining = || budget.saturating_sub(started.elapsed());
@@ -1059,6 +1071,7 @@ impl InprocRegistry {
                             sign_envelope,
                             remaining(),
                             budget,
+                            governed_origin,
                         )
                         .await;
                     }
@@ -1082,6 +1095,7 @@ impl InprocRegistry {
                         sign_envelope,
                         remaining(),
                         budget,
+                        governed_origin,
                     )
                     .await;
                 }
@@ -1119,6 +1133,7 @@ impl InprocRegistry {
                         sign_envelope,
                         remaining(),
                         budget,
+                        governed_origin.clone(),
                     )
                     .await
                     {
@@ -1178,6 +1193,7 @@ impl InprocRegistry {
         sign_envelope: bool,
         remaining: std::time::Duration,
         budget: std::time::Duration,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<InprocDelivery, InprocSendError> {
         Self::deliver_to_sender_wait(
             from_keypair,
@@ -1187,6 +1203,7 @@ impl InprocRegistry {
             kind,
             sign_envelope,
             remaining,
+            governed_origin,
         )
         .await
         .map(|delivery| match delivery.outcome {
@@ -1240,6 +1257,9 @@ impl InprocRegistry {
     /// `MessageKind::Response` deliberately keeps capacity-only semantics: it
     /// returns as soon as the item is admitted to the queue and never waits on
     /// the drain, so it has no receipt park to bound.
+    // The envelope's arguments plus the process-local governed origin that
+    // rides beside it.
+    #[allow(clippy::too_many_arguments)]
     async fn deliver_to_sender_wait(
         from_keypair: &Keypair,
         to_pubkey: PubKey,
@@ -1248,6 +1268,7 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
         park_bound: std::time::Duration,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<InprocDelivery, InprocSendError> {
         let response_uses_legacy_queue_semantics = matches!(&kind, MessageKind::Response { .. });
         let mut envelope = Envelope {
@@ -1264,7 +1285,7 @@ impl InprocRegistry {
         let envelope_id = envelope.id;
         if response_uses_legacy_queue_semantics {
             return match sender
-                .send_wait_in_process(InboxItem::External { envelope })
+                .send_wait_in_process(InboxItem::External { envelope }, governed_origin)
                 .await
             {
                 AdmissionOutcome::Admitted => Ok(InprocDelivery {
@@ -1283,7 +1304,11 @@ impl InprocRegistry {
             };
         }
         match sender
-            .send_wait_for_delivery(InboxItem::External { envelope }, park_bound)
+            .send_wait_for_delivery(
+                InboxItem::External { envelope },
+                park_bound,
+                governed_origin,
+            )
             .await
         {
             BoundedIngressDelivery::Resolved(IngressDeliveryOutcome::Queued) => unreachable!(
@@ -1711,6 +1736,7 @@ mod tests {
                     probe_message(body),
                     true,
                     TEST_PARK_BOUND,
+                    None,
                 )
                 .await
                 .expect("both same-name peers must remain routable");
@@ -1811,6 +1837,7 @@ mod tests {
                 probe_message("incumbent keeps routing"),
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await
             .expect("the refused registration must not have unbound the incumbent");
@@ -1919,6 +1946,7 @@ mod tests {
                 probe_message("after the refused claim"),
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await
             .expect("the refused claim must not have unbound the incumbent generation");
@@ -2375,6 +2403,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
         let delivery = result.expect("runtime-bound Message must be durably admitted");
@@ -2431,6 +2460,7 @@ mod tests {
                 message(),
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await
             .expect("first stable envelope delivery should resolve");
@@ -2454,6 +2484,7 @@ mod tests {
                 message(),
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await
             .expect("same-envelope retry should resolve by durable deduplication");
@@ -2516,6 +2547,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await
             .expect("Response must complete after queue admission");
@@ -2596,6 +2628,7 @@ mod tests {
                 message_kind("drain dies mid-claim"),
                 true,
                 SHORT_PARK_BOUND,
+                None,
             ),
         )
         .await
@@ -2643,6 +2676,7 @@ mod tests {
                 message_kind("nobody is draining"),
                 true,
                 SHORT_PARK_BOUND,
+                None,
             ),
         )
         .await
@@ -2695,6 +2729,7 @@ mod tests {
                 message_kind("fills the only slot"),
                 true,
                 SHORT_PARK_BOUND,
+                None,
             ),
         )
         .await
@@ -2715,6 +2750,7 @@ mod tests {
                 message_kind("waits on capacity that never opens"),
                 true,
                 SHORT_PARK_BOUND,
+                None,
             ),
         )
         .await
@@ -2767,7 +2803,8 @@ mod tests {
                     handling_mode: None,
                 },
                 true,
-                Duration::from_secs(3600),
+                Duration::from_hours(1),
+                None,
             ),
         )
         .await
@@ -2821,6 +2858,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await
             .expect("auth-exempt supervisor bridge request must hand off as volatile control");
@@ -2866,6 +2904,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
 
@@ -2901,6 +2940,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
 
@@ -2953,6 +2993,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
         assert!(matches!(
@@ -2980,6 +3021,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
         assert!(matches!(wrong_ns, Err(InprocSendError::PeerNotFound(_))));
@@ -3031,6 +3073,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
         let delivery = result.expect("canonical target must receive");
@@ -3088,6 +3131,7 @@ mod tests {
                 },
                 true,
                 TEST_PARK_BOUND,
+                None,
             )
             .await;
 

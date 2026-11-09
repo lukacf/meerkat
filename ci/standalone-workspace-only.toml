@@ -236,13 +236,14 @@ tests = [
     "agent::state::tests::foreign_identical_registry_profile_witness_rejects_atomically",
     "agent::state::tests::generated_authority_stage_persists_projection_and_clears_legacy_only_on_success",
     "agent::state::tests::generic_fatal_llm_failure_uses_machine_terminal_cause_and_preserves_detail",
+    "agent::state::tests::governed_authorization::a_compaction_summary_rebuilds_after_a_stale_read_whose_change_completed",
     "agent::state::tests::governed_authorization::a_compaction_summary_waits_out_an_owner_change_in_progress",
     "agent::state::tests::governed_authorization::a_denial_outside_the_admitted_topology_stays_fail_closed",
     "agent::state::tests::governed_authorization::a_flip_storm_spends_at_most_three_free_rebuilds",
     "agent::state::tests::governed_authorization::a_mandatory_run_override_without_an_engine_is_rejected_before_entry",
     "agent::state::tests::governed_authorization::a_one_shot_withholding_append_failure_stays_local_to_its_operation",
-    "agent::state::tests::governed_authorization::a_refusal_without_a_change_in_progress_rebuilds_at_once",
     "agent::state::tests::governed_authorization::a_run_budget_under_the_wait_bound_ends_the_turn_on_time",
+    "agent::state::tests::governed_authorization::a_stale_read_after_a_completed_change_rebuilds_after_one_pause",
     "agent::state::tests::governed_authorization::an_always_denying_gate_is_bounded_by_the_turn_limit",
     "agent::state::tests::governed_authorization::an_observation_reaches_only_the_host_that_installed_the_observer",
     "agent::state::tests::governed_authorization::an_owner_change_in_progress_is_waited_out_before_the_rebuild",
@@ -437,6 +438,7 @@ excluded = [
     { path = "tests/agent_builder_policy_canary.rs", reason = "repository policy canary: reads sibling crates' build scripts, sources and Bazel targets" },
     { path = "tests/brain_swap_surface_parity.rs", reason = "scans sibling crates' surface sources" },
     { path = "tests/host_launch_sites.rs", reason = "workspace launch-site gate over clippy.toml and every crate's sources" },
+    { path = "tests/admission_fence_sites.rs", reason = "workspace admission fence gate over every crate's sources" },
     { path = "tests/integration.rs", reason = "needs the unpublished mcp-test-server crate" },
     { path = "tests/governed_realm.rs", reason = "needs the unpublished mcp-test-server crate" },
     { path = "tests/governed_realm_account_binding.rs", reason = "needs the unpublished mcp-test-server crate" },
@@ -483,6 +485,7 @@ excluded = [
     { path = "tests/connector_oauth_commit.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/connector_protocol_google.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/connector_protocol_providers.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
+    { path = "tests/credential_commit_fence.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/google_auth_authorizer.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/mcp_oauth_account_use.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
     { path = "tests/mcp_oauth_owner.rs", reason = "needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)" },
@@ -959,10 +962,19 @@ tests = [
     "router::shutdown_report_tests::stdio::shutdown_reports_a_still_connecting_servers_close",
     "router::shutdown_report_tests::stdio::shutdown_reports_an_established_servers_settled_close",
     "router::tests::a_call_without_a_usable_credential_unpublishes_at_the_next_boundary",
+    "router::tests::a_control_refusing_the_retry_keeps_the_server_unpublished",
+    "router::tests::a_governance_refused_restage_is_reported_once",
+    "router::tests::a_governed_name_without_a_retained_control_is_not_retried_plainly",
+    "router::tests::a_governed_retry_after_a_challenge_asks_its_control_again",
+    "router::tests::a_governed_sign_in_retry_asks_its_control",
     "router::tests::a_newer_staged_intent_wins_over_a_release",
     "router::tests::a_refused_restage_is_reported_and_the_sign_in_is_kept",
     "router::tests::a_release_of_another_credential_leaves_the_server_published",
+    "router::tests::a_released_governed_name_without_a_retained_control_is_not_restaged",
+    "router::tests::a_released_governed_server_is_restaged_under_its_control",
     "router::tests::a_remove_staged_ahead_of_the_old_failure_wins",
+    "router::tests::a_retry_of_a_governed_record_without_a_control_is_refused",
+    "router::tests::a_retry_under_a_control_for_another_descriptor_is_refused",
     "router::tests::a_sign_in_before_a_queued_call_refusal_keeps_the_server_published",
     "router::tests::a_sign_in_before_the_release_boundary_restores_the_server_without_another_sign_in",
     "router::tests::a_sign_out_after_a_retained_sign_in_supersedes_it",
@@ -1004,6 +1016,7 @@ tests = [
     "router::tests::sign_out_unpublishes_the_connected_server_and_sign_in_adds_it_back",
     "router::tests::staged_add_remove_reload_transitions",
     "router::tests::stale_results_cannot_clear_or_replace_a_newer_retry_record",
+    "router::tests::the_close_releases_the_retained_governed_controls",
 ]
 
 [crates.meerkat-mcp-server]
@@ -1038,6 +1051,13 @@ excluded = [
 [crates.meerkat-machine-schema]
 excluded = [
     { path = "tests/docs_machine_authority_alignment.rs", reason = "pins the repository's docs/reference tables against the registry" },
+]
+
+[crates.meerkat-machine-codegen]
+excluded = [
+    { path = "tests/render_contracts.rs", reason = "reads meerkat-mob's and meerkat-runtime's production sources and calls meerkat-mob" },
+    { path = "tests/runtime_alphabet_parity.rs", reason = "compares the generated alphabets with meerkat-runtime's and meerkat-mob's catalogs" },
+    { path = "tests/runtime_schema_parity.rs", reason = "compares production schemas of meerkat-runtime, meerkat-mob, meerkat-schedule and meerkat-workgraph and embeds meerkat-machine-kernels' generated sources" },
 ]
 
 [crates.meerkat-client]

@@ -19,7 +19,7 @@ use meerkat_auth_core::http_egress::{HttpEgressError, HttpEgressProfile, HttpEgr
 use meerkat_auth_core::{McpAuthMode, McpOAuthError, McpServerIdentity};
 use meerkat_core::McpServerConfig;
 use meerkat_core::ToolDef;
-use meerkat_core::auth::{McpServiceSecretRefusal, McpServiceSecretValues};
+use meerkat_core::auth::{McpServiceSecretLaunch, McpServiceSecretRefusal, McpServiceSecretValues};
 use meerkat_core::mcp_attachment::{McpAttachmentAuthority, McpStdioSetupFailureClass};
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::ContentBlock;
@@ -53,6 +53,14 @@ pub struct McpConnection {
     /// The account this connection's operations act with, as its owners
     /// stated it when it was made ([`connection_account`]).
     account: Arc<meerkat_core::OperationAccount>,
+    /// What its stdio server's launch injected for the declared service
+    /// secrets: the write of each value, never a value. `None` when the
+    /// launch injected none.
+    service_secret_launch: Option<Arc<McpServiceSecretLaunch>>,
+    /// The OAuth credential owner this connection's requests read their
+    /// bearer from, with its target; `None` for a connection that resolves
+    /// no bearer (stdio, or a remote server without a resolver).
+    credential_source: Option<OAuthBearer>,
     /// Full standard discovery, for host replay. Model definitions are a
     /// separate projection and do not carry private UI metadata.
     standard_tools: std::sync::RwLock<Vec<rmcp::model::Tool>>,
@@ -130,7 +138,7 @@ pub struct McpStdioCloseBoundsError {
 
 impl McpStdioCloseBounds {
     /// The largest grace either bound accepts.
-    pub const MAX_GRACE: Duration = Duration::from_secs(60);
+    pub const MAX_GRACE: Duration = Duration::from_mins(1);
     /// No grace: escalation starts as soon as the close does.
     pub const IMMEDIATE: Self = Self {
         eof_grace: Duration::ZERO,
@@ -1627,7 +1635,11 @@ pub trait McpAuthResolver: Send + Sync {
     /// before the handshake. The default holds no custody and refuses, so a
     /// resolver that does not serve service secrets never launches a server
     /// that declares them, and no value is ever taken from the host
-    /// environment instead.
+    /// environment instead. A value read with the write that stored it
+    /// ([`meerkat_core::auth::load_mcp_service_secret_into`]) carries that
+    /// write's witness, which the connection records
+    /// ([`McpConnection::service_secret_launch`]); a value inserted without
+    /// one is recorded without a witness.
     async fn stdio_service_secrets(
         &self,
         server: &McpServerConfig,
@@ -1644,6 +1656,23 @@ pub trait McpAuthResolver: Send + Sync {
     /// locally answers unavailable.
     fn selected_account(&self, _target: &McpServerIdentity) -> meerkat_core::OperationAccount {
         meerkat_core::OperationAccount::Unavailable
+    }
+
+    /// The publication of the credential this resolver's owner holds for
+    /// `target` now, read without loading, resolving, refreshing or sending
+    /// anything: what a call prepared now records as the credential its
+    /// requests carry ([`crate::McpCallTarget::credential_publication`]).
+    /// A request reads the owner's credential when it is sent, after its
+    /// call was prepared, so it carries that publication or a later one, and
+    /// a later one is never the lease's current publication while the
+    /// recorded one is. `None` when the owner holds no lease-published
+    /// credential for `target`, or keeps no lease (the default). A resolver
+    /// that wraps another forwards it.
+    fn credential_publication(
+        &self,
+        _target: &McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        None
     }
 }
 
@@ -1701,6 +1730,14 @@ impl McpAuthResolver for meerkat_auth_core::McpOAuthAuthority {
             }
             _ => meerkat_core::OperationAccount::Unavailable,
         }
+    }
+
+    /// The publication the authority's lease for `target` holds now.
+    fn credential_publication(
+        &self,
+        target: &McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        meerkat_auth_core::McpOAuthAuthority::credential_publication(self, target)
     }
 }
 
@@ -1979,6 +2016,7 @@ impl McpConnection {
         // Refusal precedes process spawn, SSE startup and HTTP transport effects.
         let client = ClientServiceSelection::select(config, client_factory.as_deref())?;
         let mut stdio_child = None;
+        let mut service_secret_launch = None;
         let service = match &config.transport {
             McpTransportConfig::Stdio(stdio) => {
                 // We own the process; rmcp only gets its stdout/stdin.
@@ -1990,6 +2028,10 @@ impl McpConnection {
                 // connect deadline) spawns nothing either.
                 let secrets =
                     resolve_stdio_service_secrets(config, stdio, auth_resolver.as_deref()).await?;
+                // The writes of exactly the values this launch injects, taken
+                // from those values before they go to the process: the
+                // connection keeps this record, never a value.
+                let launched_secrets = secrets.as_ref().map(|values| Arc::new(values.launch()));
                 // The launch-only configuration: the declared secrets and the
                 // one projection of a connector-bound installation's expected
                 // account binding (set over any configured value). It is
@@ -2016,6 +2058,7 @@ impl McpConnection {
                         match client_custody.deposit(service, custody.bounds.eof_grace()) {
                             Ok(service) => {
                                 stdio_child = Some(custody);
+                                service_secret_launch = launched_secrets;
                                 service
                             }
                             // Its close index closed it while it connected: the
@@ -2107,6 +2150,8 @@ impl McpConnection {
             oauth_target: None,
             attempt: None,
             account: Arc::new(connection_account(config, None)),
+            service_secret_launch,
+            credential_source: None,
             standard_tools: Default::default(),
         })
     }
@@ -2326,14 +2371,17 @@ impl McpConnection {
         let session_expiry = SessionExpiryRecorder::default();
         let recorder = recorder.unwrap_or_default();
         let egress = EgressGuard::new(http_egress.clone());
+        let abandoned = crate::transport::abandoned::AbandonedRequests::default();
         let mut http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
                 .with_protected_metadata(protected_metadata.clone())
                 .with_session_expiry(session_expiry.clone())
                 .with_first_request_entry(first_request.clone())
-                .with_egress(egress.clone());
+                .with_egress(egress.clone())
+                .with_abandoned_requests(abandoned.clone());
         let oauth_target = bearer.as_ref().map(|bearer| bearer.target().clone());
         let account = Arc::new(connection_account(config, bearer.as_ref()));
+        let credential_source = bearer.clone();
         if let Some(bearer) = bearer {
             http_client = http_client.with_oauth_bearer(bearer);
         }
@@ -2356,7 +2404,7 @@ impl McpConnection {
                 egress: egress.recorded(),
                 shut_down: false,
             })?;
-        let service = client_custody
+        let mut service = client_custody
             .deposit(service, REMOTE_CLOSE_BOUND)
             .map_err(|_| StreamableConnectError {
                 reason: McpError::RouterShutDown.to_string(),
@@ -2365,6 +2413,9 @@ impl McpConnection {
                 egress: None,
                 shut_down: true,
             })?;
+        // The connection abandons requests through the registry its HTTP
+        // client ends their exchanges by.
+        service.abandoned = abandoned;
         Ok(Self {
             config: config.clone(),
             connection_id,
@@ -2375,6 +2426,8 @@ impl McpConnection {
             oauth_target,
             attempt: attempt.cloned(),
             account,
+            service_secret_launch: None,
+            credential_source,
             standard_tools: Default::default(),
         })
     }
@@ -2770,6 +2823,32 @@ impl McpConnection {
         &self.account
     }
 
+    /// The service-secret writes this connection's stdio server was launched
+    /// with: for each declared slot, the witness of the write whose value the
+    /// launch injected, read with the value from the same stored row
+    /// ([`meerkat_core::auth::McpServiceSecretLaunch`]). It names writes,
+    /// never values. Fixed for the connection's lifetime (the running server
+    /// keeps the environment it was launched with), so every call over this
+    /// connection is served by these writes' values; a later write or
+    /// removal reaches only a later launch. `None` when the launch injected
+    /// no service secret (a server that declares none, or a remote server).
+    pub fn service_secret_launch(&self) -> Option<&McpServiceSecretLaunch> {
+        self.service_secret_launch.as_deref()
+    }
+
+    /// The publication of the credential this connection's requests carry,
+    /// as its credential owner states it now
+    /// ([`McpAuthResolver::credential_publication`]): read when a call is
+    /// prepared and recorded on its [`crate::McpCallTarget`]. `None` when the
+    /// connection resolves no bearer, or its owner keeps no lease.
+    pub fn credential_publication(
+        &self,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        self.credential_source
+            .as_ref()
+            .and_then(OAuthBearer::credential_publication)
+    }
+
     pub(crate) fn supports_mcp_apps(&self) -> bool {
         self.service.supports_mcp_apps()
     }
@@ -2885,18 +2964,32 @@ impl McpConnection {
         // transport result. Dropping the router's admitted read future would
         // skip its outcome observation and release its credential lease early.
         // A timeout is local unavailability, never proof the remote did no work.
-        let result = tokio::time::timeout_at(deadline, async {
-            self.service
-                .send_request_with_option(
+        // The deadline ends both the handoff and the wait for the response.
+        // A read it ends is abandoned: the server is told it is cancelled,
+        // from a task, so the caller is not held while that notice is sent
+        // (rmcp's own timeout would wait for it, and on a connection whose
+        // transport is still busy with this very read it could wait forever).
+        let result = async {
+            let handle = tokio::time::timeout_at(
+                deadline,
+                self.service.send_request_with_option(
                     request,
-                    rmcp::service::PeerRequestOptions::with_timeout(remaining),
-                )
-                .await?
-                .await_response()
-                .await
-        })
+                    rmcp::service::PeerRequestOptions::no_options(),
+                ),
+            )
+            .await
+            .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))?;
+            let abandoned = AbandonedRequest::arm(&self.service, handle.id.clone());
+            match tokio::time::timeout_at(deadline, handle.await_response()).await {
+                Ok(response) => {
+                    abandoned.settled();
+                    response
+                }
+                // Dropping the guard abandons the read.
+                Err(_) => Err(rmcp::ServiceError::Timeout { timeout: remaining }),
+            }
+        }
         .await
-        .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))
         .map_err(|error| {
             let disposition = dispatch.disposition();
             if matches!(disposition, Some(RequestDisposition::Sent) | None)
@@ -3280,6 +3373,7 @@ impl ClientCustody {
                 mcp_apps,
                 custody: self.clone(),
                 bound,
+                abandoned: Default::default(),
             });
         }
         // Closed first (its close index began its close): no client stays
@@ -3429,6 +3523,9 @@ pub(crate) struct HeldClient {
     custody: ClientCustody,
     /// How long a close started by this handle's drop waits for the service.
     bound: Duration,
+    /// The requests this connection abandons, whose HTTP exchange its
+    /// streamable-HTTP client ends (unused by other transports).
+    abandoned: crate::transport::abandoned::AbandonedRequests,
 }
 
 impl std::ops::Deref for HeldClient {
@@ -3448,6 +3545,7 @@ impl HeldClient {
             mcp_apps: client.supports_mcp_apps(),
             custody: custody.clone(),
             bound: REMOTE_CLOSE_BOUND,
+            abandoned: Default::default(),
         };
         *custody.slot() = ClientSlot::Held(client);
         held
@@ -3520,6 +3618,35 @@ struct CloseIndexShared {
     /// The router's attempt guards, cancelled with `RouterClosed` when the
     /// close begins, before any attempt is stopped.
     guards: std::sync::OnceLock<std::sync::Weak<crate::attempt_guard::RouterGuards>>,
+    /// The governed attachment controls the router retains for a re-add
+    /// after a sign-in, released when the close begins.
+    retained: std::sync::Mutex<RetainedControls>,
+}
+
+#[derive(Default)]
+struct RetainedControls {
+    /// Set when the close began: a control retained after it is released at
+    /// once.
+    released: bool,
+    cells: Vec<std::sync::Weak<RetainedControl>>,
+}
+
+/// One governed attachment control a router retains past its connection's
+/// physical entry, for the governed name's re-add after a sign-in: the
+/// name's own and its retry records' share it. Empty once the router's
+/// close began ([`CloseIndex::begin_close`]): no re-add is staged after it,
+/// so a router whose shutdown never runs keeps no control alive past its
+/// close.
+pub(crate) struct RetainedControl(std::sync::Mutex<Option<Arc<dyn McpAttachmentAuthority>>>);
+
+impl RetainedControl {
+    /// The retained control, unless the router's close released it.
+    pub(crate) fn control(&self) -> Option<Arc<dyn McpAttachmentAuthority>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[derive(Default)]
@@ -3600,6 +3727,48 @@ impl CloseIndex {
         let _ = self.0.guards.set(Arc::downgrade(guards));
     }
 
+    /// Retain `control` for a governed name's re-add after a sign-in, until
+    /// the close begins. Once it began, the cell is empty from the start.
+    pub(crate) fn retain_control(
+        &self,
+        control: Arc<dyn McpAttachmentAuthority>,
+    ) -> Arc<RetainedControl> {
+        let mut retained = self
+            .0
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retained.released {
+            return Arc::new(RetainedControl(std::sync::Mutex::new(None)));
+        }
+        retained.cells.retain(|cell| cell.strong_count() > 0);
+        let cell = Arc::new(RetainedControl(std::sync::Mutex::new(Some(control))));
+        retained.cells.push(Arc::downgrade(&cell));
+        cell
+    }
+
+    /// Release every retained control: nothing can be re-added once the
+    /// close began.
+    fn release_retained_controls(&self) {
+        let cells = {
+            let mut retained = self
+                .0
+                .retained
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retained.released = true;
+            std::mem::take(&mut retained.cells)
+        };
+        for cell in cells.iter().filter_map(std::sync::Weak::upgrade) {
+            let control = cell
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(control);
+        }
+    }
+
     /// Freeze admission and start, now, every close this index covers that
     /// has not started, without any router lock or in-flight call: a held
     /// stdio server's client is closed and then its process, under that
@@ -3608,13 +3777,18 @@ impl CloseIndex {
     /// holds nothing yet is retired, so its attempt stops and spawns or
     /// connects nothing more (a client it still connects is closed at
     /// once). A close already running is joined. A later call returns a
-    /// ticket over the same closes. Call it within a Tokio runtime.
+    /// ticket over the same closes. The governed attachment controls the
+    /// router retains for a re-add after a sign-in are released. Call it
+    /// within a Tokio runtime.
     pub(crate) fn begin_close(&self) -> McpCloseTicket {
         // The router is closing: its attempts' guards learn it first, so an
         // attempt stopped below is cancelled as `RouterClosed`.
         if let Some(guards) = self.0.guards.get().and_then(std::sync::Weak::upgrade) {
             guards.close(crate::McpAttemptCancelCause::RouterClosed);
         }
+        // Nothing is re-added once the close began, so no control is kept
+        // for it, whether or not the router's shutdown ever runs.
+        self.release_retained_controls();
         let now = tokio::time::Instant::now();
         let closes = {
             let mut state = self.state();
@@ -3905,7 +4079,7 @@ impl CallAdmission<'_> {
 // OAuth target) are passed separately so both callers share one path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call_tool_on(
-    service: &rmcp::service::Peer<rmcp::RoleClient>,
+    service: &HeldClient,
     server: &str,
     admission: CallAdmission<'_>,
     protected_metadata: &ProtectedMetadataState,
@@ -3958,7 +4132,7 @@ pub(crate) async fn call_tool_on(
         request.extensions.insert(custody);
     }
     let request = request.into();
-    let result = service.send_request(request).await.map_err(|error| {
+    let failure = |error: rmcp::ServiceError| {
         let disposition = dispatch.disposition();
         // An OAuth refusal (a 401, or no usable credential before
         // dispatch) is typed unless the request's own disposition already
@@ -3969,12 +4143,92 @@ pub(crate) async fn call_tool_on(
             return refused;
         }
         tool_call_failure(server, name, disposition, &error)
-    })?;
+    };
+    let handle = service
+        .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+        .await
+        .map_err(&failure)?;
+    // A caller that stops waiting (its deadline expired, or it was
+    // cancelled) drops this future: the server is told the request is
+    // abandoned, unless its response settled it first.
+    let abandoned = AbandonedRequest::arm(service, handle.id.clone());
+    let response = handle.await_response().await;
+    abandoned.settled();
+    let result = response.map_err(failure)?;
     match result {
         ServerResult::CallToolResult(result) => Ok(result),
         _ => Err(McpError::ProtocolError {
             message: "unexpected MCP tools/call response".into(),
         }),
+    }
+}
+
+/// Why a request this host stopped waiting for is cancelled.
+const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
+
+/// Tells the server about a request this host stops waiting for. Dropped
+/// before the request settled (the caller's future was dropped: its deadline
+/// expired or it was cancelled), the guard ends the request's HTTP exchange
+/// on a streamable-HTTP connection and sends `notifications/cancelled` for
+/// the request id, once, from a task: the caller is never held while the
+/// notice is sent. A request settled by its response or an error sends
+/// nothing.
+///
+/// Known limit: rmcp writes every outbound message from a task of its own, so
+/// a cancellation sent in the same tick as its request's handoff (a deadline
+/// that expires during a slow entry step, or one that had already expired)
+/// can reach the server before the request does. The server cannot match it
+/// and keeps working; this was seen in about 3 of 1500 immediate abandons on
+/// a multi-threaded runtime. Ordinary deadlines fire long after the request
+/// was written. On a streamable-HTTP connection this cannot happen: the
+/// guard abandons the request in the registry before it sends the notice, so
+/// a request not yet posted is never posted. Over stdio and legacy SSE it
+/// can; a real fix needs rmcp to write a request before later messages.
+/// Without this guard no cancellation is sent at all.
+struct AbandonedRequest {
+    peer: Option<rmcp::service::Peer<rmcp::RoleClient>>,
+    abandoned: crate::transport::abandoned::AbandonedRequests,
+    id: rmcp::model::RequestId,
+}
+
+impl AbandonedRequest {
+    fn arm(client: &HeldClient, id: rmcp::model::RequestId) -> Self {
+        Self {
+            peer: Some(rmcp::service::Peer::clone(client)),
+            abandoned: client.abandoned.clone(),
+            id,
+        }
+    }
+
+    /// The request settled: there is nothing to cancel.
+    fn settled(mut self) {
+        self.peer = None;
+    }
+}
+
+impl Drop for AbandonedRequest {
+    fn drop(&mut self) {
+        let Some(peer) = self.peer.take() else {
+            return;
+        };
+        // A server in stateless mode ignores notifications: it sees the
+        // request's own HTTP exchange end. A streamable-HTTP client ends it
+        // now, even while its transport is still waiting on another request.
+        self.abandoned.abandon(&self.id);
+        // A drop cannot wait for the send, so the notification goes from a
+        // task. Without a runtime the transport is shutting down with it and
+        // nothing can be sent.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let notification =
+            rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam {
+                request_id: self.id.clone(),
+                reason: Some(ABANDONED_REQUEST_REASON.to_owned()),
+            });
+        runtime.spawn(async move {
+            let _ = peer.send_notification(notification.into()).await;
+        });
     }
 }
 
@@ -7223,6 +7477,22 @@ mod pagination_tests;
 #[cfg(test)]
 #[path = "structured_result_tests.rs"]
 mod structured_result_tests;
+
+#[cfg(test)]
+#[path = "cancel_tests.rs"]
+mod cancel_tests;
+
+#[cfg(test)]
+#[path = "cancel_http_tests.rs"]
+mod cancel_http_tests;
+
+#[cfg(test)]
+#[path = "http_abandon_tests.rs"]
+mod http_abandon_tests;
+
+#[cfg(test)]
+#[path = "http_abandon_session_tests.rs"]
+mod http_abandon_session_tests;
 
 #[cfg(test)]
 #[path = "process_confinement_tests.rs"]

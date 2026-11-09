@@ -32,6 +32,10 @@ from .types import (  # noqa: F401
     ForkNoticeSystemPrompt,
     ForkNoticeTools,
     ForkToolsNotComparedReason,
+    InstructionContentDigest,
+    InstructionEntryKind,
+    InstructionKey,
+    InstructionNamespace,
     InteractionId,
     InterruptedInputKind,
     InterruptedToolRunDisposition,
@@ -42,6 +46,9 @@ from .types import (  # noqa: F401
     MeerkatSchema,
     OperationId,
     PeerId,
+    PrincipalId,
+    PrincipalKind,
+    PrincipalQualification,
     ProfileId,
     Provider,
     ProviderImageMetadata,
@@ -67,6 +74,7 @@ from .types import (  # noqa: F401
     ToolProcessCessation,
     ToolProcessSpawner,
     TranscriptRewriteSelection,
+    TrustDomainId,
 )
 
 Value = Any
@@ -79,6 +87,68 @@ AgentErrorClass = Literal['llm', 'operation_refused', 'store', 'tool', 'policy_i
 # [`StopReason`]s that fail a run as
 # [`AgentError::ContentFiltered`](crate::error::AgentError::ContentFiltered).
 ContentFilteredStop = Literal['refusal', 'content_filter']
+
+
+class GrantGateRefusalUnknownFamily(TypedDict, total=False):
+    """A gated family is not a built-in tool family.
+    """
+    family: Required[str]
+    kind: Required[Literal['unknown_family']]
+
+
+class GrantGateRefusalFamilyDisabled(TypedDict, total=False):
+    """A gated family is disabled by this build; a gated family is mounted
+    closed, never disabled.
+    """
+    family: Required[str]
+    kind: Required[Literal['family_disabled']]
+
+
+class GrantGateRefusalFamilyNotMounted(TypedDict, total=False):
+    """A gated family none of whose names this build's final dispatcher
+    mounts: no grant could ever open it.
+    """
+    family: Required[str]
+    kind: Required[Literal['family_not_mounted']]
+
+
+class GrantGateRefusalToolNotMounted(TypedDict, total=False):
+    """A gated name a known tool source can provide, that this build's final
+    dispatcher does not mount and no pending source could provide once it
+    connects.
+    """
+    kind: Required[Literal['tool_not_mounted']]
+    tool: Required[str]
+
+
+class GrantGateRefusalUnknownTool(TypedDict, total=False):
+    """A gated tool name that no tool source of this build provides, and no
+    pending source could provide once it connects.
+    """
+    kind: Required[Literal['unknown_tool']]
+    tool: Required[str]
+
+
+class GrantGateRefusalPolicyRefused(TypedDict, total=False):
+    """The build's tool policy refuses a gated name, so no grant could ever
+    open it.
+    """
+    kind: Required[Literal['policy_refused']]
+    tool: Required[str]
+
+
+class GrantGateRefusalNoGrantService(TypedDict, total=False):
+    """The build has no grant service: a gate needs the runtime's, carried
+    on the session's runtime bindings.
+    """
+    kind: Required[Literal['no_grant_service']]
+
+
+# Why a build's scoped tool grant gate was refused: a gate no grant could
+# honour. The agent factory answers it, and a session service surfaces it as
+# [`crate::error::AgentError::ToolGrantGateRefused`], whose wire form is an
+# invalid-params error carrying this refusal, tagged by `kind`.
+GrantGateRefusal = GrantGateRefusalUnknownFamily | GrantGateRefusalFamilyDisabled | GrantGateRefusalFamilyNotMounted | GrantGateRefusalToolNotMounted | GrantGateRefusalUnknownTool | GrantGateRefusalPolicyRefused | GrantGateRefusalNoGrantService
 
 
 class HookFailureReasonTimeout(TypedDict, total=False):
@@ -312,7 +382,17 @@ class AgentErrorReasonContentFiltered(TypedDict, total=False):
     stop: Required[ContentFilteredStop]
 
 
-AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused | AgentErrorReasonContentFiltered
+class AgentErrorReasonToolGrantGateRefused(TypedDict, total=False):
+    """The session's build refused its scoped tool grant gate
+    ([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A
+    turn whose build was refused carries it, so a surface answers the
+    turn with the refusal it answers the session error with.
+    """
+    reason_type: Required[Literal['tool_grant_gate_refused']]
+    refusal: Required[GrantGateRefusal]
+
+
+AgentErrorReason = AgentErrorReasonLlmRateLimited | AgentErrorReasonLlmContextExceeded | AgentErrorReasonLlmAuthError | AgentErrorReasonLlmInvalidModel | AgentErrorReasonLlmProviderError | AgentErrorReasonLlmNetworkTimeout | AgentErrorReasonLlmCallTimeout | AgentErrorReasonHookDenied | AgentErrorReasonHookTimeout | AgentErrorReasonHookExecutionFailed | AgentErrorReasonHookConfigInvalid | AgentErrorReasonStructuredOutputValidationFailed | AgentErrorReasonInvalidOutputSchema | AgentErrorReasonAuthReauthRequired | AgentErrorReasonCallbackPending | AgentErrorReasonTurnTerminalCause | AgentErrorReasonModelFallbackResumeHeld | AgentErrorReasonHookLaunchRefused | AgentErrorReasonContentFiltered | AgentErrorReasonToolGrantGateRefused
 
 
 class AgentErrorReport(TypedDict, total=False):
@@ -798,6 +878,49 @@ class DisputedTurnUsageAccountingIdentity(TypedDict, total=False):
     active_provider: Required[Provider]
     reported_model: Required[str]
     reported_provider: Required[Provider]
+
+
+# A slot's revision: at least 1, strictly increasing per slot within the
+# owner that mints it.
+InstructionRevision = int
+
+
+class InstructionActiveRef(TypedDict, total=False):
+    """One slot of the active set an entry leaves in effect.
+    """
+    body_bytes: Required[int]
+    content_sha256: Required[InstructionContentDigest]
+    key: Required[InstructionKey]
+    namespace: Required[InstructionNamespace]
+    revision: Required[InstructionRevision]
+
+
+class InstructionChangeActivate(TypedDict, total=False):
+    """The body at `revision` applies from this entry on. `supersedes` is
+    the revision that was in effect for the slot, if one was.
+    """
+    body_bytes: Required[int]
+    change: Required[Literal['activate']]
+    content_sha256: Required[InstructionContentDigest]
+    key: Required[InstructionKey]
+    namespace: Required[InstructionNamespace]
+    revision: Required[InstructionRevision]
+    supersedes: NotRequired[Optional[InstructionRevision]]
+
+
+class InstructionChangeRevoke(TypedDict, total=False):
+    """The slot's body stops applying: `revokes` is the revision that was in
+    effect.
+    """
+    change: Required[Literal['revoke']]
+    key: Required[InstructionKey]
+    namespace: Required[InstructionNamespace]
+    revision: Required[InstructionRevision]
+    revokes: Required[InstructionRevision]
+
+
+# One change a delta entry carries.
+InstructionChange = InstructionChangeActivate | InstructionChangeRevoke
 
 
 # Typed reason an interaction stream was abandoned before normal terminal
@@ -1424,6 +1547,12 @@ class ReasoningLoweringOutcomeNotApplied(TypedDict, total=False):
 ReasoningLoweringOutcome = ReasoningLoweringOutcomeApplied | ReasoningLoweringOutcomeNotApplied
 
 
+# Why the compaction check that consumed a host's compaction request
+# compacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports
+# it. The vocabulary may grow.
+RequestedCompactionSkipReason = Literal['first_model_request', 'nothing_to_fold']
+
+
 class RunInputContent(TypedDict, total=False):
     """The run starts from caller-provided content (text or blocks).
     """
@@ -1798,6 +1927,31 @@ class RealtimeMessageOrigin(TypedDict, total=False):
 TranscriptTurnInput = Literal['runtime_authored', 'typed_text']
 
 
+class PrincipalRef(TypedDict, total=False):
+    """Typed principal reference.
+
+    Public fields preserve the existing data contract, so an in-memory value
+    is not proof of valid or authenticated identity. Governed admission must
+    call [`Self::validate_qualified`] and separately establish caller authority.
+    """
+    id: Required[PrincipalId]
+    kind: Required[PrincipalKind]
+    qualification: NotRequired[PrincipalQualification]
+
+
+class TurnRequester(TypedDict, total=False):
+    """The original requester of a turn: the principal its inputs share, and
+    whether it reached them directly.
+
+    The principal is opaque to Core. A host supplies it for the inputs it
+    admits (the authenticated caller it acts for), or a governed input's work
+    association names it. Core carries it and never interprets it: it has no
+    person, account or assurance concept for it.
+    """
+    carried: NotRequired[bool]
+    principal: Required[PrincipalRef]
+
+
 class TranscriptMessageIdentity(TypedDict, total=False):
     """Stable runtime identity for a transcript message.
 
@@ -1808,6 +1962,7 @@ class TranscriptMessageIdentity(TypedDict, total=False):
     interaction_id: NotRequired[Optional[InteractionId]]
     objective_id: NotRequired[Optional[ObjectiveId]]
     realtime_origin: NotRequired[Optional[RealtimeMessageOrigin]]
+    requester: NotRequired[Optional[TurnRequester]]
     run_id: NotRequired[Optional[RunId]]
     turn_input: NotRequired[Optional[TranscriptTurnInput]]
 
@@ -2634,10 +2789,58 @@ class AgentEventToolResultsBoundedForRequest(TypedDict, total=False):
     type: Required[Literal['tool_results_bounded_for_request']]
 
 
+class AgentEventRequestedCompactionSkipped(TypedDict, total=False):
+    """The compaction check that consumed a host's compaction request
+    (`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and
+    `mob/compact_member`) compacted nothing.
+
+    A check that compacts at the request publishes the ordinary
+    `compaction_started`, then `compaction_completed` or
+    `compaction_failed`. When the check has nothing to compact, it
+    publishes this event instead, so the host can tell that the request
+    was consumed and that nothing was compacted. Published at that check,
+    before its model request is sent. A check that consumed no request
+    publishes nothing new.
+    """
+    reason: Required[RequestedCompactionSkipReason]
+    run_id: Required[RunId]
+    type: Required[Literal['requested_compaction_skipped']]
+
+
+class AgentEventOperatorInstructionsApplied(TypedDict, total=False):
+    """An operator-instruction entry of this session was applied. It reports
+    the instructions now in effect for the live session, not their
+    durability: the delta entry a fresh run start appended is published
+    once the run whose start appended it starts, and the snapshot entry a
+    compaction folded the session's entry rows into once that compaction
+    commits (for a staged memory projection, when the runtime commits it,
+    right after its `CompactionCompleted`; a compaction rolled back before
+    its commit is never observed, and its entry sequence goes to the next
+    entry). A restart before the entry is durable (the run's first
+    checkpoint, or the projection's commit) applies the changes again at
+    the next fresh run start and publishes this event again.
+
+    An observation only, projected from the entry row's typed identity:
+    the session's operator-instruction status read is the authority on
+    what is in effect. A run that never starts takes its entry back, so
+    the changes stay pending and a later run start applies them again.
+
+    Appended after every released variant: declaration order is the
+    implicit discriminant (the xtask `released_enum_ordinals` test).
+    """
+    active: NotRequired[list[InstructionActiveRef]]
+    changes: NotRequired[list[InstructionChange]]
+    entry_sequence: Required[int]
+    kind: Required[InstructionEntryKind]
+    run_id: NotRequired[Optional[RunId]]
+    session_id: Required[SessionId]
+    type: Required[Literal['operator_instructions_applied']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest | AgentEventRequestedCompactionSkipped | AgentEventOperatorInstructionsApplied
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

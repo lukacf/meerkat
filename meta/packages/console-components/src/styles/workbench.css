@@ -1,0 +1,111 @@
+.cc-workbench {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: grid;
+  grid-template-columns: var(--_cc-workbench-sidebar-width) minmax(0, 1fr);
+  background: transparent;
+  transition: grid-template-columns var(--_cc-motion-duration) var(--_cc-motion-ease);
+}
+
+.cc-workbench.has-activity-rail {
+  grid-template-columns:
+    var(--_cc-workbench-sidebar-width)
+    minmax(0, 1fr)
+    var(--_cc-workbench-activity-width);
+}
+
+.cc-workbench__sidebar,
+.cc-workbench__launcher,
+.cc-workbench__main {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cc-workbench__activity {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.cc-workbench__sidebar,
+.cc-workbench__launcher {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.cc-workbench__main {
+  display: flex;
+  flex-direction: column;
+}
+
+.cc-workbench__sidebar-body,
+.cc-workbench__launcher-body,
+.cc-workbench__main-body,
+.cc-workbench__activity-body {
+  min-width: 0;
+  min-height: 0;
+}
+
+.cc-workbench__launcher-header,
+.cc-workbench__launcher-footer,
+.cc-workbench__main-header,
+.cc-workbench__main-footer,
+.cc-workbench__activity-header,
+.cc-workbench__activity-footer {
+  min-width: 0;
+  flex: none;
+}
+
+.cc-workbench__launcher-footer {
+  padding:
+    0
+    var(--_cc-sidebar-pad-right)
+    calc(6px * var(--_cc-window-scale))
+    var(--_cc-sidebar-pad-left);
+}
+
+.cc-workbench__main-body {
+  flex: 1 1 auto;
+  display: flex;
+  height: 0;
+  overflow: hidden;
+}
+
+.cc-workbench__main-body > * {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cc-workbench__sidebar-body,
+.cc-workbench__launcher-body,
+.cc-workbench__activity-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.cc-workbench__sidebar-body,
+.cc-workbench__launcher-body {
+  padding:
+    var(--_cc-sidebar-safe-top)
+    var(--_cc-sidebar-pad-right)
+    calc(10px * var(--_cc-window-scale))
+    var(--_cc-sidebar-pad-left);
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.cc-workbench__activity-body {
+  padding: 0;
+}
+
+.cc-workbench__sidebar-body::-webkit-scrollbar,
+.cc-workbench__launcher-body::-webkit-scrollbar,
+.cc-workbench__activity-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}

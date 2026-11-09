@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use meerkat_core::AuthBindingRef;
-use meerkat_core::AuthCredentialIdentity;
 #[cfg(test)]
 use meerkat_core::OAuthProviderIdentity;
 use meerkat_core::auth::token_store::{
@@ -20,6 +19,7 @@ use meerkat_core::handles::{
     AuthLeasePhase, AuthLeaseRestoreSnapshot, AuthLeaseSnapshot, AuthLeaseTransition,
     GeneratedAuthLeaseHandle, LeaseKey,
 };
+use meerkat_core::{AdmissionGuard, AuthCredentialIdentity};
 
 use crate::oauth_flow::{
     OAuthBrowserFlowCompletion, OAuthDevicePollLease, OAuthFlowAuthority, OAuthFlowError,
@@ -47,6 +47,9 @@ struct PreparedCommit {
     previous_lifecycle: AuthLeaseSnapshot,
     previous_lifecycle_restore: AuthLeaseRestoreSnapshot,
     lifecycle_transition: AuthLeaseTransition,
+    /// The credential fence the coordinator holds for this commit: the
+    /// save and any rollback write under it.
+    admission: Arc<AdmissionGuard>,
 }
 
 /// Durably publish directly supplied managed-store credentials under one
@@ -64,7 +67,7 @@ pub async fn save_tokens_and_publish_lifecycle(
     let outcome = coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |admission| {
                 Box::pin(async move {
                     let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
@@ -106,6 +109,7 @@ pub async fn save_tokens_and_publish_lifecycle(
                         previous_lifecycle,
                         previous_lifecycle_restore,
                         lifecycle_transition,
+                        admission,
                     };
                     let marked = match meerkat_core::mark_tokens_lifecycle_published_for_transition(
                         &commit.key,
@@ -124,7 +128,12 @@ pub async fn save_tokens_and_publish_lifecycle(
                         }
                     };
                     if let Err(error) = store
-                        .save_for(&commit.key, &marked, TokenStoreAccess::Interactive)
+                        .save_for(
+                            &commit.admission,
+                            &commit.key,
+                            &marked,
+                            TokenStoreAccess::Interactive,
+                        )
                         .await
                     {
                         return Err(compensated_error(
@@ -191,7 +200,7 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
     let outcome = coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |admission| {
                 Box::pin(async move {
                     let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let _guard =
@@ -265,6 +274,7 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                         previous_lifecycle,
                         previous_lifecycle_restore,
                         lifecycle_transition,
+                        admission,
                     };
                     let marked =
                         match meerkat_core::mark_tokens_lifecycle_published_for_transition(
@@ -286,7 +296,12 @@ pub async fn save_oauth_tokens_and_consume_browser_flow(
                             }
                         };
                     if let Err(error) = store
-                        .save_for(&commit.key, &marked, TokenStoreAccess::Interactive)
+                        .save_for(
+                            &commit.admission,
+                            &commit.key,
+                            &marked,
+                            TokenStoreAccess::Interactive,
+                        )
                         .await
                     {
                         return Err(compensated_error(
@@ -341,7 +356,7 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
     let outcome = coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |admission| {
                 Box::pin(async move {
                     let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let _guard =
@@ -402,6 +417,7 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
                         previous_lifecycle,
                         previous_lifecycle_restore,
                         lifecycle_transition,
+                        admission,
                     };
                     let marked =
                         match meerkat_core::mark_tokens_lifecycle_published_for_transition(
@@ -423,7 +439,12 @@ pub async fn save_oauth_tokens_and_consume_device_flow(
                             }
                         };
                     if let Err(error) = store
-                        .save_for(&commit.key, &marked, TokenStoreAccess::Interactive)
+                        .save_for(
+                            &commit.admission,
+                            &commit.key,
+                            &marked,
+                            TokenStoreAccess::Interactive,
+                        )
                         .await
                     {
                         return Err(compensated_error(
@@ -501,7 +522,12 @@ async fn rollback_commit(
     match &commit.previous {
         Some(previous) => {
             store
-                .save_for(&commit.key, previous, TokenStoreAccess::Interactive)
+                .save_for(
+                    &commit.admission,
+                    &commit.key,
+                    previous,
+                    TokenStoreAccess::Interactive,
+                )
                 .await
                 .map_err(|error| format!("TokenStore rollback save failed: {error}"))?;
             if matches!(
@@ -520,14 +546,23 @@ async fn rollback_commit(
                 )
                 .map_err(|error| format!("AuthMachine rollback marker handoff failed: {error}"))?;
                 store
-                    .save_for(&commit.key, &restored, TokenStoreAccess::Interactive)
+                    .save_for(
+                        &commit.admission,
+                        &commit.key,
+                        &restored,
+                        TokenStoreAccess::Interactive,
+                    )
                     .await
                     .map_err(|error| format!("TokenStore rollback marker save failed: {error}"))?;
             }
         }
         None => {
             store
-                .clear_for(&commit.key, TokenStoreAccess::Interactive)
+                .clear_for(
+                    &commit.admission,
+                    &commit.key,
+                    TokenStoreAccess::Interactive,
+                )
                 .await
                 .map_err(|error| format!("TokenStore rollback clear failed: {error}"))?;
         }
@@ -552,7 +587,7 @@ mod tests {
     impl AuthMachineOwnedTestFlowAuthority {
         fn new() -> Self {
             Self {
-                inner: crate::oauth_flow::OAuthFlowRegistry::new(StdDuration::from_secs(60)),
+                inner: crate::oauth_flow::OAuthFlowRegistry::new(StdDuration::from_mins(1)),
             }
         }
     }
@@ -734,13 +769,18 @@ mod tests {
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &TokenKey,
             _tokens: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
             Err(TokenStoreError::Io("injected save failure".to_string()))
         }
 
-        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+        async fn clear(
+            &self,
+            _fence: &meerkat_core::AdmissionGuard,
+            _key: &TokenKey,
+        ) -> Result<(), TokenStoreError> {
             Ok(())
         }
 
@@ -822,13 +862,18 @@ mod tests {
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &TokenKey,
             _tokens: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
             Err(TokenStoreError::Io("injected save failure".to_string()))
         }
 
-        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+        async fn clear(
+            &self,
+            _fence: &meerkat_core::AdmissionGuard,
+            _key: &TokenKey,
+        ) -> Result<(), TokenStoreError> {
             Err(TokenStoreError::Io("injected clear failure".to_string()))
         }
 

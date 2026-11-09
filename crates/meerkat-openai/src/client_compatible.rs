@@ -114,6 +114,9 @@ pub struct OpenAiCompatibleClient {
     /// ([`meerkat_core::provider_matrix::OpenAiBackendKind::admits_prompt_cache_fields`]),
     /// so a server outside the OpenAI backend matrix receives none.
     openai_backend: Option<meerkat_core::provider_matrix::OpenAiBackendKind>,
+    /// GitHub Copilot's Chat Completions stream discipline; see
+    /// [`Self::with_copilot_chat_stream`].
+    copilot_chat_stream: bool,
 }
 
 impl OpenAiCompatibleClient {
@@ -178,7 +181,21 @@ impl OpenAiCompatibleClient {
             post_finish_trailer_window: DEFAULT_POST_FINISH_TRAILER_WINDOW,
             static_credential: false,
             openai_backend: None,
+            copilot_chat_stream: false,
         }
+    }
+
+    /// For GitHub Copilot's Chat Completions routes only. A stream counts
+    /// as a completed turn only once a choice names a finish reason: one
+    /// that ends without it, at the end of the body or at `[DONE]`, fails
+    /// with the retryable [`LlmError::IncompleteResponse`] and commits
+    /// nothing. Only the first choice is read: a stream that carries another
+    /// choice index fails the same way, instead of having it merged into the
+    /// answer or dropped from it. Other routes are unchanged.
+    #[must_use]
+    pub fn with_copilot_chat_stream(mut self) -> Self {
+        self.copilot_chat_stream = true;
+        self
     }
 
     /// Declare the OpenAI backend this client speaks to (a GitHub Copilot
@@ -242,6 +259,22 @@ impl OpenAiCompatibleClient {
     pub fn with_post_finish_trailer_window(mut self, window: Duration) -> Self {
         self.post_finish_trailer_window = window;
         self
+    }
+
+    /// Remove from `diagnostic`, text a response carried, any credential the
+    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+        }
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
     }
 
     fn chat_completions_endpoint(&self) -> String {
@@ -657,12 +690,14 @@ impl OpenAiCompatibleClient {
         &self,
         request: reqwest::RequestBuilder,
         content_type: &'static str,
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
         let request = request.header("Content-Type", content_type);
-        if let Some(token) = &self.bearer_token {
-            request.header("Authorization", format!("Bearer {token}"))
-        } else {
-            request
+        match &self.bearer_token {
+            Some(token) => Ok(request.header(
+                "Authorization",
+                http::sensitive_header_value(&format!("Bearer {token}"))?,
+            )),
+            None => Ok(request),
         }
     }
 
@@ -680,7 +715,7 @@ impl OpenAiCompatibleClient {
         ),
         LlmError,
     > {
-        let mut request = self.apply_auth(request, content_type);
+        let mut request = self.apply_auth(request, content_type)?;
         let receipt = if let Some(authorizer) = &self.authorizer {
             let mut headers = Vec::new();
             authorizer
@@ -697,7 +732,7 @@ impl OpenAiCompatibleClient {
                 .await
                 .map_err(LlmError::from_authorizer)?;
             for (name, value) in headers {
-                request = request.header(name, value);
+                request = request.header(name, http::sensitive_header_value(&value)?);
             }
             receipt
         } else {
@@ -880,7 +915,10 @@ impl OpenAiCompatibleClient {
                         }
                     }
                 });
-                streaming::ensure_terminal_done(inner)
+                streaming::redact_stream_diagnostics(
+                    streaming::ensure_terminal_done(inner),
+                    self.authorizer.as_deref(),
+                )
             }
             OpenAiCompatibleMode::ChatCompletions => {
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
@@ -889,6 +927,10 @@ impl OpenAiCompatibleClient {
                     let body = self.build_chat_completions_body(&projected_request)?;
                     let content = meerkat_core::HttpAuthorizationContent {
                         has_images: projected_request.has_images(),
+                        initiator: prepared.map_or_else(
+                            || projected_request.initiator(),
+                            PreparedLlmRequest::initiator,
+                        ),
                     };
                     let url = self.chat_completions_endpoint();
                     let mut diagnostics = Vec::new();
@@ -941,8 +983,13 @@ impl OpenAiCompatibleClient {
                         Ok(response.bytes_stream())
                     } else {
                         let headers = response.headers().clone();
-                        let text = response.text().await.unwrap_or_default();
-                        Err(LlmError::from_http_response(status_code, text, &headers))
+                        let mut text = response.text().await.unwrap_or_default();
+                        self.redact_diagnostic(&mut text);
+                        Err(self.redacted_error(LlmError::from_http_response(
+                            status_code,
+                            text,
+                            &headers,
+                        )))
                     };
                     let mut stream = stream_result?;
                     let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
@@ -1138,6 +1185,19 @@ impl OpenAiCompatibleClient {
                             }
 
                             for choice in event.choices {
+                                // On Copilot only choice 0 (or a choice
+                                // without an index) is read, before and
+                                // after its finish reason: another one is
+                                // a shape this adapter does not merge.
+                                if self.copilot_chat_stream
+                                    && let Some(index) = choice.index.filter(|index| *index != 0)
+                                {
+                                    Err::<(), _>(LlmError::IncompleteResponse {
+                                        message: format!(
+                                            "GitHub Copilot chat stream carried choice {index}; only choice 0 is read"
+                                        ),
+                                    })?;
+                                }
                                 // The turn is terminal once a finish
                                 // reason has been latched. A compliant
                                 // server sends only usage and `[DONE]`
@@ -1297,6 +1357,19 @@ impl OpenAiCompatibleClient {
                             })?;
                         }
                     }
+                    // On Copilot a turn completes only with a finish reason (a
+                    // streamed refusal ends it too): an upstream cut or idle
+                    // close, at a line boundary or at `[DONE]`, would otherwise
+                    // commit truncated text or drop a pending tool call.
+                    if self.copilot_chat_stream
+                        && latched_stop.is_none()
+                        && refusal_text.is_empty()
+                    {
+                        Err::<(), _>(LlmError::IncompleteResponse {
+                            message: "GitHub Copilot chat stream ended without a finish reason"
+                                .to_string(),
+                        })?;
+                    }
                     if !reasoning_text.is_empty() {
                         yield LlmEvent::ReasoningComplete {
                             text: reasoning_text,
@@ -1322,7 +1395,13 @@ impl OpenAiCompatibleClient {
                     };
                 });
 
-                streaming::ensure_terminal_done(inner)
+                // Every error the stream ends with is redacted here, whichever
+                // path built it (a rejection body, an error envelope, a data
+                // line that does not parse, an incomplete buffer).
+                streaming::redact_stream_diagnostics(
+                    streaming::ensure_terminal_done(inner),
+                    self.authorizer.as_deref(),
+                )
             }
         }
     }
@@ -1446,8 +1525,9 @@ impl LlmClient for OpenAiCompatibleClient {
             Ok(())
         } else {
             let headers = response.headers().clone();
-            let text = response.text().await.unwrap_or_default();
-            Err(LlmError::from_http_response(status, text, &headers))
+            let mut text = response.text().await.unwrap_or_default();
+            self.redact_diagnostic(&mut text);
+            Err(self.redacted_error(LlmError::from_http_response(status, text, &headers)))
         }
     }
 
@@ -1536,6 +1616,10 @@ struct ChatCompletionsChunk {
 
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
+    /// The choice's position among the completions a request asked for;
+    /// absent on endpoints that send a single choice without one.
+    #[serde(default)]
+    index: Option<u64>,
     #[serde(default)]
     delta: Option<ChatDelta>,
     #[serde(default)]
@@ -2158,6 +2242,505 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    /// Records the initiator every request hands it and answers a 401 with a
+    /// retry.
+    #[derive(Default)]
+    struct InitiatorRecordingAuthorizer {
+        initiators: std::sync::Mutex<Vec<meerkat_core::HttpRequestInitiator>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpAuthorizer for InitiatorRecordingAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer recorded".to_string()));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "initiator-recording"
+        }
+
+        fn append_content_headers(
+            &self,
+            content: meerkat_core::HttpAuthorizationContent,
+            _headers: &mut Vec<(String, String)>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            self.initiators.lock().unwrap().push(content.initiator);
+            Ok(())
+        }
+    }
+
+    /// A Chat Completions request tells its authorizer who initiated it, from
+    /// its last input: the agent after a tool result, the user after a user
+    /// message; a 401 retry tells the same.
+    #[tokio::test]
+    async fn chat_requests_name_who_initiated_them_on_every_attempt() {
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let tool_turn = vec![
+            Message::User(UserMessage::text("look it up")),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![meerkat_core::ToolResult::new(
+                "call_1".to_string(),
+                "found".to_string(),
+                false,
+            )]),
+        ];
+        let cases = [
+            (
+                "a user message",
+                vec![Message::User(UserMessage::text("hello"))],
+                User,
+            ),
+            ("a tool result", tool_turn, Agent),
+        ];
+        for (case, messages, initiator) in cases {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let app = Router::new()
+                .route("/chat/completions", post(chat_auth_retry))
+                .with_state(ChatAuthRetryState {
+                    calls: Arc::clone(&calls),
+                });
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve test server");
+            });
+            let authorizer = Arc::new(InitiatorRecordingAuthorizer::default());
+            let client = OpenAiCompatibleClient::new_with_options(
+                OpenAiCompatibleMode::ChatCompletions,
+                "remote-model".to_string(),
+                format!("http://{addr}"),
+                None,
+                options(true, true, true, true),
+            )
+            .with_authorizer(authorizer.clone());
+            let request = LlmRequest::new("catalog-model", messages);
+            let _ = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{case}: the 401 is retried once"
+            );
+            assert_eq!(
+                *authorizer.initiators.lock().unwrap(),
+                vec![initiator; 2],
+                "{case}: both attempts name the same initiator"
+            );
+        }
+    }
+
+    /// Every Authorization value the canary authorizer signs with carries
+    /// this canary.
+    const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
+
+    /// Signs every request with `Authorization: Bearer <canary>`, as a
+    /// dynamic authorizer (a GitHub Copilot operator token, a cloud bearer)
+    /// does.
+    struct CanaryBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl HttpAuthorizer for CanaryBearerAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {AUTHORIZATION_CANARY}"),
+            ));
+            Ok(())
+        }
+
+        fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+            *diagnostic = diagnostic.replace(AUTHORIZATION_CANARY, "<redacted>");
+        }
+
+        fn label(&self) -> &'static str {
+            "canary-bearer-test"
+        }
+    }
+
+    /// The Authorization value an authorizer supplies is marked sensitive on
+    /// the request the Chat Completions client builds, so the request's
+    /// `Debug` (and HTTP/2 header compression) never keeps the credential.
+    #[tokio::test]
+    async fn authorizer_authorization_header_is_sensitive() {
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "http://127.0.0.1:9".to_string(),
+            None,
+            options(true, true, true, true),
+        )
+        .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let url = client.chat_completions_endpoint();
+        let (builder, _) = client
+            .apply_dynamic_auth_with_receipt(
+                reqwest::Client::new().post(&url),
+                "POST",
+                &url,
+                "application/json",
+                meerkat_core::HttpAuthorizationContent::default(),
+            )
+            .await
+            .expect("the authorizer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {AUTHORIZATION_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains(AUTHORIZATION_CANARY),
+            "{request:?}"
+        );
+    }
+
+    /// A static bearer token travels in an `Authorization` value marked
+    /// sensitive, as an authorizer's credential does.
+    #[tokio::test]
+    async fn static_bearer_header_is_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryStaticBearer";
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "http://127.0.0.1:9".to_string(),
+            Some(KEY_CANARY.to_string()),
+            options(true, true, true, true),
+        );
+        let url = client.chat_completions_endpoint();
+        let (builder, _) = client
+            .apply_dynamic_auth_with_receipt(
+                reqwest::Client::new().post(&url),
+                "POST",
+                &url,
+                "application/json",
+                meerkat_core::HttpAuthorizationContent::default(),
+            )
+            .await
+            .expect("the bearer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {KEY_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the static bearer's Authorization value must be marked sensitive"
+        );
+        assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+    }
+
+    /// Records the fields of every Meerkat event and span as text.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<String>>);
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct CaptureVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    struct CaptureSubscriber {
+        log: LogCapture,
+        next_span: std::sync::atomic::AtomicU64,
+    }
+
+    impl CaptureSubscriber {
+        fn dispatch(log: LogCapture) -> tracing::Dispatch {
+            tracing::Dispatch::new(Self {
+                log,
+                next_span: std::sync::atomic::AtomicU64::new(1),
+            })
+        }
+    }
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target().starts_with("meerkat")
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            span.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+            tracing::span::Id::from_u64(
+                self.next_span
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            values.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+        }
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut log = self.log.0.lock().unwrap();
+            event.record(&mut CaptureVisitor(&mut log));
+            log.push('\n');
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// How the echoing upstream answers. Every answer carries the request's
+    /// Authorization value, as a proxy or gateway that echoes the request's
+    /// headers in an error does.
+    #[derive(Debug, Clone, Copy)]
+    enum Echo {
+        /// HTTP 500 whose error message carries the value.
+        RejectionBody,
+        /// HTTP 400 policy stop whose message carries the value with its
+        /// first character JSON-escaped: only the decoded message holds it.
+        EscapedPolicyStop,
+        /// HTTP 200 stream whose error envelope carries the value.
+        StreamErrorEvent,
+        /// HTTP 200 stream whose data line carries the value in JSON that
+        /// does not parse.
+        MalformedStreamLine,
+    }
+
+    async fn spawn_echoing_chat_server(echo: Echo) -> (String, tokio::task::JoinHandle<()>) {
+        fn echoed(headers: &axum::http::HeaderMap) -> String {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            format!("upstream echo: {authorization}")
+        }
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(move |headers: axum::http::HeaderMap| async move {
+                    let message = echoed(&headers);
+                    match echo {
+                        Echo::RejectionBody => (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": {"message": message}})),
+                        )
+                            .into_response(),
+                        Echo::EscapedPolicyStop => {
+                            let escaped = message.replacen(
+                                AUTHORIZATION_CANARY,
+                                &format!(
+                                    "\\u{:04x}{}",
+                                    AUTHORIZATION_CANARY.as_bytes()[0],
+                                    &AUTHORIZATION_CANARY[1..]
+                                ),
+                                1,
+                            );
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                [("content-type", "application/json")],
+                                format!(
+                                    r#"{{"error":{{"code":"misalignment_policy_violation","message":"{escaped}"}}}}"#
+                                ),
+                            )
+                                .into_response()
+                        }
+                        Echo::StreamErrorEvent => {
+                            let event = serde_json::json!({"error": {"message": message}});
+                            (
+                                [("content-type", "text/event-stream")],
+                                format!("data: {event}\n\n"),
+                            )
+                                .into_response()
+                        }
+                        Echo::MalformedStreamLine => (
+                            [("content-type", "text/event-stream")],
+                            format!("data: {{\"unterminated\": \"{message}\n\n"),
+                        )
+                            .into_response(),
+                    }
+                }),
+            )
+            .route(
+                "/models",
+                axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": {"message": echoed(&headers)}})),
+                    )
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// The rendered forms of `error` a caller can see: `Display`, `Debug`
+    /// and the wire JSON.
+    fn rendered_forms(error: &LlmError) -> String {
+        format!(
+            "{error} {error:?} {}",
+            serde_json::to_string(error).expect("error JSON")
+        )
+    }
+
+    /// A provider that echoes the request's Authorization value in a
+    /// rejection body, a policy stop, a stream error envelope, a data line
+    /// that does not parse or a health check rejection never puts the
+    /// authorizer's credential in the error the Chat Completions client
+    /// returns (its `Display`, `Debug` or wire JSON) or in a field it logs.
+    /// The echo itself still reaches the error, and each error keeps its
+    /// class.
+    #[tokio::test]
+    async fn echoed_authorization_stays_out_of_chat_errors_and_logs() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        for echo in [
+            Echo::RejectionBody,
+            Echo::EscapedPolicyStop,
+            Echo::StreamErrorEvent,
+            Echo::MalformedStreamLine,
+        ] {
+            let (base_url, server) = spawn_echoing_chat_server(echo).await;
+            let client = OpenAiCompatibleClient::new_with_options(
+                OpenAiCompatibleMode::ChatCompletions,
+                "remote-model".to_string(),
+                base_url,
+                None,
+                options(true, true, true, true),
+            )
+            .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{echo:?}: the stream ends in an error"));
+            let rendered = rendered_forms(&error);
+            assert!(
+                !rendered.contains(AUTHORIZATION_CANARY),
+                "{echo:?} leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{echo:?}: the provider's message reached the error: {rendered}"
+            );
+            match echo {
+                Echo::RejectionBody => assert!(
+                    matches!(error, LlmError::ServerError { status: 500, .. }),
+                    "{echo:?}: {error:?}"
+                ),
+                Echo::EscapedPolicyStop => assert!(
+                    matches!(&error, LlmError::PolicyStop { code, .. }
+                        if code == "misalignment_policy_violation"),
+                    "{echo:?}: {error:?}"
+                ),
+                Echo::StreamErrorEvent | Echo::MalformedStreamLine => assert!(
+                    matches!(error, LlmError::StreamParseError { .. }),
+                    "{echo:?}: {error:?}"
+                ),
+            }
+        }
+
+        let (base_url, server) = spawn_echoing_chat_server(Echo::RejectionBody).await;
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url,
+            None,
+            options(true, true, true, true),
+        )
+        .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let health = client.health_check().await;
+        server.abort();
+        let error = health.expect_err("the health check is rejected");
+        let rendered = rendered_forms(&error);
+        assert!(
+            !rendered.contains(AUTHORIZATION_CANARY),
+            "the health check leaked the credential: {rendered}"
+        );
+        assert!(
+            rendered.contains("upstream echo"),
+            "the health check rejection reached the error: {rendered}"
+        );
+        assert!(
+            matches!(error, LlmError::ServerError { status: 500, .. }),
+            "{error:?}"
+        );
+
+        let logged = log.text();
+        assert!(
+            !logged.contains(AUTHORIZATION_CANARY),
+            "a log field leaked the credential: {logged}"
+        );
     }
 
     /// What the raw stub does after the scripted head bytes are on the wire.
@@ -3950,6 +4533,148 @@ mod tests {
             second_body["messages"][1]["content"][0]["prompt_cache_breakpoint"],
             serde_json::json!({"mode":"explicit"})
         );
+    }
+
+    /// A plain System row appended between two turns, the stand-in for an
+    /// operator instruction entry, keeps turn k's request a byte prefix of
+    /// turn k+1's in both cache modes: every turn-k message, with its marker,
+    /// is byte-equal in turn k+1, and the model, tools, `prompt_cache_key`
+    /// and cache options are byte-equal.
+    #[test]
+    fn chat_completions_activation_is_append_monotone() {
+        use meerkat_core::lifecycle::run_primitive::OpenAiPromptCacheOptions;
+        use meerkat_core::model_profile::capabilities::OpenAiPromptCacheMode;
+
+        const ENTRY: &str = "Operator instruction: give every time in 24-hour form.";
+        const CACHE_KEY: &str = "meerkat:profile:openai:gpt-5.6-sol";
+
+        // The lowering a backend that has admitted the prompt-cache fields
+        // receives; no compatible route's backend has today.
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "gpt-5.6-sol".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            options(true, true, true, false),
+        )
+        .with_openai_backend(meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi);
+        let tools = vec![Arc::new(meerkat_core::ToolDef::new(
+            "calendar_lookup",
+            "calendar_lookup tool",
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))];
+        let answer = |text: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: text.to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ))
+        };
+        let turn_k = vec![
+            Message::System(meerkat_core::SystemMessage::new(
+                "You are the calendar domain agent.",
+            )),
+            Message::User(UserMessage::text("note tomorrow's agenda")),
+            answer("Tomorrow: standup at 9, dentist at 14."),
+            Message::User(UserMessage::text("move the dentist to 15")),
+        ];
+        let mut next_turn = turn_k.clone();
+        next_turn.extend([
+            answer("Moved: dentist at 15."),
+            Message::System(meerkat_core::SystemMessage::new(ENTRY)),
+            Message::User(UserMessage::text("what is left for tomorrow?")),
+        ]);
+        let message_bytes = |body: &Value| -> Vec<String> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(Value::to_string)
+                .collect()
+        };
+        let marked = |body: &Value| -> Vec<usize> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    message
+                        .to_string()
+                        .contains("prompt_cache_breakpoint")
+                        .then_some(index)
+                })
+                .collect()
+        };
+        let without_messages = |body: &Value| {
+            let mut body = body.clone();
+            body.as_object_mut().unwrap().remove("messages");
+            body.to_string()
+        };
+
+        for mode in [
+            OpenAiPromptCacheMode::Explicit,
+            OpenAiPromptCacheMode::Implicit,
+        ] {
+            let lower = |messages: &[Message]| {
+                let request = LlmRequest::new("gpt-5.6-sol", messages.to_vec())
+                    .with_tools(tools.clone())
+                    .with_openai_tag_merge(|tag| {
+                        tag.prompt_cache_enabled = Some(true);
+                        tag.prompt_cache_key = Some(CACHE_KEY.to_string());
+                        tag.prompt_cache_options = Some(OpenAiPromptCacheOptions {
+                            mode: Some(mode),
+                            ttl: None,
+                        });
+                    });
+                client
+                    .build_chat_completions_body(&request)
+                    .expect("chat completions body")
+            };
+            let prior = lower(&turn_k);
+            let next = lower(&next_turn);
+
+            assert_eq!(
+                without_messages(&next),
+                without_messages(&prior),
+                "{mode:?}: model, tools and cache knobs are byte-equal"
+            );
+            assert_eq!(prior["prompt_cache_key"], CACHE_KEY, "{mode:?}");
+            assert!(prior["tools"].is_array(), "{mode:?}: {prior}");
+
+            let prior_messages = message_bytes(&prior);
+            assert_eq!(prior_messages.len(), turn_k.len(), "{mode:?}");
+            assert_eq!(
+                message_bytes(&next)[..prior_messages.len()],
+                prior_messages[..],
+                "{mode:?}: every turn-k message, with its marker, is byte-equal in turn k+1"
+            );
+            // The entry keeps its transcript position: after turn k's answer,
+            // before turn k+1's prompt.
+            let entry = &next["messages"][prior_messages.len() + 1];
+            assert_eq!(entry["role"], "system", "{mode:?}: {entry}");
+            assert!(entry.to_string().contains(ENTRY), "{mode:?}: {entry}");
+
+            let prior_marks = marked(&prior);
+            let next_marks = marked(&next);
+            if mode == OpenAiPromptCacheMode::Explicit {
+                assert!(!prior_marks.is_empty(), "{prior}");
+                assert_eq!(next_marks[..prior_marks.len()], prior_marks[..]);
+                assert!(
+                    next_marks[prior_marks.len()..]
+                        .iter()
+                        .all(|&index| index >= prior_messages.len()),
+                    "turn k+1 adds markers only after turn k's messages: {next_marks:?}"
+                );
+            } else {
+                assert!(
+                    prior_marks.is_empty() && next_marks.is_empty(),
+                    "implicit mode leaves breakpoint placement to OpenAI: {next}"
+                );
+            }
+        }
     }
 
     #[test]

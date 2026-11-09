@@ -1,0 +1,50 @@
+---
+title: "Authentication and credentials"
+description: "Connect accounts through protected controls and grant agents explicit access."
+icon: "key"
+---
+
+Connect keeps model credentials, integration credentials and agent permissions separate. An account can stay connected after a task-limited grant expires.
+
+## Model-provider sign-in
+
+The CLI checks the selected realm's model configuration before opening the setup conversation. Follow its terminal prompts to select a model binding or complete provider sign-in. This credential runs the setup agent; service accounts are configured separately.
+
+## Service credentials
+
+Review the integration, account, requested operations and access duration before entering a key or token. The CLI uses hidden terminal prompts. An integrated application uses protected credential fields outside the agent conversation.
+
+The selected credential owner stores values and supplies them to the intended connection. Configuration refers to named credential slots rather than containing the values themselves.
+
+For direct SDK use, the application supplies an authenticated HTTPX client or Fetch binding. See [Python](/sdks/python#prepare-the-client-once) and [TypeScript](/sdks/typescript#transport-contract).
+
+## OAuth sign-in
+
+Complete sign-in through the host's browser handoff. The native authentication owner handles state, PKCE, callback validation and credential persistence. The application presents the account and destination for review and reports the resulting account status.
+
+For an MCP integration, distinguish the two connections:
+
+| Connection | Credential owner |
+| --- | --- |
+| Client to MCP server | The host or MCP client's credential owner |
+| MCP server to a downstream service | The server's credential owner |
+
+Use the credential intended for that connection and audience. Provider registration, requested scopes and administrator installation come from the selected integration's setup requirements.
+
+## Read account prerequisites
+
+`config-help --profile` returns `prerequisites` as `{kind, instruction}` rows and `unresolved_details`. It describes public access or required API keys, tokens, passwords and service credentials, together with known resource and host requirements.
+
+Read this information before configuring the account. The metadata commands can run before credentials are available.
+
+## Change or remove credentials
+
+Return to Connect in the same realm and ask to reconnect, replace a key or disconnect an account. Review the selected service and fields in the protected controls. Credential changes apply to later connections; retire an existing process when it needs to pick up a new value.
+
+Use the service provider's controls when you need to revoke the credential itself. Agent access is managed separately through grants.
+
+## Cancellation and recovery
+
+Connect reports saved configuration, credentials and grants separately. After an interrupted action, read its status before repeating it. An entered update can complete while later steps are cancelled.
+
+Application authors can use `McpLoginCustodian` to retain one in-flight login across request-handler cancellation. The host owns its cleanup and reconciles authentication after process restart. See [MCP browser callback](/sdks/python#supply-the-mcp-browser-callback).

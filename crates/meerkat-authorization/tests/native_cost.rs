@@ -590,6 +590,10 @@ struct ObservedFactoryAgentBuilder {
 impl SessionAgentBuilder for ObservedFactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
         self.inner.model_supports_inline_video(identity).await
     }
@@ -862,6 +866,7 @@ fn issue_lineage(
     assert!((1..=3).contains(&depth));
     let root = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id(&format!("{label}-0")),
             principal("executor"),
@@ -873,6 +878,7 @@ fn issue_lineage(
     for index in 1..depth {
         let next = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("executor"),
                 chain.last().unwrap(),
                 id(&format!("{label}-{index}")),
@@ -946,6 +952,7 @@ impl Fixture {
             let machine = MeerkatMachine::ephemeral()
                 .with_local_grant_authorization(NativeGrantWorkConfiguration {
                     retained_resume: None,
+                    kept_original: None,
                     require_scoped_destination: false,
                     grants: Arc::clone(&grants),
                     ingress,
@@ -1410,6 +1417,7 @@ async fn native_cost_correctness() {
                 .as_ref()
                 .expect("real grants")
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("grant-owner"),
                     fixture.operation.last().unwrap(),
                     &mut custody,

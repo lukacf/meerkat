@@ -491,6 +491,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         ExactRestriction::exact([action("append"), action("delete"), action("read")]);
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("a8-controller"),
             principal("executor"),
@@ -500,6 +501,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("a8-operations"),
             principal("executor"),
@@ -534,6 +536,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants: grants.clone(),
                 ingress,
@@ -587,7 +590,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         .pin_controller_client_for_actor(&actor)
         .await
         .unwrap();
-    assert!(pin.selection() == &selected);
+    assert_eq!(pin.selection(), &selected);
     let vault = Arc::new(meerkat_auth_core::EphemeralTokenStore::new());
     meerkat_auth_core::save_tokens_and_publish_lifecycle(
         meerkat_core::auth::ProviderAuthPersistence::new(
@@ -706,7 +709,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         .observation
         .operation_id
         .clone();
-    assert!(first_operation != second_operation);
+    assert_ne!(first_operation, second_operation);
     assert!(
         held_audit
             .iter()
@@ -863,8 +866,11 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
     for record in &audit {
         assert_eq!(record.contributors.len(), 1);
         assert_eq!(record.contributors[0].input_id, input_id);
-        assert!(record.contributors[0].requester == principal("requester"));
-        assert!(record.contributors[0].logical_executor == principal("executor"));
+        assert_eq!(record.contributors[0].requester, principal("requester"));
+        assert_eq!(
+            record.contributors[0].logical_executor,
+            principal("executor")
+        );
         assert_eq!(record.observation.run_id.as_ref(), Some(&run_id));
         assert!(
             matches!(&record.observation.execution_scope, OperationExecutionScope::RuntimeInput {
@@ -979,7 +985,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         .pin_controller_client_for_actor(&actor)
         .await
         .unwrap();
-    assert!(final_pin.selection() == &selected);
+    assert_eq!(final_pin.selection(), &selected);
     let final_entries = physical.entries.lock().unwrap().clone();
     let final_records = physical.values.lock().unwrap().clone();
     let first_mutations = final_entries
@@ -1033,7 +1039,7 @@ async fn adr_a8_requester_permission_revocation_preserves_effect_and_controller(
     let mut server = server().await;
     let barrier = Arc::new(EntryBarrier::default());
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_a8(&server, &barrier),
     ))
     .catch_unwind()

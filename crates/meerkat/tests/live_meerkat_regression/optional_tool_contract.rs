@@ -217,6 +217,7 @@ fn public_openai_config() -> (Config, AuthBindingRef) {
         default_binding: Some("api".into()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
     config.realm.insert("optional-tool-probe".into(), realm);
     (config, configured_binding("optional-tool-probe", "api"))
@@ -265,7 +266,7 @@ async fn run_probe(mut config: Config, binding: AuthBindingRef, model: String, b
     build.budget_limits = Some(BudgetLimits {
         max_tokens: Some(20_000),
         max_duration: None,
-        max_turn_duration: Some(Duration::from_secs(120)),
+        max_turn_duration: Some(Duration::from_mins(2)),
         max_tool_calls: Some(2),
     });
     build.model_fallback = Some(config.model_fallback.clone());

@@ -69,6 +69,7 @@ fn verdict(
     let grant = fixture
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id(label),
             who("executor"),
@@ -286,6 +287,7 @@ fn stored_chain(
 ) -> (Arc<LocalGrantAuthority>, Vec<GrantLineageRef>) {
     let store = Arc::new(crate::grants::InMemoryGrantOwnerStore::new());
     let owner = LocalGrantAuthority::new_durable(
+        &meerkat_core::AdmissionGuard::none(),
         LocalGrantConfiguration {
             root: who("root"),
             namespace: id(label),
@@ -298,6 +300,7 @@ fn stored_chain(
     .expect("durable owner");
     let root = owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("root"),
             who("first"),
@@ -310,7 +313,14 @@ fn stored_chain(
     let (parent, issuer) = match middle {
         Some(requested) => {
             let middle = owner
-                .issue_child(&who("first"), &root, id("middle"), who("second"), requested)
+                .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &who("first"),
+                    &root,
+                    id("middle"),
+                    who("second"),
+                    requested,
+                )
                 .expect("middle");
             lineage.push(middle.clone());
             (middle, "second")
@@ -319,6 +329,7 @@ fn stored_chain(
     };
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who(issuer),
             &parent,
             id("child"),

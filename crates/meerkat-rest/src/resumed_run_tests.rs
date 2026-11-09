@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 
 /// Bound on one step of the row: it only turns a hang into a failure.
-const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const DEADLINE: std::time::Duration = std::time::Duration::from_mins(1);
 /// The realm both incarnations open.
 const REALM: &str = "rest-resumed-run-after-kill";
 /// The scripted tool call: a name no catalog has, so the call is answered

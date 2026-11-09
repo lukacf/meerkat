@@ -17,8 +17,9 @@ use futures::future::BoxFuture;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::auth::{
     CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
-    ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFailureObservation, TokenKey,
-    TokenStore, TokenStoreAccess, TokenStoreError, TokenStoreObservation, TokenStoreRefusal,
+    ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFailureDisposition,
+    RefreshFailureObservation, TokenKey, TokenStore, TokenStoreAccess, TokenStoreError,
+    TokenStoreObservation, TokenStoreRefusal,
 };
 #[cfg(all(not(target_arch = "wasm32"), test))]
 use meerkat_core::auth::{CredentialMutationFn, RefreshFn};
@@ -32,10 +33,72 @@ use meerkat_core::{
     HttpAuthorizer, OpenAiAuthMetadata, ProviderAuthMetadata, ResolvedAuthEnvelope,
 };
 
-use meerkat_llm_core::provider_runtime::binding::{DynamicLease, StaticLease, ValidatedBinding};
+use meerkat_llm_core::provider_runtime::binding::{
+    DynamicLease, NormalizedAuthMethod, StaticLease, ValidatedBinding,
+};
 use meerkat_llm_core::provider_runtime::errors::ProviderAuthError;
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::CredentialReadiness;
+
+/// What a variable that is set but blank (empty or only whitespace) does to
+/// the search of an `env` credential source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlankEnvValue {
+    /// It is the credential, and the search stops at it.
+    StopsTheSearch,
+    /// It is skipped, and the search goes on to the next variable.
+    IsSkipped,
+}
+
+impl BlankEnvValue {
+    /// The rule of an auth method's `env` sources. The GitHub Copilot
+    /// operator token (`github_copilot_token`) skips a blank variable, as
+    /// GitHub Copilot CLI reads `COPILOT_GITHUB_TOKEN`, `GH_TOKEN` and
+    /// `GITHUB_TOKEN`: a CI secret that expands empty must not hide the next
+    /// variable. Every other method stops at the first variable that is set.
+    pub fn of_auth_method(method: NormalizedAuthMethod) -> Self {
+        use meerkat_core::provider_matrix::{
+            AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod,
+        };
+        match method {
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotToken)
+            | NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken)
+            | NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotToken) => Self::IsSkipped,
+            NormalizedAuthMethod::OpenAi(_)
+            | NormalizedAuthMethod::Anthropic(_)
+            | NormalizedAuthMethod::Google(_)
+            | NormalizedAuthMethod::SelfHosted(_) => Self::StopsTheSearch,
+        }
+    }
+}
+
+/// The variable an `env` credential source takes its credential from, and
+/// its value. For each name of `var`, then `fallback`, in order,
+/// `RKAT_<NAME>` comes before `<NAME>` (a name that already starts with
+/// `RKAT_` has no override); the first variable that is set wins, unless
+/// `blank` skips one whose value is blank. The one owner of that order, for
+/// [`resolve_simple_secret`], [`observe_simple_secret_readiness`] and any
+/// surface that names the variable a route reads.
+pub fn env_credential_variable(
+    var: &str,
+    fallback: &[String],
+    blank: BlankEnvValue,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    std::iter::once(var)
+        .chain(fallback.iter().map(String::as_str))
+        .flat_map(|name| {
+            let rkat_override = (!name.starts_with("RKAT_")).then(|| format!("RKAT_{name}"));
+            rkat_override
+                .into_iter()
+                .chain(std::iter::once(name.to_string()))
+        })
+        .find_map(|candidate| {
+            lookup(&candidate)
+                .filter(|value| blank == BlankEnvValue::StopsTheSearch || !value.trim().is_empty())
+                .map(|value| (candidate, value))
+        })
+}
 
 /// Resolve a [`CredentialSourceSpec`] into a single secret string. Used
 /// by api_key / static_bearer auth methods. Returns the resolved secret
@@ -50,22 +113,18 @@ pub async fn resolve_simple_secret(
         CredentialSourceSpec::InlineSecret { secret } => Ok(secret.clone()),
         CredentialSourceSpec::Env { env: var, fallback } => {
             // Single canonical owner of env-var credential resolution
-            // policy (dogma §1). For each var name (primary + ordered
-            // fallback chain), `RKAT_<VAR>` overrides `<VAR>`. The
-            // factory body no longer encodes this policy inline.
-            let candidates =
-                std::iter::once(var.as_str()).chain(fallback.iter().map(String::as_str));
-            for candidate in candidates {
-                let rkat_override = if candidate.starts_with("RKAT_") {
-                    None
-                } else {
-                    (env.env_lookup)(&format!("RKAT_{candidate}"))
-                };
-                if let Some(value) = rkat_override.or_else(|| (env.env_lookup)(candidate)) {
-                    return Ok(value);
-                }
+            // policy (dogma §1): `env_credential_variable` reads `RKAT_<VAR>`
+            // before `<VAR>`, name by name, under the binding method's rule
+            // for a blank value. The factory body encodes none of it.
+            match env_credential_variable(
+                var,
+                fallback,
+                BlankEnvValue::of_auth_method(binding.auth()),
+                &*env.env_lookup,
+            ) {
+                Some((_, value)) => Ok(value),
+                None => Err(ProviderAuthError::Auth(AuthError::MissingSecret)),
             }
-            Err(ProviderAuthError::Auth(AuthError::MissingSecret))
         }
         CredentialSourceSpec::ExternalResolver { handle } => {
             let resolver = env
@@ -159,6 +218,22 @@ pub async fn resolve_simple_secret(
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }
     }
+}
+
+/// Whether resolving `source` through [`resolve_simple_secret`] also
+/// publishes its AuthMachine lifecycle.
+///
+/// Only `managed_store` does: its secret is loaded through the
+/// lifecycle-checked managed-store path, which restores the lease from the
+/// stored row's durable marker and refuses a lease the machine does not
+/// admit. Every other source (environment, inline secret, command, external
+/// resolver) hands back bare material, so a caller that keeps an AuthMachine
+/// lease for that material is the lease's only publisher. (A command source
+/// with `refresh_interval_ms` does not change this: `resolve_simple_secret`
+/// builds a fresh runner per call, so it runs the command without consulting
+/// or publishing the lease.)
+pub fn simple_secret_source_publishes_lifecycle(source: &CredentialSourceSpec) -> bool {
+    matches!(source, CredentialSourceSpec::ManagedStore)
 }
 
 /// Whether a confined process could change what a credential command runs
@@ -260,14 +335,16 @@ pub async fn observe_simple_secret_readiness(
     match source {
         CredentialSourceSpec::InlineSecret { .. } => CredentialReadiness::Ready,
         CredentialSourceSpec::Env { env: var, fallback } => {
-            let present = std::iter::once(var.as_str())
-                .chain(fallback.iter().map(String::as_str))
-                .any(|candidate| {
-                    (!candidate.starts_with("RKAT_")
-                        && (env.env_lookup)(&format!("RKAT_{candidate}")).is_some())
-                        || (env.env_lookup)(candidate).is_some()
-                });
-            if present {
+            // The variable `resolve_simple_secret` would read, by the same
+            // rule (a blank value skipped where the method says so).
+            if env_credential_variable(
+                var,
+                fallback,
+                BlankEnvValue::of_auth_method(binding.auth()),
+                &*env.env_lookup,
+            )
+            .is_some()
+            {
                 CredentialReadiness::Ready
             } else {
                 CredentialReadiness::Missing
@@ -549,10 +626,13 @@ pub enum ManagedStoreOAuthRefreshPreparationMode {
 }
 
 /// Provider callback that projects a coordinator-locked durable reload into a
-/// managed-store refresh transaction.
+/// managed-store refresh transaction. It receives the coordinator's
+/// admission guard for the refresh, which the transaction's commit writes
+/// under.
 #[cfg(not(target_arch = "wasm32"))]
 pub type ManagedStoreOAuthRefreshPrepareFn = Box<
     dyn FnOnce(
+            Arc<meerkat_core::AdmissionGuard>,
             PersistedTokens,
             ManagedStoreOAuthRefreshPreparationMode,
         ) -> BoxFuture<'static, Result<LockedManagedStoreOAuthRefresh, RefreshError>>
@@ -584,8 +664,11 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
         }
     }
 
+    /// Claim the preparation inside the coordinator's refresh closure, under
+    /// the admission guard the coordinator handed that closure.
     pub async fn claim_refresh_owner(
         &self,
+        admission: Arc<meerkat_core::AdmissionGuard>,
         current: PersistedTokens,
     ) -> Result<LockedManagedStoreOAuthRefresh, RefreshError> {
         let prepare = self
@@ -599,6 +682,7 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
                 )
             })?;
         prepare(
+            admission,
             current,
             ManagedStoreOAuthRefreshPreparationMode::RefreshOwner,
         )
@@ -626,7 +710,7 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
             .with_exclusive_mutation_for(
                 key.clone(),
                 TokenStoreAccess::Unattended,
-                Box::new(move || {
+                Box::new(move |admission| {
                     Box::pin(async move {
                         let current = token_store
                             .load_for(&key, TokenStoreAccess::Unattended)
@@ -645,7 +729,7 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
                         } else {
                             ManagedStoreOAuthRefreshPreparationMode::RefreshOwner
                         };
-                        match prepare(current, mode)
+                        match prepare(admission, current, mode)
                             .await
                             .map_err(mutation_error_from_refresh)?
                         {
@@ -677,9 +761,11 @@ impl ManagedStoreOAuthRefreshPreparationSlot {
 /// `previous` contains both the token bytes and the opaque AuthMachine restore
 /// snapshot observed under the coordinator lock. Commit and compensation must
 /// stay on this object so neither can accidentally fall back to a pre-lock
-/// resolver snapshot.
+/// resolver snapshot. `admission` is the coordinator's credential-fence
+/// guard for the refresh: the commit and its compensation write under it.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct PreparedManagedStoreOAuthRefresh {
+    admission: Arc<meerkat_core::AdmissionGuard>,
     env: ResolverEnvironment,
     binding: ValidatedBinding,
     previous: ManagedStoreTokens,
@@ -692,6 +778,7 @@ impl PreparedManagedStoreOAuthRefresh {
     /// by the caller, including compensation for this transaction's own write.
     pub async fn commit(self, refreshed: PersistedTokens) -> Result<PersistedTokens, RefreshError> {
         publish_managed_store_tokens_lifecycle_and_save(
+            &self.admission,
             &self.env,
             &self.binding,
             &self.previous,
@@ -748,15 +835,59 @@ impl PreparedManagedStoreOAuthRefresh {
         {
             return RefreshError::StalePreparation;
         }
+        let observation = error.observation();
+        // AuthMachine's verdict on this failure, read from the refreshing
+        // lease before the failure closes it (`refresh_failed` commits the
+        // same verdict). The failure carries it, so its caller tells one
+        // that clears on its own from one that needs a new sign-in without
+        // reading the provider's answer itself. A classifier that refuses
+        // here refuses the closure below too, which reports it.
+        let verdict = if self.refresh_started
+            && auth.snapshot(&lease_key).phase == Some(AuthLeasePhase::Refreshing)
+        {
+            auth.resolve_refresh_failure_disposition(&lease_key, observation.clone())
+                .ok()
+        } else {
+            None
+        };
         match mark_managed_store_oauth_refresh_failed(
             &self.env,
             &self.binding,
             self.refresh_started,
-            error.observation(),
+            observation,
         ) {
-            Ok(()) => error,
+            Ok(()) => with_refresh_failure_verdict(error, verdict),
             Err(lifecycle_error) => RefreshError::Refresh(format!("{error}; {lifecycle_error}")),
         }
+    }
+}
+
+/// A provider's refresh failure with the verdict AuthMachine issued on it
+/// (`Classified`), when it issued one. Only a failure the provider observed
+/// takes the verdict; every other error keeps its type.
+#[cfg(not(target_arch = "wasm32"))]
+fn with_refresh_failure_verdict(
+    error: RefreshError,
+    verdict: Option<RefreshFailureDisposition>,
+) -> RefreshError {
+    let Some(disposition) = verdict else {
+        return error;
+    };
+    match error {
+        RefreshError::Observed {
+            message,
+            observation,
+        } => RefreshError::Classified {
+            message,
+            observation,
+            disposition,
+        },
+        RefreshError::Refresh(message) => RefreshError::Classified {
+            message,
+            observation: RefreshFailureObservation::transient(),
+            disposition,
+        },
+        other => other,
     }
 }
 
@@ -812,6 +943,10 @@ fn mutation_error_from_refresh(error: RefreshError) -> CredentialMutationError {
         RefreshError::CredentialAccess { refusal, detail } => {
             CredentialMutationError::CredentialAccess { refusal, detail }
         }
+        RefreshError::AdmissionInProgress => CredentialMutationError::AdmissionInProgress,
+        RefreshError::AdmissionFenceUnavailable(detail) => {
+            CredentialMutationError::AdmissionFenceUnavailable(detail)
+        }
         other => CredentialMutationError::AuthLifecycle(other.to_string()),
     }
 }
@@ -822,6 +957,11 @@ fn refresh_error_from_mutation(error: CredentialMutationError) -> RefreshError {
         CredentialMutationError::StalePreparation => RefreshError::StalePreparation,
         CredentialMutationError::CredentialAccess { refusal, detail } => {
             RefreshError::CredentialAccess { refusal, detail }
+        }
+        // The credential fence refused the adoption: nothing ran.
+        CredentialMutationError::AdmissionInProgress => RefreshError::AdmissionInProgress,
+        CredentialMutationError::AdmissionFenceUnavailable(detail) => {
+            RefreshError::AdmissionFenceUnavailable(detail)
         }
         // Every other mutation failure is a refresh failure with its text. A
         // failed publication rollback cannot reach this path: the
@@ -985,11 +1125,20 @@ async fn restore_marked_token_lifecycle_if_absent(
     loaded: &PersistedTokens,
 ) -> Result<(), ProviderAuthError> {
     let snapshot = auth_lease.snapshot(lease_key);
-    if snapshot.phase.is_some()
-        || snapshot.credential_present
-        || snapshot.generation != 0
-        || snapshot.credential_published_at_millis.is_some()
-    {
+    let absent = snapshot.phase.is_none()
+        && !snapshot.credential_present
+        && snapshot.generation == 0
+        && snapshot.credential_published_at_millis.is_none();
+    // A lease that withdrew its credential takes a record published after
+    // the withdrawn publication (another process's later login): the rule the
+    // MCP and connector reads follow for a newer record.
+    let later_than_withdrawn = !snapshot.credential_present
+        && durable_marker::marker_relation_for_tokens_and_snapshot(
+            loaded,
+            &snapshot,
+            &TokenKey::from_credential_identity(binding.credential_identity()),
+        ) == durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer;
+    if !(absent || later_than_withdrawn) {
         return Ok(());
     }
     let restored = if let Some(guard) = guard {
@@ -1382,9 +1531,12 @@ pub(crate) fn legacy_refresh_owner_allows_preparation(
 
 /// Normalize an interrupted durable Refreshing publication only while the
 /// caller owns its existing refresh coordinator/file lock and this exact
-/// lifecycle guard. This is not a general status or recovery policy.
+/// lifecycle guard. This is not a general status or recovery policy. The
+/// normalized marker is written under `admission`, the coordinator's
+/// credential-fence guard.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn normalize_interrupted_refresh_under_coordinator(
+    admission: &meerkat_core::AdmissionGuard,
     store: &dyn TokenStore,
     auth: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     key: &TokenKey,
@@ -1437,7 +1589,7 @@ pub(crate) async fn normalize_interrupted_refresh_under_coordinator(
     let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(key, tokens, &closed)
         .map_err(|error| RefreshError::Refresh(error.to_string()))?;
     store
-        .save_for(key, &marked, TokenStoreAccess::Unattended)
+        .save_for(admission, key, &marked, TokenStoreAccess::Unattended)
         .await
         .map_err(RefreshError::from_token_store)?;
     Ok(Some(marked))
@@ -1453,9 +1605,13 @@ pub(crate) async fn normalize_interrupted_refresh_under_coordinator(
 /// the durable baseline, reprojects AuthMachine authority from its durable
 /// marker when it changed, reruns cached-vs-refresh admission, and only then
 /// begins a refresh. The returned transaction owns the under-lock token and
-/// lifecycle restore snapshots used by both commit and rollback.
+/// lifecycle restore snapshots used by both commit and rollback, and
+/// `admission`, the coordinator's credential-fence guard for this refresh,
+/// which every write of the preparation, the commit and its compensation
+/// takes.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn prepare_managed_store_oauth_refresh_under_lock(
+    admission: Arc<meerkat_core::AdmissionGuard>,
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     previous: ManagedStoreTokens,
@@ -1463,6 +1619,7 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
     mode: ManagedStoreOAuthRefreshPreparationMode,
 ) -> Result<LockedManagedStoreOAuthRefresh, ProviderAuthError> {
     prepare_managed_store_oauth_refresh_for_purpose(
+        admission,
         env,
         binding,
         previous,
@@ -1475,8 +1632,11 @@ pub async fn prepare_managed_store_oauth_refresh_under_lock(
 
 /// Recheck retained-client maintenance under the existing coordinator and exact
 /// lifecycle guard. A release during the wait may never become restoration.
+/// `admission` is the coordinator's credential-fence guard, as for
+/// [`prepare_managed_store_oauth_refresh_under_lock`].
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn prepare_existing_managed_store_oauth_refresh_under_lock(
+    admission: Arc<meerkat_core::AdmissionGuard>,
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     previous: ManagedStoreTokens,
@@ -1484,6 +1644,7 @@ pub async fn prepare_existing_managed_store_oauth_refresh_under_lock(
     mode: ManagedStoreOAuthRefreshPreparationMode,
 ) -> Result<LockedManagedStoreOAuthRefresh, ProviderAuthError> {
     prepare_managed_store_oauth_refresh_for_purpose(
+        admission,
         env,
         binding,
         previous,
@@ -1496,6 +1657,7 @@ pub async fn prepare_existing_managed_store_oauth_refresh_under_lock(
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn prepare_managed_store_oauth_refresh_for_purpose(
+    admission: Arc<meerkat_core::AdmissionGuard>,
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     mut previous: ManagedStoreTokens,
@@ -1681,6 +1843,7 @@ async fn prepare_managed_store_oauth_refresh_for_purpose(
         .as_ref()
         .ok_or_else(lease_absent_error)?;
     if let Some(normalized) = normalize_interrupted_refresh_under_coordinator(
+        &admission,
         previous.store.as_ref(),
         auth,
         &previous.key,
@@ -1702,7 +1865,7 @@ async fn prepare_managed_store_oauth_refresh_for_purpose(
         previous.lifecycle_restore_snapshot = Some(captured);
     }
 
-    let admission = resolve_oauth_login_credential_disposition(
+    let use_admission = resolve_oauth_login_credential_disposition(
         env,
         binding,
         durable_baseline.primary_secret.is_some(),
@@ -1711,7 +1874,7 @@ async fn prepare_managed_store_oauth_refresh_for_purpose(
         return Ok(LockedManagedStoreOAuthRefresh::UseCached(durable_baseline));
     }
 
-    match admission {
+    match use_admission {
         OAuthLoginCredentialAdmission::UseCached => {
             Ok(LockedManagedStoreOAuthRefresh::UseCached(durable_baseline))
         }
@@ -1721,6 +1884,7 @@ async fn prepare_managed_store_oauth_refresh_for_purpose(
             previous.release_prelock_lifecycle_guard();
             Ok(LockedManagedStoreOAuthRefresh::Refresh(
                 PreparedManagedStoreOAuthRefresh {
+                    admission,
                     env: env.clone(),
                     binding: binding.clone(),
                     previous,
@@ -1850,10 +2014,10 @@ impl ManagedStoreOAuthRefreshFailureCoordinator {
         let binding = self.binding.clone();
         let refresh_started = self.refresh_started;
         let pre_claim_guard = Arc::clone(&self.pre_claim_guard);
-        Box::new(move || {
+        Box::new(move |admission| {
             pre_claim_guard.disarm();
             Box::pin(async move {
-                let result = refresh_fn().await;
+                let result = refresh_fn(admission).await;
                 if let Err(err) = result.as_ref()
                     && let Err(lifecycle_err) = mark_managed_store_oauth_refresh_failed(
                         &env,
@@ -1890,6 +2054,18 @@ impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
     ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
         self.inner
             .with_exclusive_mutation_for(key, access, mutation_fn)
+            .await
+    }
+
+    async fn with_exclusive_mutation_under(
+        &self,
+        guard: Arc<meerkat_core::AdmissionGuard>,
+        key: TokenKey,
+        access: TokenStoreAccess,
+        mutation_fn: CredentialMutationFn,
+    ) -> Result<CredentialMutationOutcome, CredentialMutationError> {
+        self.inner
+            .with_exclusive_mutation_under(guard, key, access, mutation_fn)
             .await
     }
 
@@ -1974,8 +2150,12 @@ fn publish_managed_store_tokens_refresh_lifecycle(
     Ok(transition)
 }
 
+/// Publish a refreshed credential's lifecycle and save it, compensating on a
+/// failed save. Both writes take `admission`, the coordinator's
+/// credential-fence guard for the refresh.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn publish_managed_store_tokens_lifecycle_and_save(
+    admission: &meerkat_core::AdmissionGuard,
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     previous: &ManagedStoreTokens,
@@ -2062,7 +2242,12 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
     ) {
         Ok(committed) => match previous
             .store
-            .save_for(&previous.key, &committed, TokenStoreAccess::Unattended)
+            .save_for(
+                admission,
+                &previous.key,
+                &committed,
+                TokenStoreAccess::Unattended,
+            )
             .await
         {
             Ok(()) => return Ok(committed),
@@ -2099,7 +2284,12 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .map_err(|error| format!("rollback marker failed: {error}"))?;
         previous
             .store
-            .save_for(&previous.key, &marked, TokenStoreAccess::Unattended)
+            .save_for(
+                admission,
+                &previous.key,
+                &marked,
+                TokenStoreAccess::Unattended,
+            )
             .await
             .map_err(|error| format!("TokenStore rollback save failed: {error}"))?;
         Ok::<(), String>(())
@@ -2448,6 +2638,145 @@ mod tests {
         AuthBindingRef, AuthProfile, AuthRouteHints, BackendProfile, BindingPolicy, Provider,
     };
     use meerkat_llm_core::provider_runtime::{ProviderRuntimeCatalog, ValidatedBinding};
+
+    /// Only a managed-store source publishes its own AuthMachine lifecycle
+    /// through `resolve_simple_secret`; for every other source, a command
+    /// with a refresh interval included, the caller owns the lease.
+    #[test]
+    fn simple_secret_source_publishes_lifecycle_only_for_managed_store() {
+        let cases = [
+            (CredentialSourceSpec::ManagedStore, true),
+            (
+                CredentialSourceSpec::InlineSecret {
+                    secret: "inline".into(),
+                },
+                false,
+            ),
+            (
+                CredentialSourceSpec::Env {
+                    env: "COPILOT_GITHUB_TOKEN".into(),
+                    fallback: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                },
+                false,
+            ),
+            (
+                CredentialSourceSpec::ExternalResolver {
+                    handle: "copilot-token".into(),
+                },
+                false,
+            ),
+            (
+                CredentialSourceSpec::Command {
+                    program: "/usr/local/bin/mint-token".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: std::collections::BTreeMap::new(),
+                    timeout_ms: 5_000,
+                    refresh_interval_ms: Some(3_000_000),
+                },
+                false,
+            ),
+            (CredentialSourceSpec::PlatformDefault, false),
+            (
+                CredentialSourceSpec::FileDescriptor {
+                    fd: 3,
+                    scope_override: None,
+                },
+                false,
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(
+                simple_secret_source_publishes_lifecycle(&source),
+                expected,
+                "{source:?}"
+            );
+        }
+    }
+
+    /// The env chain reads `RKAT_<NAME>` before `<NAME>`, name by name. A
+    /// blank variable stops the search for every method but the GitHub
+    /// Copilot operator token, which skips it as GitHub Copilot CLI does.
+    #[test]
+    fn env_credential_variable_skips_blank_values_only_for_the_copilot_token() {
+        use meerkat_core::provider_matrix::{
+            AnthropicAuthMethod, GoogleAuthMethod, OpenAiAuthMethod,
+        };
+
+        let fallback = ["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()];
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+        let found = |blank: BlankEnvValue, pairs: &'static [(&'static str, &'static str)]| {
+            env_credential_variable("COPILOT_GITHUB_TOKEN", &fallback, blank, &vars(pairs))
+        };
+        let pair = |name: &str, value: &str| Some((name.to_string(), value.to_string()));
+
+        // RKAT_<NAME> before <NAME>, name by name, under either rule.
+        for blank in [BlankEnvValue::StopsTheSearch, BlankEnvValue::IsSkipped] {
+            assert_eq!(
+                found(
+                    blank,
+                    &[("GH_TOKEN", "gh"), ("RKAT_GITHUB_TOKEN", "rkat-github")]
+                ),
+                pair("GH_TOKEN", "gh")
+            );
+            assert_eq!(
+                found(blank, &[("GH_TOKEN", "gh"), ("RKAT_GH_TOKEN", "rkat-gh")]),
+                pair("RKAT_GH_TOKEN", "rkat-gh")
+            );
+            assert_eq!(found(blank, &[]), None);
+        }
+
+        // A blank variable stops the search, or is skipped.
+        let blank_first: &[(&str, &str)] = &[
+            ("RKAT_COPILOT_GITHUB_TOKEN", " "),
+            ("COPILOT_GITHUB_TOKEN", ""),
+            ("GH_TOKEN", "gh"),
+        ];
+        assert_eq!(
+            found(BlankEnvValue::StopsTheSearch, blank_first),
+            pair("RKAT_COPILOT_GITHUB_TOKEN", " ")
+        );
+        assert_eq!(
+            found(BlankEnvValue::IsSkipped, blank_first),
+            pair("GH_TOKEN", "gh")
+        );
+        assert_eq!(
+            found(BlankEnvValue::IsSkipped, &[("COPILOT_GITHUB_TOKEN", "\t")]),
+            None
+        );
+
+        // Only the operator token skips; API keys keep the first set variable.
+        for method in [
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotToken),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::GitHubCopilotToken),
+        ] {
+            assert_eq!(
+                BlankEnvValue::of_auth_method(method),
+                BlankEnvValue::IsSkipped,
+                "{method:?}"
+            );
+        }
+        for method in [
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ApiKey),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::GitHubCopilotOauth),
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::ApiKey),
+            NormalizedAuthMethod::Google(GoogleAuthMethod::ApiKey),
+        ] {
+            assert_eq!(
+                BlankEnvValue::of_auth_method(method),
+                BlankEnvValue::StopsTheSearch,
+                "{method:?}"
+            );
+        }
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn test_provider_auth_persistence(store: Arc<dyn TokenStore>) -> ProviderAuthPersistence {
@@ -2831,6 +3160,8 @@ mod tests {
                 credential_present: false,
                 generation: 0,
                 credential_published_at_millis: None,
+                adopted_marker_generation: None,
+                released_publication_at_millis: None,
             })
         }
 
@@ -3107,7 +3438,11 @@ mod tests {
             let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
             let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
             store
-                .save(&key, &PersistedTokens::api_key("sk-managed-readiness"))
+                .save(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &key,
+                    &PersistedTokens::api_key("sk-managed-readiness"),
+                )
                 .await
                 .unwrap();
             let expires_at = match phase {
@@ -3120,6 +3455,8 @@ mod tests {
                 credential_present: true,
                 generation: 1,
                 credential_published_at_millis: None,
+                adopted_marker_generation: None,
+                released_publication_at_millis: None,
             });
             let env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -3372,7 +3709,11 @@ mod tests {
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
-            .save(&key, &PersistedTokens::api_key("sk-managed"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &PersistedTokens::api_key("sk-managed"),
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
@@ -3408,7 +3749,10 @@ mod tests {
             &transition,
         )
         .unwrap();
-        store.save(&key, &marked).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .unwrap();
         let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -3438,7 +3782,11 @@ mod tests {
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
-            .save(&key, &PersistedTokens::api_key("sk-standalone"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &PersistedTokens::api_key("sk-standalone"),
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
@@ -3462,7 +3810,11 @@ mod tests {
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
-            .save(&key, &PersistedTokens::api_key("sk-runtime"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &PersistedTokens::api_key("sk-runtime"),
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
@@ -3487,7 +3839,11 @@ mod tests {
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
-            .save(&key, &PersistedTokens::api_key("sk-stale"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &PersistedTokens::api_key("sk-stale"),
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
@@ -3513,6 +3869,7 @@ mod tests {
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &key,
                 &PersistedTokens {
                     auth_mode: meerkat_core::auth::PersistedAuthMode::ChatgptOauth,
@@ -3550,7 +3907,11 @@ mod tests {
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
-            .save(&key, &chatgpt_oauth_tokens("oauth-access"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &chatgpt_oauth_tokens("oauth-access"),
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
@@ -3583,7 +3944,10 @@ mod tests {
                 "generation": 1,
             },
         });
-        store.save(&key, &stale_tokens).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &stale_tokens)
+            .await
+            .unwrap();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(StaticAuthLeaseHandle::valid_generation(2).generated());
@@ -3611,7 +3975,10 @@ mod tests {
         let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
         let auth_lease = StaticAuthLeaseHandle::valid_generation_with_expiry(7, expires_at);
         let marked = auth_lease.mark_tokens_lifecycle_published_for_test(&tokens);
-        store.save(&key, &marked).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .unwrap();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
             .with_auth_lease_handle(auth_lease.generated());
@@ -3645,7 +4012,10 @@ mod tests {
                 "expires_at": token_expires_at + 3600,
             },
         });
-        store.save(&key, &stale_marker).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &stale_marker)
+            .await
+            .unwrap();
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -3676,7 +4046,14 @@ mod tests {
                 "published": true,
             },
         });
-        store.save(&key, &incomplete_marker).await.unwrap();
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &incomplete_marker,
+            )
+            .await
+            .unwrap();
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -3705,7 +4082,10 @@ mod tests {
         let tokens = chatgpt_oauth_tokens("fresh-runtime-access");
         let marked = mark_tokens_lifecycle_published_for_test(&tokens, 1);
         let published_at = Some(marker_credential_published_at_for_test(&marked));
-        store.save(&key, &marked).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .unwrap();
         let auth_lease = MutableAuthLeaseHandle::unknown();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -3738,7 +4118,11 @@ mod tests {
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
         let tokens = chatgpt_oauth_tokens("oauth-only-access");
         store
-            .save(&key, &mark_tokens_lifecycle_published_for_test(&tokens, 1))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &mark_tokens_lifecycle_published_for_test(&tokens, 1),
+            )
             .await
             .unwrap();
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
@@ -3747,6 +4131,8 @@ mod tests {
             credential_present: false,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -3762,6 +4148,61 @@ mod tests {
         ));
         let snapshot = auth_lease.snapshot(&lease_key);
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
+    }
+
+    /// A provider lease released after its own publication takes a later
+    /// publication another process stored for the binding: one published
+    /// after the credential the lease withdrew.
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_released_lease_takes_a_later_publication() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        // Its own realm: the release takes the lease's lifecycle exclusion.
+        let binding = simple_secret_binding_in(
+            "released-later-publication",
+            CredentialSourceSpec::ManagedStore,
+            "managed_chatgpt_oauth",
+        );
+        let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
+        let lease_key = LeaseKey::from_credential_identity(binding.credential_identity());
+        let own = chatgpt_oauth_tokens("released-own-access");
+        let auth_lease = MutableAuthLeaseHandle::unknown();
+        let generated = auth_lease.generated();
+        generated
+            .acquire_lease(
+                &lease_key,
+                meerkat_core::persisted_token_expires_at_epoch_secs(&own),
+            )
+            .expect("this process publishes");
+        generated
+            .release_lease(&lease_key)
+            .expect("and withdraws its credential");
+        // Another process stores a later login.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let later = chatgpt_oauth_tokens("later-login-access");
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &mark_lease_tokens_lifecycle_published_for_test(&lease_key, &later, 1),
+            )
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing()
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
+            .with_auth_lease_handle(generated);
+
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+            .await
+            .expect("the later publication is served");
+        assert_eq!(secret, "later-login-access");
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert!(snapshot.credential_present);
+        assert_eq!(
+            snapshot.generation, 1,
+            "the lease generation never goes back"
+        );
     }
 
     #[cfg(feature = "workspace-tests")]
@@ -3781,6 +4222,7 @@ mod tests {
         let tokens = chatgpt_oauth_tokens("released-oauth-access");
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &key,
                 &mark_lease_tokens_lifecycle_published_for_test(&lease_key, &tokens, 1),
             )
@@ -3794,6 +4236,8 @@ mod tests {
                 credential_present: false,
                 generation: 1,
                 credential_published_at_millis: None,
+                adopted_marker_generation: None,
+                released_publication_at_millis: None,
             },
         );
         let env = ResolverEnvironment::testing()
@@ -3824,6 +4268,7 @@ mod tests {
         let auth_lease = StaticAuthLeaseHandle::valid_generation_with_expiry(2, expires_at);
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &key,
                 &auth_lease.mark_tokens_lifecycle_published_for_test(&tokens),
             )
@@ -3858,11 +4303,14 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(requested_previous_snapshot);
         let previous_snapshot = auth_lease.snapshot(&lease_key);
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &key,
                 &mark_tokens_lifecycle_published_for_test(
                     &tokens,
@@ -3908,6 +4356,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(matching_published_at),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert_eq!(
@@ -3960,6 +4410,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(snapshot_published_at),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert_eq!(
@@ -4005,6 +4457,8 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &same_time_longer,
             )),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4027,6 +4481,8 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &same_time_shorter,
             )),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4051,6 +4507,8 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &same_time_same_expiry_future_generation,
             )),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4078,6 +4536,8 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &stale_same_time,
             )),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
 
         assert_eq!(
@@ -4089,6 +4549,130 @@ mod tests {
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
             "same-ms publication ties must not let older credential generations masquerade as current"
         );
+    }
+
+    /// A lease at generation 2 that adopted a record another process
+    /// published at its generation 1: the snapshot records that marker
+    /// generation. The relation compares a same-time record with it.
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopted_marker_snapshot_for_test(record: &PersistedTokens) -> AuthLeaseSnapshot {
+        AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(meerkat_core::persisted_token_expires_at_epoch_secs(record)),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(marker_credential_published_at_for_test(record)),
+            adopted_marker_generation: Some(1),
+            released_publication_at_millis: None,
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_matches_the_adopted_marker_generation() {
+        let mut tokens = chatgpt_oauth_tokens("adopted-record-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let adopted = mark_tokens_lifecycle_published_for_test(&tokens, 1);
+        let snapshot = adopted_marker_snapshot_for_test(&adopted);
+
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &adopted,
+                &snapshot,
+                &default_test_token_key()
+            ),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+            "the record a lease adopted at its own marker generation is its current publication"
+        );
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_refuses_other_generations_than_the_adopted_marker() {
+        let mut tokens = chatgpt_oauth_tokens("adopted-record-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let adopted = mark_tokens_lifecycle_published_for_test(&tokens, 1);
+        let snapshot = adopted_marker_snapshot_for_test(&adopted);
+
+        for generation in [2_u64, 0] {
+            // The same record, publication time and expiry under another
+            // marker generation.
+            let mut other = adopted.clone();
+            other.metadata["meerkat_auth_lifecycle"]["generation"] = serde_json::json!(generation);
+            assert_eq!(
+                meerkat_core::tokens_lifecycle_published_generation(&other),
+                Some(generation)
+            );
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &other,
+                    &snapshot,
+                    &default_test_token_key()
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
+                "a same-time record at generation {generation} is not the publication the lease adopted, \
+                 the lease's own generation included"
+            );
+        }
+    }
+
+    /// A lease that withdrew its credential takes a record published after
+    /// the withdrawn publication, and no other: a record published at or
+    /// before it stays stale, and so does every record while the lease knows
+    /// no withdrawn publication.
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_after_a_release_takes_only_a_later_record() {
+        let mut tokens = chatgpt_oauth_tokens("released-record-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let record = mark_tokens_lifecycle_published_for_test(&tokens, 1);
+        let published_at = marker_credential_published_at_for_test(&record);
+        let released = |bound: Option<u64>| AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: false,
+            generation: 2,
+            credential_published_at_millis: None,
+            adopted_marker_generation: None,
+            released_publication_at_millis: bound,
+        };
+
+        for (bound, expected, case) in [
+            (
+                Some(published_at - 1),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer,
+                "a record published after the withdrawn publication is newer",
+            ),
+            (
+                Some(published_at),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenStale,
+                "the withdrawn publication's own time is not newer",
+            ),
+            (
+                Some(published_at + 1),
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenStale,
+                "a record published before the withdrawn publication is stale",
+            ),
+            (
+                None,
+                durable_marker::AuthLeaseDurableMarkerRelation::TokenStale,
+                "with no withdrawn publication known every record is stale",
+            ),
+        ] {
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &record,
+                    &released(bound),
+                    &default_test_token_key()
+                ),
+                expected,
+                "{case}"
+            );
+        }
     }
 
     #[cfg(feature = "workspace-tests")]
@@ -4104,6 +4688,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         let marker = mark_tokens_lifecycle_published_for_test(&tokens, 1);
 
@@ -4135,13 +4721,18 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(requested_initial_snapshot);
         let initial_snapshot = auth_lease.snapshot(&lease_key);
         let previous_tokens = auth_lease.mark_tokens_lifecycle_published_for_test(&tokens);
         let current_tokens =
             mark_tokens_lifecycle_published_for_test(&tokens, initial_snapshot.generation + 1);
-        store.save(&key, &current_tokens).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &current_tokens)
+            .await
+            .unwrap();
         let previous = managed_store_tokens(
             Arc::clone(&store),
             key.clone(),
@@ -4155,10 +4746,15 @@ mod tests {
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
-        let err =
-            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &tokens)
-                .await
-                .unwrap_err();
+        let err = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
+            &env,
+            &binding,
+            &previous,
+            &tokens,
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             matches!(&err, ProviderAuthError::Auth(AuthError::StaleCredential)),
@@ -4192,11 +4788,20 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let before_refresh = auth_lease.snapshot(&lease_key);
         let previous_tokens =
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_previous_tokens);
-        store.save(&key, &previous_tokens).await.unwrap();
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &previous_tokens,
+            )
+            .await
+            .unwrap();
         let previous = ManagedStoreTokens {
             store: Arc::clone(&store),
             key: key.clone(),
@@ -4213,10 +4818,15 @@ mod tests {
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
-        let committed =
-            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
-                .await
-                .expect("refresh commit succeeds");
+        let committed = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
+            &env,
+            &binding,
+            &previous,
+            &refreshed,
+        )
+        .await
+        .expect("refresh commit succeeds");
 
         assert_eq!(
             committed.primary_secret.as_deref(),
@@ -4267,7 +4877,10 @@ mod tests {
                 &key, &raw_a, &acquired,
             )
             .unwrap();
-            store.save(&key, &marked_a).await.unwrap();
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_a)
+                .await
+                .unwrap();
             let local = generated_auth_lease_handle_for_test(Arc::new(
                 meerkat_runtime::RuntimeAuthLeaseHandle::new(),
             ));
@@ -4304,13 +4917,16 @@ mod tests {
             )
             .unwrap();
             assert_ne!(marked_a, marked_b, "must execute the durable rebase branch");
-            store.save(&key, &marked_b).await.unwrap();
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_b)
+                .await
+                .unwrap();
             let env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
                 .with_auth_lease_handle(local.clone());
             let locked_store = Arc::clone(&store);
             let locked_key = key.clone();
-            let refresh: RefreshFn = Box::new(move || {
+            let refresh: RefreshFn = Box::new(move |fence| {
                 Box::pin(async move {
                     let locked = locked_store
                         .load(&locked_key)
@@ -4318,6 +4934,7 @@ mod tests {
                         .map_err(|error| RefreshError::Refresh(error.to_string()))?
                         .ok_or_else(|| RefreshError::Refresh("fixture account absent".into()))?;
                     match prepare_managed_store_oauth_refresh_under_lock(
+                        fence,
                         &env,
                         &binding,
                         previous,
@@ -4387,9 +5004,14 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(1),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let marked_a = publisher.mark_tokens_lifecycle_published_for_test(&raw_a);
-        store.save(&key, &marked_a).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked_a)
+            .await
+            .unwrap();
 
         // Model two processes which both loaded A before either obtained the
         // cross-process refresh lock. Each process has an independent
@@ -4446,10 +5068,12 @@ mod tests {
             .with_auth_lease_handle(auth_two.clone())
             .with_force_refresh(true);
         let lock_dir = tempfile::tempdir().unwrap();
-        let coordinator_one: Arc<dyn RefreshCoordinator> =
-            Arc::new(crate::FileLockCoordinator::new(lock_dir.path()));
-        let coordinator_two: Arc<dyn RefreshCoordinator> =
-            Arc::new(crate::FileLockCoordinator::new(lock_dir.path()));
+        let coordinator_one: Arc<dyn RefreshCoordinator> = Arc::new(
+            crate::FileLockCoordinator::new(lock_dir.path().join("refresh-locks")),
+        );
+        let coordinator_two: Arc<dyn RefreshCoordinator> = Arc::new(
+            crate::FileLockCoordinator::new(lock_dir.path().join("refresh-locks")),
+        );
         let start = Arc::new(tokio::sync::Barrier::new(3));
         let observed_baselines = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
 
@@ -4464,7 +5088,7 @@ mod tests {
             tokio::spawn(async move {
                 start.wait().await;
                 let refresh_key = key.clone();
-                let refresh_fn: RefreshFn = Box::new(move || {
+                let refresh_fn: RefreshFn = Box::new(move |fence| {
                     Box::pin(async move {
                         let baseline = store
                             .load(&refresh_key)
@@ -4483,6 +5107,7 @@ mod tests {
                                     .expect("fixture baseline has rotating refresh token"),
                             );
                         let transaction = match prepare_managed_store_oauth_refresh_under_lock(
+                            fence,
                             &env,
                             &binding,
                             preload,
@@ -4583,6 +5208,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -4636,6 +5263,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -4690,9 +5319,14 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let tokens = auth_lease.mark_tokens_lifecycle_published_for_test(&expired_tokens);
-        store.save(&key, &tokens).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+            .await
+            .unwrap();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
@@ -4745,6 +5379,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -4775,7 +5411,7 @@ mod tests {
         );
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let refresh_fn: crate::auth_store::RefreshFn = Box::new(move || {
+        let refresh_fn: crate::auth_store::RefreshFn = Box::new(move |_fence| {
             Box::pin(async move {
                 let _ = started_tx.send(());
                 let _ = release_rx.await;
@@ -4834,6 +5470,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -4918,6 +5556,8 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -4942,8 +5582,9 @@ mod tests {
             binding,
             refresh_started,
         );
-        let refresh_fn: crate::auth_store::RefreshFn =
-            Box::new(|| Box::pin(async { panic!("inner coordinator must not invoke refresh_fn") }));
+        let refresh_fn: crate::auth_store::RefreshFn = Box::new(|_fence| {
+            Box::pin(async { panic!("inner coordinator must not invoke refresh_fn") })
+        });
 
         assert!(matches!(
             coord.with_refresh(key, refresh_fn).await,
@@ -4970,7 +5611,10 @@ mod tests {
         );
         let initial_tokens =
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_initial_tokens);
-        store.save(&key, &initial_tokens).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &initial_tokens)
+            .await
+            .unwrap();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
@@ -5022,7 +5666,14 @@ mod tests {
         let lease_key = LeaseKey::from_auth_binding(binding.auth_binding_ref());
         let auth_lease = StaticAuthLeaseHandle::valid();
         let previous_tokens = chatgpt_oauth_tokens("expired-access");
-        store.save(&key, &previous_tokens).await.unwrap();
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &previous_tokens,
+            )
+            .await
+            .unwrap();
         let previous = ManagedStoreTokens {
             store: Arc::clone(&store),
             key: key.clone(),
@@ -5036,12 +5687,16 @@ mod tests {
         };
 
         let newer_tokens = chatgpt_oauth_tokens("newer-login-access");
-        store.save(&key, &newer_tokens).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &newer_tokens)
+            .await
+            .unwrap();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
         let err = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
             &env,
             &binding,
             &previous,
@@ -5074,7 +5729,14 @@ mod tests {
         );
         let previous_tokens =
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_previous_tokens);
-        store.save(&key, &previous_tokens).await.unwrap();
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &previous_tokens,
+            )
+            .await
+            .unwrap();
         let previous = ManagedStoreTokens {
             store: Arc::clone(&store),
             key: key.clone(),
@@ -5091,14 +5753,24 @@ mod tests {
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
-        let first =
-            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
-                .await
-                .unwrap();
-        let second =
-            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
-                .await
-                .unwrap();
+        let first = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
+            &env,
+            &binding,
+            &previous,
+            &refreshed,
+        )
+        .await
+        .unwrap();
+        let second = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
+            &env,
+            &binding,
+            &previous,
+            &refreshed,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(second, first);
         assert_eq!(second, store.load(&key).await.unwrap().unwrap());
@@ -5107,9 +5779,14 @@ mod tests {
         let owner = env.auth_lease_handle.as_ref().unwrap();
         owner.mark_reauth_required(&lease_key).unwrap();
         let refused_owner = owner.snapshot(&lease_key);
-        let rejected =
-            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
-                .await;
+        let rejected = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
+            &env,
+            &binding,
+            &previous,
+            &refreshed,
+        )
+        .await;
         assert!(matches!(
             rejected,
             Err(ProviderAuthError::Auth(AuthError::StaleCredential))
@@ -5138,11 +5815,20 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
+            released_publication_at_millis: None,
         });
         let previous_tokens =
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_previous_tokens);
         let shared_tokens = mark_tokens_lifecycle_published_for_test(&refreshed, 2);
-        store.save(&key, &previous_tokens).await.unwrap();
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &previous_tokens,
+            )
+            .await
+            .unwrap();
         let previous = ManagedStoreTokens {
             store: Arc::clone(&store),
             key: key.clone(),
@@ -5154,15 +5840,23 @@ mod tests {
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
             lifecycle_guard: None,
         };
-        store.save(&key, &shared_tokens).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &shared_tokens)
+            .await
+            .unwrap();
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(Arc::clone(&store)))
             .with_auth_lease_handle(auth_lease.generated());
 
-        let err =
-            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
-                .await
-                .unwrap_err();
+        let err = publish_managed_store_tokens_lifecycle_and_save(
+            &meerkat_core::AdmissionGuard::none(),
+            &env,
+            &binding,
+            &previous,
+            &refreshed,
+        )
+        .await
+        .unwrap_err();
 
         assert!(
             matches!(&err, ProviderAuthError::Auth(AuthError::StaleCredential)),
@@ -5183,7 +5877,11 @@ mod tests {
         let binding = simple_secret_binding(CredentialSourceSpec::ManagedStore, "api_key");
         let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
         store
-            .save(&key, &PersistedTokens::static_bearer("bearer"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &PersistedTokens::static_bearer("bearer"),
+            )
             .await
             .unwrap();
         let env = ResolverEnvironment::testing()
@@ -5264,7 +5962,10 @@ mod tests {
         let marked =
             meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &raw, &transition)
                 .unwrap();
-        store.save(&key, &marked).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .unwrap();
         (store, auth, marked)
     }
 
@@ -5380,7 +6081,10 @@ mod tests {
             ),
             durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
         );
-        store.save(&key, &newer).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &newer)
+            .await
+            .unwrap();
         let restored = meerkat_core::rehydrate_marked_tokens_for_status(
             store.as_ref(),
             &fresh,
@@ -5397,7 +6101,10 @@ mod tests {
         );
         let before_unmarked = fresh.snapshot(&lease);
         let unmarked = chatgpt_oauth_tokens("ce-unmarked");
-        store.save(&key, &unmarked).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &unmarked)
+            .await
+            .unwrap();
         let rejected = meerkat_core::rehydrate_marked_tokens_for_status(
             store.as_ref(),
             &fresh,
@@ -5421,8 +6128,11 @@ mod tests {
         let store = Arc::new(crate::auth_store::EphemeralTokenStore::new());
         let key = default_test_token_key();
         let tokens = chatgpt_oauth_tokens("coalesced-stale");
-        store.save(&key, &tokens).await.unwrap();
-        let slot = ManagedStoreOAuthRefreshPreparationSlot::new(Box::new(|_, _| {
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+            .await
+            .unwrap();
+        let slot = ManagedStoreOAuthRefreshPreparationSlot::new(Box::new(|_, _, _| {
             Box::pin(async { Err(RefreshError::StalePreparation) })
         }));
         let result = slot
@@ -5484,7 +6194,10 @@ mod tests {
             )
             .unwrap();
             let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
-            store.save(&key, &marked).await.unwrap();
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+                .await
+                .unwrap();
             drop(guard);
             let env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(test_provider_auth_persistence(store.clone()))
@@ -5543,20 +6256,22 @@ mod tests {
         #[cfg(feature = "keyring")]
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn status_with_the_owner_busy_answers_at_once_without_reading() {
-            use crate::auth_store::keyring::test_keychain::{FakeKeychain, store};
+            use crate::auth_store::keyring::test_keychain::{FakeKeychain, store_under};
             let (_env, binding, owner, marked) = keychain_fixture("kc-status").await;
             let keychain = FakeKeychain::blocked();
-            let keyring: Arc<dyn TokenStore> = Arc::new(store(&keychain, 2));
+            let root = tempfile::tempdir().unwrap();
+            let keyring: Arc<dyn TokenStore> = Arc::new(store_under(&keychain, 2, root.path()));
             let identity = binding.credential_identity().clone();
             let lease = LeaseKey::from_credential_identity(&identity);
             let key = TokenKey::from_credential_identity(&identity);
+            let fence = crate::auth_store::covering_guard(root.path(), &key);
             let saving = tokio::spawn({
                 let keyring = Arc::clone(&keyring);
                 let marked = marked.clone();
                 async move {
                     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
                     keyring
-                        .save_for(&key, &marked, TokenStoreAccess::Interactive)
+                        .save_for(&fence, &key, &marked, TokenStoreAccess::Interactive)
                         .await
                 }
             });
@@ -5641,7 +6356,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn cold_resolutions_over_capacity_or_after_a_denial_make_no_keychain_call() {
             use crate::auth_store::keyring::KeychainFailure;
-            use crate::auth_store::keyring::test_keychain::{FakeKeychain, store};
+            use crate::auth_store::keyring::test_keychain::{FakeKeychain, store_under};
             let (env_a, binding_a, _owner_a, marked_a) = keychain_fixture("kc-cap-a").await;
             let (env_b, binding_b, _owner_b, marked_b) = keychain_fixture("kc-cap-b").await;
             let keychain = FakeKeychain::blocked();
@@ -5656,7 +6371,8 @@ mod tests {
                 &serde_json::to_string(&marked_b).unwrap(),
             );
             // One operating-system call at a time in this process.
-            let keyring: Arc<dyn TokenStore> = Arc::new(store(&keychain, 1));
+            let root = tempfile::tempdir().unwrap();
+            let keyring: Arc<dyn TokenStore> = Arc::new(store_under(&keychain, 1, root.path()));
             let env_a = Arc::new(env_a.with_provider_auth_persistence(
                 test_provider_auth_persistence(Arc::clone(&keyring)),
             ));
@@ -5717,7 +6433,12 @@ mod tests {
             assert_eq!(keychain.calls(), 2, "a recorded denial launches no call");
             // An explicit credential change re-arms the credential.
             keyring
-                .save_for(&key_b, &marked_b, TokenStoreAccess::Interactive)
+                .save_for(
+                    &crate::auth_store::covering_guard(root.path(), &key_b),
+                    &key_b,
+                    &marked_b,
+                    TokenStoreAccess::Interactive,
+                )
                 .await
                 .unwrap();
             assert_eq!(keychain.calls(), 3);
@@ -5819,15 +6540,19 @@ mod tests {
                 } else {
                     original
                 };
-                store.save(&key, &durable).await.unwrap();
+                store
+                    .save(&meerkat_core::AdmissionGuard::none(), &key, &durable)
+                    .await
+                    .unwrap();
                 let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let observed_in_refresh = observed.clone();
                 let locked_store = store.clone();
                 let locked_key = key.clone();
-                let refresh: RefreshFn = Box::new(move || {
+                let refresh: RefreshFn = Box::new(move |fence| {
                     Box::pin(async move {
                         let locked = locked_store.load(&locked_key).await.unwrap().unwrap();
                         match prepare_existing_managed_store_oauth_refresh_under_lock(
+                            fence,
                             &env,
                             &binding,
                             previous,
@@ -5883,16 +6608,18 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-                self.inner.save(key, tokens).await
+                self.inner.save(fence, key, tokens).await
             }
             async fn clear(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-                self.inner.clear(key).await
+                self.inner.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, meerkat_core::auth::TokenStoreError> {
                 self.inner.list().await
@@ -5974,15 +6701,19 @@ mod tests {
                 durable_marker::marker_relation_for_tokens_and_snapshot(&durable, &before, &key),
                 durable_marker::AuthLeaseDurableMarkerRelation::TokenNewer
             );
-            store.save(&key, &durable).await.unwrap();
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &durable)
+                .await
+                .unwrap();
             let locked_store = store.clone();
             let locked_key = key.clone();
             let prepare_env = env.clone();
             let prepare_binding = binding.clone();
-            let refresh: RefreshFn = Box::new(move || {
+            let refresh: RefreshFn = Box::new(move |fence| {
                 Box::pin(async move {
                     let locked = locked_store.load(&locked_key).await.unwrap().unwrap();
                     match prepare_existing_managed_store_oauth_refresh_under_lock(
+                        fence,
                         &prepare_env,
                         &prepare_binding,
                         previous,

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "authority": "app-corpus-mob",
+  "revision": 0,
+  "additions": [],
+  "suppressions": [],
+  "cross_additions": [],
+  "cross_suppressions": [],
+  "receipts": [],
+  "operation_records": [],
+  "last_operation_record_seq": 0,
+  "idempotency": {},
+  "compacted_idempotency": [],
+  "bilateral_coordinator_bindings": {}
+}

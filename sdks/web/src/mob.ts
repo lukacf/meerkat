@@ -776,6 +776,7 @@ const WIRE_MEMBER_PREVIEW_UNAVAILABLE_VALUES: readonly WireMemberPreviewUnavaila
   'read_failed',
   'session_absent',
   'not_observed_while_retiring',
+  'store_refused',
 ];
 
 /**
@@ -838,6 +839,8 @@ const WIRE_MEMBER_CUSTODY_DEFERRAL_CAUSE_VALUES: readonly WireMemberCustodyDefer
   'served_elsewhere',
   'hosting_unavailable',
   'durable_tail_unprovable',
+  'store_unavailable',
+  'store_unreadable',
 ];
 
 /**

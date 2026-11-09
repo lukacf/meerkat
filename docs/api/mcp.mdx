@@ -62,7 +62,7 @@ source of truth for tool names and availability.
 | `meerkat_event_stream_read` | Read the next item from an open event stream |
 | `meerkat_event_stream_close` | Close a previously opened event stream |
 | `meerkat_mob_create` | Create a mob from a typed public definition (mob feature) |
-| `meerkat_mob_list` | List active mobs (mob feature) |
+| `meerkat_mob_list` | List active mobs, and under `quarantined` the persisted mobs whose stores did not restore (mob feature) |
 | `meerkat_mob_status` | Get lifecycle status for one mob (mob feature) |
 | `meerkat_mob_lifecycle` | Apply a lifecycle action to a mob (mob feature) |
 | `meerkat_mob_spawn` | Spawn a member into a mob (mob feature) |
@@ -610,6 +610,22 @@ ask its user.
   the authorization server: its exact redirect, its authentication method and
   its secret. Profiles are a Rust host API: no RPC, REST or SDK method
   installs one.
+
+  Attribution: an entry can state the administrator it admitted on its
+  admission (`EnteredAdministration::administered_by`, with an
+  `AdministeringPrincipal`, a qualified principal and optionally the digest
+  of their login, and the host's `AdministrationRecorder`). When the update
+  settles, its owner hands the recorder one `AdministrationRecord`: the
+  administrator, the login digest, the slot's install, replacement or
+  removal, whether it committed or its outcome is unknown, and when, also
+  after the caller stopped waiting. The record names the slot by the server
+  name, the realm and the credential binding, never by the server URL,
+  which can carry credentials in its userinfo or its query. The `_entered`
+  forms of the realm's MCP service secrets (`set_mcp_service_secret_entered`,
+  `remove_mcp_service_secret_entered`) and of realm configuration writes
+  (`ConfigRuntime::patch_entered`, `McpRealmPersistTarget::add_entered`)
+  record the same way. No record carries a value or secret, and Core keeps
+  no copy: the host keeps the record in its own audit.
 - **Bounded network stages.** No stalled authorization server holds a login,
   its host or the credential. Each network stage of a login or refresh
   (protected resource metadata, authorization-server metadata, account
@@ -1454,7 +1470,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 8},
+  "contract_version": {"major": 0, "minor": 9, "patch": 11},
   "capabilities": [
     {
       "id": "sessions",
@@ -1521,7 +1537,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 8},
+  "contract_version": {"major": 0, "minor": 9, "patch": 11},
   "providers": [
     {
       "provider": "anthropic",

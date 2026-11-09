@@ -1,0 +1,60 @@
+{
+  "name": "steward-contradiction-fact-time-over-capture",
+  "records": [
+    {
+      "id": "mem-office-old-capture",
+      "kind": "Fact",
+      "title": "Office moved to Söder on 2026-05-01",
+      "description": "Matters when planning visits or shipping hardware to the office.",
+      "body": "Operator said on 2026-04-20 that the office moves to Söder on 2026-05-01; the Kista lease ends the same week.",
+      "scope_kind": "mob",
+      "scope_key": "mob:ops",
+      "trust": "agent_observed",
+      "status": "active"
+    },
+    {
+      "id": "mem-office-new-capture",
+      "kind": "Fact",
+      "title": "Office is in Kista",
+      "description": "Matters when planning visits or shipping hardware to the office.",
+      "body": "A shipping label from March 2026 in the transcript showed the Kista address, so the office is in Kista.",
+      "scope_kind": "mob",
+      "scope_key": "mob:ops",
+      "trust": "agent_observed",
+      "status": "active"
+    }
+  ],
+  "proposals": [],
+  "mob_context": { "mob": "mob:ops", "purpose": "operate the household and office logistics" },
+  "scripted_reply": {
+    "ops": [
+      {
+        "op": "supersede",
+        "id": "resolved-office",
+        "prior": "mem-office-new-capture",
+        "kind": "fact",
+        "title": "Office is in Söder (moved 2026-05-01; Kista record was stale fact-time)",
+        "description": "Matters when planning visits or shipping hardware to the office.",
+        "body": "The office is in Söder as of 2026-05-01 per the operator's announcement. The Kista record was captured later but its evidence (a March 2026 shipping label) describes an older state of the world — fact-time beats capture-time.",
+        "tags": [],
+        "trust": "agent_observed",
+        "derived_from": ["mem-office-old-capture"],
+        "rationale": "same-scope contradiction resolved by fact-time over capture-time (equal trust tier): the later-captured Kista record carries older fact-time evidence"
+      }
+    ],
+    "proposal_verdicts": [],
+    "quarantine_verdicts": [],
+    "open_loop_escalations": [],
+    "contradictions": [],
+    "working_set": ["mem-office-old-capture"]
+  },
+  "expected": {
+    "validator": "ok",
+    "ops": { "supersede": 1 },
+    "live": {
+      "must_supersede": ["mem-office-new-capture"],
+      "must_not_tombstone": ["mem-office-old-capture"]
+    }
+  },
+  "notes": "The §5 external memory hub calibration lesson, imported: recency judgments prefer fact-time over capture-time when the evidence carries one. Both records sit at the same trust tier, so the tier rule cannot decide; naive capture-time recency would keep the newer-captured Kista record, but its evidence describes an older state of the world (a March shipping label) than the older-captured Söder record (an operator announcement of a 2026-05-01 move). The correct dream supersedes the newer-captured, stale-fact-time record and states the rule in the rationale, per the consolidate-phase prompt's fact-time refinement."
+}

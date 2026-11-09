@@ -41,7 +41,8 @@ pub use audit::{
 };
 mod owner_change_wait;
 pub use owner_change_wait::{
-    OWNER_CHANGE_FREE_REBUILDS, OWNER_CHANGE_WAIT_BOUND, OwnerChangeChurn, OwnerChangeWait,
+    NotNowWait, OWNER_CHANGE_FREE_REBUILDS, OWNER_CHANGE_WAIT_BOUND, OwnerChangeChurn,
+    OwnerChangeWait,
 };
 mod refusal_observer;
 pub use refusal_observer::{
@@ -94,6 +95,42 @@ pub enum ControllerReadinessFailure {
     /// verdict; asking again after the boundary is released may succeed.
     #[error("the session's turn boundary is held")]
     TurnBoundaryHeld,
+    /// The input's source is held now by another of its owner's writers
+    /// (its collection, its publication or its source writer), and the host
+    /// does not wait for it inside a protected section: it answers this
+    /// instead. Not a verdict; asking again once the writer released it may
+    /// succeed.
+    #[error("the input's source is held by another of its owner's writers")]
+    SourceHeld,
+    /// What the host prepared outside protection names another session or
+    /// incarnation than the one bound now: it prepares again and the caller
+    /// asks again. Not a verdict.
+    #[error("the host's preparation names another session or incarnation")]
+    PreparationStale,
+}
+
+impl ControllerReadinessFailure {
+    /// The cause's stable snake_case name, for structured data on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PolicyUnavailable => "policy_unavailable",
+            Self::ExecutorUnavailable => "executor_unavailable",
+            Self::FactsUnavailable => "facts_unavailable",
+            Self::Busy => "busy",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::AuthorityChanged => "authority_changed",
+            Self::UnsupportedScope => "unsupported_scope",
+            Self::CredentialUnusable { .. } => "credential_unusable",
+            Self::CredentialPreparationFailed { .. } => "credential_preparation_failed",
+            Self::PolicyChanged => "policy_changed",
+            Self::ReplacementNotEmpty => "replacement_not_empty",
+            Self::OriginalAdmissionPending => "original_admission_pending",
+            Self::TurnBoundaryHeld => "turn_boundary_held",
+            Self::SourceHeld => "source_held",
+            Self::PreparationStale => "preparation_stale",
+        }
+    }
 }
 
 /// A domain owner's external resource or physical destination coordinates.
@@ -663,7 +700,10 @@ pub trait WorkAuthorization: Send + Sync {
     /// The typed outcome is returned boxed. Wrappers check their own custody
     /// and forward; the default is unavailable and issues nothing. A held
     /// exclusion refuses as for `run_if_current_within`, before anything is
-    /// decided or appended.
+    /// decided or appended. An admission fence of the grant owner's store
+    /// that another holder holds (`realm_admission`) is answered, also
+    /// before anything is decided or appended, with a boxed
+    /// [`ChildIssuanceAdmissionInProgress`] in place of the outcome.
     fn issue_child_if_current_within(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -699,6 +739,7 @@ struct WorkAuthorizationContextInner {
     consent_scope: Option<crate::approval::ApprovalConsentScope>,
     consent_hosting: Option<crate::session_hosting::HostingClaim>,
     resumed_inputs: Vec<crate::retained_work::ResumedInput>,
+    governed_send_origin: Option<crate::interaction::GovernedSendOrigin>,
 }
 
 /// Process-local authorization context for one admitted work association.
@@ -731,6 +772,7 @@ impl WorkAuthorizationContext {
             consent_scope: None,
             consent_hosting: None,
             resumed_inputs: Vec::new(),
+            governed_send_origin: None,
         }))
     }
 
@@ -760,6 +802,7 @@ impl WorkAuthorizationContext {
             consent_scope: self.0.consent_scope.clone(),
             consent_hosting: self.0.consent_hosting.clone(),
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         })))
     }
 
@@ -776,6 +819,7 @@ impl WorkAuthorizationContext {
             consent_scope: self.0.consent_scope.clone(),
             consent_hosting: self.0.consent_hosting.clone(),
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
@@ -802,6 +846,7 @@ impl WorkAuthorizationContext {
             consent_scope: Some(scope),
             consent_hosting,
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
@@ -820,12 +865,39 @@ impl WorkAuthorizationContext {
             consent_scope: self.0.consent_scope.clone(),
             consent_hosting: self.0.consent_hosting.clone(),
             resumed_inputs: inputs,
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
     /// The staged inputs of this run that resume retained work.
     pub fn resumed_inputs(&self) -> &[crate::retained_work::ResumedInput] {
         &self.0.resumed_inputs
+    }
+
+    /// Set the governed origin of the staged run this context authorizes:
+    /// the work its comms tools' in-process deliveries were sent under
+    /// ([`crate::GovernedSendOrigin`]). The native runtime sets it on every
+    /// run it stages, from the batch it staged, replacing whatever the host's
+    /// context held (`None` for a run with no single origin). Identity data
+    /// only, never a permission, and never built from a tool's arguments.
+    #[must_use]
+    pub fn with_governed_send_origin(self, origin: Option<crate::GovernedSendOrigin>) -> Self {
+        Self(Arc::new(WorkAuthorizationContextInner {
+            authorization: Arc::clone(&self.0.authorization),
+            execution_scope: self.0.execution_scope.clone(),
+            controller_client: self.0.controller_client.clone(),
+            retained_work: self.0.retained_work.clone(),
+            consent_scope: self.0.consent_scope.clone(),
+            consent_hosting: self.0.consent_hosting.clone(),
+            resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: origin,
+        }))
+    }
+
+    /// The governed origin the native runtime attached for the staged run,
+    /// when it attached one.
+    pub fn governed_send_origin(&self) -> Option<&crate::GovernedSendOrigin> {
+        self.0.governed_send_origin.as_ref()
     }
 
     /// The hosting domain and session of the staged run, when the native
@@ -856,6 +928,7 @@ impl WorkAuthorizationContext {
             consent_scope: Some(scope),
             consent_hosting: Some(claim),
             resumed_inputs: self.0.resumed_inputs.clone(),
+            governed_send_origin: self.0.governed_send_origin.clone(),
         }))
     }
 
@@ -974,6 +1047,18 @@ pub trait PreparedOperationAuthorization: Send + Sync {
         binding: &PreparedAuthorizationBinding,
     ) -> Result<(), crate::OperationAuthorizationError>;
 
+    /// Spend what this exact decision's entry spends, once, at the effect
+    /// entry: [`crate::ToolDispatchContext::enter_reviewed_effect_held`]
+    /// calls it after the staging that passed and the review it spends,
+    /// before the effect. For an operation whose grant serves a counted
+    /// number of uses, it spends one, acknowledged by the grant's owner
+    /// before it returns. A refusal refuses the entry: the effect does not
+    /// run. A decision that spends nothing answers `Ok(())`.
+    ///
+    /// It has no default: a wrapper of a prepared decision must forward it,
+    /// so no wrapper can let an operation enter without its spend.
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError>;
+
     /// Stage a protected native observation at an actual boundary. This is
     /// separate from the allocation-free currentness check. Governed native
     /// contexts install a real input-row sink; this compatibility default is
@@ -1019,18 +1104,21 @@ pub enum OperationRefusalKind {
 }
 
 /// Whether the tool code a refusal's certifier guards ran for the refused
-/// call. Only a core component that sees its own refusal happen before it
-/// invokes that code certifies [`Self::NotDispatched`]; every other refusal
+/// call. Only a core component that sees its own refusal happen before that
+/// code runs certifies [`Self::NotDispatched`]; every other refusal
 /// is [`Self::Unknown`]. Like the kind, neither value is a permission.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalDispatch {
     /// No code of the tool that the certifying core component guards ran
     /// for this call: the fenced dispatch refused before it invoked the
-    /// dispatcher, or the execution policy gate before it invoked its inner
-    /// dispatcher. The certification covers only the code below its
-    /// certifier: a dispatcher layer that runs tool code of its own before
-    /// delegating forwards such a refusal as
+    /// dispatcher, the execution policy gate before it invoked its inner
+    /// dispatcher, or a leaf's effect entry
+    /// (`ToolDispatchContext::enter_reviewed_effect`) before the body it
+    /// guards, while no effect of the call had entered. The certification
+    /// covers only the code below its certifier: a dispatcher layer that
+    /// runs tool code of its own before delegating (a leaf that runs an
+    /// effect before its effect entry included) forwards such a refusal as
     /// `OperationRefused::new(refusal.kind())`, which is [`Self::Unknown`].
     NotDispatched,
     /// No certification: the tool code may or may not have run.
@@ -1058,8 +1146,8 @@ impl OperationRefused {
         }
     }
 
-    /// This refusal certified by the core component that met it before it
-    /// invoked the tool code it guards.
+    /// This refusal certified by the core component that met it before the
+    /// tool code it guards ran.
     #[must_use]
     pub(crate) const fn not_dispatched(self) -> Self {
         Self {
@@ -1102,6 +1190,17 @@ impl fmt::Debug for OperationRefused {
 }
 
 impl std::error::Error for OperationRefused {}
+
+/// A work owner's answer to a child issuance it did not attempt
+/// ([`WorkAuthorization::issue_child_if_current_within`], boxed in place of
+/// the grant owner's outcome): an admission, or another fenced write, holds
+/// the admission fence of the grant owner's store (`realm_admission`).
+/// Nothing was decided or appended. A waiting issuance (the
+/// `_after_owner_change` forms) waits it out like a refusal to rebuild,
+/// within the same bounds; still held after them, it is the issuance's
+/// answer, and the hold may last until the holding process restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildIssuanceAdmissionInProgress;
 
 /// An operation refusal, unavailable authority, or failed observation.
 /// None of these variants authorizes retry or bypassing the actual owner.
@@ -1164,6 +1263,50 @@ mod tests {
                 usage: SourceAuthorizationUse::Read,
             }),
         })
+    }
+
+    /// The governed origin the native runtime attaches to a run's work
+    /// authorization stays the same carrier through every other attachment
+    /// a context takes, so a comms tool always reads the run's own origin.
+    #[test]
+    fn a_work_context_keeps_its_governed_send_origin_through_every_attachment() {
+        struct NoWork;
+        impl WorkAuthorization for NoWork {
+            fn prepare(
+                &self,
+                _binding: &PreparedAuthorizationBinding,
+            ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError>
+            {
+                Err(OperationAuthorizationError::Unavailable)
+            }
+        }
+        let work = WorkAuthorizationContext::new(Arc::new(NoWork), OperationExecutionScope::Domain);
+        assert!(work.governed_send_origin().is_none(), "none until attached");
+        let origin =
+            crate::GovernedSendOrigin::__from_runtime_facts(Arc::new("the staged run's facts"));
+        let same = |context: &WorkAuthorizationContext| {
+            context
+                .governed_send_origin()
+                .is_some_and(|kept| Arc::ptr_eq(kept.__runtime_facts(), origin.__runtime_facts()))
+        };
+        let work = work.with_governed_send_origin(Some(origin.clone()));
+        assert!(same(&work));
+        let identity = crate::retained_work::RetainedWorkIdentity::new(
+            "runtime",
+            RunId::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            None,
+        );
+        let work = work.with_retained_work(identity);
+        assert!(same(&work), "kept with the retained work identity");
+        let work = work.with_resumed_inputs(Vec::new());
+        assert!(same(&work), "kept with the resumed inputs");
+        let work = work.with_governed_send_origin(None);
+        assert!(
+            work.governed_send_origin().is_none(),
+            "a run with no single origin replaces the one held before"
+        );
     }
 
     /// Consent owner loss (3): a work context records the consent scope its
@@ -1270,7 +1413,7 @@ mod tests {
             OperationRefusalKind::MalformedFacts,
         ] {
             let refusal = OperationRefused::new(kind);
-            assert!(refusal.kind() == kind);
+            assert_eq!(refusal.kind(), kind);
             assert_eq!(
                 refusal.to_string(),
                 "operation unavailable under current authorization"
@@ -1319,6 +1462,10 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
             }
         }
         struct Work(Arc<Check>);

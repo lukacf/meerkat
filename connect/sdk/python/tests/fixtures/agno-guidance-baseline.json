@@ -1,0 +1,1034 @@
+{
+  "unchanged": {
+    "hackernews": {
+      "profile": "hackernews",
+      "operations": [
+        "get_top_hackernews_stories",
+        "get_user_details"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Public Hacker News reads require no provider credential in this profile."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    },
+    "pubmed": {
+      "profile": "pubmed",
+      "operations": [
+        "search_pubmed"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "email",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "max_results",
+          "kind": "integer",
+          "required": false,
+          "credential_reference": false
+        },
+        {
+          "name": "results_expanded",
+          "kind": "boolean",
+          "required": false,
+          "credential_reference": false
+        },
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Public PubMed reads require no provider credential. The required email is an operator-supplied contact address, not an account credential."
+        },
+        {
+          "kind": "account",
+          "instruction": "Supply the contact email required by the selected PubMed profile; no account login is implemented."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    },
+    "searxng": {
+      "profile": "searxng",
+      "operations": [
+        "search_web",
+        "news_search"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "host",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "This profile sends unauthenticated reads to the explicitly configured SearXNG host. It has no credential field or login path for a protected instance."
+        },
+        {
+          "kind": "host_deployment",
+          "instruction": "Supply an operator-approved SearXNG host that permits these unauthenticated reads. The host owns its network, proxy and CA policy."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    },
+    "arxiv": {
+      "profile": "arxiv",
+      "operations": [
+        "search_arxiv_and_return_articles"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Public arXiv feed reads require no provider credential in this profile."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    },
+    "youtube": {
+      "profile": "youtube",
+      "operations": [
+        "get_youtube_video_data"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Public YouTube oEmbed metadata requires no provider credential. This is not a Google OAuth, browser, transcript or video-download profile."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    },
+    "wikipedia": {
+      "profile": "wikipedia",
+      "operations": [
+        "search_wikipedia"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "language",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Public Wikipedia reads require no provider credential. Choose the explicit language; it is not an account selector."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    },
+    "postgres": {
+      "profile": "postgres",
+      "operations": [
+        "show_tables",
+        "describe_table"
+      ],
+      "fields": [
+        {
+          "name": "profile",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "operations",
+          "kind": "string_array",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "config",
+          "kind": "object",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "config_fields": [
+        {
+          "name": "database",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "max_rows",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "password_env",
+          "kind": "string",
+          "required": true,
+          "credential_reference": true
+        },
+        {
+          "name": "port",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "schema",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "socket_directory",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "timeout",
+          "kind": "integer",
+          "required": true,
+          "credential_reference": false
+        },
+        {
+          "name": "user",
+          "kind": "string",
+          "required": true,
+          "credential_reference": false
+        }
+      ],
+      "prerequisites": [
+        {
+          "kind": "application_binding",
+          "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "password_env names the selected PostgreSQL principal's password for SCRAM SHA-256 authentication over the configured local Unix socket. It is not an API key or a connection URI."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "A database operator must provision a principal with the intended metadata visibility and SCRAM SHA-256 password authentication. This profile does not create roles, acquire credentials or provision schemas."
+        },
+        {
+          "kind": "host_deployment",
+          "instruction": "Select a reachable local Unix socket, port, database, user and schema. TCP, remote TLS, trust/peer authentication, service files and password-file fallback are unsupported. The password reference name cannot start with PG, and PG-prefixed environment variables are refused."
+        }
+      ],
+      "unresolved_details": [
+        "This help describes the selected adapter and retained guide. It does not verify current provider availability, account identity, resource access, authorization or readiness.",
+        "The database principal, SCRAM configuration and actual metadata visibility require the database owner's verification."
+      ],
+      "guide": {
+        "standalone_resource": "meerkat_toolkit_agno/PROFILE-GUIDE.md",
+        "source_document": "sdk/python/AGNO-MCP.md"
+      },
+      "scope": "Field requirements only, not a complete JSON Schema. Select one or more listed operations. The packaged guide describes semantic constraints, defaults and account prerequisites. Credential references name environment variables; help and check-config never read their values. Configuration validity is not authentication, authorization or readiness."
+    }
+  },
+  "retained_prerequisites": {
+    "hackernews": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Public Hacker News reads require no provider credential in this profile."
+      }
+    ],
+    "pubmed": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Public PubMed reads require no provider credential. The required email is an operator-supplied contact address, not an account credential."
+      },
+      {
+        "kind": "account",
+        "instruction": "Supply the contact email required by the selected PubMed profile; no account login is implemented."
+      }
+    ],
+    "searxng": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "This profile sends unauthenticated reads to the explicitly configured SearXNG host. It has no credential field or login path for a protected instance."
+      },
+      {
+        "kind": "host_deployment",
+        "instruction": "Supply an operator-approved SearXNG host that permits these unauthenticated reads. The host owns its network, proxy and CA policy."
+      }
+    ],
+    "tavily": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Tavily account API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "financial-datasets": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Financial Datasets account API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "The account key must have the dataset entitlement for the selected income-statement and balance-sheet reads. Account setup and billing belong to the account owner."
+      }
+    ],
+    "openweather": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected OpenWeather account API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Obtain an OpenWeather account key with access to the selected current-weather, 5-day-forecast, air-pollution and direct-geocoding endpoints. Key activation, plan access and billing remain account-owner facts."
+      }
+    ],
+    "bitbucket": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names a Bitbucket Cloud API token, paired with the explicit account_email for HTTP Basic authentication. It is not an account password."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select the account email, workspace and repository explicitly. The retained guide identifies read:repository:bitbucket and, for pull-request reads, read:pullrequest:bitbucket; the token must also access the selected resources."
+      }
+    ],
+    "gitlab": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names a GitLab personal access token accepted as PRIVATE-TOKEN, not an OAuth client secret."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "The documented setup uses a personal access token with read_api and access to the selected projects, merge requests and issues. Supply the exact HTTPS origin for self-managed GitLab; URL subpaths are unsupported."
+      }
+    ],
+    "clickup": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected ClickUp API key; workspace_id is an explicit resource selection."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Supply the selected workspace and its account API key; a workspace_id alone does not establish account access."
+      }
+    ],
+    "discord": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names a Discord bot token, not a user password or an MCP bearer credential."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "The selected bot token must have access to the requested channel or guild. These reads do not publish an agent frontend."
+      }
+    ],
+    "shopify": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected shop's Shopify Admin API token; shop_name and api_version are explicit configuration."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select the shop and an Admin API token with access to products for product reads; shop configuration alone does not prove that permission."
+      }
+    ],
+    "spotify": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names an already acquired Spotify OAuth access token, not an API key, client secret or refresh token."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "The retained donor guide identifies user-top-read for top-track reads. Playlist visibility follows the selected token; construction does not verify the selected account or scopes."
+      }
+    ],
+    "unsplash": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Unsplash API access key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "calcom": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Cal.com API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Supply the selected API key, numeric event_type_id and IANA user_timezone. The event type does not filter get_upcoming_bookings; that operation reads the selected account's upcoming bookings."
+      }
+    ],
+    "jina": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Jina Reader API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "openrouteservice": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected OpenRouteService API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "zendesk": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names a Zendesk API token. The explicit account_email is combined with /token for HTTP Basic authentication to the selected subdomain's Help Center."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select the Help Center subdomain and account email explicitly. This profile reads Help Center articles and does not supply ticket access or a frontend."
+      }
+    ],
+    "bright-data": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Bright Data API credential used as a bearer token; web_unlocker_zone and serp_zone select its explicit zones."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select the Web Unlocker and SERP zones explicitly for this account; do not rely on ambient zone defaults."
+      }
+    ],
+    "linkup": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Linkup API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "todoist": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Todoist API token used by the existing SDK client."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "zoom": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names an already acquired Zoom bearer token. No OAuth endpoint or refresh path is part of this profile."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "exa": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Exa API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "firecrawl": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Firecrawl API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "trello": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the Trello API key and token_env names its separately selected user token. Both are required; the SDK sends a key/token pair, not a fabricated OAuth signature."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Have the account owner provide both the selected API key and user token for board reads. Configuring the two reference names does not verify that they belong together or have the needed board visibility."
+      }
+    ],
+    "salesforce": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names an existing Salesforce session token for the explicit instance_url. The profile does not perform password login."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select the Salesforce instance explicitly and supply an existing session token that can read the requested object/record. No password login, refresh or SOQL path is supplied."
+      }
+    ],
+    "twilio": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the Twilio auth token paired with the selected account_sid for HTTP Basic authentication."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select account_sid and its matching auth token for call-detail reads; this profile cannot provision accounts, send messages or place calls."
+      }
+    ],
+    "webex": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names an already acquired Webex access token."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "plivo": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the Plivo auth token paired with the selected auth_id for HTTP Basic authentication."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Select auth_id and its matching auth token for call-detail reads; this profile cannot provision accounts, send messages or place calls."
+      }
+    ],
+    "arxiv": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Public arXiv feed reads require no provider credential in this profile."
+      }
+    ],
+    "reddit": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names an existing Reddit OAuth access token. user_agent supplies the required contact/application identity, not credentials."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Supply the selected OAuth access token and user_agent with contact/application identity. SDK credential discovery and authentication acquisition are disabled."
+      }
+    ],
+    "x": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the existing X bearer token. OAuth1 user-context credentials and token refresh are outside this profile."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      }
+    ],
+    "youtube": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Public YouTube oEmbed metadata requires no provider credential. This is not a Google OAuth, browser, transcript or video-download profile."
+      }
+    ],
+    "oxylabs": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the selected Oxylabs account password, paired with username for HTTP Basic authentication. Despite its field name, this value is not an API key."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Supply the selected username and its account password for the fixed Oxylabs realtime API. Keep that password in the host credential path, never in the JSON configuration or a tool argument."
+      }
+    ],
+    "wikipedia": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Public Wikipedia reads require no provider credential. Choose the explicit language; it is not an account selector."
+      }
+    ],
+    "aws-lambda": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "api_key_env names the AWS secret access key and access_key_id_env names its matching access key ID. session_token_env optionally names the matching session token; when configured it must be supplied. These are explicit signing credentials, not an MCP bearer token."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "account",
+        "instruction": "Supply a matching explicit AWS credential set and commercial region with permission for the selected Lambda list operation. Shared credential files, ambient profiles, metadata credentials, STS acquisition and refresh are not provided."
+      }
+    ],
+    "postgres": [
+      {
+        "kind": "application_binding",
+        "instruction": "This profile is a local stdio MCP server, not a remote MCP OAuth endpoint. The host owns access to its child process. Any selected service credential is for the local connector's provider connection; never send it as bearer authentication to an arbitrary MCP server."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "password_env names the selected PostgreSQL principal's password for SCRAM SHA-256 authentication over the configured local Unix socket. It is not an API key or a connection URI."
+      },
+      {
+        "kind": "client_authentication",
+        "instruction": "Have the host credential owner inject only the selected credential references into the child process. Configuration contains environment-variable names, never secret values. Obtain missing credentials through that owner's approved path outside model/tool transcripts. This component does not acquire, refresh or revoke credentials, register applications, or launch authentication."
+      },
+      {
+        "kind": "administrator",
+        "instruction": "A database operator must provision a principal with the intended metadata visibility and SCRAM SHA-256 password authentication. This profile does not create roles, acquire credentials or provision schemas."
+      },
+      {
+        "kind": "host_deployment",
+        "instruction": "Select a reachable local Unix socket, port, database, user and schema. TCP, remote TLS, trust/peer authentication, service files and password-file fallback are unsupported. The password reference name cannot start with PG, and PG-prefixed environment variables are refused."
+      }
+    ]
+  }
+}

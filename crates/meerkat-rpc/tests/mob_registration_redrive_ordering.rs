@@ -106,6 +106,10 @@ impl OrderingProbeBuilder {
 impl SessionAgentBuilder for OrderingProbeBuilder {
     type Agent = meerkat::FactoryAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
     async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
@@ -147,6 +151,7 @@ fn mcp_member_definition() -> MobDefinition {
         model: "claude-haiku-4-5-20251001".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -335,7 +340,7 @@ async fn missing_live_redrive_retires_the_predecessor_router_before_the_successo
     // The next turn wakes the member, which replaces the stopped
     // registration.
     tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle
             .member(&identity)
             .await

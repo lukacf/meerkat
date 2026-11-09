@@ -94,6 +94,22 @@ for grant_input in crates/meerkat-authorization/src/grants/mod.rs crates/meerkat
     bad "machine-authority-changed ignored grant authority input $grant_input"
   fi
 done
+# The scoped tool grant machine's production owner and its service apply the
+# generated ToolGrantLifecycleMachine inputs.
+for tool_grant_input in crates/meerkat-runtime/src/tool_grant/dsl.rs crates/meerkat-runtime/src/tool_grant/service.rs; do
+  if scripts/machine-authority-changed -- "$tool_grant_input" >/dev/null; then
+    ok "machine-authority-changed protects tool grant authority input $tool_grant_input"
+  else
+    bad "machine-authority-changed ignored tool grant authority input $tool_grant_input"
+  fi
+done
+for decision_input in crates/meerkat-runtime/src/decision/dsl.rs crates/meerkat-runtime/src/decision/service.rs; do
+  if scripts/machine-authority-changed -- "$decision_input" >/dev/null; then
+    ok "machine-authority-changed protects durable decision input $decision_input"
+  else
+    bad "machine-authority-changed ignored durable decision input $decision_input"
+  fi
+done
 for poster_input in scripts/machine-posters/generate-machine-posters.mjs docs/internal/machine-posters/mob_machine.html crates/xtask/src/machine_alphabet.rs scripts/machine-posters-changed; do
   if scripts/machine-posters-changed -- "$poster_input" >/dev/null; then
     ok "machine-posters-changed routes poster input $poster_input to the poster gate"
@@ -118,6 +134,20 @@ for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile 
     bad "machine-authority-changed ignored its gate owner $gate_owner"
   fi
 done
+# The one TLC install every TLC lane runs (the JDK and the mirrored TLC jar)
+# is a machine-authority input: nightly runs only the lane's machine-verify
+# part, so a jar or JDK change reaches the audit shards through ci.yml's
+# tlc-audits job alone. Another action stays out of the machine lanes.
+if scripts/machine-authority-changed -- .github/actions/setup-tlc-ci/action.yml >/dev/null; then
+  ok "machine-authority-changed protects the TLC install .github/actions/setup-tlc-ci/action.yml"
+else
+  bad "machine-authority-changed ignored the TLC install .github/actions/setup-tlc-ci/action.yml"
+fi
+if scripts/machine-authority-changed -- .github/actions/setup-rust-ci/action.yml >/dev/null; then
+  bad "machine-authority-changed routes an action without TLC to the machine lanes"
+else
+  ok "an action without TLC (.github/actions/setup-rust-ci/action.yml) stays out of the machine lanes"
+fi
 edge_out=$(printf 'crates/xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"
@@ -166,47 +196,20 @@ done
 
 # ── #296: governance/spec changes route formal/governance checks ─────────────
 echo "#296 agent gates route governance/spec changes:"
-if grep -Fq 'is_governance_path' scripts/cargo-agent-gate \
-  && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/cargo-agent-gate; then
-  ok "cargo-agent-gate has governance allowlist + formal gate routing"
-else
-  bad "cargo-agent-gate missing governance allowlist or formal gate routing"
-fi
 if grep -Fq 'is_governance_path' scripts/buildbuddy-agent-gate \
   && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
   ok "buildbuddy-agent-gate has governance allowlist + formal gate routing"
 else
   bad "buildbuddy-agent-gate missing governance allowlist or formal gate routing"
 fi
-# Behavioral: a spec-only change is no longer reported as "no changes" and is
+# Behavioral: a governance-only change is not reported as "no changes" and is
 # routed to the governance gate (dry-run avoids invoking cargo/make work).
-gate_out=$(scripts/cargo-agent-gate --dry-run -- specs/machines/example.tla 2>&1 || true)
-if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
-  && ! printf '%s' "$gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes specs/machines change to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route specs/machines change to governance gate"
-fi
 docs_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- docs/reference/machine-authority.mdx 2>&1 || true)
 if printf '%s' "$docs_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
   && ! printf '%s' "$docs_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes machine-authority docs to governance gate"
 else
   bad "buildbuddy-agent-gate dry-run did not route machine-authority docs"
-fi
-generated_machine_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs 2>&1 || true)
-if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
-  && ! printf '%s' "$generated_machine_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes generated machine catalog changes to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route generated machine catalog changes"
-fi
-mob_identity_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mob/src/ids.rs 2>&1 || true)
-if printf '%s' "$mob_identity_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
-  && ! printf '%s' "$mob_identity_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes mob identity authority changes to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route mob identity authority changes"
 fi
 generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
 if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
@@ -221,40 +224,12 @@ if grep -Fq '//crates/meerkat-machine-schema:docs_machine_authority_alignment_te
 else
   bad "BuildBuddy machine-authority lanes omit machine-authority docs alignment"
 fi
-schema_gate_out=$(scripts/cargo-agent-gate --dry-run -- artifacts/schemas/rest-openapi.json 2>&1 || true)
-if printf '%s' "$schema_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
-  && ! printf '%s' "$schema_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes schema artifacts to generated contract ratchets"
-else
-  bad "cargo-agent-gate dry-run did not route schema artifacts to generated contract ratchets"
-fi
 sdk_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- sdks/typescript/src/generated/types.ts sdks/python/meerkat/generated/types.py 2>&1 || true)
 if printf '%s' "$sdk_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
   && ! printf '%s' "$sdk_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes SDK generated artifacts to generated contract ratchets"
 else
   bad "buildbuddy-agent-gate dry-run did not route SDK generated artifacts"
-fi
-surface_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mcp/src/router.rs crates/meerkat-mob-mcp/src/agent_tools.rs docs/api/mcp.mdx sdks/typescript/README.md 2>&1 || true)
-if printf '%s' "$surface_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
-  && ! printf '%s' "$surface_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes public surface docs/router/mob-mcp changes to generated contract ratchets"
-else
-  bad "cargo-agent-gate dry-run did not route public surface docs/router/mob-mcp changes"
-fi
-web_gate_out=$(scripts/cargo-agent-gate --dry-run -- sdks/web/src/runtime.ts 2>&1 || true)
-if printf '%s' "$web_gate_out" | grep -Fq 'test-sdk-web' \
-  && ! printf '%s' "$web_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes Web SDK changes to Web SDK tests"
-else
-  bad "cargo-agent-gate dry-run did not route Web SDK changes"
-fi
-wasm_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-web-runtime/src/lib.rs 2>&1 || true)
-if printf '%s' "$wasm_gate_out" | grep -Fq 'wasm-check' \
-  && ! printf '%s' "$wasm_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes web runtime changes to wasm-check"
-else
-  bad "cargo-agent-gate dry-run did not route web runtime changes"
 fi
 rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-rest/src/lib.rs crates/meerkat-rpc/src/session_runtime.rs 2>&1 || true)
 if printf '%s' "$rest_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
@@ -333,8 +308,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # firing run, so the fake prints one trace state.
 # live_context_causal_tail_batch_audit.sh requires its four goals violated,
 # and with --mutants each seeded defect's property violated.
-# run_start_hold_audit.sh requires each of its seven reachability witnesses
-# to be reported violated.
+# run_start_hold_audit.sh requires each of its nine reachability witnesses
+# (seven in its main run, two in its reasons run) to be reported violated.
+# retained_run_settle_audit.sh requires its eleven witnesses violated, and
+# with --mutants each seeded defect's action property violated.
 # requeue_across_stop_audit.sh requires each of its fifteen reachability
 # witnesses to be reported violated.
 # materialization_rollback_keep_audit.sh requires each of its eleven
@@ -342,32 +319,46 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # invariant, the generated keep_unregister_only_without_live_input among them.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
 # be reported violated.
+# live_delegation_admitted_start_after_close_audit.sh requires its fourteen
+# goals violated, and with --mutants its nine unreachable-goal mutants' runs
+# to end without an error (the success line above) and its five other
+# mutants' invariants violated.
 # live_context_result_barrier_audit.sh with --mutants requires its
 # summary-dropped mutant to violate AuditResultFollowsSummary.
 # peer_request_maps_audit.sh requires its six witnesses reported violated,
 # and with --mutants each seeded defect's property or invariant violated.
 # mob_operator_grant_audit.sh requires each of its seven reachability
-# witnesses violated, and with --mutants each seeded defect's property.
-# generation_highwater_audit.sh requires each of its six reachability
 # witnesses violated, and with --mutants each seeded defect's property or
-# invariant; its exact-successor mutant needs the success line above.
+# invariant.
+# tool_grant_gate_audit.sh requires each of its ten reachability witnesses
+# violated, and with --mutants each of its nine seeded defects' property or
+# invariant.
+# generation_highwater_audit.sh requires each of its six reachability
+# witnesses violated, the success line for its reset run and its reset
+# witness violated, and with --mutants each seeded defect's property or
+# invariant (its two reset mutants' target invariants among them); its
+# exact-successor mutant needs the success line above.
 # member_lifecycle_audit.sh requires a final distinct-state count at or
 # above its floor, a coverage block in which each of its covered actions
-# generated a state, its five state witnesses and three step witnesses
+# generated a state, its five state witnesses and four step witnesses
 # violated, and with --mutants its unguarded mutant's property violated, its
 # plain-ordering mutant's evaluation error, its two replay mutants' generated
 # invariants violated, its two RetireAtScope mutants' invariants violated,
-# its mint mutant's action property violated, and its three destroyed-runtime
-# mutants' action property violated.
+# its mint mutant's action property violated, its three destroyed-runtime
+# mutants' action property violated, its two RetireAbsent mutants'
+# invariant violated, and its two stale-abandonment mutants' invariant
+# violated.
 # member_residency_audit.sh requires a final distinct-state count at or above
-# each run's floor, a coverage block in which each covered action of its eight
-# runs generated a state and its thirty-two witnesses violated; the lane
+# each run's floor, a coverage block in which each covered action of its
+# eleven runs generated a state and its forty-eight witnesses violated; the lane
 # runs it without --mutants, whose refusal lines are listed for a run by hand.
 # One of its arms is printed as TLC prints an application with a state-level
 # argument, with the location suffix "(L C L C)" before the ">", so the
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
+# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
 # durable_tail_recovery_ownership_audit.sh requires its four witnesses
@@ -377,12 +368,85 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # actions (of module entered_step_audit) generated a state, its three
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # property violated.
+# source_credential_publication_audit.sh (auth) requires each of its nine
+# reachability witnesses violated.
+# tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its fifteen
+# witnesses violated, and with --mutants each seeded defect's invariant or
+# action property violated.
+# identity_entry_audit.sh (mob_machine) requires a final distinct-state count
+# at or above each of its nine runs' floors, a coverage block in which each
+# covered action of every run generated a state, its eighty-seven step
+# witnesses and six state witnesses violated, and with --mutants its
+# reconcile mutant's generated invariant, its probe mutant's invariant, its
+# adoption mutant's invariant or property, its unlisted adoption and
+# unadopted retirement mutants' target action properties, its replay,
+# archive and destroy mutants' generated invariants, its rotation, seat,
+# respawn, preserving-archive, takeover and host-adopted archive mutants'
+# action properties, its declared apply
+# mutants' generated invariants (the in-flight seal mutant's run with its
+# target invariant alone), totality invariants and action properties
+# (one per declared apply invariant, property and guard; the reset
+# mutant's run with its target property alone), and its forced
+# destroy mutants' generated invariants violated.
 # input_controller_hold_audit.sh requires its nine witnesses violated, and
 # with --mutants each seeded defect's property or the generated
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
+# durable_decision_audit.sh requires a final distinct-state count at or above
+# its floor, a coverage block in which each of its covered actions (of module
+# durable_decision_audit) generated a state, its twenty-two witnesses violated,
+# and with --mutants each seeded defect's invariant violated (the generated
+# first_presentation_is_a_reading included).
+# approval_grant_audit.sh (grant_authority) requires a final distinct-state
+# count at or above its floor, a coverage block in which each of its covered
+# actions (of module approval_grant_audit) generated a state, its fourteen
+# witnesses violated, and with --mutants each seeded defect's invariant
+# violated.
+# instruction_boundary_audit.sh (session_document) requires its six
+# witnesses violated, and with --mutants each seeded defect's target
+# invariant violated.
+# created_identity_audit.sh (mob_machine) requires a final distinct-state
+# count for each of its eighteen runs (at or above the floor of each
+# measured one), a coverage block in which each covered action of every run
+# generated a state (an arm a run fires only through a named wrapper read
+# under the wrapper's name, by the runner's closed alias table: the
+# wrappers print so below, and a check further down drops each wrapper's
+# line in turn), its one hundred and twenty
+# step witnesses violated, and with --mutants each seeded defect's generated
+# invariant, audit invariant, totality invariant or action property
+# violated and its created_custody_local_kept, recovered_removal_unmarked,
+# accepted_ladder_refused, stale_session_spares_no_external and
+# stale_session_spares_no_entry mutants' runs to end without an error (the
+# success line below).
+# activation_body_retirement_audit.sh (session_document) requires its three
+# witnesses violated, and with --mutants each seeded defect's target
+# invariant violated.
+# operator_instruction_delivery_audit.sh (mob_machine) requires a final
+# distinct-state count for each of its two runs, a coverage block in which
+# each covered action of both runs generated a state, its seven step
+# witnesses and four state witnesses violated, and with --mutants each
+# seeded defect's target property violated and its live-only delivery and
+# bound-only release mutants' runs to end without an error (the success line
+# above).
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
 # witnesses violated, and with --mutants each seeded defect's invariant
 # violated.
+# writer_fence_audit.sh (host_store_writer_fence) requires its eleven
+# witnesses violated, and with --mutants each seeded defect's invariant or
+# action property violated.
+# member_dispatch_admission_audit.sh (mob_machine) requires a coverage block
+# in which each of its four covered Running arms generated a state, its
+# Running witness violated, and with --mutants each seeded defect's target
+# invariant violated.
+# custody_end_audit.sh (grant_authority) requires its four witnesses
+# violated, and with --mutants each seeded defect's target invariant or
+# action property violated.
+# requester_batch_audit.sh requires the success line for its three requester
+# safety runs and its three order safety runs, its four witnesses
+# (AuditLateNeverJoins twice, AuditLateNeverRunsAlone,
+# AuditEarlyNeverRunsAlone) violated, and with --mutants
+# AuditLateNeverInBatchRun or AuditRunsShareOneKey violated for each seeded
+# requester defect and the action property AuditSteerLaneFifo violated for
+# each seeded order defect.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -392,6 +456,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
   'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
   'echo "Error: Invariant AuditLateNeverJoins is violated."' \
+  'echo "Error: Invariant AuditLateNeverRunsAlone is violated."' \
+  'echo "Error: Invariant AuditLateNeverInBatchRun is violated."' \
+  'echo "Error: Invariant AuditEarlyNeverRunsAlone is violated."' \
+  'echo "Error: Action property AuditSteerLaneFifo is violated."' \
   'echo "Error: Invariant AuditCapacityRefusalNeverReached is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \
@@ -415,6 +483,24 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessRegisteredHeldRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessStillHeldRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessStoppedHoldSurvivesResume is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHostPreparationHeld is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHostRecoveryHeld is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAcceptedUnderHostHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSettledUnderHostHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRepeatAccepted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyWithRunCurrent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyStaleObservation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyWhileDraining is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetryNotRetained is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingInitializing is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessInertDestroyed is violated."' \
+  'echo "Error: Action property AuditAcceptedSettlesTheRetainedRun is violated."' \
+  'echo "Error: Action property AuditSettleNotAcceptedWhileDraining is violated."' \
+  'echo "Error: Action property AuditRefusedSettleRecordsNothing is violated."' \
+  'echo "Error: Action property AuditSettledRunNeverResumes is violated."' \
+  'echo "Error: Action property AuditSettledRunEndsCancelled is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterGracefulStop is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterCrash is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredSettled is violated."' \
@@ -456,6 +542,23 @@ printf '%s\n' \
   'echo "Error: Invariant NotGoalAudible is violated."' \
   'echo "Error: Invariant AuditNeverResolvedAfterClose is violated."' \
   'echo "Error: Invariant AuditNeverSettledAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverConfirmedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverUnconfirmedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverAuthorizedAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverConsequentialAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverRequeuedAfterClose is violated."' \
+  'echo "Error: Invariant AuditStaleBindingNeverServes is violated."' \
+  'echo "Error: Invariant AuditClosedChannelHoldsNoWorkerCount is violated."' \
+  'echo "Error: Invariant AuditNeverSteerSettledAfterClose is violated."' \
+  'echo "Error: Invariant AuditNeverFreshBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverCustodyBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditRevokedBlockedIsCancelled is violated."' \
+  'echo "Error: Invariant AuditNeverIntakeClosedWhileBound is violated."' \
+  'echo "Error: Invariant AuditNeverAuthorizedAfterIntakeClose is violated."' \
+  'echo "Error: Invariant AuditNeverRestartBlockedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverRestartFailedSettled is violated."' \
+  'echo "Error: Invariant AuditNeverRestartCancelledSettled is violated."' \
+  'echo "Error: Invariant AuditNoAdmissionAfterIntakeClose is violated."' \
   'echo "Error: Invariant NotGoalSilentReopen is violated."' \
   'echo "Error: Invariant NotGoalSilentExhausted is violated."' \
   'echo "Error: Invariant NotGoalFaultedChannelReportsClosed is violated."' \
@@ -490,12 +593,31 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessResolveCleared is violated."' \
   'echo "Error: Action property AuditRebindDropsTheOtherScope is violated."' \
   'echo "Error: Invariant mob_operator_scopes_are_bound_to_an_incarnation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessGatedServer is violated."' \
+  'echo "Error: Invariant NotAuditWitnessIgnoredName is violated."' \
+  'echo "Error: Invariant NotAuditWitnessModeWithUngated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendChanged is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendUnchanged is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendByMode is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendGatedIgnored is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOpenedExtended is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStagedNamed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStagedByMode is violated."' \
+  'echo "Error: Action property AuditExtendNeverOpens is violated."' \
+  'echo "Error: Action property AuditExtendOnlyForGatedServers is violated."' \
+  'echo "Error: Action property AuditGatedStageOnlyStagesGatedServers is violated."' \
+  'echo "Error: Invariant tool_grant_open_names_are_gated is violated."' \
+  'echo "Error: Invariant tool_grant_not_mounted_are_not_gated is violated."' \
+  'echo "Error: Invariant tool_grant_ungated_servers_are_not_gated is violated."' \
   'echo "Error: Invariant NotAuditWitnessRecorded is violated."' \
   'echo "Error: Invariant NotAuditWitnessRaised is violated."' \
   'echo "Error: Invariant NotAuditWitnessSealedWithHighwater is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedBelowHighwater is violated."' \
   'echo "Error: Invariant NotAuditWitnessFirstRecoveredAboveZero is violated."' \
   'echo "Error: Invariant NotAuditWitnessResetGap is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResetFolded is violated."' \
+  'echo "Error: Invariant AuditRetainedOnlyThisEpoch is violated."' \
+  'echo "Error: Invariant AuditMintAboveEverySeat is violated."' \
   'echo "Error: Invariant next_generation_above_highwater is violated."' \
   'echo "Error: Action property AuditSealClosesRecovery is violated."' \
   'echo "Error: Action property AuditHighwaterNeverLowers is violated."' \
@@ -505,10 +627,13 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessArchived is violated."' \
   'echo "Error: Action property NotAuditWitnessSuccessor is violated."' \
   'echo "Error: Action property NotAuditWitnessStaleIncarnation is violated."' \
+  'echo "Error: Action property NotAuditWitnessStaleAbandonment is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetiringScopeCurrent is violated."' \
   'echo "Error: Invariant NotAuditWitnessCurrentRuntimeGone is violated."' \
   'echo "Error: Invariant AuditRetireAtScopeCoherent is violated."' \
   'echo "Error: Invariant AuditRetireAtScopeExactlyOne is violated."' \
+  'echo "Error: Invariant AuditRetireAbsentAnsweredInEveryPhase is violated."' \
+  'echo "Error: Invariant AuditStaleAbandonmentAnsweredOnce is violated."' \
   'echo "Error: Invariant pending_session_ingress_detach_has_session_correlation is violated."' \
   'echo "Error: Invariant pending_respawn_topology_has_no_current_runtime is violated."' \
   'echo "Error: Action property AuditObservationMonotonic is violated."' \
@@ -524,6 +649,33 @@ printf '%s\n' \
   'echo "Error: Invariant AuditDisagreeingCursorHolds is violated by the initial state:"' \
   'echo "Error: Invariant AuditCursorOnEndTurnHolds is violated by the initial state:"' \
   'echo "Error: Invariant AuditContinuableNeedsAgreeingBoundCursor is violated by the initial state:"' \
+  'echo "Error: Invariant NotAuditWitnessApplied is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokeApplied is violated."' \
+  'echo "Error: Invariant NotAuditWitnessMobOwnedEffective is violated."' \
+  'echo "Error: Invariant AuditEffectiveChangesOnlyAtRunStart is violated."' \
+  'echo "Error: Invariant AuditMidRunFoldKeepsEffective is violated."' \
+  'echo "Error: Invariant AuditSessionWriteNeverLowersRevision is violated."' \
+  'echo "Error: Invariant AuditPrefixOnlyAppliesInLeadingPrefix is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReboundAfterRelease is violated."' \
+  'echo "Error: Invariant AuditMobTargetBoundUntilReleased is violated."' \
+  'echo "Error: Invariant AuditTargetWithinBudget is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedInstructionsRevoked is violated."' \
+  'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
+  'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdopted is violated."' \
+  'echo "Error: Invariant AuditMemberSessionTakesNoHostWrite is violated."' \
+  'echo "Error: Invariant AuditOnlyAMemberSessionTargetIsTakenOver is violated."' \
+  'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBodyRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCopiedRetiredHeadKept is violated."' \
+  'echo "Error: Invariant NotAuditWitnessThreeRowsRetireTwo is violated."' \
+  'echo "Error: Invariant AuditOwnHeadKeepsItsBody is violated."' \
+  'echo "Error: Invariant AuditSupersededRowsRetired is violated."' \
+  'echo "Error: Invariant AuditRetiredChangesOnlyAtTheDecision is violated."' \
+  'echo "Error: Invariant AuditDecisionNeverLowersACount is violated."' \
+  'echo "Error: Invariant AuditDecisionKeepsRowsAndHeads is violated."' \
+  'echo "Error: Invariant activation_body_maps_lockstep is violated."' \
+  'echo "Error: Invariant activation_effective_body_live is violated."' \
   'echo "Error: Invariant NotAuditWitnessIdle is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessTerminalized is violated."' \
@@ -566,6 +718,18 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessCrossNotice is violated."' \
   'echo "Error: Action property NotAuditWitnessRetireBesideWaking is violated."' \
   'echo "Error: Action property NotAuditWitnessCommsLessWokeLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessExemptArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessExemptRotated is violated."' \
+  'echo "Error: Action property NotAuditWitnessSameSessionWokeLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyEndsSameSession is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStaleScopeAfterRotation is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRotatedSameSession is violated."' \
+  'echo "Error: Action property NotAuditWitnessHostMarkKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessHeldSuccessorRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecoveredFreshRotated is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecoveredSameRotated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReplayedKeptTopology is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayedSuccessorWokeLive is violated."' \
   'echo "Error: Invariant materialization_domain_is_session_bound_membership is violated."' \
   'echo "Error: Invariant local_session_bound_member_is_live_or_wakeable is violated."' \
   'echo "Error: Invariant broken_member_has_no_phase is violated."' \
@@ -609,18 +773,42 @@ printf '%s\n' \
   'echo "Error: Invariant unborn_seat_session_is_recorded is violated."' \
   'echo "Error: Action property AuditReseatUnbornIffNeverBorn is violated."' \
   'echo "Error: Invariant spawn_profile_authority_is_a_pending_grant is violated."' \
+  'echo "Error: Invariant definition_wiring_exempt_member_is_seated is violated."' \
+  'echo "Error: Action property AuditRotationDecidesExemptionAnew is violated."' \
+  'echo "Error: Action property AuditSealedExemptsOnlyASeat is violated."' \
+  'echo "Error: Action property AuditSeatDecidesExemptionFromInput is violated."' \
+  'echo "Error: Action property AuditSameSessionTerminalKeepsSession is violated."' \
+  'echo "Error: Invariant same_session_rotation_keeps_its_binding is violated."' \
+  'echo "Error: Invariant AuditScopedReleaseFenced is violated."' \
+  'echo "Error: Action property AuditReplayKeepsKeptTopology is violated."' \
+  'echo "Error: Action property AuditSameSessionTerminalKeepsHostMark is violated."' \
+  'echo "Error: Invariant AuditKeptRowsReplayable is violated."' \
   'echo "Error: Action property NotAuditWitnessSessionOwnedRetires is violated."' \
   'echo "Error: Action property NotAuditWitnessCompositionKeepsServing is violated."' \
   'echo "Error: Action property NotAuditWitnessQueuedKeepsServing is violated."' \
   'echo "Error: Action property NotAuditWitnessCompositionClaimed is violated."' \
   'echo "Error: Invariant AuditVerdictExactlyOne is violated."' \
   'echo "Error: Action property AuditPlacementOwnership is violated."' \
+  'echo "Error: Action property NotAuditWitnessQueuedInputKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedWithdrawn is violated."' \
+  'echo "Error: Action property AuditAbortWithdrawsOnlyTheRequest is violated."' \
+  'echo "Error: Action property AuditAbortOnlyForThePendingRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessConflictRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedCompleted is violated."' \
+  'echo "Error: Action property AuditPendingSwitchEndsOnlyWithItsRequest is violated."' \
+  'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
+  'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
+  'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRecorded is violated."' \
+  'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRefusedWake is violated."' \
+  'echo "Error: Action property NotAuditWitnessBuildPreparationRetryResolved is violated."' \
+  'echo "Error: Action property NotAuditWitnessBuildPreparationRetryRetired is violated."' \
   'echo "Error: Assumption line 1, col 1 to line 1, col 2 of module member_residency_audit is false."' \
   'echo "Error: The first argument of <= should be an integer, but instead it is:"' \
   'echo "200000 states generated, 200000 distinct states found, 0 states left on queue."' \
   'echo "The coverage statistics at 2026-01-01 00:00:00"' \
-  'for action in RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning ObserveMemberProgressChangedOpenRunning ObserveMemberProgressChangedIdleRunning ObserveMemberProgressUnchangedIdleRunning ObserveMemberProgressUnchangedOpenHealthyRunning ObserveMemberProgressUnchangedOpenDegradedRunning ObserveMemberProgressUnchangedOpenWedgedRunning ObserveMemberProgressStaleRunning RetireRunningReleasing RetireRunningPreservingBinding RetireRunningNoBinding RetireStoppedReleasing RetireStoppedPreservingBinding RetireStoppedNoBinding RetireAbsentRunning RetireAbsentStopped RetireMember SessionIngressDetachedForMobDestroyRunning ObserveRuntimeRetired ObserveRuntimeRetiredStopped ObserveMemberRetirementArchivedLive ObserveMemberRetirementArchivedRetired ObserveMemberRetirementArchivedLiveStopped ObserveMemberRetirementArchivedRetiredStopped ObserveMemberRetirementArchivedAlreadyCleared ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared ObserveMemberRetirementArchivedAlreadyClearedStopped ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped BeginPlacedCompletionLifecycleQuiesceFreshStop StopRunning ResumeStopped BeginPlacedCompletionLifecycleQuiesceFresh MarkCompleted DestroyMob RetireAtScopeCurrentRunning RetireAtScopeCurrentStopped RetireAtScopeNoCurrentIncarnationRunning RetireAtScopeNoCurrentIncarnationStopped RetireAtScopeStaleFenceTokenRunning RetireAtScopeStaleFenceTokenStopped RetireAtScopeStaleSessionBindingRunning RetireAtScopeStaleSessionBindingStopped RetireAtScopeMobNotRunningCompleted RetireAtScopeMobNotRunningDestroyed RecoverRosterMemberResetRunning RecoverMemberSessionBindingReplacingRunning RecoverMemberSessionBindingAlreadyCurrentRunning RetireMemberPeerOnly SessionIngressDetachedForMobDestroyStopped RecoverRosterMemberRetiringRunning RecoverRosterMemberRetiringReplay RecoverRosterMemberRetiredRunning RecoverRosterMemberRetiredCurrentAlreadyAbsent RecoverRosterMemberRetiredStaleGeneration RecoverRosterMemberRetiredStaleIncarnation RecoverRosterMemberRetirementStartedReleasing RecoverRosterMemberRetirementStartedReleasingAlreadyApplied RecoverRosterMemberRetirementStartedPreservingBinding RecoverRosterMemberRetirementStartedPeerOnly RecoverRosterMemberAddressabilityRunning ObserveMemberRetirementArchivedLivePreservingTopology ObserveMemberRetirementArchivedRetiredPreservingTopology ObserveRuntimeDestroyed ObserveRuntimeDestroyedStopped ObserveRuntimeDestroyedCompleted AdmitDestroyCleanup AuditStartRun FinishRunRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
-  'for action in RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning RecoverMemberSessionBindingAlreadyCurrentRunning RecoverMemberPeerEndpointFreshRunning RegisterMemberPeerRunning RecoverRosterMemberRetiredRunning RecoverMemberRestoreFailureRunning RecoverMemberRestoreHostRefusedRunning SeedMemberResidencyRunning SeedMemberResidencyStopped SeedMemberResidencyCompleted ResolveMemberHostPreparationRunning ResolveMemberHostPreparationStopped ResolveMemberHostPreparationCompleted PlanBootMaterializationWake PlanBootMaterializationVerify PlanBootMaterializationStayDormant SealBootMaterializationPlan WakeMemberAuthorizedRunning WakeMemberJoinedRunning WakeMemberAlreadyLiveRunning WakeMemberRefusedRunning WakeMemberRefusedStopped WakeMemberRefusedCompleted WakeMemberRefusedDestroyed ResolveMemberRevivalBoundRunning ResolveMemberRevivalSucceededRunningLocal ResolveMemberRevivalFailedRunning ResolveMemberRevivalHostRefusedRunning ResolveMemberRevivalRetryableRunning AbandonMemberWakeDormantRunning AbandonMemberWakeBrokenRunning ResolveRecreatedMemberSessionSucceededRunningLocal ResolveMemberRevivalBoundStaleStopped ResolveMemberRevivalBoundStaleCompleted ResolveMemberRevivalBoundStaleDestroyed ResolveMemberRevivalSucceededStaleRunning ResolveMemberRevivalSucceededStaleStopped ResolveMemberRevivalSucceededStaleCompleted ResolveMemberRevivalSucceededStaleDestroyed ResolveMemberRevivalFailedStaleRunning ResolveMemberRevivalFailedStaleStopped ResolveMemberRevivalFailedStaleCompleted ResolveMemberRevivalFailedStaleDestroyed ResolveMemberRevivalHostRefusedStaleRunning ResolveMemberRevivalHostRefusedStaleStopped ResolveMemberRevivalHostRefusedStaleCompleted ResolveMemberRevivalHostRefusedStaleDestroyed ResolveMemberRevivalRetryableStaleRunning ResolveMemberRevivalRetryableStaleStopped ResolveMemberRevivalRetryableStaleCompleted ResolveMemberRevivalRetryableStaleDestroyed AbandonMemberWakeStaleRunning AbandonMemberWakeStaleStopped AbandonMemberWakeStaleCompleted AbandonMemberWakeStaleDestroyed ResolveRecreatedMemberSessionSucceededStaleRunning ResolveRecreatedMemberSessionSucceededStaleStopped ResolveRecreatedMemberSessionSucceededStaleCompleted ResolveRecreatedMemberSessionSucceededStaleDestroyed ResolveMemberRevivalSessionCreatedRunning ResolveMemberRevivalSessionCreatedStaleRunning ResolveMemberRevivalSessionCreatedStaleStopped ResolveMemberRevivalSessionCreatedStaleCompleted ResolveMemberRevivalSessionCreatedStaleDestroyed RecoverMemberSeatSessionUnbornRunning RecoverMemberSeatSessionBornRunning AuthorizeSpawnProfileSeatedRunning ObserveRuntimeReady ReleaseMemberMaterializationReleasedRunning ReleaseMemberMaterializationReleasedStopped ReleaseMemberMaterializationReleasedCompleted ReleaseMemberMaterializationStaleRunning ReleaseMemberMaterializationStaleStopped ReleaseMemberMaterializationStaleCompleted ReleaseMemberMaterializationStaleDestroyed ClassifyMemberLiveMaterializationRevivable ClassifyMemberLiveMaterializationTerminal ClassifyMemberLiveMaterializationTerminalDormant ClassifyPeerNoticeRunning ClassifyPeerNoticeStopped ClassifyPeerNoticeCompleted ClassifyPeerNoticeDestroyed BeginPlacedCompletionLifecycleQuiesceFreshStop StopRunning ResumeStopped BeginPlacedCompletionLifecycleQuiesceFresh CompleteRunning MarkCompleted AdmitDestroyCleanup DestroyMob ShutdownRunning RetireRunningReleasing RetireRunningPreservingBinding RetireStoppedReleasing SessionIngressDetachedForMobDestroyRunning SessionIngressDetachedForMobDestroyStopped ObserveRuntimeRetired ObserveRuntimeRetiredStopped ObserveMemberRetirementArchivedLive ObserveMemberRetirementArchivedRetired ObserveMemberRetirementArchivedLiveStopped ObserveMemberRetirementArchivedRetiredStopped RecoverMemberSessionBindingReplacingRunning BeginExplicitResumeStopped SettleExplicitResumePreparationStopped BeginExplicitResumeReadinessStopped SettleExplicitResumeReadinessStopped AuthorizeExplicitResumeMemberRunning AuthorizeExplicitResumeMemberLiveRunning AuthorizeExplicitResumeMemberJoinRunning ClassifyExplicitResumeMemberLiveRevivable ClassifyExplicitResumeMemberLiveMissing SettleExplicitResumeMemberRunning SettleExplicitResumeMemberReplacedRunning BeginExplicitResumeReadinessRunning SettleExplicitResumeReadinessRunning BeginExplicitResumeTopologyRunning SettleExplicitResumeTopologyRunning FinishExplicitResumeRunning RecoverRosterWiringRunning WireMembersRunning ObserveMemberRetirementArchivedLivePreservingTopology ResolveWiringEdgeRealizationRealizedRunning ResolveWiringEdgeRealizationOwedRunning ResolveWiringEdgeRealizationStaleRunning AuthorizeSpawnProfileRunning BeginSpawnExecFresh CommitDormantSeatRunning CommitSpawnMembershipFresh BeginMemberRotationRunning CommitMemberRotationLiveRunning CommitMemberRotationRetiredRunning RetireRunningReleasingArchiveOnly RetireRunningPreservingBindingArchiveOnly RetireStoppedReleasingArchiveOnly RetireStoppedPreservingBindingArchiveOnly RetireMemberArchiveOnly RetireStoppedPreservingBinding RetireMember RetryRuntimeRetireRunning RetryRuntimeRetireStopped RecoverRosterMemberRetirementStartedReleasing RecoverRosterMemberRetirementStartedPreservingBinding CommitMemberRotationLiveStopped CommitMemberRotationRetiredStopped AdmitDestroyMemberRetireLiveRunning AdmitDestroyMemberRetireArchiveOnlyRunning AdmitDestroyMemberRetireAlreadyRetiringSessionRunning AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning ObserveDestroyMemberRetirementArchivedLiveRunning ObserveDestroyMemberRetirementArchivedRetiredRunning ClassifyMemberReleaseRunning ClassifyMemberReleaseStopped ClassifyMemberReleaseCompleted ClassifyMemberReleaseDestroyed RecoverSpawnedMemberPeerEndpointFreshRunning ResolveRuntimeBindingRefusalRunning ResolveRuntimeBindingRefusalStaleRunning ResolveRuntimeBindingRefusalStaleStopped ResolveRuntimeBindingRefusalStaleCompleted ResolveRuntimeBindingRefusalStaleDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning ObserveMemberProgressChangedOpenRunning ObserveMemberProgressChangedIdleRunning ObserveMemberProgressUnchangedIdleRunning ObserveMemberProgressUnchangedOpenHealthyRunning ObserveMemberProgressUnchangedOpenDegradedRunning ObserveMemberProgressUnchangedOpenWedgedRunning ObserveMemberProgressStaleRunning RetireRunningReleasing RetireRunningPreservingBinding RetireRunningNoBinding RetireStoppedReleasing RetireStoppedPreservingBinding RetireStoppedNoBinding RetireAbsentRunning RetireAbsentStopped RetireAbsentCompleted RetireAbsentDestroyed RetireMember SessionIngressDetachedForMobDestroyRunning ObserveRuntimeRetired ObserveRuntimeRetiredStopped ObserveMemberRetirementArchivedLive ObserveMemberRetirementArchivedRetired ObserveMemberRetirementArchivedLiveStopped ObserveMemberRetirementArchivedRetiredStopped ObserveMemberRetirementArchivedAlreadyCleared ObserveMemberRetirementArchivedStaleRuntimeAlreadyCleared ObserveMemberRetirementArchivedAlreadyClearedStopped ObserveMemberRetirementArchivedStaleRuntimeAlreadyClearedStopped BeginPlacedCompletionLifecycleQuiesceFreshStop StopRunning ResumeStopped BeginPlacedCompletionLifecycleQuiesceFresh MarkCompleted DestroyMob RetireAtScopeCurrentRunning RetireAtScopeCurrentStopped RetireAtScopeNoCurrentIncarnationRunning RetireAtScopeNoCurrentIncarnationStopped RetireAtScopeStaleFenceTokenRunning RetireAtScopeStaleFenceTokenStopped RetireAtScopeStaleSessionBindingRunning RetireAtScopeStaleSessionBindingStopped RetireAtScopeMobNotRunningCompleted RetireAtScopeMobNotRunningDestroyed RecoverRosterMemberResetRunning RecoverMemberSessionBindingReplacingRunning RecoverMemberSessionBindingAlreadyCurrentRunning RetireMemberPeerOnly SessionIngressDetachedForMobDestroyStopped RecoverRosterMemberRetiringRunning RecoverRosterMemberRetiringReplay RecoverRosterMemberRetiredRunning RecoverRosterMemberRetiredCurrentAlreadyAbsent RecoverRosterMemberRetiredStaleGeneration RecoverRosterMemberRetiredStaleIncarnation RecoverRosterMemberRetirementStartedReleasing RecoverRosterMemberRetirementStartedReleasingAlreadyApplied RecoverRosterMemberRetirementStartedPreservingBinding RecoverRosterMemberRetirementStartedPeerOnly RecoverRosterMemberAddressabilityRunning ObserveRespawnTopologyAbandonedStaleEndedSuccessor ObserveMemberRetirementArchivedLivePreservingTopology ObserveMemberRetirementArchivedRetiredPreservingTopology ObserveRuntimeDestroyed ObserveRuntimeDestroyedStopped ObserveRuntimeDestroyedCompleted AdmitDestroyCleanup AuditStartRun FinishRunRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning RecoverMemberSessionBindingAlreadyCurrentRunning RecoverMemberPeerEndpointFreshRunning RegisterMemberPeerRunning RecoverRosterMemberRetiredRunning RecoverMemberRestoreFailureRunning RecoverMemberRestoreHostRefusedRunning SeedMemberResidencyRunning SeedMemberResidencyStopped SeedMemberResidencyCompleted ResolveMemberHostPreparationRunning ResolveMemberHostPreparationStopped ResolveMemberHostPreparationCompleted PlanBootMaterializationWake PlanBootMaterializationVerify PlanBootMaterializationStayDormant SealBootMaterializationPlan WakeMemberAuthorizedRunning WakeMemberJoinedRunning WakeMemberAlreadyLiveRunning WakeMemberRefusedRunning WakeMemberRefusedStopped WakeMemberRefusedCompleted WakeMemberRefusedDestroyed ResolveMemberRevivalBoundRunning ResolveMemberRevivalSucceededRunningLocal ResolveMemberRevivalFailedRunning ResolveMemberRevivalHostRefusedRunning ResolveMemberRevivalRetryableRunning ResolveMemberRevivalRetryableBuildPreparationRunning ResolveMemberBuildPreparationRunning ResolveMemberBuildPreparationStopped ResolveMemberBuildPreparationCompleted AbandonMemberWakeDormantRunning AbandonMemberWakeBrokenRunning ResolveRecreatedMemberSessionSucceededRunningLocal ResolveMemberRevivalBoundStaleStopped ResolveMemberRevivalBoundStaleCompleted ResolveMemberRevivalBoundStaleDestroyed ResolveMemberRevivalSucceededStaleRunning ResolveMemberRevivalSucceededStaleStopped ResolveMemberRevivalSucceededStaleCompleted ResolveMemberRevivalSucceededStaleDestroyed ResolveMemberRevivalFailedStaleRunning ResolveMemberRevivalFailedStaleStopped ResolveMemberRevivalFailedStaleCompleted ResolveMemberRevivalFailedStaleDestroyed ResolveMemberRevivalHostRefusedStaleRunning ResolveMemberRevivalHostRefusedStaleStopped ResolveMemberRevivalHostRefusedStaleCompleted ResolveMemberRevivalHostRefusedStaleDestroyed ResolveMemberRevivalRetryableStaleRunning ResolveMemberRevivalRetryableStaleStopped ResolveMemberRevivalRetryableStaleCompleted ResolveMemberRevivalRetryableStaleDestroyed AbandonMemberWakeStaleRunning AbandonMemberWakeStaleStopped AbandonMemberWakeStaleCompleted AbandonMemberWakeStaleDestroyed ResolveRecreatedMemberSessionSucceededStaleRunning ResolveRecreatedMemberSessionSucceededStaleStopped ResolveRecreatedMemberSessionSucceededStaleCompleted ResolveRecreatedMemberSessionSucceededStaleDestroyed ResolveMemberRevivalSessionCreatedRunning ResolveMemberRevivalSessionCreatedStaleRunning ResolveMemberRevivalSessionCreatedStaleStopped ResolveMemberRevivalSessionCreatedStaleCompleted ResolveMemberRevivalSessionCreatedStaleDestroyed RecoverMemberSeatSessionUnbornRunning RecoverMemberSeatSessionBornRunning AuthorizeSpawnProfileSeatedRunning ObserveRuntimeReady ReleaseMemberMaterializationReleasedRunning ReleaseMemberMaterializationReleasedStopped ReleaseMemberMaterializationReleasedCompleted ReleaseMemberMaterializationStaleRunning ReleaseMemberMaterializationStaleStopped ReleaseMemberMaterializationStaleCompleted ReleaseMemberMaterializationStaleDestroyed ClassifyMemberLiveMaterializationRevivable ClassifyMemberLiveMaterializationTerminal ClassifyMemberLiveMaterializationTerminalDormant ClassifyPeerNoticeRunning ClassifyPeerNoticeStopped ClassifyPeerNoticeCompleted ClassifyPeerNoticeDestroyed BeginPlacedCompletionLifecycleQuiesceFreshStop StopRunning ResumeStopped BeginPlacedCompletionLifecycleQuiesceFresh CompleteRunning MarkCompleted AdmitDestroyCleanup DestroyMob ShutdownRunning RetireRunningReleasing RetireRunningPreservingBinding RetireStoppedReleasing SessionIngressDetachedForMobDestroyRunning SessionIngressDetachedForMobDestroyStopped ObserveRuntimeRetired ObserveRuntimeRetiredStopped ObserveMemberRetirementArchivedLive ObserveMemberRetirementArchivedRetired ObserveMemberRetirementArchivedLiveStopped ObserveMemberRetirementArchivedRetiredStopped RecoverMemberSessionBindingReplacingRunning BeginExplicitResumeStopped SettleExplicitResumePreparationStopped BeginExplicitResumeReadinessStopped SettleExplicitResumeReadinessStopped AuthorizeExplicitResumeMemberRunning AuthorizeExplicitResumeMemberLiveRunning AuthorizeExplicitResumeMemberJoinRunning ClassifyExplicitResumeMemberLiveRevivable ClassifyExplicitResumeMemberLiveMissing SettleExplicitResumeMemberRunning SettleExplicitResumeMemberReplacedRunning BeginExplicitResumeReadinessRunning SettleExplicitResumeReadinessRunning BeginExplicitResumeTopologyRunning SettleExplicitResumeTopologyRunning FinishExplicitResumeRunning RecoverRosterWiringRunning WireMembersRunning ObserveMemberRetirementArchivedLivePreservingTopology ResolveWiringEdgeRealizationRealizedRunning ResolveWiringEdgeRealizationOwedRunning ResolveWiringEdgeRealizationStaleRunning AuthorizeSpawnProfileRunning BeginSpawnExecFresh CommitDormantSeatRunning CommitSpawnMembershipFresh BeginMemberRotationRunning CommitMemberRotationLiveRunning CommitMemberRotationRetiredRunning RetireRunningReleasingArchiveOnly RetireRunningPreservingBindingArchiveOnly RetireStoppedReleasingArchiveOnly RetireStoppedPreservingBindingArchiveOnly RetireMemberArchiveOnly RetireStoppedPreservingBinding RetireMember RetryRuntimeRetireRunning RetryRuntimeRetireStopped RecoverRosterMemberRetirementStartedReleasing RecoverRosterMemberRetirementStartedPreservingBinding CommitMemberRotationLiveStopped CommitMemberRotationRetiredStopped AdmitDestroyMemberRetireLiveRunning AdmitDestroyMemberRetireArchiveOnlyRunning AdmitDestroyMemberRetireAlreadyRetiringSessionRunning AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionRunning ObserveDestroyMemberRetirementArchivedLiveRunning ObserveDestroyMemberRetirementArchivedRetiredRunning ClassifyMemberReleaseRunning ClassifyMemberReleaseStopped ClassifyMemberReleaseCompleted ClassifyMemberReleaseDestroyed RecoverSpawnedMemberPeerEndpointFreshRunning ResolveRuntimeBindingRefusalRunning ResolveRuntimeBindingRefusalStaleRunning ResolveRuntimeBindingRefusalStaleStopped ResolveRuntimeBindingRefusalStaleCompleted ResolveRuntimeBindingRefusalStaleDestroyed ExemptMemberFromDefinitionWiringSeatedRunning ExemptMemberFromDefinitionWiringSeatedStopped CommitMemberRotationLiveKickoffRunning CommitMemberRotationRetiredKickoffRunning CommitMemberRotationLiveKickoffStopped CommitMemberRotationRetiredKickoffStopped ClassifyMemberReleaseStaleRunning ClassifyMemberReleaseStaleStopped ClassifyMemberReleaseStaleCompleted ClassifyMemberReleaseStaleDestroyed BeginMemberRotationSameSessionRunning CommitMemberRotationSameSessionRunning CommitMemberRotationSameSessionStopped CommitMemberRotationSameSessionKickoffRunning CommitMemberRotationSameSessionKickoffStopped RecoverMemberRotationIntentFreshSessionRunning RecoverMemberRotationIntentSameSessionRunning RecoverMemberRotationIntentDestroyingRunning RecoverRosterWiringAlreadyRecovered RecoverExternalPeerWiringRunning RecoverExternalPeerWiringAlreadyRecovered ConvergeRecoveredRosterTopologyPrune ConvergeRecoveredRosterTopologyRetain RespawnRunning RespawnIdentityEntryRefusedRunning RespawnIdentityEntryRefusedStopped TakeOverIdentityEntryAdopting TakeOverIdentityEntryEnded TakeOverIdentityEntryDeferred TakeOverIdentityEntryNotADeclaredEntry TakeOverIdentityEntryMobNotRunningStopped TakeOverIdentityEntryMobNotRunningDestroyed TakeOverIdentityEntryNonAuthoritative ObserveMemberRetirementArchivedLiveHostAdopted ObserveMemberRetirementArchivedRetiredHostAdopted RecoverIdentityEntryAdoptingMarkedRunning RecoverIdentityEntryAdoptingStaleRunning ObserveMemberRetirementArchivedRetiredPreservingTopology RecordMemberCustodyUnrestoredSeatedRunning RecordMemberCustodyUnrestoredSeatedStopped ResolveMemberCustodyRestoredRecordedRunning ResolveMemberCustodyRestoredRecordedStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "<ResolveMemberRevivalBoundStaleRunning line 1, col 1 to line 1, col 62 of module model (210 8 210 78)>: 0:490"' \
   'for action in AuditConsumeReviewForEntry AuditConsumeConsentForEntry AuditConsumeReviewRejectedUsed AuditConsumeConsentRejectedAlreadyConsumed AuditAdmitEnteredStep AuditAdmitEnteredStepRejectedMissing AuditAdmitEnteredStepRejectedConsentLinked AuditAdmitEnteredStepRejectedRetired AuditAdmitEnteredStepRejectedNotEntered AuditAdmitEnteredStepRejectedClosing AuditFinishEnteredStepOpen AuditFinishEnteredStepClosing AuditFinishEnteredStepReleases AuditFinishEnteredStepRejectedMissing AuditFinishEnteredStepRejectedNotInFlight AuditReleaseReviewUsed AuditReleaseReviewUsedClosing AuditReleaseReviewRejectedClosing AuditReleaseReviewRejectedMissing AuditRetireReviewRejectedSettled AuditWithdrawConsentRejectedMismatch; do echo "<$action line 1, col 1 to line 1, col 2 of module entered_step_audit>: 1:1"; done' \
   'echo "Error: Invariant NotAuditWitnessCancelWhileStepInFlight is violated."' \
@@ -635,6 +823,144 @@ printf '%s\n' \
   'echo "Error: Invariant AuditReleaseWaitsForSteps is violated."' \
   'echo "Error: Invariant AuditEnteredStateMatchesHistory is violated."' \
   'echo "Error: Action property AuditStepsNeverSpendOrSettle is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefusalHealed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLogoutHealed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWindowRenewed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRefusedValueBlocked is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLateRefusalLeavesNewer is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCurrentRefusalWithdraws is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdoptedBelowLease is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedBound is violated."' \
+  'echo "Error: Action property AuditGenerationNeverDecreases is violated."' \
+  'echo "Error: Invariant released_publication_only_without_credential is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredByTimer is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredAtDispatch is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredWhileDownSettledOnRead is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdmittedOneTickBeforeDeadline is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRollbackAfterExpiryStillRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokedThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEndedWithSubjectThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokeAfterDeadlineRecordsExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSubjectEndAfterDeadlineRecordsExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnpersistedRefusalThenAdmitted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRunEndedThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLaterRunEndsStaleGrant is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHostCallOutsideRunRefusedWithoutEnding is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRecoveryEndsInterruptedRun is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSubjectEndOfRunEndedGrantChangesNothing is violated."' \
+  'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
+  'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
+  'echo "Error: Action property AuditTerminalLatched is violated."' \
+  'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
+  'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
+  'echo "Error: Invariant AuditRunScopedUseInItsRun is violated."' \
+  'echo "Error: Invariant AuditRunEndOnlyAfterItsRun is violated."' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryAdoptedUnlisted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryRetireUnadopted AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterRefused SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed UnlistIdentityEntryRemoved RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
+  'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayedStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSparesEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSpawnsWorkerOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnseated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessProbeRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLaneRefusedStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessTwoEntries is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntrySeated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEntryLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRetiredLive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRotated is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryDestroyArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryDestroyedMob is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryDestroyedForced is violated."' \
+  'echo "Error: Action property NotAuditWitnessCustodyDestroyed is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRespawnRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessWorkerRespawnAdmitted is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryRespawnRefusedStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessWorkerPreservingArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryHostAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessHostMemberStands is violated."' \
+  'echo "Error: Action property NotAuditWitnessTakeOverEndsUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessTakeOverDeferred is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryReseatedOnRecord is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptedThenUnlisted is violated."' \
+  'echo "Error: Action property NotAuditWitnessRelistedAfterUnlist is violated."' \
+  'echo "Error: Action property NotAuditWitnessRevived is violated."' \
+  'echo "Error: Action property NotAuditWitnessRetiredEntryKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessFreshAfterForget is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealRefusesUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistEndsUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayMarked is violated."' \
+  'echo "Error: Action property NotAuditWitnessDeclareOverAdopting is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesAdopting is violated."' \
+  'echo "Error: Action property NotAuditWitnessTakeOverDeferredBySeal is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptedEntryEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptionMarkReplayed is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesIntentNamed is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesUnseatedIntentNamed is violated."' \
+  'echo "Error: Action property NotAuditWitnessCandidateRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessNameHeldByWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessHostAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessInFlight is violated."' \
+  'echo "Error: Action property NotAuditWitnessResetEndsEntries is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyEndsEntries is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleHoldRefusesPeerWake is violated."' \
+  'echo "Error: Action property NotAuditWitnessMigrationVerdict is violated."' \
+  'echo "Error: Action property NotAuditWitnessMigrationRestamped is violated."' \
+  'echo "Error: Action property NotAuditWitnessRestampVerdict is violated."' \
+  'echo "Error: Action property NotAuditWitnessRotateVerdict is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleHoldEnded is violated."' \
+  'echo "Error: Action property NotAuditWitnessFirstBootKeptOverRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleHoldDroppedAtArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleMoveTakesNewName is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleMoveOwesEndpoint is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHeldWaiting is violated."' \
+  'echo "Error: Action property NotAuditWitnessHeldSpawnSeats is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHosted is violated."' \
+  'echo "Error: Action property NotAuditWitnessEverCreatedOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedCustody is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedCustodyAborted is violated."' \
+  'echo "Error: Action property NotAuditWitnessListedAgainUnmarked is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeRoleHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeRoleMigrationOwed is violated."' \
+  'echo "Error: Action property NotAuditWitnessSeatKeepsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistedEndStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistedEndRetired is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistedReplayEnd is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayKeepsUnarchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessHostedReplayKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessStaleMarkIgnored is violated."' \
+  'echo "Error: Action property NotAuditWitnessPreflightAdmitsMembers is violated."' \
+  'echo "Error: Action property NotAuditWitnessResetEndsRetiredEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistEndsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessResetEndsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessReplayEndsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessApplyBusy is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyEndsCommittedLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealDefersInFlightSpawn is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedEntrySeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedEndHosted is violated."' \
+  'echo "Error: Action property NotAuditWitnessMigrateKeepsHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessHoldEndsAtSameSessionCommit is violated."' \
+  'echo "Error: Action property NotAuditWitnessHoldEndsAtFreshCommit is violated."' \
+  'echo "Error: Action property NotAuditWitnessHoldKeptOnSameRole is violated."' \
+  'echo "Error: Action property NotAuditWitnessSeatedResumeRevealsHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeAnswersHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeAuthorizesSettled is violated."' \
+  'echo "Error: Action property AuditRotationKeepsEntry is violated."' \
+  'echo "Error: Action property AuditSeatRecordsEntryFromCustody is violated."' \
+  'echo "Error: Action property AuditFreshLifeRespawnNeverAnEntry is violated."' \
+  'echo "Error: Action property AuditPreservingArchiveNeverAnEntry is violated."' \
+  'echo "Error: Invariant worker_reconcile_spares_entries is violated."' \
+  'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
+  'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
+  'echo "Error: Action property AuditAdoptionNeedsObservation is violated."' \
+  'echo "Error: Action property AuditRetireUnadoptedQualifies is violated."' \
+  'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
   'echo "Error: Invariant NotAuditWitnessHeldWhileRunCurrent is violated."' \
   'echo "Error: Invariant NotAuditWitnessReleasedThenStaged is violated."' \
   'echo "Error: Invariant NotAuditWitnessHeldEndsRefused is violated."' \
@@ -649,11 +975,379 @@ printf '%s\n' \
   'echo "Error: Action property AuditResumedRunWaitsForDestination is violated."' \
   'echo "Error: Action property AuditResumedRunBindsItsDestination is violated."' \
   'echo "Error: Invariant input_controller_holds_are_kept_unstaged_governed_inputs is violated."' \
+  'for action in AuditHoldHuman AuditHoldReview AuditHoldRefusedWindow AuditHoldRefusedSelfReview AuditHoldReplayed AuditHoldConflict AuditPresentAtDeadline AuditPresentRefusedSubjectChanged AuditPresentRefusedIncomplete AuditPresentToApprover AuditPresentRefusedUntimed AuditPresentRefusedWrongApproverAudience AuditPresentToReviewer AuditPresentRefusedWrongReviewerAudience AuditPresentRefusedNotOpen AuditDecideAtDeadline AuditDecideRefusedReviewStage AuditDecideRefusedEvidenceRequired AuditDecideRefusedSubjectChanged AuditDecideRefusedNotEligible AuditDecideRefusedSelfApproval AuditDecideRefusedPresentationIncomplete AuditDecideRefusedDecidedBeforePresentation AuditDecideApproved AuditDecideRejected AuditDecideRefusedNotOpen AuditReviewAtDeadline AuditReviewRefusedHumanStage AuditReviewRefusedWrongReviewer AuditReviewRefusedEvidenceRequired AuditReviewRefusedSubjectChanged AuditReviewRefusedPresentationIncomplete AuditReviewAllowed AuditReviewDenied AuditReviewEscalated AuditReviewRefusedNotOpen AuditWithdrawAtDeadline AuditWithdrawByHost AuditWithdrawByRequester AuditWithdrawRefusedNotRequester AuditWithdrawRefusedNotOpen AuditExpireOpenDue AuditExpireOpenNotDue AuditExpireApprovedDue AuditExpireApprovedSettlementOwed AuditExpireApprovedNotDue AuditExpireSettled AuditAuthorizeExecution AuditAuthorizeExecutionAtDeadline AuditAuthorizeExecutionRefusedSettlementOwed AuditAuthorizeExecutionRefusedBinding AuditAuthorizeExecutionRefusedNotApproved AuditAuthorizeExecutionRefusedApproverRevoked AuditAuthorizeExecutionRefusedRevokedSettlementOwed AuditReleaseExecution AuditReleaseExecutionAtDeadline AuditReleaseExecutionRefusedNotAuthorized AuditReleaseExecutionRefusedNotApproved AuditRecordExecuted AuditRecordExecutedRefusedNotAuthorized AuditRecordExecutedRefusedBinding AuditRecordExecutedReplayed AuditRecordExecutedReplayRefusedBinding AuditRecordExecutedRefusedNotApproved AuditCloseRefused AuditCloseRefusedWithPermit AuditCloseRefusedAtDeadline AuditCloseRefusedNotApproved AuditSettleNoticeDelivered AuditSettleNoticeFailed AuditSettleNoticeReplayed AuditSettleNoticeRefused AuditSettleNoticeRefusedNotEnded AuditOweCleanup AuditOweCleanupReplayed AuditOweCleanupRefusedNotAuthorized AuditOweCleanupRefusedNotApproved AuditSettleCleanup AuditSettleCleanupRefusedNotOwed AuditSettleCleanupRefusedNotEnded AuditSettleReply AuditSettleReplyReplayed AuditSettleReplyRefusedOther AuditSettleReplyRefusedNotExecuted AuditCommit; do echo "<$action line 1, col 1 to line 1, col 2 of module durable_decision_audit>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessHumanApprovalExecutedAndNoticed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetriedAfterRelease is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExecutionRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEscalatedThenHumanApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStaleDigestThenApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDecideAtDeadlineExpires is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWithdrawnThenDecideRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSelfApprovalThenAnotherApproves is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCommitThenRecordReplayed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHoldReplayedAndConflicting is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPermitAcrossDeadlineExecuted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleaseAfterDeadlineExpires is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAuthorizeAtDeadlineRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDecidedBeforePresentationRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessApprovedAtThePresentation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessApproverRevokedEndsRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRevokedPermitSettledExecuted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCleanupSettledAfterExecution is violated."' \
+  'echo "Error: Invariant NotAuditWitnessCleanupSettledAfterExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReplySettledThenAnotherRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLinkedPresentationThenApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncountedCarriedThenApproved is violated."' \
+  'echo "Error: Invariant AuditTerminalsLatch is violated."' \
+  'echo "Error: Invariant AuditApprovalIsAttested is violated."' \
+  'echo "Error: Invariant AuditRejectionIsAttested is violated."' \
+  'echo "Error: Invariant AuditExecutedOnlyFromApprovedWithHeldBinding is violated."' \
+  'echo "Error: Invariant AuditExpiryOnlyAtTheDeadline is violated."' \
+  'echo "Error: Invariant AuditApprovedExpiresOnlyWithoutPermit is violated."' \
+  'echo "Error: Invariant AuditWithdrawOnlyOpenByRequesterOrHost is violated."' \
+  'echo "Error: Invariant AuditSealedFieldsNeverChange is violated."' \
+  'echo "Error: Invariant AuditNoticeOwedOnceAtTheEnd is violated."' \
+  'echo "Error: Invariant AuditNoPermitAtOrAfterDeadline is violated."' \
+  'echo "Error: Invariant AuditReleaseClearsPermit is violated."' \
+  'echo "Error: Invariant AuditDecisionFollowsPresentation is violated."' \
+  'echo "Error: Invariant AuditPermitOnlyForCurrentApprover is violated."' \
+  'echo "Error: Invariant AuditCommittedIsSettleable is violated."' \
+  'echo "Error: Invariant AuditFirstPresentationIsTheEarliest is violated."' \
+  'echo "Error: Invariant AuditCleanupOwedUnderPermit is violated."' \
+  'echo "Error: Invariant AuditCleanupSettledAfterTheEnd is violated."' \
+  'echo "Error: Invariant AuditReplySettledOnce is violated."' \
+  'echo "Error: Invariant first_presentation_is_a_reading is violated."' \
+  'for action in AuditConfigure AuditIssueRoot AuditIssueChild AuditRevoke AuditResolve AuditSpend AuditSpendRefusedApproverRevoked AuditSpendUncertain AuditRestart AuditPrepare AuditEnter AuditEnterStale; do echo "<$action line 1, col 1 to line 1, col 2 of module approval_grant_audit>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessApprovalChildIssued is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUsedOnce is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSecondUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherDigestRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherRequesterRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherWorkRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWindowElapsedRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessParentRevokedBeforeUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessApproverRevokedBeforeUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDeviceTrustRefusedUnderRule is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSpentThenCrashStillSpent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRacingSecondAttemptRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPlainChildRefusedUnderRule is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainSpendNotEntered is violated."' \
+  'echo "Error: Invariant AuditNoUseBeyondUses is violated."' \
+  'echo "Error: Invariant AuditUseOnlyExactOperation is violated."' \
+  'echo "Error: Invariant AuditUseOnlyBoundRequesterAndWork is violated."' \
+  'echo "Error: Invariant AuditNoChildWithoutApprovalUnderRule is violated."' \
+  'echo "Error: Invariant AuditNoApprovalChildWithoutRule is violated."' \
+  'echo "Error: Invariant AuditRuleAssuranceHolds is violated."' \
+  'echo "Error: Invariant AuditIssuedTermsAreApproved is violated."' \
+  'echo "Error: Invariant AuditNoSpendAfterApproverRevoked is violated."' \
+  'echo "Error: Invariant AuditOneGrantPerDecision is violated."' \
+  'echo "Error: Invariant AuditSpendAdvancesPublication is violated."' \
+  'echo "Error: Invariant AuditSpentSurvivesRestart is violated."' \
+  'echo "Error: Invariant unseated_entry_is_not_a_member is violated."' \
+  'echo "Error: Invariant retiring_entry_is_a_declared_entry is violated."' \
+  'echo "Error: Invariant marked_entry_has_no_spawn_in_flight is violated."' \
+  'echo "Error: Invariant archived_session_record_is_unseated is violated."' \
+  'echo "Error: Action property AuditEntryLeavesBySealDestroyOrReset is violated."' \
+  'echo "Error: Action property AuditCandidateChangesNothing is violated."' \
+  'echo "Error: Action property AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry is violated."' \
+  'echo "Error: Action property AuditTakeOverEndsOnlyUnseated is violated."' \
+  'echo "Error: Action property AuditApplyLeavesAdoptingEntryAlone is violated."' \
+  'echo "Error: Action property AuditSealSparesIntentNamed is violated."' \
+  'echo "Error: Action property AuditSeatTakesArchivedSession is violated."' \
+  'echo "Error: Action property AuditHostPreparationNeverWoken is violated."' \
+  'echo "Error: Action property AuditHostStepKeepsRoleHold is violated."' \
+  'echo "Error: Action property AuditRoleHoldKeepsFirstBootRow is violated."' \
+  'echo "Error: Invariant held_creation_entry_was_never_created is violated."' \
+  'echo "Error: Action property AuditDormantSeatTakesOnlyOwedEntries is violated."' \
+  'echo "Error: Invariant placed_entry_custody_is_hosted_on_first_use is violated."' \
+  'echo "Error: Action property AuditLadderReservesEntryName is violated."' \
+  'echo "Error: Action property AuditResumeRoleMoveNeedsMigration is violated."' \
+  'echo "Error: Action property AuditSeatBindsArchivedOnlyAsRecord is violated."' \
+  'echo "Error: Action property AuditForgetNamesRecord is violated."' \
+  'echo "Error: Action property AuditListingUnmarks is violated."' \
+  'echo "Error: Action property AuditSeatKeepsRoleHold is violated."' \
+  'echo "Error: Invariant AuditDeclareExactlyOne is violated."' \
+  'echo "Error: Invariant AuditSealExactlyOne is violated."' \
+  'echo "Error: Action property AuditReplayRecordsOnlyArchived is violated."' \
+  'echo "Error: Action property AuditHostedReplayKeepsHosted is violated."' \
+  'echo "Error: Invariant AuditMarkReplayExactlyOne is violated."' \
+  'echo "Error: Action property AuditResetOnEmptyRoster is violated."' \
+  'echo "Error: Action property AuditResetPreflightChangesNothing is violated."' \
+  'echo "Error: Invariant AuditResetPreflightAgrees is violated."' \
+  'echo "Error: Invariant role_hold_belongs_to_an_entry is violated."' \
+  'echo "Error: Action property AuditResumeHeldOnlyWhenOwed is violated."' \
+  'echo "Error: Action property NotAuditWitnessResumeAnswersHeldStopped is violated."' \
+  'echo "Error: Invariant spawn_exec_membership_commit_requires_runtime is violated."' \
+  'echo "Error: Invariant AuditRolesDeclareExactlyOne is violated."' \
+  'echo "Error: Action property AuditRoleMoveKeepsRoleHold is violated."' \
+  'echo "Error: Action property AuditRoleMoveTakesItsEndpoint is violated."' \
+  'echo "Error: Action property AuditSameSessionSeatsTheStartedRole is violated."' \
+  'echo "Error: Invariant rotation_started_role_is_a_same_session_rotations is violated."' \
+  'echo "Error: Action property AuditRoleHoldEndsAtNewRole is violated."' \
+  'echo "Error: Action property AuditSeatedResumeWritesRoleHold is violated."' \
+  'echo "Error: Invariant AuditHoldDeclareExactlyOne is violated."' \
+  'echo "Error: Action property AuditResumeNeverRebuildsHeldMember is violated."' \
+  'echo "Error: Action property AuditResumeHeldChangesNothing is violated."' \
+  'echo "Error: Invariant AuditHeldDeclareExactlyOne is violated."' \
+  'echo "Error: Invariant AuditApplyOpenExactlyOne is violated."' \
+  'echo "Error: Invariant AuditPlacedDeclareExactlyOne is violated."' \
+  'echo "Error: Action property AuditRemoteCommitSeatsEntry is violated."' \
+  'for action in RecoverCreatedIdentityEntrySeatedRunning RecoverCreatedIdentityEntrySeatedStopped RecoverCreatedIdentityEntryRetiredRunning RecoverCreatedIdentityEntryRetiredStopped RecoverCreatedIdentityEntryPendingRunning RecoverCreatedIdentityEntryPendingStopped RecoverCreatedIdentityEntryTombstoneRunning RecoverCreatedIdentityEntryTombstoneStopped RecoverCreatedIdentityEntryUnreadableRunning RecoverCreatedIdentityEntryUnreadableStopped DeclareIdentityEntryRefusedNameOwnedByCreated DeclareIdentityEntryRefusedNameTombstoned DeclareIdentityEntryRefusedNameUnreadable AdoptLegacyIdentityEntryOtherCustody ResolveAgentLaneMemberAdmissionUnreadableNameRunning ResolveAgentLaneMemberAdmissionUnreadableNameStopped ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped ProbeMemberAdmissionIdentityNameReservedRunning ProbeMemberAdmissionIdentityNameReservedStopped CommitSpawnActivationFinalRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessScanSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanRetired is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanTombstone is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedMember is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanEntryTombstoned is violated."' \
+  'echo "Error: Action property NotAuditWitnessReseatOnRecord is violated."' \
+  'echo "Error: Action property NotAuditWitnessCreatedCustodyAborted is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessReconcileSparesReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessEnsureSparesReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessDestroyClearsReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealKeepsCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSkipsUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessProbeOtherOrigin is violated."' \
+  'echo "Error: Action property NotAuditWitnessScanContradictedPlaced is violated."' \
+  'echo "Error: Action property NotAuditWitnessReservedLadderAborted is violated."' \
+  'echo "Error: Invariant AuditRecoverExactlyOne is violated."' \
+  'echo "Error: Invariant AuditScanUnseatedCauses is violated."' \
+  'echo "Error: Invariant tombstone_is_never_an_entry is violated."' \
+  'echo "Error: Action property AuditNoLadderForReservedName is violated."' \
+  'echo "Error: Action property AuditLadderCustodyMatchesOrigin is violated."' \
+  'echo "Error: Invariant entry_custodies_are_disjoint is violated."' \
+  'echo "Error: Action property AuditCreatedSeatTakesRecord is violated."' \
+  'echo "Error: Invariant AuditReseatProbeExactlyOne is violated."' \
+  'echo "Error: Invariant AuditNamesDeclareExactlyOne is violated."' \
+  'echo "Error: Action property AuditSealNeverTouchesCreated is violated."' \
+  'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
+  'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
+  'echo "Error: Action property AuditNoSeatUnderReservedName is violated."' \
+  'for action in RecoverCreatedIdentityEntryRemovingRunning RecoverCreatedIdentityEntryRemovingStopped RecoverCreatedIdentityEntryArchivingRunning RecoverCreatedIdentityEntryArchivingStopped RecoverCreatedIdentityEntryArchivedRunning RecoverCreatedIdentityEntryArchivedStopped SetIdentityChangesHeldRunning SetIdentityChangesHeldStopped AdmitIdentityChangeAdmitted AdmitIdentityChangeReplayed AdmitIdentityChangeOperationReused AdmitIdentityChangeNonAuthoritative AdmitIdentityChangeChangesHeld AdmitIdentityChangeDecisionUnbound AdmitIdentityChangeDecisionExpired AdmitIdentityChangeImportedNotHostOperator AdmitIdentityChangeGrantRevoked AdmitIdentityChangeStaleSpec AdmitIdentityChangeMobNotRunningStopped RecordCreatedIdentityEntryRecorded RecordCreatedIdentityEntryNameHeldByIdentity RecordCreatedIdentityEntryNameHeldByWorker RecordCreatedIdentityEntryNameTombstoned RecordCreatedIdentityEntryNameUnreadable RecordCreatedIdentityEntryNonAuthoritative RecordCreatedIdentityEntryChangesHeld RecordCreatedIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchived RemoveIdentityEntryRetiring RemoveIdentityEntryRemoved RemoveIdentityEntryAlreadyRemoved RemoveIdentityEntryUnknown RemoveIdentityEntryInFlight RemoveIdentityEntryNameUnreadable RemoveIdentityEntryNonAuthoritative RemoveIdentityEntryChangesHeld RemoveIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchiving ArchiveIdentityEntryAlreadyArchived ArchiveIdentityEntryOwnedByRoster ArchiveIdentityEntryUnknown ArchiveIdentityEntryInFlight ArchiveIdentityEntryNameUnreadable ArchiveIdentityEntryNonAuthoritative ArchiveIdentityEntryChangesHeld ArchiveIdentityEntryMobNotRunningStopped UnarchiveIdentityEntryRestored UnarchiveIdentityEntryNotArchived UnarchiveIdentityEntryOwnedByRoster UnarchiveIdentityEntryUnknown UnarchiveIdentityEntryInFlight UnarchiveIdentityEntryNameUnreadable UnarchiveIdentityEntryNonAuthoritative UnarchiveIdentityEntryChangesHeld UnarchiveIdentityEntryMobNotRunningStopped DeclareIdentityEntryPreparationPending BeginPreparationConstructionHeld BeginPreparationConstructionNotPending BeginPreparationConstructionNotConstructed BeginPreparationConstructionConstructionOpen BeginPreparationConstructionNonAuthoritative BeginPreparationConstructionMobNotRunningStopped SettleHostPreparationSeat SettleHostPreparationActivationAccepted SettleHostPreparationNotPending SettleHostPreparationConstructionRequired SettleHostPreparationConstructionOpen SettleHostPreparationStaleAttempt SettleHostPreparationExpired SettleHostPreparationMismatch SettleHostPreparationActivationPending SettleHostPreparationNonAuthoritative SettleHostPreparationMobNotRunningStopped EndPreparationConstructionEndedRunning EndPreparationConstructionEndedStopped EndPreparationConstructionNotOpenRunning EndPreparationConstructionNotOpenStopped EndPreparationConstructionActivationPendingRunning EndPreparationConstructionActivationPendingStopped CommitSpawnMembershipFresh ObserveMemberRetirementArchivedLiveStopped BeginPlacedCompletionLifecycleQuiesceFresh AdmitDestroyCleanup AdmitDestroyMemberRetireArchiveOnlyRunning SessionIngressDetachedForMobDestroyRunning ObserveDestroyMemberRetirementArchivedLiveRunning ArchiveIdentityEntryPreparationPending DeclareIdentityEntryKept DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRecordOnly DeclareIdentityEntrySeatOwed BeginSpawnExecFreshPeerOnly CommitSpawnMembershipFreshPeerOnly AbortSpawnExecActiveRunning RetireRunningReleasingArchiveOnly ObserveMemberRetirementArchivedLive SeedMemberResidencyRunning AuthorizeSpawnProfileRunning BeginSpawnExecFresh CommitDormantSeatRunning RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning RecoverCreatedIdentityEntrySeatedRunning RecoverCreatedIdentityEntryUnreadableRunning SealBootMaterializationPlan UnlistIdentityEntryRetiring UnlistIdentityEntryRemoved UnlistIdentityEntryDeferred UnlistIdentityEntryNotADeclaredEntry UnlistIdentityEntryNonAuthoritative UnlistIdentityEntryMobNotRunningStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessCommitRecordedPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitRecordedHosted is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitRecordedHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitStaleSpec is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitHeldRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitWorkerRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitCreatedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitHeldCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUpdateMigrates is violated."' \
+  'echo "Error: Action property NotAuditWitnessUpdateRestamps is violated."' \
+  'echo "Error: Action property NotAuditWitnessUpdateOfUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalRetiring is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalEndsAtStoppedTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalStoreOwnedEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalDestroyClearsMark is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalAtOnce is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalOfArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalAlreadyRemoved is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalRefusesDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveRetires is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveRestored is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveReseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveOwnedByRoster is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchivePendingRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveUpdateRecordOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveRemovalWaits is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterSettledByDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepStoreSettleSeats is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepAccepted is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepPublished is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterPublished is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepAbortRefusedWhileActivating is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepExpired is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRemovalEndsHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRemovalWaits is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepArchiveRefusedWhileHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepUpdateRecordOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepLadderOpensAfterAcceptance is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterLadderOpensAfterAcceptance is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessPeerOnlyCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistMarksSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistRemovesUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistDefersLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistedNameRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistLeavesCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecoveredRemovalEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecoveredArchiveEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeToUnseatedDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeSecondDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgePeerUnknown is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByOwner is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByPolicy is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeNotOwner is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByPeerRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByOwnerRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeKeptByThirdRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeKeptByArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeUnwireRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRecovered is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeOutOfForce is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeOutOfForceUnwire is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRealized is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRestoredToNoEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRosterSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRosterOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStaleGeneration is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptUnlistingRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRetiringRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptApplyOpen is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStoreOwned is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptNotAMember is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptTombstoned is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptCandidate is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptOverrideRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleDeclaredKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleInPlace is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleTombstone is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleNameTaken is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleReleased is violated."' \
+  'echo "Error: Action property NotAuditWitnessCyclePurgeNothing is violated."' \
+  'echo "Error: Action property NotAuditWitnessCyclePlainInPlace is violated."' \
+  'echo "Error: Action property NotAuditWitnessCyclePlainOtherSession is violated."' \
+  'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
+  'echo "Error: Action property AuditRemovalTombstones is violated."' \
+  'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
+  'echo "Error: Action property AuditArchivedNeverSeated is violated."' \
+  'echo "Error: Action property AuditPendingSeatedOnlyByItsActivation is violated."' \
+  'echo "Error: Invariant AuditAcceptedActivationIsFinal is violated."' \
+  'echo "Error: Invariant AuditConstructionAwaitsPreparation is violated."' \
+  'echo "Error: Action property AuditConstructedNeverSettledWithoutAttempt is violated."' \
+  'echo "Error: Action property AuditRecordCauseFollowsFacts is violated."' \
+  'echo "Error: Invariant AuditRecordExactlyOne is violated."' \
+  'echo "Error: Invariant AuditAdmitExactlyOne is violated."' \
+  'echo "Error: Action property AuditHeldNeverSeatedDormant is violated."' \
+  'echo "Error: Invariant AuditUpdateParity is violated."' \
+  'echo "Error: Invariant AuditRemovalExactlyOne is violated."' \
+  'echo "Error: Action property AuditPendingNeverArchived is violated."' \
+  'echo "Error: Invariant AuditArchiveExactlyOne is violated."' \
+  'echo "Error: Invariant AuditPrepExactlyOne is violated."' \
+  'echo "Error: Action property AuditUnlistDecidesItsIdentityAlone is violated."' \
+  'echo "Error: Action property AuditRecordTakesFreeNames is violated."' \
+  'echo "Error: Invariant AuditUnlistExactlyOne is violated."' \
+  'echo "Error: Invariant construction_is_held_or_activating is violated."' \
+  'echo "Error: Invariant entry_ending_marks_are_seated_and_disjoint is violated."' \
+  'echo "Error: Invariant archived_entry_is_store_owned is violated."' \
+  'echo "Error: Action property AuditStoreUpdateKeepsStanding is violated."' \
+  'echo "Error: Action property AuditCreatedEntryNeverDeclared is violated."' \
+  'echo "Error: Invariant AuditEdgesExactlyOne is violated."' \
+  'echo "Error: Action property AuditOnlyTheOwnerEndsItsEdge is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeKeepsItsOwner is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeBindsIdentitiesOnly is violated."' \
+  'echo "Error: Action property AuditRestoreIsTheRecovery is violated."' \
+  'echo "Error: Invariant AuditAdoptExactlyOne is violated."' \
+  'echo "Error: Action property AuditAdoptionKeepsTheIncarnation is violated."' \
+  'echo "Error: Action property AuditAdoptionTakesASettledMember is violated."' \
+  'echo "Error: Action property AuditAdoptionTakesNoOverriddenWorker is violated."' \
+  'echo "Error: Invariant AuditCycleExactlyOne is violated."' \
+  'echo "Error: Action property AuditPurgeTouchesNothingElse is violated."' \
+  'echo "Error: Invariant AuditImportRestoresOverNoRow is violated."' \
+  'echo "Error: Action property AuditImportKeepsTheIncarnation is violated."' \
+  'echo "Error: Action property AuditPurgeNeedsRows is violated."' \
+  'echo "Error: Action property AuditImportBindsOnTheRecordsSession is violated."' \
+  'echo "Error: Invariant created_origin_without_row_is_unreadable is violated."' \
+  'for action in PurgeIdentityRowsPurged PurgeIdentityRowsNonAuthoritative PurgeIdentityRowsReplayed PurgeIdentityRowsOperationReused PurgeIdentityRowsRowsPurged PurgeIdentityRowsNotHostOperator PurgeIdentityRowsChangesNotHeld PurgeIdentityRowsNothingToPurge PurgeIdentityRowsMobNotRunningStopped RecoverRowlessCreatedEntryReservedRunning RecoverRowlessCreatedEntryReservedStopped RecoverRowlessCreatedEntryKeptRunning RecoverRowlessCreatedEntryKeptStopped ImportIdentityRecordRestoredInPlace ImportIdentityRecordRestoredOwedSeat ImportIdentityRecordRestoredPending ImportIdentityRecordRestoredArchived ImportIdentityRecordRestoredTombstone ImportIdentityRecordRestoredByAdoption ImportIdentityRecordUnchanged ImportIdentityRecordNameTakenMeanwhile ImportIdentityRecordUnsettled ImportIdentityRecordNonAuthoritative ImportIdentityRecordChangesHeld ImportIdentityRecordRowsPurged ImportIdentityRecordMobNotRunningStopped AdmitIdentityChangeRowsPurged; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in AdoptIdentityIntoStoreAdopted AdoptIdentityIntoStoreNotAdoptable AdoptIdentityIntoStorePredecessorMismatch AdoptIdentityIntoStoreAdmissionUnsettled AdoptIdentityIntoStoreDeclaredApplyOpen AdoptIdentityIntoStoreNameUnreadable AdoptIdentityIntoStoreNameTombstoned AdoptIdentityIntoStoreNonAuthoritative AdoptIdentityIntoStoreChangesHeld AdoptIdentityIntoStoreMobNotRunningStopped UnlistIdentityEntryRetiring OpenDeclaredApplyOpened CloseDeclaredApplyRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Invariant owned_edge_joins_no_tombstone is violated."' \
+  'echo "Error: Invariant owned_edge_owner_is_a_store_owned_end is violated."' \
+  'for action in DeclareOwnedIdentityEdgeDeclared DeclareOwnedIdentityEdgeAlreadyOwned DeclareOwnedIdentityEdgePeerUnknown DeclareOwnedIdentityEdgeOwnerInvalid DeclareOwnedIdentityEdgeMobNotRunningStopped EndOwnedIdentityEdgeEnded EndOwnedIdentityEdgeNotOwner EndOwnedIdentityEdgeAbsent EndOwnedIdentityEdgeNonAuthoritative EndOwnedIdentityEdgeChangesHeld EndOwnedIdentityEdgeMobNotRunningStopped AdmitMemberUnwireAdmittedRunning AdmitMemberUnwireAdmittedStopped AdmitMemberUnwireOwnedEdgeRunning AdmitMemberUnwireOwnedEdgeStopped RecoverOwnedIdentityEdgeRecoveredRunning RecoverOwnedIdentityEdgeRecoveredStopped RecoverOwnedIdentityEdgeSkippedRunning RecoverOwnedIdentityEdgeSkippedStopped AdmitOwnedEdgeRealizationRealizeRunning AdmitOwnedEdgeRealizationRealizeStopped AdmitOwnedEdgeRealizationNotOwnedRunning AdmitOwnedEdgeRealizationNotOwnedStopped AdmitOwnedEdgeRealizationEndNotAnIdentityRunning RestoreOwnedIdentityEdgeRestored RestoreOwnedIdentityEdgeSkipped RestoreOwnedIdentityEdgeMobNotRunningStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "<C1RecoverInBootOrder line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<ArchiveRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<RecoveredRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<C1OneRowRemoving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<C1OneRowArchiving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<C1OneRowUnreadable line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresInPlace line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresOwedSeat line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresPending line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresArchived line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresTombstone line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresByAdoption line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'for action in SubmitWorkRunningExternal SubmitWorkRunningExternalPeerOnly SubmitWorkRunningInternal SubmitWorkRunningInternalPeerOnly ResolveSubmitWorkRejectionMemberNotFound ResolveSubmitWorkRejectionStaleFenceToken ResolveSubmitWorkRejectionIdentityMember ResolveSubmitWorkRejectionIdentityMemberUnreadableName ResolveSubmitWorkRejectionNotExternallyAddressable ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable ResolveSubmitWorkRejectionStaleSessionBinding; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalWorkerAdmitted is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsInternalEntryAdmitted is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalEntryRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalCreatedRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalEntryMovedSessionRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsExternalWorkerMovedSessionRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessDoorsInternalEntryMovedSessionRefused is violated."' \
+  'echo "Error: Invariant AuditDoorsNoExternalEntryAdmission is violated."' \
+  'echo "Error: Invariant AuditDoorsAtMostOne is violated."' \
+  'echo "Error: Invariant AuditDoorsEntryExactlyOne is violated."' \
+  'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
+  'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecordedReowed is violated."' \
+  'echo "Error: Action property NotAuditWitnessBlockedThenUnblocked is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecordCloses is violated."' \
+  'echo "Error: Action property NotAuditWitnessSeatAfterWriteOwed is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnseatDropsFacts is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDormantDeliverable is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnbornOwedDeferred is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetiringReleasable is violated."' \
+  'echo "Error: Action property AuditWriteOwesExactlyTheSelected is violated."' \
+  'echo "Error: Invariant AuditDeliversOnlyToBoundBornMembers is violated."' \
+  'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \
+  'echo "Error: Action property AuditUnseatLeavesNoFact is violated."' \
   'echo "Error: Invariant NotAuditWitnessReviseDropsEarlierAck is violated."' \
   'echo "Error: Invariant NotAuditWitnessLateAckAccepted is violated."' \
   'echo "Error: Invariant NotAuditWitnessDeleteDropsEarlierAck is violated."' \
   'echo "Error: Invariant AuditAckSetAnswersTheLatestSupersession is violated."' \
   'echo "Error: Invariant AuditLatestSupersessionAcksAreKept is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResumedAfterStop is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWaitedOutOwnGrantResumed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHolderRenewed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessForeignAfterWait is violated."' \
+  'echo "Error: Invariant NotAuditWitnessListingFailedResumed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResidual is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWaitedOutAgainResumed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessQuarantineKeptAcrossReacquire is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPoisonKeptAcrossReacquire is violated."' \
+  'echo "Error: Invariant NotAuditWitnessFailedOpenRefusesReacquire is violated."' \
+  'echo "Error: Invariant NotAuditWitnessChunkOwnerQuarantined is violated."' \
+  'echo "Error: Invariant AuditNoFalseLoss is violated."' \
+  'echo "Error: Invariant AuditWaitsAgainOnlyUnrenewed is violated."' \
+  'echo "Error: Invariant AuditNoResumeWithoutProof is violated."' \
+  'echo "Error: Invariant AuditNoResumeOverForeignBatch is violated."' \
+  'echo "Error: Action property AuditClassificationsMonotone is violated."' \
+  'echo "Error: Invariant no_scope_is_quarantined_and_poisoned is violated."' \
+  'echo "Error: Invariant AuditNoReacquireAfterFailedOpen is violated."' \
+  'for action in ResolveMemberDispatchAdmissionAskHostRunning ResolveMemberDispatchAdmissionInheritRunning ResolveMemberDispatchAdmissionRefusedRunning ResolveMemberDispatchAdmissionNoneRequiredRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessRunning is violated by the initial state:"' \
+  'echo "Error: Invariant AuditHostAskedOnlyForGatedOrUnknownLineage is violated by the initial state:"' \
+  'echo "Error: Invariant AuditInheritNeedsDerived is violated by the initial state:"' \
+  'echo "Error: Invariant AuditVerdictTable is violated by the initial state:"' \
+  'echo "Error: Invariant AuditGatedLineageNeverBuiltUngated is violated by the initial state:"' \
+  'echo "Error: Invariant AuditUnknownLineageUngatedOnlyWhenTheHostDerivedNone is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRefusedOnlyForGatedNoneDerived is violated by the initial state:"' \
+  'echo "Error: Invariant AuditStaleRecordNeverMatches is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRecordOnlyTheCurrentLocalIncarnation is violated by the initial state:"' \
+  'echo "Error: Invariant NotAuditWitnessReleasedAfterIssuance is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainThenReleased is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReleasedTwice is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainAfterRevocation is violated."' \
+  'echo "Error: Invariant AuditReleaseEndsInReleased is violated."' \
+  'echo "Error: Invariant AuditUncertainAppendEndsCustody is violated."' \
+  'echo "Error: Invariant AuditEndedOwnerAcceptsNothing is violated."' \
+  'echo "Error: Action property AuditCustodyEndLatches is violated."' \
+  'echo "Error: Action property AuditCustodyEndKeepsTheFacts is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"
@@ -720,7 +1414,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v audits-w audits-x audits-y"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""
@@ -751,6 +1445,31 @@ else
   done
 fi
 
+# The created identity runner's runs reach the shards by the --part lists
+# the lane names, under one "running bounded" line per shard, so a run
+# dropped from every list would leave the lines above unchanged: by the
+# runner's own per-run lines, the shards together must run each run the
+# runner checks whole (no --part) exactly once.
+created_identity_runs() {
+  grep -E '^created identity audit [a-z]+ run: [0-9]+ distinct states' \
+    | sed -E 's/^created identity audit ([a-z]+) run: .*/\1/' | sort
+}
+created_whole_rc=0
+created_whole_out="$(PATH="$tlc_env_tmp:$PATH" \
+  TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+  TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+  TLC_WORKERS=1 bash specs/machines/mob_machine/created_identity_audit.sh 2>&1)" || created_whole_rc=$?
+created_whole_runs="$(printf '%s\n' "$created_whole_out" | created_identity_runs || true)"
+created_shard_runs="$(for shard in $audit_shards; do created_identity_runs < "$shard_outputs/$shard" || true; done | sort)"
+if [ "$created_whole_rc" = 0 ] && [ -n "$created_whole_runs" ] \
+  && [ -z "$(printf '%s\n' "$created_shard_runs" | uniq -d)" ] \
+  && [ "$created_shard_runs" = "$created_whole_runs" ]; then
+  ok "TLC lane parts: the audit shards run each run of the created identity runner exactly once"
+else
+  bad "TLC lane parts drop or repeat a created identity run (whole runner rc=$created_whole_rc; its runs:$(printf ' %s' $created_whole_runs); the shards':$(printf ' %s' $created_shard_runs))"
+  [ "$created_whole_rc" = 0 ] || show_tail created-identity-whole "$created_whole_out"
+fi
+
 # The member residency runner counts an arm printed with TLC's location
 # suffix (the fake above prints one so; the lane parts run it), and still
 # refuses a covered arm that is absent from the coverage block: a copy of the
@@ -773,6 +1492,53 @@ else
   show_tail residency-absent "$absent_out"
 fi
 rm -rf "$absent_tlc_tmp"
+
+# The created identity runner reads an arm a run fires only through a named
+# wrapper under the wrapper's name, by its closed alias table (TLC names an
+# action whose body is a conjunction after its operator), never by a
+# location: a copy of the fake without the wrapper's line must fail that
+# run on exactly that arm and wrapper, though the fake still prints the
+# arm's own line.
+alias_tlc_tmp="$(mktemp -d)"
+alias_failures=""
+for alias_case in "scan:C1RecoverInBootOrder:RecoverRosterMemberRunning" \
+  "names:C1RecoverInBootOrder:RecoverRosterMemberRunning" \
+  "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly" \
+  "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly" \
+  "recovered:C1OneRowRemoving:RecoverCreatedIdentityEntryRemovingRunning" \
+  "recovered:C1OneRowArchiving:RecoverCreatedIdentityEntryArchivingRunning" \
+  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning" \
+  "cycle:CycleRestoresInPlace:ImportIdentityRecordRestoredInPlace" \
+  "cycle:CycleRestoresOwedSeat:ImportIdentityRecordRestoredOwedSeat" \
+  "cycle:CycleRestoresPending:ImportIdentityRecordRestoredPending" \
+  "cycle:CycleRestoresArchived:ImportIdentityRecordRestoredArchived" \
+  "cycle:CycleRestoresTombstone:ImportIdentityRecordRestoredTombstone" \
+  "cycle:CycleRestoresByAdoption:ImportIdentityRecordRestoredByAdoption"; do
+  alias_run="${alias_case%%:*}"
+  alias_wrapper="${alias_case#*:}"
+  alias_wrapper="${alias_wrapper%%:*}"
+  alias_arm="${alias_case##*:}"
+  grep -vF "<${alias_wrapper} line 1, col 1 to line 1, col 2 of module created_identity_audit>" \
+    "$tlc_env_tmp/tlc" > "$alias_tlc_tmp/tlc"
+  chmod +x "$alias_tlc_tmp/tlc"
+  alias_rc=0
+  alias_out="$(PATH="$alias_tlc_tmp:$PATH" \
+    TLC_JAVA_OPTIONS_CAPTURE="$alias_tlc_tmp/capture" \
+    TLC_JDK_JAVA_OPTIONS_CAPTURE="$alias_tlc_tmp/capture-jdk" \
+    TLC_WORKERS=1 bash specs/machines/mob_machine/created_identity_audit.sh --part "$alias_run" 2>&1)" || alias_rc=$?
+  if [ "$alias_rc" = 0 ] \
+    || ! printf '%s\n' "$alias_out" \
+      | grep -Fq "${alias_run} run: ${alias_arm} never fired (coverage of ${alias_wrapper}: 'absent')"; then
+    alias_failures+=" ${alias_run}"
+    show_tail "created-identity-alias-${alias_run}" "$alias_out"
+  fi
+done
+if [ -z "$alias_failures" ]; then
+  ok "created identity audit reads a wrapped arm under its wrapper's name and refuses it when the wrapper's line is absent"
+else
+  bad "created identity audit accepted a coverage block without a wrapper its alias table names (runs:${alias_failures})"
+fi
+rm -rf "$alias_tlc_tmp"
 
 # tlc_run_cap.sh: the per-run watchdog must never outlive a run that ended
 # first, or hold a caller's `$(...)` capture open. A sleep orphaned between

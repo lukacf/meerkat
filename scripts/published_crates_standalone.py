@@ -18,11 +18,15 @@ scripts/release-rust-crates.sh lists.
         - `cargo test -p C --features <declared>` passes, where <declared> is
           the crate's [package.metadata.meerkat.standalone-tests] features;
         - test-name parity: per test target, the standalone test names equal
-          the workspace's names for the same package and features, minus the
-          workspace-only tests ci/standalone-workspace-only.toml declares.
+          the workspace's names for the same package and features (plus
+          `workspace-tests` when the crate declares it, as every workspace
+          test build of the crate passes), minus the workspace-only tests
+          ci/standalone-workspace-only.toml declares.
       --stack mirror (default) sets RUST_MIN_STACK to the workspace's
       .cargo/config.toml value; --stack default leaves Rust's own default, to
-      record which targets need the larger stack.
+      record which targets need the larger stack. --out must not lie under a
+      directory with a Cargo configuration (the repository's included): the
+      standalone builds run inside it, and a downloader has none.
 
   published_crates_standalone.py guard [--crate NAME ...]
 
@@ -36,11 +40,44 @@ scripts/release-rust-crates.sh lists.
         - code under a cfg that needs `workspace-tests` is not scanned: the
           package leaves that feature off, so the code never builds there;
         - the declared test features exist and leave `workspace-tests` off,
-          a crate declaring `workspace-tests` has the path-only self
-          dev-dependency that enables it and its Bazel unit-test target
-          turns it on, and the packaged README.md prints the test command.
+          and the packaged README.md prints the test command;
+        - the crate's test features (the declared ones, and `workspace-tests`
+          when it declares that feature) are on its Bazel unit-test target,
+          its lib.rs carries the test-feature canary over exactly them, and
+          no path-only self dev-dependency turns them on (the workspace's
+          test commands pass them; the edge would make the crate's lib test
+          wait for its own library).
       A flagged line that is not a test escape is listed under the crate's
       `guard_allow` with its reason.
+
+  published_crates_standalone.py floor --product NAME --out DIR
+      [--mode pr|release] [--allow-dirty]
+
+      The published-floor check of a product other than Core (ci/products.json:
+      meta, connect). In the one workspace a product compiles against the
+      in-tree Core (and Connect against the in-tree Meta) through path
+      dependencies; a published product requires the versions its manifests
+      declare from crates.io. The floor check builds the product's crates the
+      way a downloader resolves them:
+        - package: a product with a publish order packages those crates
+          (`cargo package --no-verify`, every in-repo crate patched to its
+          path so packaging resolves); an unpublished product's manifests are
+          normalized the same way (workspace inheritance resolved, `path`
+          dropped from every dependency outside the product);
+        - unpack them into a scratch workspace whose [patch.crates-io] covers
+          only the product's own crates, with the repository lock as the
+          seed and the repository's [env] (the forced LIBSQLITE3_FLAGS);
+        - resolve: every other in-repo crate must come from crates.io at the
+          declared version (a version crates.io lacks fails here, naming it:
+          the product needs an unreleased dependency);
+        - build: what a downloader compiles, the product's libraries and
+          binaries: `cargo check --workspace --lib --bins` (--mode pr) or
+          `cargo build --workspace --lib --bins` (--mode release). Test
+          targets are not part of a published crate's contract, and a
+          product's packaged tests may read files its package does not ship
+          (Meta's lib tests read tests/fixtures, which its package excludes;
+          its integration tests read the repository's docs).
+      Writes floor.json to --out. Exit 1 names the first failing stage.
 
 Exit 0 = proven, 1 = a crate fails, 2 = usage error or unreadable input.
 """
@@ -149,9 +186,9 @@ def test_command(manifest: dict) -> str | None:
 
 def published_test_contract_failures(crate: str, manifest: dict, package_root: pathlib.Path, packaged: set[str]) -> list[str]:
     """The published test contract: the declared feature set exists and never
-    turns on `workspace-tests`; a crate that declares `workspace-tests` has the
-    path-only self dev-dependency that enables it; and README.md, which the
-    package carries, prints the exact test command."""
+    turns on `workspace-tests`, which only the workspace's own test builds
+    pass; and README.md, which the package carries, prints the exact test
+    command."""
     failures = []
     features = (manifest.get("features") or {})
     for feature in standalone_features(manifest):
@@ -159,13 +196,6 @@ def published_test_contract_failures(crate: str, manifest: dict, package_root: p
             failures.append(f"{crate}: standalone-tests features must not include {WORKSPACE_TESTS}")
         elif feature not in features:
             failures.append(f"{crate}: standalone-tests feature {feature} is not declared in [features]")
-    if WORKSPACE_TESTS in features:
-        self_dep = (manifest.get("dev-dependencies") or {}).get(crate)
-        if not (isinstance(self_dep, dict) and self_dep.get("path") == "." and "version" not in self_dep
-                and WORKSPACE_TESTS in (self_dep.get("features") or [])):
-            failures.append(
-                f"{crate}: declares {WORKSPACE_TESTS} but no path-only self dev-dependency enables it"
-            )
     command = test_command(manifest)
     if command is not None:
         readme = package_root / "README.md"
@@ -190,23 +220,139 @@ def bazel_unit_test_features(build_text: str, target: str) -> list[str] | None:
     return re.findall(r'"([^"]+)"', features.group(1)) if features else []
 
 
+def test_features(manifest: dict) -> list[str]:
+    """The features every workspace test build of the crate passes: its
+    declared standalone-test features, then `workspace-tests` when it declares
+    that feature (scripts/ci-products.mjs testFeaturesOf)."""
+    declared = list(dict.fromkeys(standalone_features(manifest)))
+    if WORKSPACE_TESTS in (manifest.get("features") or {}):
+        declared.append(WORKSPACE_TESTS)
+    return declared
+
+
 def bazel_workspace_tests_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
-    """A crate that declares `workspace-tests` gets it on its Bazel unit-test
-    target (scripts/generate-bazel-rust-builds.mjs follows the self
-    dev-dependency), or the Bazel lanes silently drop its workspace-only tests."""
-    if WORKSPACE_TESTS not in (manifest.get("features") or {}):
+    """A crate's Bazel unit-test target turns on every test feature of the
+    crate (scripts/generate-bazel-rust-builds.mjs adds them to its feature
+    union), or the Bazel lanes silently drop the tests they gate."""
+    wanted = test_features(manifest)
+    if not wanted:
         return []
     target = f"{crate.replace('-', '_')}_unit_test"
     try:
         build_text = (package_root / "BUILD.bazel").read_text()
     except OSError as err:
-        return [f"{crate}: declares {WORKSPACE_TESTS} but its BUILD.bazel cannot be read: {err}"]
+        return [f"{crate}: has test features but its BUILD.bazel cannot be read: {err}"]
     features = bazel_unit_test_features(build_text, target)
     if features is None:
-        return [f"{crate}: declares {WORKSPACE_TESTS} but BUILD.bazel has no {target}"]
-    if WORKSPACE_TESTS not in features:
-        return [f"{crate}: BUILD.bazel {target} does not enable {WORKSPACE_TESTS}; run make buildbuddy-generate"]
+        return [f"{crate}: has test features but BUILD.bazel has no {target}"]
+    missing = [feature for feature in wanted if feature not in features]
+    if missing:
+        return [f"{crate}: BUILD.bazel {target} does not enable {', '.join(missing)}; run make buildbuddy-generate"]
     return []
+
+
+CANARY_ENV = "MEERKAT_WORKSPACE_TEST_FEATURES"
+# The canary in any whitespace layout (rustfmt splits a long cfg over lines):
+# `#[cfg(...)]` (no `]` inside) on a module whose generic function asserts on
+# the variable in an inline const, and a `#[used]` static that instantiates
+# that function. A generic function's inline const is evaluated only where
+# the function is instantiated, which only code generation does: a test
+# binary trips the canary, `cargo check`, clippy and an editor's check run do
+# not. A plain `const _` assert would trip all of them.
+CANARY = re.compile(
+    r'#\[cfg\((?P<cfg>[^\]]*)\)\]\s*'
+    r'mod test_features_canary \{\s*'
+    r'fn require<T>\(\) \{\s*'
+    r'const \{\s*'
+    r'let _ = size_of::<T>\(\);\s*'
+    r'assert!\(\s*'
+    r'option_env!\("' + CANARY_ENV + r'"\)\.is_none\(\),\s*'
+    r'"(?P<message>(?:[^"\\]|\\.)*)"\s*,?\s*'
+    r'\);\s*'
+    r'\}\s*'
+    r'\}\s*'
+    r'#\[used\]\s*'
+    r'static REQUIRE: fn\(\) = require::<\(\)>;\s*'
+    r'\}',
+    re.S,
+)
+
+
+def rust_string_value(literal: str) -> str:
+    """A Rust string literal's text as the compiler reads it, for the escapes
+    a canary message uses: a backslash at the end of a line drops the line
+    break and the next line's leading whitespace, and `\\"` and `\\\\` stand
+    for the character."""
+    text = re.sub(r"\\\n\s*", "", literal)
+    return re.sub(r'\\(["\\])', r"\1", text)
+
+
+def canary_features(cfg: str) -> list[str] | None:
+    """The features a canary's cfg, `all(test, not(PREDICATE))`, requires,
+    where PREDICATE is `feature = "x"` or `all(feature = "x", ...)`; None for
+    any other cfg. Whitespace is ignored."""
+    compact = re.sub(r"\s+", "", cfg)
+    whole = re.fullmatch(r'all\(test,not\((?P<predicate>.*)\)\)', compact)
+    if not whole:
+        return None
+    predicate = whole.group("predicate")
+    one = re.fullmatch(r'feature="([^"]+)"', predicate)
+    if one:
+        return [one.group(1)]
+    many = re.fullmatch(r'all\((feature="[^"]+"(?:,feature="[^"]+")+),?\)', predicate)
+    if many:
+        return re.findall(r'feature="([^"]+)"', many.group(1))
+    return None
+
+
+def canary_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
+    """A crate with test features carries exactly one test-feature canary in
+    its lib.rs, over exactly those features, whose message names the command
+    to run (`cargo test -p <crate> --features <them>`): in the repository
+    (.cargo/config.toml [env] sets the variable) a test build without them
+    fails to compile instead of compiling the tests they gate out. A crate
+    without test features carries none."""
+    wanted = test_features(manifest)
+    try:
+        text = (package_root / "src" / "lib.rs").read_text()
+    except OSError as err:
+        return [f"{crate}: has test features but its src/lib.rs cannot be read: {err}"] if wanted else []
+    found = list(CANARY.finditer(text))
+    reads = text.count(f'option_env!("{CANARY_ENV}")')
+    if not wanted:
+        return [f"{crate}: has no test features but its lib.rs carries a test-feature canary"] if reads else []
+    if len(found) != 1 or reads != 1:
+        return [
+            f"{crate}: lib.rs must carry exactly one test-feature canary (a cfg(all(test, not(...))) "
+            f"test_features_canary module asserting on {CANARY_ENV} in a generic function's inline const, "
+            "and the #[used] static that instantiates it)"
+        ]
+    features = canary_features(found[0].group("cfg"))
+    if features is None or sorted(features) != sorted(wanted):
+        return [f"{crate}: the lib.rs canary requires {features}, not the crate's test features {wanted}"]
+    command = f"cargo test -p {crate} --features {','.join(wanted)}"
+    if f"`{command}`" not in rust_string_value(found[0].group("message")):
+        return [f"{crate}: the lib.rs canary message must name `{command}`"]
+    return []
+
+
+def self_dev_dependency_failures(crate: str, manifest: dict) -> list[str]:
+    """No crate dev-depends on itself: the workspace's test commands pass its
+    test features, and a self edge would make its lib test wait for its own
+    library (and swallow `--features <crate>/<feature>` in non-test builds)."""
+    tables = [manifest.get("dev-dependencies") or {}]
+    for target in (manifest.get("target") or {}).values():
+        tables.append((target or {}).get("dev-dependencies") or {})
+    failures = []
+    for table in tables:
+        for key, spec in table.items():
+            name = spec.get("package", key) if isinstance(spec, dict) else key
+            if name == crate or (isinstance(spec, dict) and spec.get("path") == "."):
+                failures.append(
+                    f"{crate}: dev-depends on itself ({key}); the workspace's test commands pass its test features "
+                    "(scripts/core-workspace-args.mjs --tests)"
+                )
+    return failures
 
 
 def toolchain(root: pathlib.Path) -> str | None:
@@ -549,6 +695,8 @@ def guard(root: pathlib.Path, crates: list[str]) -> int:
             failures.append(f"{crate}: guard_allow {path} {kind} matches nothing (stale entry)")
         failures.extend(published_test_contract_failures(crate, cargo_manifest, package_root, packaged))
         failures.extend(bazel_workspace_tests_failures(crate, cargo_manifest, package_root))
+        failures.extend(canary_failures(crate, cargo_manifest, package_root))
+        failures.extend(self_dev_dependency_failures(crate, cargo_manifest))
         print(f"  {crate:<36}{'FAIL' if any(f.startswith(crate + ':') for f in failures) else 'OK'}")
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
@@ -695,11 +843,34 @@ def package_and_unpack(root: pathlib.Path, crates: list[str], all_crates: list[s
     return unpacked
 
 
+def cargo_config_above(path: pathlib.Path) -> pathlib.Path | None:
+    """The first Cargo configuration file Cargo would read for a build run in
+    `path` from the directories above it (`.cargo/config.toml` or
+    `.cargo/config` of `path` or an ancestor), or None. The user's own
+    $CARGO_HOME configuration is not one: a downloader has that too."""
+    home = pathlib.Path(os.environ.get("CARGO_HOME") or pathlib.Path.home() / ".cargo").resolve()
+    own = {home / "config.toml", home / "config"}
+    for directory in [path, *path.parents]:
+        for name in ("config.toml", "config"):
+            candidate = directory / ".cargo" / name
+            if candidate.is_file() and candidate.resolve() not in own:
+                return candidate
+    return None
+
+
 def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str, allow_dirty: bool) -> int:
     manifest = load_manifest(root)
     all_crates = release_crates(root)
     dirs = crate_dirs(root)
     rust_toolchain = toolchain(root)
+    # The standalone builds run in out/ws: a Cargo configuration above it (the
+    # repository's [env], for one) would reach them, and a downloader has none.
+    config = cargo_config_above(out.resolve())
+    if config is not None:
+        raise UsageError(
+            f"--out {out} lies under {config.parent.parent}, whose Cargo configuration ({config}) the standalone "
+            "builds would read; choose a directory outside the repository"
+        )
     out.mkdir(parents=True, exist_ok=False)
     logs = out / "logs"
     logs.mkdir()
@@ -732,7 +903,13 @@ def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str,
 
         rc_s, standalone_listing = run([cargo(), "test", "-p", crate, *feature_args, "--", "--list", "--format", "terse"],
                                        ws, standalone_env, logs / f"{crate}.list-standalone.log")
-        rc_w, workspace_listing = run([cargo(), "test", "-p", crate, *feature_args, "--", "--list", "--format", "terse"],
+        # The workspace runs the crate's tests with `workspace-tests` too when
+        # it declares that feature: every workspace test build passes it (no
+        # dev-dependency does), and the parity below takes the tests it gates
+        # out again (ci/standalone-workspace-only.toml).
+        workspace_features = [*features, *([WORKSPACE_TESTS] if WORKSPACE_TESTS in (packaged.get("features") or {}) else [])]
+        workspace_feature_args = ["--features", ",".join(workspace_features)] if workspace_features else []
+        rc_w, workspace_listing = run([cargo(), "test", "-p", crate, *workspace_feature_args, "--", "--list", "--format", "terse"],
                                       root, workspace_env, logs / f"{crate}.list-workspace.log")
         if rc_s != 0 or rc_w != 0:
             row["problems"].append(f"listing failed (standalone rc {rc_s}, workspace rc {rc_w})")
@@ -751,6 +928,273 @@ def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str,
 
 
 # ---------------------------------------------------------------------------
+# Published floor (one product against the registry)
+# ---------------------------------------------------------------------------
+
+PRODUCTS = pathlib.Path("ci") / "products.json"
+
+
+def load_product(root: pathlib.Path, name: str) -> dict:
+    try:
+        products = json.loads((root / PRODUCTS).read_text())["products"]
+    except (OSError, ValueError, KeyError) as err:
+        raise UsageError(f"cannot read {PRODUCTS}: {err}") from err
+    for product in products:
+        if product.get("name") == name:
+            if not product.get("root"):
+                raise UsageError("Core has no published floor: it is the dependency the floor checks")
+            return product
+    raise UsageError(f"{PRODUCTS} lists no product {name!r}")
+
+
+def workspace_members(root: pathlib.Path) -> list[dict]:
+    out = subprocess.run(
+        [cargo(), "metadata", "--no-deps", "--format-version", "1"],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout
+    meta = json.loads(out)
+    members = set(meta["workspace_members"])
+    return [pkg for pkg in meta["packages"] if pkg["id"] in members]
+
+
+def under(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{json.dumps(key)} = {toml_value(item)}" for key, item in value.items()) + " }"
+    raise UsageError(f"cannot write {value!r} as TOML")
+
+
+def toml_document(document: dict) -> str:
+    """A manifest as TOML: scalar keys first, then tables, then arrays of
+    tables (the subset Cargo manifests use)."""
+    lines: list[str] = []
+
+    def table(prefix: str, body: dict) -> None:
+        scalars = {k: v for k, v in body.items() if not isinstance(v, dict) and not (isinstance(v, list) and v and all(isinstance(i, dict) for i in v))}
+        tables = {k: v for k, v in body.items() if isinstance(v, dict)}
+        arrays = {k: v for k, v in body.items() if isinstance(v, list) and v and all(isinstance(i, dict) for i in v)}
+        if prefix and (scalars or not tables):
+            lines.append(f"[{prefix}]")
+        for key, value in scalars.items():
+            lines.append(f"{json.dumps(key)} = {toml_value(value)}")
+        if prefix and (scalars or not tables):
+            lines.append("")
+        for key, value in tables.items():
+            table(f"{prefix}.{json.dumps(key)}" if prefix else json.dumps(key), value)
+        for key, items in arrays.items():
+            for item in items:
+                lines.append(f"[[{prefix + '.' if prefix else ''}{json.dumps(key)}]]")
+                for k, v in item.items():
+                    lines.append(f"{json.dumps(k)} = {toml_value(v)}")
+                lines.append("")
+
+    table("", document)
+    return "\n".join(lines) + "\n"
+
+
+def normalized_dependency(name: str, spec, workspace_deps: dict, kept_paths: dict[pathlib.Path, str],
+                          crate_dir: pathlib.Path, root: pathlib.Path):
+    """A dependency as `cargo package` writes it: workspace inheritance
+    resolved, and no `path` for a crate outside the product (`kept_paths`
+    maps each product crate's directory to its path in the scratch
+    workspace)."""
+    if isinstance(spec, str):
+        return spec
+    spec = dict(spec)
+    if spec.pop("workspace", False):
+        inherited = workspace_deps.get(name)
+        if inherited is None:
+            raise UsageError(f"{crate_dir.name}: {name} inherits a workspace dependency the root does not declare")
+        inherited = {"version": inherited} if isinstance(inherited, str) else dict(inherited)
+        member_features = spec.pop("features", [])
+        merged = {**inherited, **spec}
+        if member_features or inherited.get("features"):
+            merged["features"] = sorted(set(inherited.get("features", [])) | set(member_features))
+        spec = merged
+        base = root
+    else:
+        base = crate_dir
+    if "path" in spec:
+        target = (base / spec["path"]).resolve()
+        if target in kept_paths:
+            spec["path"] = kept_paths[target]
+        else:
+            spec.pop("path")
+            if "version" not in spec:
+                raise UsageError(f"{crate_dir.name}: {name} is a path dependency with no version, so no published build can resolve it")
+    return spec
+
+
+def normalized_manifest(crate_dir: pathlib.Path, root: pathlib.Path, kept_paths: dict[pathlib.Path, str]) -> dict:
+    root_manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    workspace_package = root_manifest["workspace"].get("package", {})
+    workspace_deps = root_manifest["workspace"].get("dependencies", {})
+    manifest = tomllib.loads((crate_dir / "Cargo.toml").read_text())
+    package = manifest["package"]
+    for key, value in list(package.items()):
+        if isinstance(value, dict) and value.get("workspace") is True:
+            package[key] = workspace_package[key]
+    package.pop("workspace", None)
+
+    def dependencies(table: dict) -> dict:
+        return {name: normalized_dependency(name, spec, workspace_deps, kept_paths, crate_dir, root)
+                for name, spec in table.items()}
+
+    for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+        if key in manifest:
+            manifest[key] = dependencies(manifest[key])
+    for target in (manifest.get("target") or {}).values():
+        for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+            if key in target:
+                target[key] = dependencies(target[key])
+    if (manifest.get("lints") or {}).get("workspace") is True:
+        manifest["lints"] = root_manifest["workspace"].get("lints", {})
+    return manifest
+
+
+def surface_flags(metadata: dict, members) -> list[str]:
+    """`--lib` and `--bins` for the floor members' published surface: each
+    flag only when some member has such a target (Cargo refuses `--lib`
+    when no selected package has a library)."""
+    kinds = {kind for pkg in metadata["packages"] if pkg["name"] in members
+             for target in pkg["targets"] for kind in target["kind"]}
+    flags = []
+    if kinds & {"lib", "rlib", "dylib", "proc-macro"}:
+        flags.append("--lib")
+    if "bin" in kinds:
+        flags.append("--bins")
+    if not flags:
+        raise UsageError("the product's crates have no library or binary target to check")
+    return flags
+
+
+def resolve_problem(stderr: str) -> str:
+    """What keeps a product's declared dependencies from resolving against
+    crates.io, from `cargo metadata`'s stderr: the requirements no published
+    version satisfies and the crates that are not published at all, else
+    cargo's first error line."""
+    unmet = sorted(set(re.findall(r"failed to select a version for the requirement `([^`]+)`", stderr)))
+    unpublished = sorted(set(re.findall(r"no matching package named `([^`]+)` found", stderr)))
+    if unmet or unpublished:
+        return "; ".join([*unmet, *(f"{name} is not on crates.io" for name in unpublished)])
+    errors = [line.strip().removeprefix("error: ") for line in stderr.splitlines() if line.strip().startswith("error: ")]
+    if errors:
+        return errors[0]
+    lines = [line for line in stderr.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else "no output"
+
+
+def repository_env(root: pathlib.Path) -> str:
+    """The repository's Cargo [env] table, as a config file for the scratch
+    workspace: the floor builds with the build settings CI tested."""
+    config = tomllib.loads((root / ".cargo" / "config.toml").read_text())
+    env = config.get("env") or {}
+    return "[env]\n" + "".join(f"{json.dumps(key)} = {toml_value(value)}\n" for key, value in env.items())
+
+
+def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, allow_dirty: bool) -> int:
+    product = load_product(root, product_name)
+    product_root = (root / product["root"]).resolve()
+    members = workspace_members(root)
+    product_crates = [pkg for pkg in members if under(pathlib.Path(pkg["manifest_path"]).parent, product_root)]
+    if not product_crates:
+        raise UsageError(f"no workspace member lies under {product['root']}/")
+    in_repo = {pkg["name"]: pkg for pkg in members}
+    if out.exists():
+        raise UsageError(f"--out {out} exists; the floor check writes a fresh directory")
+    out.mkdir(parents=True)
+    logs = out / "logs"
+    logs.mkdir()
+    env = build_env("mirror", out / "target", toolchain(root))
+    report: dict = {"product": product_name, "mode": mode, "crates": [pkg["name"] for pkg in product_crates],
+                    "stage": None, "problems": []}
+
+    def finish(stage: str, problems: list[str]) -> int:
+        report["stage"] = stage
+        report["problems"] = problems
+        (out / "floor.json").write_text(json.dumps(report, indent=2) + "\n")
+        verdict = "releasable against published dependencies" if not problems else f"not releasable ({stage})"
+        print(f"{product_name}: {verdict}")
+        for problem in problems:
+            print(f"  {problem}")
+        return 1 if problems else 0
+
+    publish_order = product.get("publish_order")
+    ws = out / "ws"
+    if isinstance(publish_order, list) and publish_order:
+        # Package the publishing crates as crates.io receives them. Packaging
+        # resolves their dependencies, so every in-repo crate is patched to
+        # its path for that step only.
+        unknown = [name for name in publish_order if name not in in_repo]
+        if unknown:
+            raise UsageError(f"{PRODUCTS}: {product_name} publishes unknown crates {', '.join(unknown)}")
+        dirs = {name: pathlib.Path(pkg["manifest_path"]).parent for name, pkg in in_repo.items()}
+        patched = [name for name, pkg in in_repo.items() if pkg.get("publish") is None or pkg.get("publish")]
+        unpacked = package_and_unpack(root, publish_order, sorted(set(patched) | set(publish_order)), dirs, out, allow_dirty, env)
+        floor_members = {name: path for name, path in unpacked.items()}
+    else:
+        # An unpublished product: its manifests normalized as cargo package
+        # would write them; the product's own crates keep their paths.
+        ws.mkdir()
+        floor_members = {}
+        crate_dirs_by_name = {pkg["name"]: pathlib.Path(pkg["manifest_path"]).parent.resolve() for pkg in product_crates}
+        kept = {directory: f"../{name}" for name, directory in crate_dirs_by_name.items()}
+        for name, crate_dir in crate_dirs_by_name.items():
+            target = ws / name
+            shutil.copytree(crate_dir, target, ignore=shutil.ignore_patterns("target", "BUILD.bazel"))
+            (target / "Cargo.toml").write_text(toml_document(normalized_manifest(crate_dir, root, kept)))
+            floor_members[name] = target
+        member_list = "".join(f'    "{path.name}",\n' for path in floor_members.values())
+        (ws / "Cargo.toml").write_text(f'[workspace]\nresolver = "2"\nmembers = [\n{member_list}]\n')
+        shutil.copyfile(root / "Cargo.lock", ws / "Cargo.lock")
+    (ws / ".cargo").mkdir(exist_ok=True)
+    (ws / ".cargo" / "config.toml").write_text(repository_env(root))
+
+    # Resolve: every other in-repo crate from crates.io at the declared
+    # version, never a path or git source.
+    proc = subprocess.run([cargo(), "metadata", "--format-version", "1"], cwd=ws, env=env, capture_output=True, text=True)
+    (logs / "resolve.log").write_text(f"$ cargo metadata\n# cwd {ws}\n{proc.stderr}\n# rc {proc.returncode}\n")
+    if proc.returncode != 0:
+        return finish("resolve", [f"declared dependency versions do not resolve from crates.io: {resolve_problem(proc.stderr)}"])
+    resolved = json.loads(proc.stdout)
+    problems = []
+    for pkg in resolved["packages"]:
+        if pkg["name"] in floor_members:
+            continue
+        if pkg["name"] in in_repo:
+            source = pkg.get("source") or "path"
+            if not source.startswith("registry+"):
+                problems.append(f"{pkg['name']} {pkg['version']} comes from {source}, not crates.io")
+    if problems:
+        return finish("resolve", problems)
+    report["registry_dependencies"] = sorted(
+        f"{pkg['name']} {pkg['version']}" for pkg in resolved["packages"] if pkg["name"] in in_repo and pkg["name"] not in floor_members
+    )
+
+    command = [cargo(), "check" if mode == "pr" else "build", "--workspace", *surface_flags(resolved, floor_members)]
+    rc, output = run(command, ws, env, logs / "build.log")
+    if rc != 0:
+        errors = [line for line in output.splitlines() if line.startswith("error")][:10]
+        return finish("build", [f"`{' '.join(command[1:])}` against the published dependencies fails", *errors])
+    return finish("build", [])
+
+
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str]) -> int:
@@ -764,8 +1208,15 @@ def main(argv: list[str]) -> int:
     census_parser.add_argument("--shard", default="1/1", help="K/N: test every Nth crate starting at the Kth")
     guard_parser = sub.add_parser("guard")
     guard_parser.add_argument("--crate", action="append", default=[])
+    floor_parser = sub.add_parser("floor")
+    floor_parser.add_argument("--product", required=True)
+    floor_parser.add_argument("--out", required=True, type=pathlib.Path)
+    floor_parser.add_argument("--mode", choices=("pr", "release"), default="pr")
+    floor_parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "floor":
+            return floor(ROOT, args.product, args.out, args.mode, args.allow_dirty)
         crates = release_crates(ROOT)
         if args.crate:
             unknown = sorted(set(args.crate) - set(crates))

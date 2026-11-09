@@ -10,6 +10,7 @@ use serde_json::json;
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
 use crate::machines::work_item_admission as admission_dsl;
 use crate::machines::workgraph_lifecycle as wg_dsl;
+use crate::read_page::{self, PageCursor, PageRead, ReadyKey, UpdatedKey};
 use crate::store::{
     WorkGraphAdmissionFence, WorkGraphEventFilter, WorkGraphStore, WorkItemAdmissionInsert,
 };
@@ -19,18 +20,19 @@ use crate::types::{
     AttentionProjectionParentContext, AttentionProjectionRequest, AttentionProjectionResult,
     AttentionProjectionText, AttentionPruneRequest, AttentionPruneResult, AttentionReassignRequest,
     AttentionReassignResult, AttentionResumeRequest, BreakGlassAttentionReassignRequest,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget,
-    GoalBindExistingRequest, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
-    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
-    GoalStatusResult, LinkWorkItemsRequest, ObserveLeaseExpiryRequest, ObserveReadinessRequest,
-    PolicyEscalateRequest, ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome,
-    WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus,
-    WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef,
-    WorkExecutionBinding, WorkExecutionBindingFilter, WorkExecutionBindingId,
-    WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus,
+    BreakGlassReleaseWorkItemRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
+    CreateWorkItemRequest, GoalAttentionTarget, GoalBindExistingRequest, GoalConfirmRequest,
+    GoalConfirmResult, GoalCreateRequest, GoalCreateResult, GoalRequestCloseRequest,
+    GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult, LinkWorkItemsRequest,
+    ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
+    ProjectedAttentionAuthority, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMode, WorkAttentionStatus, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef, WorkExecutionBinding,
+    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionEvidenceKind,
+    WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind, WorkGraphEventsResponse,
+    WorkGraphItemsResponse, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use crate::{
     ChildJoinDisposition, WorkExecutionLifecycleEffect, WorkExecutionMachine,
@@ -76,38 +78,61 @@ const EXECUTION_PROJECTION_CAS_ATTEMPTS: usize = 8;
 const MAX_REVIEWER_QUORUM_THRESHOLD: u16 = 64;
 const DEFAULT_COLLECTION_LIMIT: usize = 100;
 const MAX_COLLECTION_LIMIT: usize = 1000;
-const MAX_ATOMIC_SNAPSHOT_EDGES: usize = 1000;
-const MAX_ATOMIC_SNAPSHOT_ATTENTION: usize = 1000;
-const MAX_ATOMIC_READY_ITEMS: usize = 1000;
 
 /// Whether `item` is terminal (`completed`, `cancelled`, `failed`). A terminal
 /// item has no transition back to `open`, so it is never ready again; it still
 /// resolves blockers and child joins for the live items that reference it. An
-/// item whose terminality cannot be classified counts as live, so the atomic
-/// ceilings below never shrink on a malformed row.
+/// item whose terminality cannot be classified counts as live, so `ready`
+/// still hands it to the readiness classifier.
 fn is_terminal_item(item: &WorkItem) -> bool {
     WorkGraphMachine::classify_terminality(item).unwrap_or(false)
 }
 
-/// Items that count against the atomic ready/snapshot ceiling: the live
-/// (non-terminal) working set. Closed history does not consume the ceiling.
-fn live_item_count(items: &[WorkItem]) -> usize {
-    items.iter().filter(|item| !is_terminal_item(item)).count()
+/// One page of a read whose rows are sorted in the read's order: the rows
+/// after the cursor's position (from the first row on a first page), cut at
+/// `limit`.
+#[derive(Debug, Clone, Copy)]
+struct PageBounds {
+    /// The page's first row.
+    start: usize,
+    /// One past the page's last row.
+    end: usize,
+    /// Every row of the read, before the cursor and the cut.
+    total: usize,
 }
 
-/// Edges that count against the atomic snapshot edge ceiling: those touching at
-/// least one live item. An edge between two terminal items can no longer change
-/// any item's readiness.
-fn live_edge_count(items: &[WorkItem], edges: &[WorkEdge]) -> usize {
-    let terminal = items
-        .iter()
-        .filter(|item| is_terminal_item(item))
-        .map(|item| &item.id)
-        .collect::<BTreeSet<_>>();
-    edges
-        .iter()
-        .filter(|edge| !(terminal.contains(&edge.from_id) && terminal.contains(&edge.to_id)))
-        .count()
+impl PageBounds {
+    /// `after_cursor` is false for every row at or before the cursor's
+    /// position and true for every row after it (always true on a first
+    /// page).
+    fn new<T>(rows: &[T], after_cursor: impl Fn(&T) -> bool, limit: usize) -> Self {
+        let start = read_page::page_start(rows, after_cursor);
+        Self {
+            start,
+            end: start.saturating_add(limit).min(rows.len()),
+            total: rows.len(),
+        }
+    }
+
+    /// Rows remain after the page.
+    const fn truncated(self) -> bool {
+        self.end < self.total
+    }
+
+    fn page<T>(self, rows: &[T]) -> &[T] {
+        rows.get(self.start..self.end).unwrap_or_default()
+    }
+
+    /// The row the continuation starts after: the page's last row, when rows
+    /// remain. A page that took no row (`limit: 0`) has none, so it hands out
+    /// no cursor.
+    fn continue_after<T>(self, rows: &[T]) -> Option<&T> {
+        if self.truncated() && self.end > self.start {
+            rows.get(self.end - 1)
+        } else {
+            None
+        }
+    }
 }
 
 fn bounded_collection_limit(limit: Option<usize>) -> Result<usize, WorkGraphError> {
@@ -1063,67 +1088,196 @@ impl WorkGraphService {
             .ok_or_else(|| WorkGraphError::not_found(realm_id, namespace, id))
     }
 
+    /// The items `filter` selects, most recently updated first, cut at its
+    /// `limit`. See [`Self::list_page`] for the page totals and the cursor.
     pub async fn list(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
-        self.store
-            .list_items(self.normalize_item_filter(filter)?)
-            .await
+        self.list_page(filter).await.map(|page| page.items)
     }
 
+    /// One page of [`Self::list`]: the items after the filter's `cursor` (from
+    /// the most recently updated on a first page), cut at its `limit`, with
+    /// `total_items`, `truncated`, the `next_cursor` that continues the walk,
+    /// and its anchor. The store returns every matching item; the service
+    /// orders them, places the cursor and cuts.
+    pub async fn list_page(
+        &self,
+        filter: WorkItemFilter,
+    ) -> Result<WorkGraphItemsResponse, WorkGraphError> {
+        let mut filter = self.normalize_item_filter(filter)?;
+        let (realm_id, namespace) =
+            self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let limit = filter.limit.take().unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        let cursor = filter
+            .cursor
+            .take()
+            .map(|cursor| read_page::decode_cursor::<UpdatedKey>(&cursor, PageRead::List))
+            .transpose()?;
+        // A first page anchors the walk before it reads a row, so a change
+        // its rows miss is past the anchor.
+        let anchor = match &cursor {
+            Some(cursor) => cursor.anchor,
+            None => self.ledger_high_water_mark(&realm_id, &namespace).await?,
+        };
+        let mut items = self.store.list_items(filter).await?;
+        items.sort_by(read_page::updated_order);
+        let bounds = PageBounds::new(
+            &items,
+            |item| {
+                cursor
+                    .as_ref()
+                    .is_none_or(|cursor| read_page::after_updated_key(item, &cursor.key))
+            },
+            limit,
+        );
+        let next_cursor = bounds
+            .continue_after(&items)
+            .map(|item| {
+                read_page::encode_cursor(PageRead::List, &read_page::updated_key(item), anchor)
+            })
+            .transpose()?;
+        let changed_since_anchor =
+            self.ledger_high_water_mark(&realm_id, &namespace).await? > anchor;
+        items.truncate(bounds.end);
+        Ok(WorkGraphItemsResponse {
+            items: items.split_off(bounds.start),
+            total_items: Some(bounds.total),
+            truncated: Some(bounds.truncated()),
+            next_cursor,
+            anchor_event_seq: anchor,
+            changed_since_anchor: Some(changed_since_anchor),
+        })
+    }
+
+    /// The ready items, by priority (high first), then creation time, then
+    /// id, cut at the filter's `limit`. See [`Self::ready_page`] for the page
+    /// totals and the cursor.
     pub async fn ready(&self, filter: ReadyWorkFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
+        self.ready_page(filter).await.map(|page| page.items)
+    }
+
+    /// One page of [`Self::ready`]: the ready items after the filter's
+    /// `cursor`, cut at its `limit`, with `total_items` (every ready item),
+    /// `truncated`, the `next_cursor` and the walk's anchor. Readiness is
+    /// classified for every live item of one namespace observation, however
+    /// many the namespace holds.
+    pub async fn ready_page(
+        &self,
+        filter: ReadyWorkFilter,
+    ) -> Result<WorkGraphItemsResponse, WorkGraphError> {
         let output_limit = bounded_collection_limit(filter.limit)?;
         let (realm_id, namespace) =
             self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let cursor = filter
+            .cursor
+            .as_deref()
+            .map(|cursor| read_page::decode_cursor::<ReadyKey>(cursor, PageRead::Ready))
+            .transpose()?;
+        let anchor = match &cursor {
+            Some(cursor) => cursor.anchor,
+            None => self.ledger_high_water_mark(&realm_id, &namespace).await?,
+        };
         let (now, all_items, edges) = self
             .store
             .read_namespace_graph(&realm_id, &namespace)
             .await?;
-        if live_item_count(&all_items) > MAX_ATOMIC_READY_ITEMS {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-live-item limit; narrow the scope"
-            )));
-        }
-        let labels = filter.labels.clone();
-        let items_by_id = all_items
-            .iter()
-            .cloned()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+        let graph = NamespaceGraphIndex::new(&all_items, &edges);
+        let labels = filter.labels;
         let mut ready = Vec::new();
-        // Terminal items are never ready: only the live set is evaluated, so the
-        // evaluation stays within the ceiling however much history the
-        // namespace holds.
+        // Terminal items are never ready: only the live set is classified.
+        // The ready items stay references into the observation until the
+        // cut, so only the page is cloned.
         for item in all_items.iter().filter(|item| {
             !is_terminal_item(item) && labels.iter().all(|label| item.labels.contains(label))
         }) {
-            let joined = matches!(
-                child_join_disposition(item, &all_items, &edges)?,
-                ChildJoinDisposition::Satisfied
-            );
-            if WorkGraphMachine::classify_readiness_from_observation(
-                item,
-                now,
-                unresolved_blocker_count(item, &items_by_id, &edges)?,
-                joined,
-            )? {
-                ready.push(item.clone());
+            if graph.is_ready(item, now)? {
+                ready.push(item);
             }
         }
-        ready.sort_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
-                .reverse()
-                .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        ready.truncate(output_limit);
-        Ok(ready)
+        ready.sort_by(|left, right| read_page::ready_order(left, right));
+        let bounds = PageBounds::new(
+            &ready,
+            |item| {
+                cursor
+                    .as_ref()
+                    .is_none_or(|cursor| read_page::after_ready_key(item, &cursor.key))
+            },
+            output_limit,
+        );
+        let next_cursor = bounds
+            .continue_after(&ready)
+            .map(|item| {
+                read_page::encode_cursor(PageRead::Ready, &read_page::ready_key(item), anchor)
+            })
+            .transpose()?;
+        let changed_since_anchor =
+            self.ledger_high_water_mark(&realm_id, &namespace).await? > anchor;
+        Ok(WorkGraphItemsResponse {
+            items: bounds
+                .page(&ready)
+                .iter()
+                .map(|item| (*item).clone())
+                .collect(),
+            total_items: Some(bounds.total),
+            truncated: Some(bounds.truncated()),
+            next_cursor,
+            anchor_event_seq: anchor,
+            changed_since_anchor: Some(changed_since_anchor),
+        })
     }
 
+    /// One observation of the namespace: the items `filter` selects, most
+    /// recently updated first, after its `cursor` and cut at its `limit`,
+    /// with `total_items`, `truncated`, the `next_cursor` and the walk's
+    /// anchor; the edges, attention bindings and ready ids of the page.
+    /// Readiness is classified against the whole namespace, so a blocker
+    /// outside the page still blocks.
+    ///
+    /// A first page holds the edges between its own items. A continuation
+    /// adds the edges from its items to the items at or before the cursor,
+    /// so a walk reports every edge between the items it returned once, on
+    /// the page of the edge's later end.
     pub async fn snapshot(
         &self,
         filter: WorkGraphSnapshotFilter,
     ) -> Result<WorkGraphSnapshot, WorkGraphError> {
         let filter = self.normalize_snapshot_filter(filter)?;
+        let cursor = filter
+            .cursor
+            .as_deref()
+            .map(|cursor| read_page::decode_cursor::<UpdatedKey>(cursor, PageRead::Snapshot))
+            .transpose()?;
+        let limit = filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        self.observe_snapshot(&filter, cursor.as_ref(), limit).await
+    }
+
+    /// One observation of the namespace with every item `filter` selects:
+    /// [`Self::snapshot`] without the `limit` cut and without a cursor, so
+    /// `items` holds every selected item, `truncated` is false and there is
+    /// no `next_cursor`. The filter's `limit` and `cursor` are ignored.
+    ///
+    /// For trusted in-process callers that need the whole selection in one
+    /// consistent read, such as live delegation scheduling. Its result grows
+    /// with the namespace, so no tool, RPC method, REST route, CLI command or
+    /// Meta method offers it: those keep the bounded pages and the cursor.
+    pub async fn snapshot_uncut(
+        &self,
+        mut filter: WorkGraphSnapshotFilter,
+    ) -> Result<WorkGraphSnapshot, WorkGraphError> {
+        filter.limit = None;
+        filter.cursor = None;
+        let filter = self.normalize_snapshot_filter(filter)?;
+        self.observe_snapshot(&filter, None, usize::MAX).await
+    }
+
+    /// The snapshot body: one observation of the namespace, the items
+    /// `filter` selects most recently updated first, after `cursor` and cut
+    /// at `limit`, with their edges, attention bindings and ready ids.
+    async fn observe_snapshot(
+        &self,
+        filter: &WorkGraphSnapshotFilter,
+        cursor: Option<&PageCursor<UpdatedKey>>,
+        limit: usize,
+    ) -> Result<WorkGraphSnapshot, WorkGraphError> {
         let realm_id = filter
             .realm_id
             .clone()
@@ -1136,22 +1290,10 @@ impl WorkGraphService {
             .store
             .read_namespace_snapshot(&realm_id, &namespace)
             .await?;
-        if live_item_count(&read.items) > MAX_ATOMIC_READY_ITEMS {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-live-item limit; narrow the scope"
-            )));
-        }
-        if live_edge_count(&read.items, &read.edges) > MAX_ATOMIC_SNAPSHOT_EDGES {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_EDGES}-edge scan limit; narrow the namespace/item scope"
-            )));
-        }
-        if read.attention.len() > MAX_ATOMIC_SNAPSHOT_ATTENTION {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_ATTENTION}-attention scan limit; narrow the namespace/item scope"
-            )));
-        }
-        let mut items = read
+        // The observation's own high-water mark is atomic with its rows, so
+        // a first page anchors the walk on it.
+        let anchor = cursor.map_or(read.event_high_water_mark, |cursor| cursor.anchor);
+        let mut matching = read
             .items
             .iter()
             .filter(|item| {
@@ -1163,24 +1305,35 @@ impl WorkGraphService {
                     && (filter.include_terminal
                         || !WorkGraphMachine::classify_terminality(item).unwrap_or(true))
             })
-            .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        items.truncate(filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT));
-        let included_item_refs = items
+        matching.sort_by(|left, right| read_page::updated_order(left, right));
+        let bounds = PageBounds::new(
+            &matching,
+            |item| cursor.is_none_or(|cursor| read_page::after_updated_key(item, &cursor.key)),
+            limit,
+        );
+        let page = bounds.page(&matching);
+        let page_item_refs = page
             .iter()
-            .map(|item| (item.namespace.clone(), item.id.clone()))
+            .map(|item| (&item.namespace, &item.id))
+            .collect::<BTreeSet<_>>();
+        // The items the walk has reached: those at or before the cursor, and
+        // this page.
+        let walked_item_refs = matching
+            .get(..bounds.end)
+            .unwrap_or_default()
+            .iter()
+            .map(|item| (&item.namespace, &item.id))
             .collect::<BTreeSet<_>>();
         let edges = read
             .edges
             .iter()
             .filter(|edge| {
-                included_item_refs.contains(&(edge.namespace.clone(), edge.from_id.clone()))
-                    && included_item_refs.contains(&(edge.namespace.clone(), edge.to_id.clone()))
+                let from = (&edge.namespace, &edge.from_id);
+                let to = (&edge.namespace, &edge.to_id);
+                walked_item_refs.contains(&from)
+                    && walked_item_refs.contains(&to)
+                    && (page_item_refs.contains(&from) || page_item_refs.contains(&to))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1188,34 +1341,24 @@ impl WorkGraphService {
             .attention
             .iter()
             .filter(|binding| {
-                included_item_refs.contains(&(
-                    binding.work_ref.namespace.clone(),
-                    binding.work_ref.item_id.clone(),
-                ))
+                page_item_refs.contains(&(&binding.work_ref.namespace, &binding.work_ref.item_id))
             })
             .cloned()
             .collect::<Vec<_>>();
-        let all_items_by_id = read
-            .items
-            .iter()
-            .cloned()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+        let graph = NamespaceGraphIndex::new(&read.items, &read.edges);
         let mut ready_item_ids = Vec::new();
-        for item in &items {
-            let joined = matches!(
-                child_join_disposition(item, &read.items, &read.edges)?,
-                ChildJoinDisposition::Satisfied
-            );
-            if WorkGraphMachine::classify_readiness_from_observation(
-                item,
-                read.captured_at,
-                unresolved_blocker_count(item, &all_items_by_id, &read.edges)?,
-                joined,
-            )? {
+        for item in page {
+            if graph.is_ready(item, read.captured_at)? {
                 ready_item_ids.push(item.id.clone());
             }
         }
+        let next_cursor = bounds
+            .continue_after(&matching)
+            .map(|item| {
+                read_page::encode_cursor(PageRead::Snapshot, &read_page::updated_key(item), anchor)
+            })
+            .transpose()?;
+        let items = page.iter().map(|item| (*item).clone()).collect::<Vec<_>>();
 
         Ok(WorkGraphSnapshot {
             realm_id,
@@ -1227,6 +1370,11 @@ impl WorkGraphService {
             edges,
             attention,
             ready_item_ids,
+            total_items: Some(bounds.total),
+            truncated: Some(bounds.truncated()),
+            next_cursor,
+            anchor_event_seq: anchor,
+            changed_since_anchor: Some(read.event_high_water_mark > anchor),
         })
     }
 
@@ -1268,6 +1416,62 @@ impl WorkGraphService {
             .await?;
         let expected_previous_revision = item.revision;
         let (item, event) = WorkGraphMachine::release_item(item, request, now)?;
+        self.store
+            .update_item_cas(item, expected_previous_revision, event)
+            .await
+    }
+
+    /// Break-glass release: a host-plane operator hands back a claim it does
+    /// not own, such as one whose owner is gone or one with no lease to end.
+    /// The same transition as [`Self::release`], bound to the request's
+    /// revision, with mandatory attribution: the Released event records the
+    /// operator and the claim it released (`break_glass`), and a WARN log
+    /// names them. Never exposed on the agent tool surface or wire catalogs.
+    pub async fn break_glass_release(
+        &self,
+        request: BreakGlassReleaseWorkItemRequest,
+    ) -> Result<WorkItem, WorkGraphError> {
+        let principal = request.principal.trim().to_string();
+        if principal.is_empty() {
+            return Err(WorkGraphError::InvalidInput(
+                "break-glass release requires a non-empty principal".to_string(),
+            ));
+        }
+        let now = self.store.get_store_time_utc().await?;
+        let item = self
+            .get(
+                request.realm_id.clone(),
+                request.namespace.clone(),
+                request.id.clone(),
+            )
+            .await?;
+        let released_claim = item.claim.clone();
+        let expected_previous_revision = item.revision;
+        let (item, event) = WorkGraphMachine::release_item(
+            item,
+            ReleaseWorkItemRequest {
+                id: request.id,
+                realm_id: request.realm_id,
+                namespace: request.namespace,
+                expected_revision: request.expected_revision,
+            },
+            now,
+        )?;
+        tracing::warn!(
+            item_id = %item.id,
+            principal = %principal,
+            "break-glass work item release (host-plane, audit-logged)"
+        );
+        let event = WorkGraphEvent {
+            payload: json!({
+                "item": &item,
+                "break_glass": {
+                    "principal": principal,
+                    "released_claim": released_claim,
+                },
+            }),
+            ..event
+        };
         self.store
             .update_item_cas(item, expected_previous_revision, event)
             .await
@@ -1574,6 +1778,7 @@ impl WorkGraphService {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: Some(binding.binding_id.clone()),
+            withdraws: BTreeSet::new(),
         };
 
         for attempt in 0..EXECUTION_PROJECTION_CAS_ATTEMPTS {
@@ -1853,25 +2058,63 @@ impl WorkGraphService {
             .await
     }
 
+    /// The public events after the filter's `after_seq`, in sequence order,
+    /// cut at its `limit`. See [`Self::events_page`] for the continuation.
     pub async fn events(
         &self,
-        mut filter: WorkGraphEventFilter,
+        filter: WorkGraphEventFilter,
     ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
-        if filter.all_namespaces {
-            return Err(WorkGraphError::InvalidInput(
-                "all_namespaces requires a separate host capability; a namespace grant authorizes exactly one immutable namespace"
-                    .to_string(),
-            ));
-        }
-        if filter.realm_id.is_none() {
-            filter.realm_id = Some(self.default_realm_id.to_string());
-        }
-        if !filter.all_namespaces && filter.namespace.is_none() {
-            filter.namespace = Some(self.default_namespace.clone());
-        }
-        filter.limit = Some(bounded_collection_limit(filter.limit)?);
-        self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let filter = self.normalize_event_filter(filter)?;
         self.store.list_public_events(filter).await
+    }
+
+    /// One page of [`Self::events`] with `truncated`, the `next_after_seq`
+    /// that continues it (the last returned `seq`) and the ledger's
+    /// `event_high_water_mark`. It reads one event past the page to tell
+    /// whether the page ended early.
+    pub async fn events_page(
+        &self,
+        filter: WorkGraphEventFilter,
+    ) -> Result<WorkGraphEventsResponse, WorkGraphError> {
+        let mut filter = self.normalize_event_filter(filter)?;
+        let (realm_id, namespace) =
+            self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let limit = filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        filter.limit = Some(limit.saturating_add(1));
+        let mut events = self.store.list_public_events(filter).await?;
+        let truncated = events.len() > limit;
+        events.truncate(limit);
+        let next_after_seq = if truncated {
+            events.last().and_then(|event| event.seq)
+        } else {
+            None
+        };
+        let event_high_water_mark = self.ledger_high_water_mark(&realm_id, &namespace).await?;
+        Ok(WorkGraphEventsResponse {
+            events,
+            truncated: Some(truncated),
+            next_after_seq,
+            event_high_water_mark,
+        })
+    }
+
+    /// The event ledger's highest sequence in one realm and namespace,
+    /// internal execution events included. A list or ready walk anchors on
+    /// it, and a page reports whether the ledger has moved past the anchor.
+    async fn ledger_high_water_mark(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+    ) -> Result<Option<i64>, WorkGraphError> {
+        self.store
+            .latest_event_seq(WorkGraphEventFilter {
+                realm_id: Some(realm_id.to_string()),
+                namespace: Some(namespace.clone()),
+                all_namespaces: false,
+                after_seq: None,
+                limit: None,
+            })
+            .await
     }
 
     fn scope(
@@ -1896,6 +2139,27 @@ impl WorkGraphService {
         &self,
         mut filter: WorkItemFilter,
     ) -> Result<WorkItemFilter, WorkGraphError> {
+        if filter.all_namespaces {
+            return Err(WorkGraphError::InvalidInput(
+                "all_namespaces requires a separate host capability; a namespace grant authorizes exactly one immutable namespace"
+                    .to_string(),
+            ));
+        }
+        if filter.realm_id.is_none() {
+            filter.realm_id = Some(self.default_realm_id.to_string());
+        }
+        if !filter.all_namespaces && filter.namespace.is_none() {
+            filter.namespace = Some(self.default_namespace.clone());
+        }
+        filter.limit = Some(bounded_collection_limit(filter.limit)?);
+        self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        Ok(filter)
+    }
+
+    fn normalize_event_filter(
+        &self,
+        mut filter: WorkGraphEventFilter,
+    ) -> Result<WorkGraphEventFilter, WorkGraphError> {
         if filter.all_namespaces {
             return Err(WorkGraphError::InvalidInput(
                 "all_namespaces requires a separate host capability; a namespace grant authorizes exactly one immutable namespace"
@@ -1948,27 +2212,107 @@ impl WorkGraphService {
     }
 }
 
-fn child_join_disposition(
-    item: &WorkItem,
-    items: &[WorkItem],
-    edges: &[WorkEdge],
-) -> Result<ChildJoinDisposition, WorkGraphError> {
-    let children = edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Parent && edge.to_id == item.id)
-        .filter_map(|edge| items.iter().find(|candidate| candidate.id == edge.from_id));
-    let mut active = 0u64;
-    let mut failed = 0u64;
-    let mut cancelled = 0u64;
-    for child in children {
-        match child.status {
-            WorkStatus::Completed => {}
-            WorkStatus::Failed => failed = failed.saturating_add(1),
-            WorkStatus::Cancelled => cancelled = cancelled.saturating_add(1),
-            _ => active = active.saturating_add(1),
+/// Per-call indexes over one namespace observation, built once by `ready` and
+/// `snapshot`: items by id, the children of each parent (`parent` edges point
+/// from the child to the parent) and the blockers of each blocked item
+/// (`blocks` edges), both in edge order. The readiness inputs are counted
+/// from them instead of scanning every item or edge for each item, so a read
+/// costs about the items plus the edges it observes. The counts the machine
+/// receives do not change.
+struct NamespaceGraphIndex<'a> {
+    items_by_id: BTreeMap<&'a WorkItemId, &'a WorkItem>,
+    children_by_parent: BTreeMap<&'a WorkItemId, Vec<&'a WorkItemId>>,
+    blockers_by_blocked: BTreeMap<&'a WorkItemId, Vec<&'a WorkItemId>>,
+}
+
+impl<'a> NamespaceGraphIndex<'a> {
+    fn new(items: &'a [WorkItem], edges: &'a [WorkEdge]) -> Self {
+        let mut children_by_parent = BTreeMap::<_, Vec<_>>::new();
+        let mut blockers_by_blocked = BTreeMap::<_, Vec<_>>::new();
+        for edge in edges {
+            match edge.kind {
+                WorkEdgeKind::Parent => children_by_parent
+                    .entry(&edge.to_id)
+                    .or_default()
+                    .push(&edge.from_id),
+                WorkEdgeKind::Blocks => blockers_by_blocked
+                    .entry(&edge.to_id)
+                    .or_default()
+                    .push(&edge.from_id),
+                WorkEdgeKind::Related | WorkEdgeKind::Supersedes | WorkEdgeKind::DerivedFrom => {}
+            }
+        }
+        Self {
+            items_by_id: items.iter().map(|item| (&item.id, item)).collect(),
+            children_by_parent,
+            blockers_by_blocked,
         }
     }
-    WorkGraphMachine::classify_child_join(item, active, failed, cancelled)
+
+    /// Whether the machine classifies `item` ready at `observed_at`, given
+    /// its child join and its unresolved blockers in this observation.
+    fn is_ready(
+        &self,
+        item: &WorkItem,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, WorkGraphError> {
+        let joined = matches!(
+            self.child_join_disposition(item)?,
+            ChildJoinDisposition::Satisfied
+        );
+        WorkGraphMachine::classify_readiness_from_observation(
+            item,
+            observed_at,
+            self.unresolved_blocker_count(item)?,
+            joined,
+        )
+    }
+
+    fn child_join_disposition(
+        &self,
+        item: &WorkItem,
+    ) -> Result<ChildJoinDisposition, WorkGraphError> {
+        let children = self
+            .children_by_parent
+            .get(&item.id)
+            .into_iter()
+            .flatten()
+            .filter_map(|child_id| self.items_by_id.get(child_id));
+        let mut active = 0u64;
+        let mut failed = 0u64;
+        let mut cancelled = 0u64;
+        for child in children {
+            match child.status {
+                WorkStatus::Completed => {}
+                WorkStatus::Failed => failed = failed.saturating_add(1),
+                WorkStatus::Cancelled => cancelled = cancelled.saturating_add(1),
+                _ => active = active.saturating_add(1),
+            }
+        }
+        WorkGraphMachine::classify_child_join(item, active, failed, cancelled)
+    }
+
+    /// Count the unresolved blocking edges for `item`.
+    ///
+    /// The per-blocking-edge SATISFACTION verdict ("is this blocker resolved?")
+    /// is a machine fact: the shell extracts only the raw blocker lifecycle
+    /// phase and drives the canonical `WorkGraphLifecycleMachine`'s
+    /// `ClassifyBlockerSatisfied` input, mirroring the emitted verdict. This
+    /// function performs only the mechanical fan-in (counting the unsatisfied
+    /// edges); it decides no satisfaction class itself. The resulting count is
+    /// fed to `RefreshEligibility` / `Claim`, which the machine revalidates via
+    /// its `dependencies_satisfied` guard. Fails closed on any classification
+    /// refusal.
+    fn unresolved_blocker_count(&self, item: &WorkItem) -> Result<u64, WorkGraphError> {
+        let mut unresolved: u64 = 0;
+        for blocker_id in self.blockers_by_blocked.get(&item.id).into_iter().flatten() {
+            let blocker = self.items_by_id.get(blocker_id).copied();
+            if !WorkGraphMachine::classify_blocker_satisfied(item, blocker)? {
+                unresolved = unresolved.saturating_add(1);
+            }
+        }
+        Ok(unresolved)
+    }
 }
 
 fn attention_updated_event(
@@ -2349,34 +2693,6 @@ fn validate_completion_policy(policy: &WorkCompletionPolicy) -> Result<(), WorkG
         )));
     }
     Ok(())
-}
-
-/// Count the unresolved blocking edges for `item`.
-///
-/// The per-blocking-edge SATISFACTION verdict ("is this blocker resolved?") is a
-/// machine fact: the shell extracts only the raw blocker lifecycle phase and
-/// drives the canonical `WorkGraphLifecycleMachine`'s `ClassifyBlockerSatisfied`
-/// input, mirroring the emitted verdict. This function performs only the
-/// mechanical fan-in (counting the unsatisfied edges); it decides no satisfaction
-/// class itself. The resulting count is fed to `RefreshEligibility` / `Claim`,
-/// which the machine revalidates via its `dependencies_satisfied` guard. Fails
-/// closed on any classification refusal.
-fn unresolved_blocker_count(
-    item: &WorkItem,
-    all_items: &BTreeMap<WorkItemId, WorkItem>,
-    edges: &[WorkEdge],
-) -> Result<u64, WorkGraphError> {
-    let mut unresolved: u64 = 0;
-    for edge in edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-    {
-        let blocker = all_items.get(&edge.from_id);
-        if !WorkGraphMachine::classify_blocker_satisfied(item, blocker)? {
-            unresolved = unresolved.saturating_add(1);
-        }
-    }
-    Ok(unresolved)
 }
 
 impl WorkExecutionBridge {
@@ -2767,15 +3083,41 @@ mod tests {
             .expect("close")
     }
 
+    /// Update `item`'s title, which makes it the most recently updated item.
+    async fn touch(service: &WorkGraphService, item: &WorkItem) -> WorkItem {
+        service
+            .update(UpdateWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                title: Some(format!("{} (updated)", item.title)),
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            })
+            .await
+            .expect("update")
+    }
+
+    fn ids(items: &[WorkItem]) -> Vec<WorkItemId> {
+        items.iter().map(|item| item.id.clone()).collect()
+    }
+
     #[tokio::test]
-    async fn closed_history_does_not_consume_the_atomic_ready_ceiling() {
+    async fn closed_history_does_not_hide_the_live_working_set() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
             "realm",
             WorkNamespace::default(),
         );
-        // More stored items than the ceiling, all but one of them closed.
-        for index in 0..super::MAX_ATOMIC_READY_ITEMS {
+        // A thousand closed items and one live item.
+        for index in 0..1000 {
             let item = service
                 .create(create_req(&format!("done {index}")))
                 .await
@@ -2806,39 +3148,126 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_live_working_set_still_hits_the_atomic_ready_ceiling() {
+    async fn snapshot_cut_keeps_the_most_recently_updated_items() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
             "realm",
             WorkNamespace::default(),
         );
-        for index in 0..=super::MAX_ATOMIC_READY_ITEMS {
+        let a = service.create(create_req("a")).await.expect("a");
+        service.create(create_req("b")).await.expect("b");
+        let c = service.create(create_req("c")).await.expect("c");
+        touch(&service, &a).await;
+
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("snapshot");
+        // Most recently updated first: the cut drops `b`, updated longest ago.
+        assert_eq!(ids(&snapshot.items), vec![a.id, c.id]);
+    }
+
+    #[tokio::test]
+    async fn list_cut_keeps_the_most_recently_updated_items() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let a = service.create(create_req("a")).await.expect("a");
+        service.create(create_req("b")).await.expect("b");
+        let c = service.create(create_req("c")).await.expect("c");
+        touch(&service, &a).await;
+
+        let listed = service
+            .list(WorkItemFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(ids(&listed), vec![a.id, c.id]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_over_a_thousand_live_items_returns_a_bounded_page() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..1001 {
             service
                 .create(create_req(&format!("open {index}")))
                 .await
                 .expect("create");
         }
-        let error = service
-            .ready(Default::default())
+
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(10),
+                ..Default::default()
+            })
             .await
-            .expect_err("over the live ceiling");
-        assert!(error.to_string().contains("live-item limit"), "{error}");
-        let error = service
-            .snapshot(Default::default())
-            .await
-            .expect_err("over the live ceiling");
-        assert!(error.to_string().contains("live-item limit"), "{error}");
+            .expect("a namespace with 1001 live items is read, not refused");
+        assert_eq!(snapshot.items.len(), 10);
+        assert_eq!(snapshot.ready_item_ids.len(), 10);
+        let page = serde_json::to_value(&snapshot).expect("snapshot json");
+        assert_eq!(page["total_items"], json!(1001));
+        assert_eq!(page["truncated"], json!(true));
     }
 
     #[tokio::test]
-    async fn edges_between_closed_items_do_not_consume_the_snapshot_edge_ceiling() {
+    async fn ready_over_a_thousand_live_items_returns_the_first_ready_page() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
             "realm",
             WorkNamespace::default(),
         );
-        // 50 related items (well under the item ceiling) with one edge more
-        // than the edge ceiling between them.
+        // Five of the 1001 open items are high priority, so they lead the
+        // ready order, in creation order.
+        let mut high = Vec::new();
+        for index in 0..1001 {
+            let mut request = create_req(&format!("open {index}"));
+            if index % 200 == 100 {
+                request.priority = crate::WorkPriority::High;
+            }
+            let item = service.create(request).await.expect("create");
+            if index % 200 == 100 {
+                high.push(item.id.as_str().to_string());
+            }
+        }
+
+        // The tool result carries the page fields.
+        let page = crate::handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_ready",
+            &json!({ "limit": 5 }),
+        )
+        .await
+        .expect("a namespace with 1001 live items is evaluated, not refused");
+        let returned = page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["id"].as_str().expect("id").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(returned, high);
+        assert_eq!(page["total_items"], json!(1001));
+        assert_eq!(page["truncated"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn snapshot_over_a_thousand_live_edges_returns_a_bounded_page() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        // 50 live items with 1001 `related` edges between them.
         let mut items = Vec::new();
         for index in 0..50 {
             items.push(
@@ -2851,7 +3280,7 @@ mod tests {
         let mut linked = 0;
         'pairs: for from in 0..items.len() {
             for to in (from + 1)..items.len() {
-                if linked > super::MAX_ATOMIC_SNAPSHOT_EDGES {
+                if linked == 1001 {
                     break 'pairs;
                 }
                 service
@@ -2867,13 +3296,18 @@ mod tests {
                 linked += 1;
             }
         }
-        // While the chain is live the edge ceiling applies.
-        let error = service
+
+        let snapshot = service
             .snapshot(Default::default())
             .await
-            .expect_err("over the live edge ceiling");
-        assert!(error.to_string().contains("edge scan limit"), "{error}");
-        // Closed, the items and their edges are history and the snapshot reads again.
+            .expect("a namespace with 1001 live edges is read, not refused");
+        assert_eq!(snapshot.items.len(), 50);
+        assert_eq!(snapshot.edges.len(), 1001);
+        let page = serde_json::to_value(&snapshot).expect("snapshot json");
+        assert_eq!(page["total_items"], json!(50));
+        assert_eq!(page["truncated"], json!(false));
+        // Closed, the items and their edges are history: the default
+        // snapshot holds the live item alone, and no edge.
         for item in items {
             let current = service.get(None, None, item.id).await.expect("get");
             close_completed(&service, current).await;
@@ -2885,6 +3319,826 @@ mod tests {
             .expect("snapshot");
         assert_eq!(snapshot.items.len(), 1);
         assert!(snapshot.edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_and_list_report_total_items_and_truncated() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..5 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+
+        for (limit, returned, truncated) in [(2, 2, true), (10, 5, false)] {
+            let snapshot = service
+                .snapshot(crate::WorkGraphSnapshotFilter {
+                    limit: Some(limit),
+                    ..Default::default()
+                })
+                .await
+                .expect("snapshot");
+            assert_eq!(snapshot.items.len(), returned, "snapshot limit {limit}");
+            let snapshot = serde_json::to_value(&snapshot).expect("snapshot json");
+            assert_eq!(snapshot["total_items"], json!(5), "snapshot limit {limit}");
+            assert_eq!(
+                snapshot["truncated"],
+                json!(truncated),
+                "snapshot limit {limit}"
+            );
+
+            // The list totals travel in the tool result.
+            let list = crate::handle_unscoped_workgraph_tools_call(
+                &service,
+                "workgraph_list",
+                &json!({ "limit": limit }),
+            )
+            .await
+            .expect("list");
+            assert_eq!(
+                list["items"].as_array().map(Vec::len),
+                Some(returned),
+                "list limit {limit}"
+            );
+            assert_eq!(list["total_items"], json!(5), "list limit {limit}");
+            assert_eq!(list["truncated"], json!(truncated), "list limit {limit}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocker_outside_a_cut_snapshot_still_blocks() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let blocker = service
+            .create(create_req("old blocker"))
+            .await
+            .expect("blocker");
+        let blocked = service
+            .create(create_req("blocked"))
+            .await
+            .expect("blocked");
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: blocked.id.clone(),
+            })
+            .await
+            .expect("link");
+        let mut fillers = Vec::new();
+        for index in 0..3 {
+            fillers.push(
+                service
+                    .create(create_req(&format!("filler {index}")))
+                    .await
+                    .expect("filler"),
+            );
+        }
+        let newest_filler = fillers.pop().expect("filler");
+        // Updated last, the blocked item is the most recently updated one;
+        // the blocker is the least recently updated.
+        touch(&service, &blocked).await;
+
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            ids(&snapshot.items),
+            vec![blocked.id.clone(), newest_filler.id.clone()]
+        );
+        // Edges follow the page, so the blocker's edge was cut with it.
+        assert!(snapshot.edges.is_empty());
+        // The cut left the blocker out of the page, and readiness is still
+        // classified against the whole namespace: the open blocker blocks.
+        assert_eq!(snapshot.ready_item_ids, vec![newest_filler.id]);
+    }
+
+    /// One page of a read through its tool, with the page fields.
+    async fn tool_page(
+        service: &WorkGraphService,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        crate::handle_unscoped_workgraph_tools_call(service, tool, &arguments)
+            .await
+            .unwrap_or_else(|error| panic!("{tool} {arguments}: {error:?}"))
+    }
+
+    fn page_ids(page: &serde_json::Value) -> Vec<WorkItemId> {
+        page["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a page lists items: {page}"))
+            .iter()
+            .map(|item| WorkItemId::new(item["id"].as_str().expect("item id")).expect("id"))
+            .collect()
+    }
+
+    /// The cursor a truncated page hands back for its continuation.
+    fn next_cursor(page: &serde_json::Value) -> String {
+        page["next_cursor"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a truncated page names its next cursor: {page}"))
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_list_walk_returns_each_unchanged_item_exactly_once() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..25 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        let first = tool_page(&service, "workgraph_list", json!({ "limit": 10 })).await;
+        let mut seen = page_ids(&first);
+        assert_eq!(seen.len(), 10);
+        assert_eq!(first["truncated"], json!(true), "{first}");
+        let mut cursor = next_cursor(&first);
+        // Between the pages an item already returned changes, an item not
+        // yet returned changes, and a new item appears.
+        let returned = created
+            .iter()
+            .find(|item| item.id == seen[3])
+            .expect("a returned item")
+            .clone();
+        touch(&service, &returned).await;
+        let unreturned = created[2].clone();
+        touch(&service, &unreturned).await;
+        service.create(create_req("new")).await.expect("new item");
+
+        let mut pages = 1;
+        loop {
+            let page = tool_page(
+                &service,
+                "workgraph_list",
+                json!({ "limit": 10, "cursor": cursor }),
+            )
+            .await;
+            pages += 1;
+            assert!(pages <= 4, "the walk ends: {page}");
+            seen.extend(page_ids(&page));
+            if page["truncated"] == json!(true) {
+                cursor = next_cursor(&page);
+            } else {
+                assert!(page.get("next_cursor").is_none(), "{page}");
+                break;
+            }
+        }
+        for item in &created {
+            let count = seen.iter().filter(|id| **id == item.id).count();
+            if item.id == unreturned.id {
+                // Changed after the walk began: at most once.
+                assert!(count <= 1, "{} appears {count} times", item.id);
+            } else {
+                assert_eq!(count, 1, "{} appears {count} times", item.id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_walk_flags_changes_after_its_anchor() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..5 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        let first = tool_page(&service, "workgraph_list", json!({ "limit": 2 })).await;
+        let anchor = first["anchor_event_seq"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("a page names its walk's anchor: {first}"));
+        assert_eq!(first["changed_since_anchor"], json!(false), "{first}");
+        // The oldest item, not yet returned, changes after the anchor.
+        let changed = touch(&service, &created[0]).await;
+
+        let second = tool_page(
+            &service,
+            "workgraph_list",
+            json!({ "limit": 2, "cursor": next_cursor(&first) }),
+        )
+        .await;
+        assert_eq!(second["anchor_event_seq"], json!(anchor), "{second}");
+        assert_eq!(second["changed_since_anchor"], json!(true), "{second}");
+        // The events after the anchor name the changed item.
+        let events = tool_page(&service, "workgraph_events", json!({ "after_seq": anchor })).await;
+        assert!(
+            events["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .any(|event| event["item_id"] == json!(changed.id.as_str())),
+            "{events}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_with_one_updated_at_page_by_id() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        // Seven items stored with one `updated_at`: only the id orders them.
+        let at = Utc::now();
+        let mut expected = Vec::new();
+        for index in 0..7 {
+            let (item, event) = crate::WorkGraphMachine::create_item(
+                create_req(&format!("tied {index}")),
+                "realm".to_string(),
+                WorkNamespace::default(),
+                at,
+            )
+            .expect("item");
+            expected.push(store.insert_item(item, event).await.expect("insert").id);
+        }
+        expected.sort_by(|left, right| right.cmp(left));
+
+        let mut seen = Vec::new();
+        let mut page = tool_page(&service, "workgraph_list", json!({ "limit": 3 })).await;
+        loop {
+            seen.extend(page_ids(&page));
+            if page["truncated"] != json!(true) {
+                break;
+            }
+            assert!(seen.len() < expected.len(), "the walk ends: {page}");
+            page = tool_page(
+                &service,
+                "workgraph_list",
+                json!({ "limit": 3, "cursor": next_cursor(&page) }),
+            )
+            .await;
+        }
+        assert_eq!(seen, expected, "no row is skipped or repeated");
+    }
+
+    #[tokio::test]
+    async fn a_ready_walk_follows_priority_then_creation_then_id() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        // Nine ready items over three priorities; pairs share a creation
+        // time, so the id breaks those ties.
+        let base = Utc::now() - Duration::minutes(1);
+        let mut items = Vec::new();
+        for index in 0..9i64 {
+            let mut request = create_req(&format!("ready {index}"));
+            request.priority = match index % 3 {
+                0 => crate::WorkPriority::High,
+                1 => crate::WorkPriority::Medium,
+                _ => crate::WorkPriority::Low,
+            };
+            let (item, event) = crate::WorkGraphMachine::create_item(
+                request,
+                "realm".to_string(),
+                WorkNamespace::default(),
+                base + Duration::seconds(index / 2),
+            )
+            .expect("item");
+            items.push(store.insert_item(item, event).await.expect("insert"));
+        }
+        items.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let expected = ids(&items);
+
+        let mut seen = Vec::new();
+        let mut page = tool_page(&service, "workgraph_ready", json!({ "limit": 4 })).await;
+        loop {
+            seen.extend(page_ids(&page));
+            if page["truncated"] != json!(true) {
+                break;
+            }
+            assert!(seen.len() < expected.len(), "the walk ends: {page}");
+            page = tool_page(
+                &service,
+                "workgraph_ready",
+                json!({ "limit": 4, "cursor": next_cursor(&page) }),
+            )
+            .await;
+        }
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_or_malformed_cursor_is_invalid_arguments() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..3 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+        // Not a cursor, another version, and an undecodable body.
+        for (tool, cursor) in [
+            ("workgraph_list", "garbage"),
+            ("workgraph_snapshot", "wg0.e30"),
+            ("workgraph_ready", "wg1.%%%"),
+        ] {
+            let error = crate::handle_unscoped_workgraph_tools_call(
+                &service,
+                tool,
+                &json!({ "cursor": cursor }),
+            )
+            .await
+            .expect_err("a malformed cursor is refused");
+            assert_eq!(
+                error.code,
+                crate::WorkGraphToolErrorCode::InvalidArguments,
+                "{tool} {cursor}: {error:?}"
+            );
+        }
+        // A list cursor continues list only.
+        let list = tool_page(&service, "workgraph_list", json!({ "limit": 1 })).await;
+        let cursor = next_cursor(&list);
+        for tool in ["workgraph_ready", "workgraph_snapshot"] {
+            let error = crate::handle_unscoped_workgraph_tools_call(
+                &service,
+                tool,
+                &json!({ "limit": 1, "cursor": cursor }),
+            )
+            .await
+            .expect_err("a list cursor is foreign to this read");
+            assert_eq!(
+                error.code,
+                crate::WorkGraphToolErrorCode::InvalidArguments,
+                "{tool}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn events_report_truncated_and_next_after_seq() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..5 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+
+        // Five created events, read two at a time.
+        let first = tool_page(&service, "workgraph_events", json!({ "limit": 2 })).await;
+        let events = first["events"].as_array().expect("events");
+        assert_eq!(events.len(), 2, "{first}");
+        assert_eq!(first["truncated"], json!(true), "{first}");
+        assert_eq!(first["next_after_seq"], events[1]["seq"], "{first}");
+        let high_water = first["event_high_water_mark"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("an events page names the high-water mark: {first}"));
+
+        let rest = tool_page(
+            &service,
+            "workgraph_events",
+            json!({ "after_seq": first["next_after_seq"], "limit": 10 }),
+        )
+        .await;
+        assert_eq!(rest["events"].as_array().map(Vec::len), Some(3), "{rest}");
+        assert_eq!(rest["truncated"], json!(false), "{rest}");
+        assert!(rest.get("next_after_seq").is_none(), "{rest}");
+        assert_eq!(rest["event_high_water_mark"], json!(high_water), "{rest}");
+        assert_eq!(rest["events"][2]["seq"], json!(high_water), "{rest}");
+    }
+
+    /// A snapshot walk reports every edge between the items it returned
+    /// exactly once: a continuation carries the edges from its items to the
+    /// items before its cursor.
+    #[tokio::test]
+    async fn a_snapshot_walk_reports_each_edge_once() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut items = Vec::new();
+        for index in 0..5 {
+            items.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create")
+                    .id,
+            );
+        }
+        // Newest first, two to a page: [4, 3], [2, 1], [0]. The edges span
+        // pages in both directions, and one stays on its page.
+        let links = [(0, 4), (1, 2), (2, 3), (4, 1)];
+        for (from, to) in links {
+            service
+                .link(LinkWorkItemsRequest {
+                    realm_id: None,
+                    namespace: None,
+                    kind: WorkEdgeKind::Blocks,
+                    from_id: items[from].clone(),
+                    to_id: items[to].clone(),
+                })
+                .await
+                .expect("link");
+        }
+
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        let mut arguments = json!({ "limit": 2 });
+        loop {
+            let page = tool_page(&service, "workgraph_snapshot", arguments).await;
+            let snapshot = &page["snapshot"];
+            pages += 1;
+            assert!(pages <= 3, "the walk ends: {page}");
+            for edge in snapshot["edges"].as_array().expect("edges") {
+                seen.push((
+                    edge["from_id"].as_str().expect("from_id").to_string(),
+                    edge["to_id"].as_str().expect("to_id").to_string(),
+                ));
+            }
+            if snapshot["truncated"] != json!(true) {
+                break;
+            }
+            arguments = json!({ "limit": 2, "cursor": next_cursor(snapshot) });
+        }
+        assert_eq!(pages, 3);
+        seen.sort();
+        let mut expected = links
+            .iter()
+            .map(|(from, to)| (items[*from].to_string(), items[*to].to_string()))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(
+            seen, expected,
+            "each edge once, whatever pages its ends are on"
+        );
+    }
+
+    /// Snapshot and ready continuations carry their walk's anchor and flag a
+    /// write after it.
+    #[tokio::test]
+    async fn snapshot_and_ready_continuations_flag_changes_after_the_anchor() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..3 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        // Snapshot: newest first, so the oldest item is not yet returned.
+        let first = tool_page(&service, "workgraph_snapshot", json!({ "limit": 2 })).await;
+        let first = &first["snapshot"];
+        let anchor = first["anchor_event_seq"].clone();
+        assert!(anchor.is_i64(), "a page names its walk's anchor: {first}");
+        assert_eq!(first["changed_since_anchor"], json!(false), "{first}");
+        touch(&service, &created[0]).await;
+        let second = tool_page(
+            &service,
+            "workgraph_snapshot",
+            json!({ "limit": 2, "cursor": next_cursor(first) }),
+        )
+        .await;
+        let second = &second["snapshot"];
+        assert_eq!(second["anchor_event_seq"], anchor, "{second}");
+        assert_eq!(second["changed_since_anchor"], json!(true), "{second}");
+
+        // Ready: oldest first at one priority, so the newest item is not yet
+        // returned.
+        let first = tool_page(&service, "workgraph_ready", json!({ "limit": 2 })).await;
+        let anchor = first["anchor_event_seq"].clone();
+        assert!(anchor.is_i64(), "a page names its walk's anchor: {first}");
+        assert_eq!(first["changed_since_anchor"], json!(false), "{first}");
+        touch(&service, &created[2]).await;
+        let second = tool_page(
+            &service,
+            "workgraph_ready",
+            json!({ "limit": 2, "cursor": next_cursor(&first) }),
+        )
+        .await;
+        assert_eq!(second["anchor_event_seq"], anchor, "{second}");
+        assert_eq!(second["changed_since_anchor"], json!(true), "{second}");
+    }
+
+    /// A `limit: 0` page holds no row, so it has nothing to continue after:
+    /// it reports the totals and names no cursor.
+    #[tokio::test]
+    async fn a_limit_0_page_reports_the_totals_and_names_no_cursor() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..3 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+        let list = service
+            .list_page(WorkItemFilter {
+                limit: Some(0),
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("list page");
+        let ready = service
+            .ready_page(crate::ReadyWorkFilter {
+                limit: Some(0),
+                ..crate::ReadyWorkFilter::default()
+            })
+            .await
+            .expect("ready page");
+        for page in [&list, &ready] {
+            assert!(page.items.is_empty(), "{page:?}");
+            assert_eq!(page.total_items, Some(3), "{page:?}");
+            assert_eq!(page.truncated, Some(true), "{page:?}");
+            assert_eq!(page.next_cursor, None, "{page:?}");
+        }
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(0),
+                ..crate::WorkGraphSnapshotFilter::default()
+            })
+            .await
+            .expect("snapshot");
+        assert!(snapshot.items.is_empty(), "{snapshot:?}");
+        assert_eq!(snapshot.total_items, Some(3), "{snapshot:?}");
+        assert_eq!(snapshot.truncated, Some(true), "{snapshot:?}");
+        assert_eq!(snapshot.next_cursor, None, "{snapshot:?}");
+    }
+
+    /// `snapshot_uncut` holds every item the filter selects in one
+    /// observation, past the 1000 a page holds, and ignores `limit` and
+    /// `cursor`.
+    #[tokio::test]
+    async fn snapshot_uncut_holds_every_selected_item_in_one_observation() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..1001 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create")
+                    .id,
+            );
+        }
+        // The oldest item blocks the newest one.
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: created[0].clone(),
+                to_id: created[1000].clone(),
+            })
+            .await
+            .expect("link");
+
+        let snapshot = service
+            .snapshot_uncut(crate::WorkGraphSnapshotFilter {
+                limit: Some(1),
+                cursor: Some("not a cursor".to_string()),
+                ..crate::WorkGraphSnapshotFilter::default()
+            })
+            .await
+            .expect("uncut snapshot");
+        assert_eq!(snapshot.items.len(), 1001);
+        assert_eq!(snapshot.total_items, Some(1001));
+        assert_eq!(snapshot.truncated, Some(false));
+        assert_eq!(snapshot.next_cursor, None);
+        assert_eq!(snapshot.anchor_event_seq, snapshot.event_high_water_mark);
+        assert_eq!(snapshot.changed_since_anchor, Some(false));
+        assert_eq!(
+            snapshot.edges.len(),
+            1,
+            "the edge between the oldest and the newest"
+        );
+        assert_eq!(snapshot.ready_item_ids.len(), 1000);
+        assert!(
+            !snapshot.ready_item_ids.contains(&created[1000]),
+            "the blocked item is not ready"
+        );
+    }
+
+    /// A store that serves its event ledger through `list_events` alone and
+    /// keeps the trait defaults for `list_public_events` and
+    /// `latest_event_seq`. It holds no items, edges or bindings.
+    struct LedgerOnlyStore {
+        events: Vec<WorkGraphEvent>,
+    }
+
+    fn ledger_only_refusal() -> crate::WorkGraphError {
+        crate::WorkGraphError::UnsupportedBackend("ledger-only test store".to_string())
+    }
+
+    #[async_trait]
+    impl WorkGraphStore for LedgerOnlyStore {
+        fn kind(&self) -> WorkGraphStoreKind {
+            WorkGraphStoreKind::Custom
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, crate::WorkGraphError> {
+            Ok(Utc::now())
+        }
+
+        async fn insert_item(
+            &self,
+            _item: WorkItem,
+            _event: WorkGraphEvent,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn update_item_cas(
+            &self,
+            _item: WorkItem,
+            _expected_previous_revision: u64,
+            _event: WorkGraphEvent,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            _item: WorkItem,
+            _expected_previous_revision: u64,
+            _item_event: WorkGraphEvent,
+            _attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn get_item(
+            &self,
+            _realm_id: &str,
+            _namespace: &WorkNamespace,
+            _id: &WorkItemId,
+        ) -> Result<Option<WorkItem>, crate::WorkGraphError> {
+            Ok(None)
+        }
+
+        async fn list_items(
+            &self,
+            _filter: WorkItemFilter,
+        ) -> Result<Vec<WorkItem>, crate::WorkGraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            _filter: AttentionListRequest,
+            _observed_at: DateTime<Utc>,
+            _limit: usize,
+        ) -> Result<Vec<WorkAttentionBinding>, crate::WorkGraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_edge(
+            &self,
+            _edge: WorkEdge,
+            _event: WorkGraphEvent,
+        ) -> Result<WorkEdge, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn list_edges(
+            &self,
+            _realm_id: &str,
+            _namespace: &WorkNamespace,
+        ) -> Result<Vec<WorkEdge>, crate::WorkGraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_events(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Vec<WorkGraphEvent>, crate::WorkGraphError> {
+            Ok(self
+                .events
+                .iter()
+                .filter(|event| {
+                    filter
+                        .after_seq
+                        .is_none_or(|after| event.seq.is_some_and(|seq| seq > after))
+                })
+                .take(filter.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// On a store that keeps the trait defaults, execution events between
+    /// public ones never end an events walk early: a page that leaves public
+    /// events behind says so.
+    #[tokio::test]
+    async fn a_default_store_events_page_is_not_cut_short_by_execution_events() {
+        let item = WorkItemId::new("work_ledger").expect("item id");
+        // Two public events, three execution events, two more public events.
+        let events = [
+            WorkGraphEventKind::Created,
+            WorkGraphEventKind::Updated,
+            WorkGraphEventKind::ExecutionBound,
+            WorkGraphEventKind::ExecutionTransitioned,
+            WorkGraphEventKind::ExecutionTransitioned,
+            WorkGraphEventKind::Updated,
+            WorkGraphEventKind::Updated,
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(kind, seq)| {
+            let mut event = WorkGraphEvent::item(
+                "realm".to_string(),
+                WorkNamespace::default(),
+                item.clone(),
+                kind,
+                Utc::now(),
+                json!({}),
+            );
+            event.seq = Some(seq);
+            event
+        })
+        .collect();
+        let service = WorkGraphService::with_scope(
+            Arc::new(LedgerOnlyStore { events }),
+            "realm",
+            WorkNamespace::default(),
+        );
+
+        let first = tool_page(&service, "workgraph_events", json!({ "limit": 2 })).await;
+        let seqs = |page: &serde_json::Value| {
+            page["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .map(|event| event["seq"].as_i64().expect("seq"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seqs(&first), vec![1, 2], "{first}");
+        assert_eq!(
+            first["truncated"],
+            json!(true),
+            "public events remain past the execution events: {first}"
+        );
+        assert_eq!(first["next_after_seq"], json!(2), "{first}");
+        assert_eq!(first["event_high_water_mark"], json!(7), "{first}");
+
+        let rest = tool_page(
+            &service,
+            "workgraph_events",
+            json!({ "limit": 2, "after_seq": 2 }),
+        )
+        .await;
+        assert_eq!(seqs(&rest), vec![6, 7], "{rest}");
+        assert_eq!(rest["truncated"], json!(false), "{rest}");
+        assert!(rest.get("next_after_seq").is_none(), "{rest}");
     }
 
     #[tokio::test]
@@ -2984,6 +4238,7 @@ mod tests {
             execution_binding_id: Some(
                 crate::WorkExecutionBindingId::new("caller-supplied").expect("binding id"),
             ),
+            withdraws: BTreeSet::new(),
         });
 
         let error = service
@@ -3518,6 +4773,7 @@ mod tests {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: None,
+            withdraws: BTreeSet::new(),
         }
     }
 
@@ -3709,7 +4965,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_applies_owner_default_before_cloning_results() {
+    async fn list_applies_the_default_limit() {
         let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
         for index in 0..=super::DEFAULT_COLLECTION_LIMIT {
             service
@@ -3831,6 +5087,7 @@ mod tests {
             confirmation_kind: None,
             confirming_owner_key: None,
             execution_binding_id: Some(completed.binding.binding_id.clone()),
+            withdraws: BTreeSet::new(),
         };
         let reserved_error = service
             .add_evidence(AddEvidenceRequest {
@@ -3981,5 +5238,362 @@ mod tests {
             item_id: observed.id,
             item_revision: observed.revision,
         }));
+    }
+
+    // Evidence withdrawal. Evidence is built from its wire form, so these
+    // rows also compile against a `WorkEvidenceRef` without `withdraws`.
+
+    #[tokio::test]
+    async fn projected_execution_evidence_cannot_be_withdrawn() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let item = service.create(create_req("execute")).await.expect("item");
+        let binding_id = WorkExecutionBindingId::new("execution_withdrawal").expect("binding id");
+        let target = WorkExecutionTarget::mob_flow(
+            "mob-test",
+            "flow-test",
+            format!("sha256:{}", "a".repeat(64)),
+            "8a0737ff-b72d-57cd-91c7-feb396c79e7f",
+            crate::WorkExecutionAuthority::TargetOwner,
+            json!({"input": "value"}),
+        )
+        .expect("target");
+        let (machine_state, _) =
+            WorkExecutionMachine::bind(&binding_id, target.run_id()).expect("machine bind");
+        let bound = service
+            .bind_execution(
+                WorkExecutionBinding {
+                    binding_id,
+                    work_ref: WorkItemRef {
+                        realm_id: item.realm_id.clone(),
+                        namespace: item.namespace.clone(),
+                        item_id: item.id.clone(),
+                    },
+                    target,
+                    idempotency_key: "attempt-1".to_string(),
+                    correlation_id: "74a2790d-a684-5211-98b6-b16e6496ae63".to_string(),
+                    supersedes: None,
+                    machine_state,
+                    created_at: Utc::now(),
+                },
+                item.revision,
+            )
+            .await
+            .expect("bind");
+        let running = service
+            .observe_execution(
+                Some(item.realm_id.clone()),
+                Some(item.namespace.clone()),
+                bound.binding.binding_id.clone(),
+                1,
+                WorkExecutionObservation::FlowRunning,
+            )
+            .await
+            .expect("running");
+        let completed = service
+            .observe_execution(
+                Some(item.realm_id.clone()),
+                Some(item.namespace.clone()),
+                running.binding.binding_id.clone(),
+                2,
+                WorkExecutionObservation::FlowCompleted,
+            )
+            .await
+            .expect("completed");
+        let projected = service
+            .project_execution_evidence(
+                Some(item.realm_id.clone()),
+                Some(item.namespace.clone()),
+                completed.binding.binding_id.clone(),
+                WorkExecutionEvidenceProjection {
+                    kind: WorkExecutionEvidenceKind::Completed,
+                    label: None,
+                    summary: Some("completed".to_string()),
+                },
+            )
+            .await
+            .expect("bridge evidence projection");
+
+        let error = service
+            .add_evidence(AddEvidenceRequest {
+                id: projected.id.clone(),
+                realm_id: Some(projected.realm_id.clone()),
+                namespace: Some(projected.namespace.clone()),
+                expected_revision: projected.revision,
+                evidence: serde_json::from_value(json!({
+                    "kind": "correction",
+                    "id": "retraction-1",
+                    "withdraws": [completed.binding.evidence_id()]
+                }))
+                .expect("withdrawing evidence"),
+            })
+            .await
+            .expect_err("execution evidence cannot be withdrawn");
+        assert!(
+            matches!(error, crate::WorkGraphError::InvalidInput(_)),
+            "{error:?}"
+        );
+        assert!(
+            service
+                .execution_evidence(
+                    Some(item.realm_id.clone()),
+                    Some(item.namespace.clone()),
+                    completed.binding.binding_id.clone(),
+                )
+                .await
+                .expect("execution evidence read")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_evidence_replay_compares_withdrawals() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let item = service
+            .create(create_req("idempotent withdrawal"))
+            .await
+            .expect("item");
+        let request = |expected_revision: u64, evidence: serde_json::Value| AddEvidenceRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision,
+            evidence: serde_json::from_value(evidence).expect("evidence from its wire form"),
+        };
+        let evidenced = service
+            .add_evidence(request(
+                item.revision,
+                json!({ "kind": "finding", "id": "e1" }),
+            ))
+            .await
+            .expect("first evidence");
+        let withdrawal = json!({ "kind": "finding", "id": "e2", "withdraws": ["e1"] });
+        let withdrawn = service
+            .add_evidence_idempotent(request(evidenced.revision, withdrawal.clone()))
+            .await
+            .expect("withdrawal");
+        let replayed = service
+            .add_evidence_idempotent(request(withdrawn.revision, withdrawal))
+            .await
+            .expect("an exact replay");
+        assert_eq!(
+            replayed.revision, withdrawn.revision,
+            "an exact replay writes nothing"
+        );
+        let error = service
+            .add_evidence_idempotent(request(
+                withdrawn.revision,
+                json!({ "kind": "finding", "id": "e2" }),
+            ))
+            .await
+            .expect_err("the same id without the withdrawal is different content");
+        assert!(
+            matches!(error, crate::WorkGraphError::Conflict(_)),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_paths_check_withdrawals_in_request_order() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let refs = |value: serde_json::Value| -> Vec<WorkEvidenceRef> {
+            serde_json::from_value(value).expect("evidence refs from their wire form")
+        };
+        let ordered = json!([
+            { "kind": "finding", "id": "e1" },
+            { "kind": "finding", "id": "e2", "withdraws": ["e1"] }
+        ]);
+        let reversed = json!([
+            { "kind": "finding", "id": "e2", "withdraws": ["e1"] },
+            { "kind": "finding", "id": "e1" }
+        ]);
+
+        let mut request = create_req("reversed withdrawal");
+        request.evidence_refs = refs(reversed.clone());
+        let error = service
+            .create(request)
+            .await
+            .expect_err("a withdrawal must follow the ref it names");
+        assert!(
+            matches!(error, crate::WorkGraphError::InvalidInput(_)),
+            "{error:?}"
+        );
+
+        let mut request = create_req("keyed reversed withdrawal");
+        request.evidence_refs = refs(reversed);
+        let error = service
+            .create_idempotent(
+                crate::WorkAdmissionKey::new("reversed-withdrawal").expect("admission key"),
+                request,
+            )
+            .await
+            .expect_err("a keyed create checks the same order");
+        assert!(
+            matches!(error, crate::WorkGraphError::InvalidInput(_)),
+            "{error:?}"
+        );
+
+        let mut request = create_req("ordered withdrawal");
+        request.evidence_refs = refs(ordered.clone());
+        let created = service
+            .create(request)
+            .await
+            .expect("a withdrawal of an earlier ref in the request");
+        assert_eq!(
+            serde_json::to_value(&created.evidence_refs).expect("evidence refs"),
+            ordered
+        );
+
+        // A goal create, the path a realm migration copies refs through,
+        // keeps the relation.
+        let session_id = meerkat_core::SessionId::parse("019e63c2-0000-7000-8000-0000000002a4")
+            .expect("valid session id");
+        let goal = service
+            .create_goal(crate::types::GoalCreateRequest {
+                failed_child_join_policy: Default::default(),
+                cancelled_child_join_policy: Default::default(),
+                priority: Default::default(),
+                labels: Default::default(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: refs(ordered.clone()),
+                status: None,
+                realm_id: None,
+                namespace: None,
+                title: "goal withdrawal".to_string(),
+                description: None,
+                target: crate::types::GoalAttentionTarget::Session { session_id },
+                mode: crate::types::WorkAttentionMode::Pursue,
+                completion_policy: crate::types::WorkCompletionPolicy::SelfAttest,
+                delegated_authority: crate::types::AttentionDelegatedAuthority::AddEvidence,
+                projection_policy: crate::types::AttentionProjectionPolicy::default(),
+            })
+            .await
+            .expect("a goal whose refs carry a withdrawal");
+        assert_eq!(
+            serde_json::to_value(&goal.item.evidence_refs).expect("evidence refs"),
+            ordered
+        );
+    }
+
+    /// A break-glass release hands back a claim its operator does not own:
+    /// the item returns to the pool, and the Released event records the
+    /// operator and the claim released. It is bound to the request's
+    /// revision and refuses a blank principal; the owner's plain release
+    /// records no break-glass.
+    #[tokio::test]
+    async fn break_glass_release_records_the_operator_and_the_released_claim() {
+        use crate::types::{BreakGlassReleaseWorkItemRequest, ReleaseWorkItemRequest};
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let claim = |item: &WorkItem| ClaimWorkItemRequest {
+            id: item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: item.revision,
+            owner: WorkOwner::new(
+                WorkOwnerKey::principal("owner@example.test").expect("owner key"),
+            ),
+            lease_seconds: None,
+            lease_expires_at: None,
+        };
+        let break_glass =
+            |item: &WorkItem, revision: u64, principal: &str| BreakGlassReleaseWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: revision,
+                principal: principal.to_string(),
+            };
+        let created = service
+            .create(create_req("break glass"))
+            .await
+            .expect("create");
+        let claimed = service.claim(claim(&created)).await.expect("claim");
+
+        let blank = service
+            .break_glass_release(break_glass(&claimed, claimed.revision, "  "))
+            .await;
+        assert!(
+            matches!(blank, Err(crate::WorkGraphError::InvalidInput(_))),
+            "{blank:?}"
+        );
+        let stale = service
+            .break_glass_release(break_glass(
+                &claimed,
+                created.revision,
+                "admin@example.test",
+            ))
+            .await;
+        assert!(
+            matches!(stale, Err(crate::WorkGraphError::StaleRevision { .. })),
+            "{stale:?}"
+        );
+        let released = service
+            .break_glass_release(break_glass(
+                &claimed,
+                claimed.revision,
+                "admin@example.test",
+            ))
+            .await
+            .expect("break-glass release");
+        assert_eq!(released.status, crate::WorkStatus::Open);
+        assert!(released.claim.is_none(), "{released:?}");
+
+        let reclaimed = service.claim(claim(&released)).await.expect("claim again");
+        service
+            .release(ReleaseWorkItemRequest {
+                id: reclaimed.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: reclaimed.revision,
+            })
+            .await
+            .expect("the owner's release");
+
+        let releases = service
+            .events(WorkGraphEventFilter::default())
+            .await
+            .expect("events")
+            .into_iter()
+            .filter(|event| event.kind == WorkGraphEventKind::Released)
+            .collect::<Vec<WorkGraphEvent>>();
+        assert_eq!(releases.len(), 2, "{releases:?}");
+        assert_eq!(
+            releases[0].payload["break_glass"],
+            json!({
+                "principal": "admin@example.test",
+                "released_claim": serde_json::to_value(&claimed.claim).expect("claim json"),
+            })
+        );
+        assert_eq!(
+            releases[0].payload["break_glass"]["released_claim"]["owner"]["key"],
+            json!({ "kind": "principal", "id": "owner@example.test" })
+        );
+        assert_eq!(
+            releases[0].payload["item"]["id"],
+            json!(released.id.to_string())
+        );
+        assert!(
+            releases[1].payload.get("break_glass").is_none(),
+            "{:?}",
+            releases[1]
+        );
     }
 }

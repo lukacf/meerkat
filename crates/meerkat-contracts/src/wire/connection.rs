@@ -823,24 +823,44 @@ impl From<&meerkat_core::RealmConnectionSet> for WireRealmConnectionSet {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireAuthError {
     MissingSecret,
-    UnsupportedCombination { backend: String, auth: String },
-    MissingRequiredMetadata { field: String },
+    UnsupportedCombination {
+        backend: String,
+        auth: String,
+    },
+    MissingRequiredMetadata {
+        field: String,
+    },
     WorkspaceMismatch,
     Expired,
     StaleCredential,
     RefreshRequired,
     LeaseAbsent,
     UserReauthRequired,
-    RefreshFailed { detail: String },
-    ResolveRequired { detail: String },
+    RefreshFailed {
+        detail: String,
+    },
+    ResolveRequired {
+        detail: String,
+    },
     InteractiveLoginRequired,
     HostOwnedUnavailable,
-    Io { detail: String },
-    Other { detail: String },
+    Io {
+        detail: String,
+    },
+    Other {
+        detail: String,
+    },
     CredentialAccessDenied,
     CredentialInteractionRequired,
     CredentialAccessPending,
-    CredentialStoreUnavailable { detail: String },
+    CredentialStoreUnavailable {
+        detail: String,
+    },
+    /// The credential's source (a token exchange, an identity or token
+    /// endpoint) cannot answer now; a later attempt can succeed.
+    SourceUnavailable {
+        detail: String,
+    },
 }
 
 impl From<meerkat_core::AuthError> for WireAuthError {
@@ -872,6 +892,9 @@ impl From<meerkat_core::AuthError> for WireAuthError {
             meerkat_core::AuthError::CredentialAccessPending => Self::CredentialAccessPending,
             meerkat_core::AuthError::CredentialStoreUnavailable(detail) => {
                 Self::CredentialStoreUnavailable { detail }
+            }
+            meerkat_core::AuthError::SourceUnavailable { reason } => {
+                Self::SourceUnavailable { detail: reason }
             }
         }
     }
@@ -1590,6 +1613,24 @@ mod tests {
         let s = serde_json::to_string(&w).unwrap();
         assert!(s.contains("\"kind\":\"refresh_failed\""));
         assert!(s.contains("\"detail\":\"timeout\""));
+    }
+
+    /// A credential source that cannot answer now keeps its kind on the
+    /// wire: an SDK or a browser host reads `source_unavailable` with its
+    /// detail, never the catch-all `other`.
+    #[test]
+    fn a_source_unavailable_auth_error_keeps_its_kind_on_the_wire() {
+        let wire: WireAuthError = meerkat_core::AuthError::SourceUnavailable {
+            reason: "token endpoint answered 503".into(),
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_value(&wire).unwrap(),
+            serde_json::json!({
+                "kind": "source_unavailable",
+                "detail": "token endpoint answered 503"
+            })
+        );
     }
 
     #[test]

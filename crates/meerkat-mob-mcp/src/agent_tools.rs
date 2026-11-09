@@ -181,6 +181,16 @@ enum ParentToolAccessPolicySource {
     LegacySessionMetadata,
 }
 
+/// The route a session's `delegate` helpers run on: the model, provider,
+/// self-hosted server and auth binding of the session's identity when the
+/// call runs (see `AgentMobToolSurface::current_route`).
+struct DelegateRoute {
+    model: String,
+    provider: Option<meerkat_core::Provider>,
+    self_hosted_server_id: Option<String>,
+    auth_binding: Option<meerkat_core::AuthBindingRef>,
+}
+
 /// Agent-internal tool surface for mob delegation and orchestration.
 ///
 /// Composed by `build_agent()` into the tool gateway. Provides 8 tools
@@ -198,8 +208,19 @@ pub struct AgentMobToolSurface {
     parent_tool_access_policy_source: ParentToolAccessPolicySource,
     tools: Arc<[Arc<ToolDef>]>,
     owner_bridge_session_id: SessionId,
-    /// Model name inherited by implicit mob helpers.
+    /// The model the owning agent was built on. A `delegate` runs its helper
+    /// on the session's current route ([`Self::current_route`]); this one
+    /// stands in only where the session service has no retained metadata for
+    /// the session to read that route from.
     model: String,
+    /// The provider the owning agent's build resolved for `model`, named with
+    /// it on the build-time route. `None` on a surface built by [`Self::new`]
+    /// or [`Self::new_with_effective_authority`]: its build-time route names
+    /// the model alone, which validates only for a catalogued model.
+    provider: Option<meerkat_core::Provider>,
+    /// The self-hosted server the owning agent's build resolved for `model`,
+    /// inherited with `provider`.
+    self_hosted_server_id: Option<String>,
     /// Parent agent's comms name (for building TrustedPeerDescriptor when wiring helpers).
     comms_name: Option<String>,
     /// Parent agent's canonical comms peer ID.
@@ -220,7 +241,10 @@ impl AgentMobToolSurface {
     /// Acquire a mob handle bound to THIS surface's console principal
     /// (chokepoint-(b) principal minting; SD-7: this surface is gated
     /// exactly like the RPC/REST/MCP handlers). The agent-lane `ensure_*`
-    /// gates on the machine-composed authority context stay, additive.
+    /// gates on the machine-composed authority context stay, additive. The
+    /// principal acts for the calling agent, so chokepoint (a) also applies
+    /// the agent lane's own rules: a member command addressed to an
+    /// identity entry is refused `identity_member`.
     async fn bound_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         // Handle resolution (store restore + runtime rebind in
         // `MobMcpState::ensure_restored`) is reached from inside the calling
@@ -234,13 +258,21 @@ impl AgentMobToolSurface {
         })
         .await?;
         Ok(
-            handle.with_command_authority(meerkat_mob::CommandAuthority::principal(
+            handle.with_command_authority(meerkat_mob::CommandAuthority::principal_for_agent(
                 self.control_principal.clone(),
             )),
         )
     }
 
     /// Create a new agent mob tool surface.
+    ///
+    /// The surface names no provider for `model`. A `delegate` runs its
+    /// helper on the session's current route as its durable metadata records
+    /// it; where the session service records none, the implicit mob names
+    /// `model` alone, which validates only for a catalogued model.
+    /// [`AgentMobToolSurfaceFactory`] builds the surface with the provider
+    /// route the agent's build resolved, so such a session on a model outside
+    /// the catalog delegates too.
     ///
     /// # Arguments
     /// * `state` - Shared MobMcpState for mob lifecycle operations
@@ -275,6 +307,9 @@ impl AgentMobToolSurface {
     ///
     /// The handle is owned by the agent and updated via `apply_session_effects`.
     /// Mob tools read from it for authorization checks.
+    ///
+    /// Like [`Self::new`], the surface names no provider for `model`; see
+    /// [`AgentMobToolSurfaceFactory`] for one that does.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_effective_authority(
         state: Arc<MobMcpState>,
@@ -293,6 +328,8 @@ impl AgentMobToolSurface {
             effective_authority,
             ParentToolAccessPolicySource::LegacySessionMetadata,
             model,
+            None,
+            None,
             owner_bridge_session_id,
             comms_name,
             comms_peer_id,
@@ -308,6 +345,8 @@ impl AgentMobToolSurface {
         effective_authority: Arc<std::sync::RwLock<MobToolAuthorityContext>>,
         parent_tool_access_policy_source: ParentToolAccessPolicySource,
         model: String,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<String>,
         owner_bridge_session_id: SessionId,
         comms_name: Option<String>,
         comms_peer_id: Option<PeerId>,
@@ -341,6 +380,8 @@ impl AgentMobToolSurface {
             tools,
             owner_bridge_session_id,
             model,
+            provider,
+            self_hosted_server_id,
             comms_name,
             comms_peer_id,
             comms_runtime,
@@ -1030,17 +1071,23 @@ impl AgentMobToolSurface {
     // (agent loop) commits that projection to session build_state.
     // No re-entrant session service call from inside tool dispatch.
 
-    /// Get or create the implicit mob for this agent's session.
+    /// Get or create the implicit mob for this agent's session, on the route
+    /// the session runs on when the call runs ([`Self::current_route`]).
     ///
     /// Returns (mob_id, first_delegate) where first_delegate is true if the
-    /// mob was just created.
+    /// mob was just created, which includes replacing a mob whose route the
+    /// session has left.
     async fn ensure_implicit_mob(&self) -> Result<(MobId, bool), MobError> {
+        let route = self.current_route().await?;
         let cached_mob_id = self.cached_implicit_mob_id.read().await.clone();
         let (mob_id, first_delegate) = self
             .state
-            .ensure_implicit_mob_for_model(
+            .ensure_implicit_mob_on_route(
                 &self.owner_bridge_session_id.to_string(),
-                &self.model,
+                &route.model,
+                route.provider,
+                route.self_hosted_server_id.as_deref(),
+                route.auth_binding.as_ref(),
                 cached_mob_id.as_ref(),
             )
             .await?;
@@ -1049,6 +1096,53 @@ impl AgentMobToolSurface {
         *cache = Some(mob_id.clone());
 
         Ok((mob_id, first_delegate))
+    }
+
+    /// The route the session runs on now: the model, provider, self-hosted
+    /// server and auth binding of the LLM identity its durable metadata
+    /// records. A turn that names another identity switches the session in
+    /// place and commits it before the turn runs, so a `delegate` after such
+    /// a switch, in the same turn or a later one, runs its helper where the
+    /// session runs, on the session's credentials.
+    ///
+    /// The read goes through the service's retained metadata, never through
+    /// the session's own task, which is waiting for this tool. A session the
+    /// service has recorded no metadata for yet has not switched in place (a
+    /// switch commits the session first), so the route it was built with is
+    /// still its route. A service that keeps no retained metadata (the
+    /// ephemeral session service) answers `Unsupported`: its sessions
+    /// delegate on the route they were built with, without a binding, even
+    /// after a switch. Any other failed read refuses the delegate rather than
+    /// guess the route.
+    async fn current_route(&self) -> Result<DelegateRoute, MobError> {
+        let service = self.state.session_service();
+        let session_id = self.owner_bridge_session_id.clone();
+        let recorded = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            service.load_retained_session_metadata(&session_id).await
+        })
+        .await;
+        let metadata = match recorded {
+            Ok(view) => view.and_then(|view| view.session_metadata),
+            Err(meerkat_core::service::SessionError::Unsupported(_)) => None,
+            Err(error) => return Err(MobError::SessionError(error)),
+        };
+        Ok(match metadata {
+            Some(metadata) => {
+                let identity = metadata.llm_identity();
+                DelegateRoute {
+                    model: identity.model,
+                    provider: Some(identity.provider),
+                    self_hosted_server_id: identity.self_hosted_server_id,
+                    auth_binding: identity.auth_binding,
+                }
+            }
+            None => DelegateRoute {
+                model: self.model.clone(),
+                provider: self.provider,
+                self_hosted_server_id: self.self_hosted_server_id.clone(),
+                auth_binding: None,
+            },
+        })
     }
 
     /// The authority grant a delegate returns for its session's implicit mob
@@ -2674,6 +2768,8 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
             effective_authority_handle,
             parent_tool_access_policy_source,
             args.model,
+            Some(args.provider),
+            args.self_hosted_server_id,
             args.session_id,
             args.comms_name,
             comms_peer_id,
@@ -2770,6 +2866,8 @@ impl AgentToolDispatcher for AgentMobToolSurface {
             tools: this.tools,
             owner_bridge_session_id,
             model: this.model,
+            provider: this.provider,
+            self_hosted_server_id: this.self_hosted_server_id,
             comms_name: this.comms_name,
             comms_peer_id: this.comms_peer_id,
             comms_runtime: this.comms_runtime,
@@ -3633,6 +3731,11 @@ const PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE: &str = "The member is retiring, 
      read did not read its session: output_preview and tokens_used are missing, not empty or \
      zero. status is current.";
 
+const PREVIEW_STORE_REFUSED_NOTE: &str = "The store refuses to read the member's session until \
+     its realm is reopened, so output_preview and tokens_used are missing, not empty or zero, and \
+     checking again will not bring them back before that reopen. status and progress.run_state \
+     are current; the other progress fields may be from an earlier read.";
+
 /// The plain-language note a `mob_check_member` result carries, chosen from
 /// the typed status fields: the preview marker's variant says why the
 /// preview is missing and whether it can come back, and an open turn keeps
@@ -3655,6 +3758,7 @@ fn check_member_note(status: &meerkat_contracts::MobMemberStatusResult) -> Optio
         meerkat_contracts::WireMemberPreviewUnavailable::NotObservedWhileRetiring => {
             PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE
         }
+        meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused => PREVIEW_STORE_REFUSED_NOTE,
     });
     match (running, preview_note) {
         (true, Some(preview_note)) => {
@@ -4434,12 +4538,34 @@ mod tests {
         assert!(retiring.contains("retiring"));
         assert!(!retiring.contains("progress"));
 
+        // A store that refuses the session until its realm is reopened: no
+        // check brings the preview back before that reopen, and the run
+        // state was still observed.
+        let refused = note(Some(Marker::StoreRefused), Some(WireMemberRunState::Idle))
+            .expect("a refused session read is called out");
+        assert_eq!(refused, PREVIEW_STORE_REFUSED_NOTE);
+        assert!(refused.contains("until its realm is reopened"));
+        assert!(refused.contains("checking again will not bring them back"));
+        assert!(!refused.contains("Check again later"));
+        assert!(refused.contains("status and progress.run_state are current"));
+        assert_eq!(
+            note(
+                Some(Marker::StoreRefused),
+                Some(WireMemberRunState::RunOpen)
+            ),
+            Some(format!(
+                "{MEMBER_TURN_RUNNING_SENTENCE} {PREVIEW_STORE_REFUSED_NOTE}"
+            )),
+            "an open turn keeps its running note alongside the marker's"
+        );
+
         // Every note is distinct: the variant decides it.
         let notes = [
             PREVIEW_OBSERVATION_DEADLINE_NOTE,
             PREVIEW_READ_FAILED_NOTE,
             PREVIEW_SESSION_ABSENT_NOTE,
             PREVIEW_NOT_OBSERVED_WHILE_RETIRING_NOTE,
+            PREVIEW_STORE_REFUSED_NOTE,
             MEMBER_TURN_RUNNING_NOTE,
         ];
         let distinct: std::collections::BTreeSet<_> = notes.iter().collect();
@@ -5533,6 +5659,10 @@ mod tests {
 
     #[async_trait]
     impl meerkat_mob::MobSessionService for RealCommsSessionSvc {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -5999,6 +6129,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -6024,6 +6155,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -6269,6 +6401,8 @@ mod tests {
             .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
                 session_id: SessionId::new(),
                 model: "claude-sonnet-4-5".to_string(),
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 authority_context: None,
                 effective_authority: None,
                 comms_name: None,
@@ -6296,6 +6430,8 @@ mod tests {
             .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
                 session_id: SessionId::new(),
                 model: "claude-sonnet-4-5".to_string(),
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 authority_context: Some(authority_projection),
                 effective_authority: None,
                 comms_name: None,
@@ -6331,6 +6467,8 @@ mod tests {
             .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
                 session_id,
                 model: "claude-sonnet-4-5".to_string(),
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 authority_context: Some(create_only_authority()),
                 effective_authority: None,
                 comms_name: None,
@@ -6386,6 +6524,8 @@ mod tests {
             .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
                 session_id,
                 model: "gpt-5.4".to_string(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
                 authority_context: Some(create_only_authority()),
                 effective_authority: None,
                 comms_name: None,
@@ -6860,6 +7000,8 @@ mod tests {
             .build_mob_tools(meerkat_core::service::MobToolsBuildArgs {
                 session_id,
                 model: "claude-sonnet-4-5".to_string(),
+                provider: meerkat_core::Provider::Anthropic,
+                self_hosted_server_id: None,
                 authority_context: Some(create_only_authority()),
                 effective_authority: None,
                 comms_name: None,
@@ -7147,6 +7289,65 @@ mod tests {
         }
     }
 
+    /// A surface built with its agent's resolved provider route names it on
+    /// the implicit mob it creates, so a model outside the catalog
+    /// delegates. A surface built without one (the public constructors)
+    /// names the model alone, which such a model does not validate with.
+    #[tokio::test]
+    async fn the_implicit_mob_runs_on_the_surface_agents_provider_route() {
+        let state = MobMcpState::new_in_memory();
+        let session_id = SessionId::new();
+        let model = "realm-gateway-model";
+        let surface = AgentMobToolSurface::new_with_effective_authority_and_policy_source(
+            Arc::clone(&state),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            ParentToolAccessPolicySource::LegacySessionMetadata,
+            model.to_string(),
+            Some(meerkat_core::Provider::SelfHosted),
+            Some("local".to_string()),
+            session_id.clone(),
+            None,
+            None,
+            None,
+            meerkat_core::service::MobToolSnapshotContext::Standalone,
+        );
+        let (mob_id, created) = surface
+            .ensure_implicit_mob()
+            .await
+            .expect("the implicit mob on the agent's route");
+        assert!(created);
+        let handle = state
+            .handle_for(&mob_id)
+            .await
+            .expect("implicit mob handle");
+        assert_eq!(
+            *handle.definition(),
+            MobDefinition::implicit_with_provider(
+                &session_id.to_string(),
+                model,
+                Some(meerkat_core::Provider::SelfHosted),
+                Some("local".to_string())
+            )
+        );
+
+        let without_route = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            create_only_authority(),
+            model.to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+        let error = without_route
+            .ensure_implicit_mob()
+            .await
+            .expect_err("without the agent's provider the model does not validate");
+        assert!(error.to_string().contains(model), "{error}");
+    }
+
     /// A model change replaces the session's implicit mob with a new
     /// incarnation, and the delegate grant moves to it: the replaced
     /// incarnation leaves scope.
@@ -7210,7 +7411,7 @@ mod tests {
             .await
             .expect("replacement implicit mob handle");
         let replacement_incarnation = replacement.incarnation();
-        assert!(replacement_incarnation != first_incarnation);
+        assert_ne!(replacement_incarnation, first_incarnation);
         apply_authority_effects(
             &authority,
             replacing
@@ -7223,8 +7424,9 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(authority.can_manage_mob(mob_id.as_str(), replacement_incarnation));
         assert!(!authority.can_manage_mob(mob_id.as_str(), first_incarnation));
-        assert!(
-            authority.mob_incarnations().get(mob_id.as_str()) == Some(&replacement_incarnation)
+        assert_eq!(
+            authority.mob_incarnations().get(mob_id.as_str()),
+            Some(&replacement_incarnation)
         );
     }
 
@@ -7306,7 +7508,10 @@ mod tests {
                     },
                 ] => {
                     assert!(authority_context.can_manage_mob(mob_id, incarnation));
-                    assert!(authority_context.mob_incarnations().get(mob_id) == Some(&incarnation));
+                    assert_eq!(
+                        authority_context.mob_incarnations().get(mob_id),
+                        Some(&incarnation)
+                    );
                 }
                 other => panic!("unexpected delegate session effects: {other:?}"),
             }
@@ -7673,6 +7878,111 @@ mod tests {
         assert_eq!(audit_events[0].0, "mob_spawn_member");
         assert_eq!(audit_events[0].1, expected_principal);
         assert_eq!(audit_events[0].2.as_deref(), Some("audit-scope"));
+    }
+
+    /// The agent's mob tools act for the agent: Core refuses
+    /// `mob_retire_member`, `mob_wire` and `mob_unwire` addressed to an
+    /// identity entry typed (`identity_member`), even under a grant that
+    /// manages the whole mob, and the entry stays; the tools still act on
+    /// workers.
+    ///
+    /// RED: bind the surface's handles with `CommandAuthority::principal`
+    /// (`bound_handle`): the manage grant admits every command, and the
+    /// agent retires the host's entry.
+    #[tokio::test]
+    async fn agent_mob_tools_refuse_an_identity_entry() {
+        let state = MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(sample_definition("entry-tools"))
+            .await
+            .expect("create mob");
+        let host = state.handle_for(&mob_id).await.expect("handle");
+        host.spawn_spec(
+            SpawnMemberSpec::new("worker", AgentIdentity::from("host-entry"))
+                .with_entry_custody(true),
+        )
+        .await
+        .expect("the host declares its entry");
+        for name in ["tool-worker", "tool-peer"] {
+            host.spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from(name)))
+                .await
+                .expect("a worker");
+        }
+        host.wire(
+            AgentIdentity::from("tool-worker"),
+            AgentIdentity::from("host-entry"),
+        )
+        .await
+        .expect("the host wires its entry to a worker");
+        let surface = AgentMobToolSurface::new(
+            Arc::clone(&state),
+            None,
+            scope_only_authority(mob_id.as_str(), live_incarnation(&state, &mob_id).await),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+        );
+        let call = |name: &'static str, args: serde_json::Value| {
+            let surface = &surface;
+            async move {
+                let args = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+                surface
+                    .dispatch(ToolCallView {
+                        id: name,
+                        name,
+                        args: &args,
+                    })
+                    .await
+            }
+        };
+
+        for (name, args) in [
+            (
+                "mob_retire_member",
+                json!({ "mob_id": mob_id, "member_id": "host-entry" }),
+            ),
+            (
+                "mob_wire",
+                json!({ "mob_id": mob_id, "member_id": "tool-peer", "peer": { "local": "host-entry" } }),
+            ),
+            (
+                "mob_unwire",
+                json!({ "mob_id": mob_id, "member_id": "tool-worker", "peer": { "local": "host-entry" } }),
+            ),
+        ] {
+            let error = call(name, args)
+                .await
+                .expect_err("the agent's tool does not act on an identity entry");
+            assert_eq!(
+                error
+                    .structured_data()
+                    .and_then(|data| data.get("kind").and_then(Value::as_str).map(str::to_owned)),
+                Some("identity_member".to_string()),
+                "{name}: {error:?}"
+            );
+        }
+        assert!(
+            matches!(
+                host.identity_entry(&AgentIdentity::from("host-entry")),
+                Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+            ),
+            "the entry stays"
+        );
+
+        call(
+            "mob_wire",
+            json!({ "mob_id": mob_id, "member_id": "tool-worker", "peer": { "local": "tool-peer" } }),
+        )
+        .await
+        .expect("the agent wires two workers");
+        call(
+            "mob_retire_member",
+            json!({ "mob_id": mob_id, "member_id": "tool-peer" }),
+        )
+        .await
+        .expect("the agent retires a worker");
     }
 
     #[tokio::test]
@@ -8704,6 +9014,44 @@ mod tests {
         }
     }
 
+    /// Operator instructions are host verbs (JSON-RPC and the Rust handle):
+    /// no agent mob tool, in any surface form, and no tool of the public mob
+    /// MCP surface sets, revokes or reads them.
+    #[test]
+    fn mob_instruction_verbs_are_absent_from_agent_tool_catalogs() {
+        let mut names = Vec::new();
+        for (store, snapshots, packs) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            names.extend(
+                build_tool_defs_with_profile_support(store, snapshots, packs)
+                    .iter()
+                    .map(|def| def.name.to_string()),
+            );
+        }
+        names.extend(
+            meerkat_mob::AGENT_MOB_TOOL_NAMES
+                .iter()
+                .map(|name| (*name).to_string()),
+        );
+        names.extend(
+            crate::public_mcp::public_tools_list()
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+                .map(str::to_string),
+        );
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(
+                !name.contains("instruction"),
+                "tool '{name}' reaches operator instructions, which are host verbs"
+            );
+        }
+    }
+
     #[test]
     fn test_profile_tools_present_when_store_available() {
         let defs = build_tool_defs_with_profile_support(true, false, false);
@@ -9487,6 +9835,7 @@ mod tests {
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),
@@ -9527,6 +9876,7 @@ mod tests {
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),
@@ -9567,6 +9917,7 @@ mod tests {
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),
@@ -9599,6 +9950,7 @@ mod tests {
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),
@@ -9633,6 +9985,7 @@ mod tests {
                     model: "claude-sonnet-4-5".to_string(),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),
@@ -9668,6 +10021,7 @@ mod tests {
                     model: expected_model.clone(),
                     provider: None,
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),

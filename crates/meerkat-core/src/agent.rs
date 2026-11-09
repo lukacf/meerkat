@@ -3,6 +3,8 @@
 //! The Agent struct ties together all components and runs the agent loop.
 
 #[cfg(all(test, feature = "workspace-tests"))]
+mod activation_retirement_fold_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
 mod assistant_message_identity_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod brain_swap_promotion_tests;
@@ -22,8 +24,15 @@ mod extraction;
 mod hook_impl;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod hooks_behavior_tests;
+mod instruction_run_start;
 #[cfg(test)]
 mod observation_barrier_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_fold_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_run_start_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod operator_instruction_turn_tests;
 pub(crate) mod reasoning_preference;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;
@@ -901,6 +910,10 @@ pub struct ToolDispatchContext {
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
     work_authorization: Option<crate::WorkAuthorizationContext>,
+    /// The original requester of the run this dispatch belongs to: the
+    /// requester its admitted inputs share. Bound with the run by the agent
+    /// loop; never taken from tool arguments or model output.
+    requester: Option<crate::types::TurnRequester>,
     prepared_authorization: Option<crate::authorization::PreparedOperationCheck>,
     /// Trusted host review composition attached by the agent. Absence never
     /// skips a required tier: R2 then settles as local unavailable feedback.
@@ -1080,15 +1093,22 @@ impl GovernedDispatchOperation {
         check
             .require_unreviewed_entry()
             .map_err(crate::ToolError::from)?;
-        self.work
-            .authorization()
-            .run_if_current_within(
-                check.binding(),
-                check.validity().as_ref(),
-                further,
-                operation,
-            )
-            .map_err(crate::ToolError::from)
+        let mut ran = false;
+        let answer = self.work.authorization().run_if_current_within(
+            check.binding(),
+            check.validity().as_ref(),
+            further,
+            &mut || {
+                ran = true;
+                operation();
+            },
+        );
+        // An effect of this dispatch entered: a refusal of its effect entry
+        // from now on makes no not-dispatched claim.
+        if ran && let Some(entry) = self.context.review_entry.as_ref() {
+            entry.record_effect_entered();
+        }
+        answer.map_err(crate::ToolError::from)
     }
 
     /// [`Self::run_if_current_within`], waiting out what refused it to
@@ -1212,7 +1232,10 @@ impl GovernedDispatchOperation {
 
     /// [`Self::issue_child_if_current_within`], waiting out what refused it
     /// to rebuild, as [`Self::run_if_current_within_after_owner_change`]
-    /// does (site `tool_child_issuance`). The work owner validates `further`
+    /// does (site `tool_child_issuance`), and a held admission fence of the
+    /// grant owner's store
+    /// ([`crate::authorization::ChildIssuanceAdmissionInProgress`]) the same
+    /// way. The work owner validates `further`
     /// and `intent` first. Then THIS dispatch's single consuming entry is
     /// made once, its staging waiting out an owner change in progress within
     /// the dispatch attempt's own bounds (site `tool_entry`). That staging
@@ -1289,12 +1312,13 @@ impl GovernedDispatchOperation {
                 .map_err(crate::ToolError::from)
         };
         let mut wait = StepOwnerChangeWait::new(&self.context, &self.work, "tool_child_issuance");
-        if !refuses_to_rebuild(&first) || !wait.again().await {
+        if !child_issuance_waits(&first) || !wait.again().await {
             return first;
         }
-        // Only a refusal to rebuild goes on, through the entry's witness:
-        // its attempts never spend, and each is admitted by the review owner,
-        // since the dispatch may have ended during the wait.
+        // Only a refusal to rebuild, or a held admission fence, goes on,
+        // through the entry's witness: its attempts never spend, and each is
+        // admitted by the review owner, since the dispatch may have ended
+        // during the wait.
         let operation = match entering {
             Some(entering) => entering.governed_operation(call)?,
             None => self.clone(),
@@ -1617,6 +1641,7 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("streaming", &self.streaming)
             .field("live_bridge_admission", &self.live_bridge_admission)
             .field("work_authorization", &self.work_authorization)
+            .field("requester", &self.requester)
             .field("prepared_authorization", &self.prepared_authorization)
             .field("operation_review", &self.operation_review.is_some())
             .field("review_entry", &self.review_entry)
@@ -1647,6 +1672,7 @@ impl PartialEq for ToolDispatchContext {
             && self.round == other.round
             && self.streaming == other.streaming
             && self.live_bridge_admission == other.live_bridge_admission
+            && self.requester == other.requester
             && match (&self.work_authorization, &other.work_authorization) {
                 (Some(left), Some(right)) => left.same_context(right),
                 (None, None) => true,
@@ -1742,6 +1768,7 @@ impl ToolDispatchContext {
             streaming: None,
             live_bridge_admission: None,
             work_authorization: None,
+            requester: None,
             prepared_authorization: None,
             operation_review: None,
             review_entry: None,
@@ -1775,6 +1802,32 @@ impl ToolDispatchContext {
         self.review_entry = None;
         self.staging_wait = None;
         self
+    }
+
+    /// Bind the original requester of the run this dispatch belongs to (see
+    /// [`Self::requester`]). The agent loop binds it with the run.
+    #[must_use]
+    pub fn with_requester(mut self, requester: Option<crate::types::TurnRequester>) -> Self {
+        self.requester = requester;
+        self
+    }
+
+    /// The original requester of the run this dispatch belongs to: the
+    /// requester its admitted inputs share, direct or carried. `None` when
+    /// the run's inputs carry none.
+    #[must_use]
+    pub fn requester(&self) -> Option<&crate::types::TurnRequester> {
+        self.requester.as_ref()
+    }
+
+    /// The run's requester only when the requester's own ingress admitted
+    /// every input of the run. A consumer that acts for a person uses only
+    /// this, never a requester carried across a peer hop.
+    #[must_use]
+    pub fn direct_requester(&self) -> Option<&crate::PrincipalRef> {
+        self.requester
+            .as_ref()
+            .and_then(crate::types::TurnRequester::direct_principal)
     }
 
     /// Attach trusted host review composition. It only enables review; the
@@ -2115,6 +2168,22 @@ impl ToolDispatchContext {
     /// `Used` projection is delivered after dispatch returns. A second call
     /// for the same operation refuses. R1 and ungoverned calls behave exactly
     /// like `observe_tool_entry`. Use the returned context when present.
+    ///
+    /// The entry is the boundary of the body it guards. An operation refusal
+    /// it meets in a fenced dispatch's context while no effect of the
+    /// dispatch entered (no earlier entry passed, no governed step ran its
+    /// operation) is certified
+    /// [`crate::authorization::RefusalDispatch::NotDispatched`], as the
+    /// fenced dispatch certifies one it meets before invoking the
+    /// dispatcher: the model reads `tool_invoked: false` wherever the owner
+    /// change that refused the call landed. A later entry's refusal, and one
+    /// met in a context outside a fenced dispatch, makes no claim. A leaf
+    /// that ran an effect of its own before this entry forwards its refusal
+    /// as `OperationRefused::new(refusal.kind())`. A caller that only checks
+    /// the call before the tool code runs and leaves the entry to its leaf
+    /// (a wrapper, for example) certifies its refusal the same way, without
+    /// recording an entry or spending the review, with
+    /// [`Self::check_tool_authorization_before_effect`].
     pub fn enter_reviewed_effect(
         &self,
         call: ToolCallView<'_>,
@@ -2130,45 +2199,127 @@ impl ToolDispatchContext {
     /// entered effect for a leaf that may outlive its dispatch. Hand the
     /// custody to the owner that keeps the effect going (for example a send
     /// task that outlives the caller) and hold it until that effect settles.
+    /// A caller that only checks the call before its leaf makes this entry
+    /// uses [`Self::check_tool_authorization_before_effect`], which spends
+    /// nothing.
     pub fn enter_reviewed_effect_held(
         &self,
         call: ToolCallView<'_>,
         plan: Option<&crate::ResolvedToolExecutionPlan>,
     ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
     {
-        let entering = self.observe_tool_entry_at(
+        self.observe_tool_entry_at(
             call,
             plan,
             crate::authorization::OperationEntryBoundary::ToolEffect,
-        )?;
-        self.spend_review_entry(entering)
+        )
+        .and_then(|entering| self.spend_review_entry(entering))
+        .map_err(|error| self.effect_entry_refusal(error))
     }
 
     /// [`Self::enter_reviewed_effect_held`] whose staging waits out an owner
-    /// change in progress on the work's own publication within the dispatch
-    /// attempt's own bounds, as the root staging does
-    /// ([`Self::stage_tool_entry_after_owner_change`]). Nothing is spent
-    /// before or during a wait: the review is spent once, after the staging.
-    async fn enter_reviewed_effect_held_after_owner_change(
+    /// change instead of refusing it: the effect entry for a leaf whose
+    /// dispatch may race another actor's change of the work's owners.
+    ///
+    /// Use it for a tool's single consuming effect entry when an owner
+    /// change may land after the fenced dispatch staged the call (during an
+    /// adapter's or the leaf's own awaits, for example). While a change is
+    /// in progress every staging of the decision refuses to rebuild
+    /// (`ReprepareRequired`), and the synchronous form answers that refusal
+    /// at once. This form waits for the change to complete (or, when none is
+    /// in progress at its read because the change completed while the
+    /// staging read, pauses one backoff step) and stages again from the
+    /// current owners, as the dispatch's root staging does. Call it as the
+    /// synchronous form is called: once, immediately before the body or
+    /// handoff it guards, with the context the leaf was handed, and holding
+    /// nothing the change may need (no owner or host lock, no store
+    /// transaction). Use the returned context when present, and hold the
+    /// returned custody as the synchronous form's.
+    ///
+    /// The wait stays within the dispatch attempt's own owner-change bounds,
+    /// which the attempt's other entry stagings (its root staging, the
+    /// call-level execution policy gate's) and its review's post-verdict
+    /// check share: one deadline,
+    /// [`crate::authorization::OWNER_CHANGE_WAIT_BOUND`] from the attempt's
+    /// first wait or the call's remaining tool time when less, and
+    /// [`crate::authorization::OWNER_CHANGE_FREE_REBUILDS`] free rebuilds
+    /// for all of them. Each wait is traced at site `tool_entry`
+    /// ([`crate::authorization::OwnerChangeWait::trace`]) and reported to the
+    /// host's operation refusal observer as the call's. The entry only
+    /// stages again: it never repeats the dispatch, and a refused staging
+    /// ran nothing. A context outside a fenced dispatch has no such bounds
+    /// and answers exactly as the synchronous form.
+    ///
+    /// Nothing is spent before or during a wait: the review is spent once,
+    /// after the staging that passed, for the decision that staging
+    /// returned. The staging never reviews again, so the tier decides what
+    /// an owner change met here leaves:
+    /// - R1 enters once the change settles, under the decision prepared
+    ///   again after it.
+    /// - At R2 the change supersedes the reviewed decision, so once it
+    ///   completes the entry settles as [`crate::ToolError::ReviewUnsatisfied`]
+    ///   ([`crate::approval::review::ReviewUnsatisfiedKind::ContextChanged`]),
+    ///   by design and as a later synchronous entry would: no effect runs
+    ///   under a decision that was not reviewed.
+    /// - A human consent (R3) goes on to its spend, which re-adjudicates it.
+    ///
+    /// Prefer this form for an effect entry that can await, so that a
+    /// concurrent owner change delays the effect instead of refusing it. The
+    /// synchronous [`Self::enter_reviewed_effect_held`] (or
+    /// [`Self::enter_reviewed_effect`]) fits an entry that cannot await, or
+    /// one that must answer at once. A caller that only checks the call
+    /// before its leaf makes the entry uses
+    /// [`Self::check_tool_authorization_before_effect`] instead, which
+    /// neither waits nor spends.
+    ///
+    /// # Errors
+    /// As [`Self::enter_reviewed_effect_held`], with the refusal to rebuild
+    /// (`ReprepareRequired`) once the bounds are spent. An operation refusal
+    /// met while no effect of the dispatch entered is certified
+    /// [`crate::authorization::RefusalDispatch::NotDispatched`], as the
+    /// synchronous form certifies it (see [`Self::enter_reviewed_effect`]).
+    pub async fn enter_reviewed_effect_held_after_owner_change(
         &self,
         call: ToolCallView<'_>,
         plan: Option<&crate::ResolvedToolExecutionPlan>,
     ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
     {
-        let entering = self
+        let staged = self
             .stage_tool_entry_after_owner_change(
                 call,
                 plan,
                 crate::authorization::OperationEntryBoundary::ToolEffect,
             )
             .await
-            .map_err(crate::approval::review::ReviewAdmissionRefusal::into_settled)?;
-        self.spend_review_entry(entering)
+            .map_err(crate::approval::review::ReviewAdmissionRefusal::into_settled);
+        staged
+            .and_then(|entering| self.spend_review_entry(entering))
+            .map_err(|error| self.effect_entry_refusal(error))
+    }
+
+    /// A failure of this dispatch's effect entry (its staging, final check,
+    /// review check point or spend), met before the body the entry guards.
+    /// While no effect of the dispatch entered, an operation refusal is
+    /// certified [`crate::authorization::RefusalDispatch::NotDispatched`]:
+    /// the same answer the fenced dispatch gives a refusal it meets before
+    /// invoking the dispatcher, whichever of them an owner change reaches
+    /// first. Once an effect entered, and in a context without the dispatch's
+    /// review entry (one that did not come through a fenced dispatch), the
+    /// failure is returned unchanged, with no claim.
+    fn effect_entry_refusal(&self, error: crate::ToolError) -> crate::ToolError {
+        match self.review_entry.as_ref() {
+            Some(entry) if !entry.effect_entered() => error.not_dispatched(),
+            _ => error,
+        }
     }
 
     /// Spend this dispatch's retained review once for the decision staging
     /// returned (`entering`, or this context's own when staging refreshed
-    /// nothing). R1 and ungoverned entries spend nothing.
+    /// nothing). R1 and ungoverned entries spend nothing. Then the entering
+    /// decision's own entry spend, once: a use of a grant that serves a
+    /// counted number of uses, acknowledged by its owner before the effect
+    /// ([`crate::authorization::PreparedOperationAuthorization::spend_at_entry`]).
+    /// Its refusal refuses the entry.
     fn spend_review_entry(
         &self,
         entering: Option<Self>,
@@ -2179,6 +2330,9 @@ impl ToolDispatchContext {
             (Some(entry), Some(check)) => entry.consume_held(check)?,
             _ => crate::approval::review::ReviewedEntryCustody::none(),
         };
+        if let Some(check) = current.prepared_authorization() {
+            check.spend_at_entry()?;
+        }
         Ok((entering, custody))
     }
 
@@ -2276,6 +2430,45 @@ impl ToolDispatchContext {
         }
     }
 
+    /// [`Self::check_tool_authorization`] for a check made before the tool
+    /// code it guards runs, by a caller that does not make the dispatch's
+    /// effect entry itself (for example a wrapper whose leaf enters the
+    /// effect later). Use the returned context when present, as for
+    /// [`Self::check_tool_authorization`].
+    ///
+    /// An operation refusal met while no effect of the dispatch entered (no
+    /// effect entry passed, no governed step ran its operation) is certified
+    /// [`crate::authorization::RefusalDispatch::NotDispatched`], exactly as
+    /// [`Self::enter_reviewed_effect`] certifies one: the model reads
+    /// `tool_invoked: false`. Once an effect of the dispatch entered, and in
+    /// a context outside a fenced dispatch (one without the dispatch's review
+    /// entry), the refusal is returned unchanged and makes no claim.
+    ///
+    /// It records no entry and spends nothing: it makes exactly the check
+    /// [`Self::check_tool_authorization`] makes, and it can be repeated.
+    /// The dispatch's review stays for the single consuming effect entry
+    /// ([`Self::enter_reviewed_effect`], [`Self::enter_reviewed_effect_held`]
+    /// or [`Self::enter_reviewed_effect_held_after_owner_change`]), so a
+    /// reviewed (R2 or R3) dispatch whose leaf enters after this check still
+    /// spends its review once, there.
+    ///
+    /// The caller must not have performed any effect of the call before it:
+    /// the certification says that the tool code it guards never ran. A
+    /// caller that ran an effect of its own first forwards a refusal as
+    /// `OperationRefused::new(refusal.kind())`, which makes no claim.
+    ///
+    /// # Errors
+    /// As [`Self::check_tool_authorization`], with an operation refusal
+    /// certified as above.
+    pub fn check_tool_authorization_before_effect(
+        &self,
+        call: ToolCallView<'_>,
+        plan: Option<&crate::ResolvedToolExecutionPlan>,
+    ) -> Result<Option<Self>, crate::ToolError> {
+        self.check_tool_authorization(call, plan)
+            .map_err(|error| self.effect_entry_refusal(error))
+    }
+
     /// Record an entry attempt, then check actual currentness after that
     /// synchronous staging work. Adapters call this after their own awaits.
     /// Several adapter boundaries may observe the same operation ID; these
@@ -2309,8 +2502,8 @@ impl ToolDispatchContext {
     }
 
     /// [`Self::observe_tool_entry`] at the fenced dispatch's own root
-    /// staging, before any dispatcher code ran, waiting out an owner change
-    /// in progress as [`Self::stage_tool_entry_after_owner_change`] does. A
+    /// staging, before any dispatcher code ran, waiting after a refusal to
+    /// rebuild as [`Self::stage_tool_entry_after_owner_change`] does. A
     /// retained model review that a completed owner publication change
     /// superseded comes back typed, for the dispatch's one supersession
     /// decision, instead of settled; every other staging (adapters, the
@@ -2333,8 +2526,10 @@ impl ToolDispatchContext {
     /// [`Self::observe_tool_entry_at`] for a staging point on the fenced
     /// dispatch chain that stages again after awaits of its own (the
     /// call-level execution policy gate, after its dispatch admission and
-    /// consequence policy): an owner change in progress meanwhile is waited
-    /// out within the dispatch attempt's own bounds, as at the root staging.
+    /// consequence policy): a refusal to rebuild meanwhile (an owner change
+    /// in progress, or one that completed while the staging read) is waited
+    /// after within the dispatch attempt's own bounds, as at the root
+    /// staging.
     pub(crate) async fn observe_tool_entry_after_owner_change_at(
         &self,
         call: ToolCallView<'_>,
@@ -2347,13 +2542,16 @@ impl ToolDispatchContext {
     }
 
     /// The one waiting entry staging: stage at `boundary`
-    /// ([`Self::stage_tool_entry`]); while that refuses to rebuild because
-    /// an owner change is still in progress on the work's own publication,
-    /// wait for the change within the dispatch attempt's [`EntryStagingWait`]
-    /// and stage again. The review check point runs on the decision staged
-    /// after the wait, so no verdict is reused. A context outside a fenced
-    /// dispatch carries no waiting state, and its refusal takes the ordinary
-    /// path.
+    /// ([`Self::stage_tool_entry`]); while that refuses to rebuild, wait
+    /// within the dispatch attempt's [`EntryStagingWait`] and stage again.
+    /// Such a refusal is a stale read of the work's own publication that ran
+    /// nothing, so the wait is the one after a stale read: for an owner change
+    /// still in progress, or, with none (the change that made the read stale
+    /// may have completed during it), one backoff step. Each settled wait is
+    /// one of the attempt's free rebuilds. The review check point runs on the
+    /// decision staged after the wait, so no verdict is reused. A context
+    /// outside a fenced dispatch carries no waiting state, and its refusal
+    /// takes the ordinary path.
     async fn stage_tool_entry_after_owner_change(
         &self,
         call: ToolCallView<'_>,
@@ -2368,15 +2566,15 @@ impl ToolDispatchContext {
                 && refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
                 && let Some(work) = self.work_authorization()
                 && let Some(staging) = self.staging_wait.as_ref()
-                && let Some(wait) = staging
-                    .wait_for_settled_change(
+                && staging
+                    .wait_after_stale_read(
                         work,
                         staging_wait_site(boundary),
                         self.prepared_authorization()
                             .map(|prepared| &prepared.binding().facts().operation_id),
                     )
                     .await
-                && wait.settled()
+                    .settled()
             {
                 continue;
             }
@@ -2759,10 +2957,12 @@ pub trait AgentOwnedRelease: Send + Sync {
 /// An operation refusal certified
 /// [`crate::authorization::RefusalDispatch::NotDispatched`] speaks only for
 /// the tool code below the core component that certified it (the fenced
-/// dispatch, or the execution policy gate for its inner dispatcher). A
-/// dispatcher layer that runs tool code of its own before delegating to such
-/// a component forwards the refusal as `OperationRefused::new(refusal.kind())`,
-/// which makes no claim.
+/// dispatch, the execution policy gate for its inner dispatcher, or a leaf's
+/// effect entry, [`ToolDispatchContext::enter_reviewed_effect`], for the body
+/// it guards). A dispatcher layer that runs tool code of its own before
+/// delegating to such a component, a leaf that runs an effect before its
+/// effect entry included, forwards the refusal as
+/// `OperationRefused::new(refusal.kind())`, which makes no claim.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentToolDispatcher: Send + Sync {
@@ -2932,6 +3132,16 @@ pub trait AgentToolDispatcher: Send + Sync {
         Arc::from([])
     }
 
+    /// Whether this dispatcher adjudicates scoped tool grants: it hands a
+    /// grant-gated call to its tool only when a live grant admits it, as
+    /// `ExecutionPolicyGatedDispatcher::with_tool_grant_gate` does. An agent
+    /// with a grant gate requires it, since its visibility precheck lets a
+    /// closed gated name through to this one refusal site. The default
+    /// adjudicates nothing.
+    fn adjudicates_tool_grants(&self) -> bool {
+        false
+    }
+
     /// Execute a tool call, returning the transcript result and any async operations.
     ///
     /// The `ToolDispatchOutcome` separates transcript data (`result`) from
@@ -3066,6 +3276,21 @@ pub trait AgentToolDispatcher: Send + Sync {
         &self,
         _authority: Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
     ) {
+    }
+
+    /// Whether this dispatcher only observes the bindings the agent factory
+    /// gives a build's external tools, and surfaces nothing of its own.
+    ///
+    /// Such a dispatcher lists no tool, catalog entry or pending catalog
+    /// source, now or later (for example a wrapper of a build's external
+    /// tools that wraps none). The agent factory binds the session's mob
+    /// operator authority to it ([`Self::bind_session_mob_tool_authority`])
+    /// as to any external tools, and then composes the build as one with no
+    /// external tools, so it changes nothing in the composed surface, its
+    /// catalog exactness included. A wrapper forwards the answer of the
+    /// dispatcher it wraps. The default is `false`.
+    fn observes_bindings_only(&self) -> bool {
+        false
     }
 }
 
@@ -3234,19 +3459,21 @@ impl EntryStagingWait {
         })
     }
 
-    /// Wait out an owner change in progress on `work`'s own publication
-    /// within this attempt's bounds, before the tool deadline; see
-    /// [`crate::authorization::OwnerChangeChurn::wait_for_settled_change`].
-    async fn wait_for_settled_change(
+    /// The wait after a staging of this attempt refused to rebuild, within
+    /// this attempt's bounds and before the tool deadline: for an owner change
+    /// in progress on `work`'s own publication, or, with none, one backoff
+    /// step; see
+    /// [`crate::authorization::OwnerChangeChurn::wait_after_stale_read`].
+    async fn wait_after_stale_read(
         &self,
         work: &crate::WorkAuthorizationContext,
         site: &'static str,
         operation: Option<&crate::OperationId>,
-    ) -> Option<crate::authorization::OwnerChangeWait> {
+    ) -> crate::authorization::OwnerChangeWait {
         self.churn
             .lock()
             .await
-            .wait_for_settled_change(
+            .wait_after_stale_read(
                 work.authorization().as_ref(),
                 self.deadline.remaining(),
                 site,
@@ -3257,10 +3484,12 @@ impl EntryStagingWait {
 }
 
 /// The common prepared entry of a governed dispatch: prepare `binding` from
-/// the work's current owners and check it. An owner change still in
-/// progress on the work's own publication refuses every preparation until it
-/// completes, so it is waited out (bounded by `churn`) and the same operation
-/// prepared again.
+/// the work's current owners and check it. A refusal to rebuild is a stale
+/// read of the work's own publication that ran nothing: an owner change still
+/// in progress refuses every preparation until it completes, and one that
+/// completed while a preparation read leaves that read stale with none in
+/// progress. Either way the entry takes the wait after a stale read (bounded
+/// by `churn`) and prepares the same operation again.
 async fn prepare_current_after_owner_change(
     work: &crate::WorkAuthorizationContext,
     binding: &crate::authorization::PreparedAuthorizationBinding,
@@ -3273,15 +3502,15 @@ async fn prepare_current_after_owner_change(
                 .and_then(|prepared| prepared.current());
         if let Err(crate::OperationAuthorizationError::Refused(refusal)) = &result
             && refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
-            && let Some(wait) = churn
-                .wait_for_settled_change(
+            && churn
+                .wait_after_stale_read(
                     work.authorization().as_ref(),
                     deadline.remaining(),
                     "tool_dispatch",
                     Some(&binding.facts().operation_id),
                 )
                 .await
-            && wait.settled()
+                .settled()
         {
             continue;
         }
@@ -3305,6 +3534,17 @@ fn refuses_to_rebuild<T>(answer: &Result<T, crate::ToolError>) -> bool {
         Err(crate::ToolError::AuthorizationRefused { refusal })
             if refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
     )
+}
+
+/// Whether a waiting child issuance waits after this attempt: a refusal to
+/// rebuild, or the work owner's answer that an admission holds the grant
+/// store's fence ([`crate::authorization::ChildIssuanceAdmissionInProgress`]),
+/// which it waits out the same way, within the same bounds.
+fn child_issuance_waits(answer: &Result<Box<dyn std::any::Any + Send>, crate::ToolError>) -> bool {
+    refuses_to_rebuild(answer)
+        || answer.as_ref().is_ok_and(|outcome| {
+            (**outcome).is::<crate::authorization::ChildIssuanceAdmissionInProgress>()
+        })
 }
 
 /// The owner-change waiting state of one waiting step of a dispatch's
@@ -3374,26 +3614,34 @@ impl<'a> StepOwnerChangeWait<'a> {
 /// memory plan without a target of its owner's kind is refused first (see
 /// [`ToolDispatchContext::require_authorized_operation_target`]).
 ///
-/// The prepared entry waits out an owner change in progress on the work's
-/// own publication with its own [`crate::authorization::OwnerChangeChurn`];
-/// each review attempt (one, or two when a superseded model review is
-/// reviewed once more) has another, shared through the dispatch context by
-/// its post-verdict check and every entry staging of the attempt (the root
+/// After a refusal to rebuild, a stale read of the work's own publication
+/// that ran nothing, the prepared entry and every entry staging wait
+/// ([`crate::authorization::OwnerChangeChurn::wait_after_stale_read`]) and
+/// rebuild: they wait for an owner change still in progress, or, with none
+/// named (the change that made the read stale may have completed during it),
+/// pause one backoff step. The
+/// prepared entry waits with its own churn; each review attempt (one, or two
+/// when a superseded model review is reviewed once more) has another, shared
+/// through the dispatch context by its post-verdict check (which waits only
+/// for a change in progress) and every entry staging of the attempt (the root
 /// staging, and the execution policy gate's staging after the gate's own
 /// awaits). All are inside the plan's tool timeout: per dispatch at most 3
 /// such values, 9 free rebuilds and 6 s of waits. Each asks the dispatch
-/// context's work authorization, the run's own, which reports such a change
-/// through every wrapper; an exact-control work reports none, so its refusal
-/// takes the ordinary path. A tool body's own waits (a delegate operation's,
-/// or a waiting governed step's: `run_if_current_within_after_owner_change`
-/// and its siblings) take a waiting state of their own from the dispatch
-/// context, each bounded by the call's remaining tool time.
+/// context's work authorization, the run's own, which reports a change in
+/// progress through every wrapper; an exact-control work names none, so it
+/// pauses one backoff step before each such rebuild. A tool body's own waits
+/// (a delegate operation's, or a waiting governed step's:
+/// `run_if_current_within_after_owner_change` and its siblings) take a
+/// waiting state of their own from the dispatch context, each bounded by the
+/// call's remaining tool time.
 ///
 /// An operation refusal met before the dispatcher is invoked is certified
 /// [`crate::authorization::RefusalDispatch::NotDispatched`] at this entry's
 /// one boundary (`FencedOutcome`). What the dispatcher returns is
 /// forwarded unchanged: its tool code may have produced an effect before a
-/// later governed step refused.
+/// later governed step refused. A refusal its leaf's effect entry met before
+/// any effect of the call entered comes back already certified by that entry
+/// ([`ToolDispatchContext::enter_reviewed_effect`]).
 ///
 /// A context carrying an observation barrier
 /// ([`ToolDispatchContext::with_observation_barrier`]) awaits it after the
@@ -4377,6 +4625,10 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         self.inner.pending_catalog_sources()
     }
 
+    fn adjudicates_tool_grants(&self) -> bool {
+        self.inner.adjudicates_tool_grants()
+    }
+
     async fn poll_external_updates(&self) -> ExternalToolUpdate {
         self.inner.poll_external_updates().await
     }
@@ -4719,6 +4971,25 @@ pub trait CommsRuntime: Send + Sync {
         Err(SendError::Unsupported(
             "send not implemented for this CommsRuntime".to_string(),
         ))
+    }
+
+    /// Dispatch a canonical comms command with the origin of the governed
+    /// work that sends it, if any ([`crate::GovernedSendOrigin`]): an
+    /// in-process delivery carries it to its receiver unchanged, and a
+    /// delivery over a network carries none. A comms tool passes the origin
+    /// of its dispatch context's work, never one from its arguments. With no
+    /// origin this is [`Self::send`].
+    ///
+    /// The default sends `cmd` without the origin, so a receiver sees a
+    /// delivery from an ungoverned sender, which a binder that keeps the
+    /// original requester refuses (`origin_unverifiable`).
+    async fn send_with_governed_origin(
+        &self,
+        cmd: CommsCommand,
+        origin: Option<crate::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
+        let _ = origin;
+        self.send(cmd).await
     }
 
     #[doc(hidden)]
@@ -5236,6 +5507,14 @@ where
     client: Arc<C>,
     tools: Arc<T>,
     tool_scope: ToolScope,
+    /// The build's scoped tool grant gate: each model-request boundary opens
+    /// the gated names a live grant admits. The dispatch gate carries the
+    /// same binding and adjudicates every gated call again.
+    pub(crate) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
+    /// The run a dropped-run cancel ended whose run-scoped tool grants are
+    /// still to be ended: the cancel is synchronous, so its caller ends them
+    /// after it ([`Agent::end_dropped_run_tool_grants`]).
+    dropped_run_tool_grants_owed: Option<crate::RunId>,
     store: Arc<S>,
     session: Session,
     budget: Budget,
@@ -5428,6 +5707,12 @@ where
     /// Registry-minted facts for the active model. This replaces client-local
     /// capability/limit projections as the durable source used by later turns.
     pub(crate) active_model_profile: Option<crate::ModelProfileWitness>,
+    /// How the active model carries an operator-instruction entry, as the
+    /// build resolved it from the model as its backend serves it. `None`
+    /// derives it from [`Self::active_model_profile`]; a hot swap, whose
+    /// witness is the catalog row, installs the lowering its request policy
+    /// carries, which the host resolved for the new binding's backend.
+    pub(crate) operator_instruction_lowering: Option<crate::InstructionLowering>,
     /// True when the runtime control plane must stamp execution kind metadata.
     pub(crate) runtime_execution_kind_required: bool,
     /// Resources this agent's construction handed over that must be released
@@ -5442,6 +5727,21 @@ where
     /// failures can return before `StartConversationRun` and must never reuse
     /// the previous turn's terminal snapshot.
     pub(crate) runtime_started_run_id: Option<crate::lifecycle::RunId>,
+    /// The run in flight started fresh, not from a run cursor. A compaction
+    /// before its first model response may fold operator instructions at
+    /// the run's start (`Session::authorize_instruction_fold`).
+    pub(crate) run_started_fresh: bool,
+    /// The run id a fresh run start named in its operator-instruction entry
+    /// when no run was started in the turn authority yet: the run loop
+    /// starts the run under it, so the entry names the run the agent runs.
+    /// The run loop takes it whenever it picks a run's id.
+    pub(crate) run_start_reserved_run_id: Option<crate::lifecycle::RunId>,
+    /// What the last fresh run start's operator-instruction entry changed,
+    /// and whether its run started and a checkpoint holds it, until the
+    /// session task concludes the run start
+    /// (`Agent::conclude_run_start_operator_instructions`).
+    pub(crate) unconcluded_run_start_instructions:
+        Option<Box<instruction_run_start::UnconcludedRunStartInstructions>>,
     /// Machine-terminal failure observed for the exact runtime run above.
     /// Kept separate from the public `AgentError` so direct session surfaces
     /// preserve their original typed errors while the runtime can commit a
@@ -6092,7 +6392,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6157,7 +6457,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6241,7 +6541,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -6302,7 +6602,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -6341,7 +6641,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6406,7 +6706,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6473,7 +6773,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6519,7 +6819,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6661,7 +6961,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6730,7 +7030,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6782,7 +7082,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6826,7 +7126,7 @@ mod tests {
         let resolution = ToolExecutionResolutionContext::new(
             ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )])
             .unwrap(),
         );
@@ -6977,6 +7277,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// The dispatch's own operation is reachable only with its actual
@@ -7080,6 +7384,10 @@ mod governed_operation_tests {
             _binding: &PreparedAuthorizationBinding,
             _event: OperationObservation,
         ) -> Result<(), OperationObservationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -7276,7 +7584,7 @@ mod governed_operation_tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(60),
+                std::time::Duration::from_mins(1),
             )])
             .unwrap(),
         );
@@ -7461,7 +7769,7 @@ mod governed_operation_tests {
                 tier,
                 0,
                 begin_after_checks,
-                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_hours(1),
             )
         }
 
@@ -7528,6 +7836,19 @@ mod governed_operation_tests {
             }))
         }
 
+        /// The plain unreviewed step runs its operation: this fixture's
+        /// exclusion is always free.
+        fn run_if_current_within(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+            _prepared: Option<&crate::authorization::OperationValidity>,
+            _further: &(dyn std::any::Any + Send + Sync),
+            operation: &mut dyn FnMut(),
+        ) -> Result<(), OperationAuthorizationError> {
+            operation();
+            Ok(())
+        }
+
         fn review_operation_context(
             &self,
             _binding: &PreparedAuthorizationBinding,
@@ -7563,6 +7884,10 @@ mod governed_operation_tests {
             _binding: &PreparedAuthorizationBinding,
             _event: OperationObservation,
         ) -> Result<(), OperationObservationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -7895,6 +8220,10 @@ mod governed_operation_tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// What one fenced call through the execution policy gate did under an
@@ -8026,6 +8355,356 @@ mod governed_operation_tests {
             "the gate waits until the shared deadline, never past it: {:?}",
             spent.took
         );
+    }
+
+    /// The publication facts a [`StaleReadWork`] and its decisions share.
+    #[derive(Default)]
+    struct StaleReadFacts {
+        sequence: std::sync::atomic::AtomicU64,
+        /// Preparations still to meet another actor's owner change, which
+        /// publishes and completes while they read.
+        stale_reads: std::sync::atomic::AtomicUsize,
+        /// Stagings of the execution policy gate still to complete a change
+        /// of their own after recording their entry, and to arm one stale
+        /// read for the preparation their final check then makes.
+        gate_stagings: std::sync::atomic::AtomicUsize,
+        /// Whether a stale read's change revokes the work's authority.
+        revokes: bool,
+        revoked: AtomicBool,
+        /// Whether the work's decisions require a model review (R2).
+        reviewed: bool,
+        prepares: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StaleReadFacts {
+        /// Facts whose next `stale_reads` preparations, and the
+        /// preparations after the next `gate_stagings` gate stagings, read
+        /// stale; their changes revoke the work's authority when `revokes`.
+        fn scripted(stale_reads: usize, gate_stagings: usize, revokes: bool) -> Arc<Self> {
+            Arc::new(Self {
+                stale_reads: std::sync::atomic::AtomicUsize::new(stale_reads),
+                gate_stagings: std::sync::atomic::AtomicUsize::new(gate_stagings),
+                revokes,
+                ..Self::default()
+            })
+        }
+
+        /// Another actor's owner change publishes and completes: the
+        /// sequence moves two steps, and none is in progress afterwards.
+        fn complete_change(&self, revoke: bool) {
+            if revoke {
+                self.revoked.store(true, Ordering::SeqCst);
+            }
+            self.sequence.fetch_add(2, Ordering::SeqCst);
+        }
+    }
+
+    /// A work owner whose reads end stale after a change they never saw in
+    /// progress, as a read that waits for an owner's lock while another
+    /// actor's change holds it does: a scripted preparation meets a change
+    /// that completes while it reads and refuses to rebuild
+    /// (`ReprepareRequired`), and `owner_change_in_progress` names nothing.
+    /// Once a revoking change completed, every preparation is `Denied`.
+    struct StaleReadWork(Arc<StaleReadFacts>);
+
+    struct StaleReadPrepared {
+        facts: Arc<StaleReadFacts>,
+        at: u64,
+    }
+
+    impl WorkAuthorization for StaleReadWork {
+        fn prepare(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            let facts = &self.0;
+            facts.prepares.fetch_add(1, Ordering::SeqCst);
+            if facts.revoked.load(Ordering::SeqCst) {
+                return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+            }
+            if facts
+                .stale_reads
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                facts.complete_change(facts.revokes);
+                return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+            }
+            Ok(Arc::new(StaleReadPrepared {
+                facts: Arc::clone(facts),
+                at: facts.sequence.load(Ordering::SeqCst),
+            }))
+        }
+
+        fn review_operation_context(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<
+            crate::authorization::ReviewOperationContextResolution,
+            OperationAuthorizationError,
+        > {
+            Ok(crate::authorization::ReviewOperationContextResolution::NotApplicable)
+        }
+    }
+
+    impl PreparedOperationAuthorization for StaleReadPrepared {
+        fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+            if self.facts.reviewed {
+                crate::authorization::OperationReviewTier::R2
+            } else {
+                crate::authorization::OperationReviewTier::R1
+            }
+        }
+
+        fn check_current(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<(), OperationAuthorizationError> {
+            if self.facts.sequence.load(Ordering::SeqCst) != self.at {
+                return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+            }
+            Ok(())
+        }
+
+        fn observe(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+            event: OperationObservation,
+        ) -> Result<(), OperationObservationError> {
+            if matches!(
+                event,
+                OperationObservation::Entry(
+                    crate::authorization::OperationEntryBoundary::ToolExecutionPolicy
+                )
+            ) && self
+                .facts
+                .gate_stagings
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                self.facts.complete_change(false);
+                self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+    }
+
+    fn stale_read_context(facts: &Arc<StaleReadFacts>) -> ToolDispatchContext {
+        ToolDispatchContext::default().with_work_authorization(Some(
+            crate::WorkAuthorizationContext::new(
+                Arc::new(StaleReadWork(Arc::clone(facts))),
+                crate::OperationExecutionScope::Domain,
+            ),
+        ))
+    }
+
+    /// The call-level execution policy gate's staging finds its decision
+    /// stale (a change completed after it was prepared) and prepares it
+    /// again while another actor's owner change publishes and completes:
+    /// that read refuses to rebuild with no change in progress any more. The
+    /// gate pauses one backoff step and stages again from the owners, as one
+    /// of the dispatch attempt's free rebuilds: the call enters once when
+    /// its authority still holds, and is refused with the owners' current
+    /// answer (`Denied`, certified not dispatched) when that change revoked
+    /// it.
+    ///
+    /// RED on the base: the gate's staging answered the stale read as its
+    /// own certified refusal (`reprepare_required`, `tool_invoked: false`)
+    /// in both cases.
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_gated_entry_rebuilds_after_a_stale_read_whose_change_completed() {
+        let mut rows: Vec<CertifiedRow> = Vec::new();
+        for revokes in [false, true] {
+            let facts = StaleReadFacts::scripted(0, 1, revokes);
+            let inner = Arc::new(SourceKindDispatcher::default());
+            let gated: Arc<dyn AgentToolDispatcher> =
+                Arc::new(crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::clone(&inner),
+                    crate::ToolExecutionPolicy::unrestricted(),
+                ));
+            let result = fenced(&gated, "read_file", &stale_read_context(&facts)).await;
+            assert_eq!(
+                facts.sequence.load(Ordering::SeqCst),
+                4,
+                "revokes={revokes}: two changes, both completed"
+            );
+            if revokes {
+                rows.push((
+                    "policy gate staging after a revoking change",
+                    result,
+                    inner.0.load(Ordering::SeqCst),
+                    OperationRefusalKind::Denied,
+                ));
+                continue;
+            }
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|outcome| !outcome.result.is_error),
+                "the gate stages again after the stale read, then enters: {:?}",
+                refusal_and_data(&result).map(|(_, data)| data)
+            );
+            assert_eq!(inner.0.load(Ordering::SeqCst), 1, "the body ran once");
+            assert_eq!(
+                facts.prepares.load(Ordering::SeqCst),
+                3,
+                "prepared at the entry, read stale at the gate, prepared again after it"
+            );
+        }
+        assert_certified_not_dispatched(rows);
+    }
+
+    /// The common prepared entry's first preparation meets another actor's
+    /// owner change, which publishes and completes while it reads: it
+    /// refuses to rebuild with no change in progress any more. The entry
+    /// pauses one backoff step and prepares the same operation again from
+    /// the owners, as one of its free rebuilds: the call enters once when its
+    /// authority still holds, and is refused with the owners' current answer
+    /// (`Denied`, certified not dispatched) when that change revoked it.
+    ///
+    /// RED on the base: the entry answered the stale read as its certified
+    /// refusal (`reprepare_required`, `tool_invoked: false`) in both cases.
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_entry_rebuilds_after_a_stale_read_whose_change_completed() {
+        let mut rows: Vec<CertifiedRow> = Vec::new();
+        for revokes in [false, true] {
+            let facts = StaleReadFacts::scripted(1, 0, revokes);
+            let dispatcher = Arc::new(SourceKindDispatcher::default());
+            let result = fenced(&dispatcher, "read_file", &stale_read_context(&facts)).await;
+            assert_eq!(
+                facts.sequence.load(Ordering::SeqCst),
+                2,
+                "revokes={revokes}: one change, completed"
+            );
+            if revokes {
+                rows.push((
+                    "prepared entry after a revoking change",
+                    result,
+                    dispatcher.0.load(Ordering::SeqCst),
+                    OperationRefusalKind::Denied,
+                ));
+            } else {
+                assert!(
+                    result
+                        .as_ref()
+                        .is_ok_and(|outcome| !outcome.result.is_error),
+                    "the entry prepares again after the stale read, then enters: {:?}",
+                    refusal_and_data(&result).map(|(_, data)| data)
+                );
+                assert_eq!(dispatcher.0.load(Ordering::SeqCst), 1, "the body ran once");
+            }
+            assert_eq!(
+                facts.prepares.load(Ordering::SeqCst),
+                2,
+                "revokes={revokes}: read stale, then prepared again after it"
+            );
+        }
+        assert_certified_not_dispatched(rows);
+    }
+
+    /// A model reviewer that allows every candidate and counts its reviews.
+    /// During its first review another actor's owner change completes, so
+    /// the reviewed decision is stale, and the change after it is met by the
+    /// next preparation's read: the review's currentness check prepares the
+    /// decision again and that read is stale, with no change in progress.
+    struct StaleAfterReview {
+        facts: Arc<StaleReadFacts>,
+        reviews: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::approval::review::OperationReviewer for StaleAfterReview {
+        async fn review(
+            &self,
+            _candidate: &crate::approval::review::ReviewCandidate<'_>,
+        ) -> Result<crate::approval::review::ReviewVerdict, crate::approval::review::ReviewerFailure>
+        {
+            if self.reviews.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.facts.complete_change(false);
+                self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(crate::approval::review::ReviewVerdict::Allow)
+        }
+    }
+
+    /// The review's currentness check after a verdict reads stale after an
+    /// owner change that completed: it pauses one backoff step and checks
+    /// again. A change that superseded the reviewed decision is then
+    /// reviewed once more for the current decision and entered once; one
+    /// that revoked the call's authority refuses it with the owners' current
+    /// answer (`Denied`, certified not dispatched).
+    ///
+    /// RED on the base: the stale read retired the review as an authority
+    /// change and refused the call with `reprepare_required` in both cases.
+    #[tokio::test(start_paused = true)]
+    async fn a_reviewed_entry_rebuilds_after_a_stale_read_whose_change_completed() {
+        let mut rows: Vec<CertifiedRow> = Vec::new();
+        for revokes in [false, true] {
+            let facts = Arc::new(StaleReadFacts {
+                revokes,
+                reviewed: true,
+                ..StaleReadFacts::default()
+            });
+            let reviewer = Arc::new(StaleAfterReview {
+                facts: Arc::clone(&facts),
+                reviews: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let context = stale_read_context(&facts).with_operation_review(Some(Arc::new(
+                crate::approval::review::BoundOperationReview::new(
+                    Arc::clone(&reviewer) as Arc<dyn crate::approval::review::OperationReviewer>,
+                    crate::approval::ApprovalService::new(),
+                    std::time::Duration::from_secs(30),
+                ),
+            )));
+            let dispatcher = Arc::new(Reviewed(SourceKindDispatcher::default()));
+            let result = fenced(&dispatcher, "read_file", &context).await;
+            assert_eq!(
+                facts.sequence.load(Ordering::SeqCst),
+                4,
+                "revokes={revokes}: two changes, both completed"
+            );
+            if revokes {
+                assert_eq!(
+                    reviewer.reviews.load(Ordering::SeqCst),
+                    1,
+                    "reviewed once, never again"
+                );
+                rows.push((
+                    "reviewed entry after a revoking change",
+                    result,
+                    dispatcher.0.0.load(Ordering::SeqCst),
+                    OperationRefusalKind::Denied,
+                ));
+                continue;
+            }
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|outcome| !outcome.result.is_error),
+                "the current decision is reviewed once more, then entered: {:?}",
+                refusal_and_data(&result).map(|(_, data)| data)
+            );
+            assert_eq!(
+                reviewer.reviews.load(Ordering::SeqCst),
+                2,
+                "reviewed again for the current decision, never by reusing the first allow"
+            );
+            assert_eq!(
+                dispatcher.0.0.load(Ordering::SeqCst),
+                1,
+                "the body ran once"
+            );
+        }
+        assert_certified_not_dispatched(rows);
     }
 
     /// The reviewed tool the body-entry check refused for a change that
@@ -8177,6 +8856,10 @@ mod governed_operation_tests {
     ///   which has the approval owner it needs.
     /// - A consent attempt's own admission refuses only with review outcomes,
     ///   never an operation refusal, so it has no row.
+    /// - A leaf's effect entry certifies its own refusal met before any
+    ///   effect of the call entered, after the fenced entry invoked the
+    ///   dispatcher, in
+    ///   `an_effect_entry_refusal_before_any_effect_is_certified_not_dispatched`.
     #[tokio::test(start_paused = true)]
     async fn every_pre_invocation_refusal_is_certified_not_dispatched() {
         let mut rows: Vec<CertifiedRow> = Vec::new();
@@ -8619,6 +9302,202 @@ mod governed_operation_tests {
                 before + 1,
                 "{row}: the body ran"
             );
+        }
+    }
+
+    /// How [`EnteringLeaf`] reaches the effects it counts.
+    #[derive(Clone, Copy)]
+    enum LeafEffects {
+        /// Its one effect entry, immediately before its body, as a
+        /// `ConsumesAtEntry` leaf makes it.
+        EntryThenBody,
+        /// A body under each of two entries: an unreviewed entry spends
+        /// nothing, so the leaf may enter again.
+        TwoEntries,
+        /// A plain governed step that runs its operation, then the entry of
+        /// its body.
+        PlainStepThenEntry,
+    }
+
+    /// A leaf that enters its effects through the dispatch context it was
+    /// handed, counting the calls that reached it and the effects that ran.
+    struct EnteringLeaf {
+        effects: LeafEffects,
+        invoked: std::sync::atomic::AtomicUsize,
+        ran: std::sync::atomic::AtomicUsize,
+    }
+
+    impl EnteringLeaf {
+        fn new(effects: LeafEffects) -> Arc<Self> {
+            Arc::new(Self {
+                effects,
+                invoked: std::sync::atomic::AtomicUsize::new(0),
+                ran: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for EnteringLeaf {
+        fn tools(&self) -> Arc<[Arc<crate::types::ToolDef>]> {
+            SourceKindDispatcher::default().tools()
+        }
+
+        fn review_entry_support(
+            &self,
+            _tool_name: &str,
+        ) -> crate::approval::review::ReviewEntrySupport {
+            crate::approval::review::ReviewEntrySupport::ConsumesAtEntry
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::ToolError> {
+            self.dispatch_with_context(call, &ToolDispatchContext::default())
+                .await
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::ToolError> {
+            self.invoked.fetch_add(1, Ordering::SeqCst);
+            let entries = match self.effects {
+                LeafEffects::EntryThenBody => 1,
+                LeafEffects::TwoEntries => 2,
+                LeafEffects::PlainStepThenEntry => {
+                    context
+                        .governed_operation(call)?
+                        .run_if_current_within(&(), &mut || {
+                            self.ran.fetch_add(1, Ordering::SeqCst);
+                        })?;
+                    1
+                }
+            };
+            for _ in 0..entries {
+                context.enter_reviewed_effect(call, None)?;
+                self.ran.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(crate::types::ToolResult::new(call.id.to_string(), "ran".to_string(), false).into())
+        }
+    }
+
+    /// `leaf` as a fenced dispatch's root: itself, or behind the call-level
+    /// execution policy gate, reached through its resolved entry point
+    /// (`Some(true)`) or through an adapter that lowers the call
+    /// (`Some(false)`).
+    fn leaf_root(leaf: &Arc<EnteringLeaf>, gate: Option<bool>) -> Arc<dyn AgentToolDispatcher> {
+        let leaf = Arc::clone(leaf) as Arc<dyn AgentToolDispatcher>;
+        let Some(resolved) = gate else {
+            return leaf;
+        };
+        let gated: Arc<dyn AgentToolDispatcher> =
+            Arc::new(crate::ExecutionPolicyGatedDispatcher::new(
+                leaf,
+                crate::ToolExecutionPolicy::unrestricted(),
+            ));
+        if resolved {
+            gated
+        } else {
+            Arc::new(Lowering(gated))
+        }
+    }
+
+    /// The effect entry is the boundary of the body it guards: a refusal it
+    /// meets while no effect of the call entered is certified not
+    /// dispatched, wherever the owner change that refused it landed. Here
+    /// the change begins right after the last check the fenced dispatch
+    /// (and the call-level execution policy gate, on both of its paths)
+    /// staged before handing the call on, so the leaf's own effect entry
+    /// meets it: the leaf was invoked, its body never ran, and the model
+    /// reads `tool_invoked: false`, as it does when the change lands before
+    /// the hand-off.
+    #[tokio::test(start_paused = true)]
+    async fn an_effect_entry_refusal_before_any_effect_is_certified_not_dispatched() {
+        // The current checks before the leaf's entry: the prepared entry's
+        // one and the root staging's two, then the gate staging's two.
+        for (row, gate, checks_before_entry) in [
+            ("fenced entry", None, 3),
+            ("policy gate (resolved)", Some(true), 5),
+            ("policy gate (lowered)", Some(false), 5),
+        ] {
+            let work = ChurnWork::held(
+                crate::authorization::OperationReviewTier::R1,
+                Some(checks_before_entry),
+            );
+            let leaf = EnteringLeaf::new(LeafEffects::EntryThenBody);
+            let root = leaf_root(&leaf, gate);
+            let result = fenced(&root, "read_file", &churn_context(&work)).await;
+            let (refusal, data) = refusal_and_data(&result).expect(row);
+            assert_eq!(
+                refusal.kind(),
+                OperationRefusalKind::ReprepareRequired,
+                "{row}"
+            );
+            assert_eq!(
+                refusal.dispatch(),
+                crate::authorization::RefusalDispatch::NotDispatched,
+                "{row}: met at the effect entry, before any effect"
+            );
+            assert_eq!(
+                data,
+                serde_json::json!({"kind": "reprepare_required", "tool_invoked": false}),
+                "{row}"
+            );
+            assert_eq!(
+                leaf.invoked.load(Ordering::SeqCst),
+                1,
+                "{row}: the fenced dispatch handed the call on"
+            );
+            assert_eq!(leaf.ran.load(Ordering::SeqCst), 0, "{row}: no body ran");
+        }
+    }
+
+    /// Once an effect of the call entered, a later refusal of its effect
+    /// entry makes no claim (`tool_invoked: "unknown"`): an unreviewed leaf
+    /// may enter twice, since an unreviewed entry spends nothing, and a leaf
+    /// may run a plain governed step before its entry. Either way an effect
+    /// ran before the refused entry.
+    #[tokio::test(start_paused = true)]
+    async fn an_effect_entry_refusal_after_an_effect_makes_no_claim() {
+        // The change begins right after the last current check of the first
+        // effect: the first entry's final check (the fifth), or the plain
+        // step's own check (the fourth).
+        for (row, effects, checks_before_refused_entry) in [
+            ("a second entry", LeafEffects::TwoEntries, 5),
+            (
+                "an entry after a plain step",
+                LeafEffects::PlainStepThenEntry,
+                4,
+            ),
+        ] {
+            let work = ChurnWork::held(
+                crate::authorization::OperationReviewTier::R1,
+                Some(checks_before_refused_entry),
+            );
+            let leaf = EnteringLeaf::new(effects);
+            let root = leaf_root(&leaf, None);
+            let result = fenced(&root, "read_file", &churn_context(&work)).await;
+            let (refusal, data) = refusal_and_data(&result).expect(row);
+            assert_eq!(
+                refusal.kind(),
+                OperationRefusalKind::ReprepareRequired,
+                "{row}"
+            );
+            assert_eq!(
+                refusal.dispatch(),
+                crate::authorization::RefusalDispatch::Unknown,
+                "{row}: an effect entered before the refused entry"
+            );
+            assert_eq!(
+                data,
+                serde_json::json!({"kind": "reprepare_required", "tool_invoked": "unknown"}),
+                "{row}"
+            );
+            assert_eq!(leaf.ran.load(Ordering::SeqCst), 1, "{row}: one effect ran");
         }
     }
 }

@@ -119,7 +119,8 @@ expect_red "named test compiled out by the row's features" "${TEST_ROOT}/compile
 SCRATCH="${TEST_ROOT}/scratch"
 git clone --quiet --shared --no-checkout "$REPO_ROOT" "$SCRATCH"
 git -C "$SCRATCH" checkout --quiet --detach "$(git -C "$REPO_ROOT" rev-parse HEAD)"
-for file in scripts/ci-non-rust-readers.json scripts/ci-non-rust-readers.mjs scripts/ci-non-rust-readers-guard.mjs scripts/rust-test-selector.mjs; do
+for file in scripts/ci-non-rust-readers.json scripts/ci-non-rust-readers.mjs scripts/ci-non-rust-readers-guard.mjs scripts/rust-test-selector.mjs scripts/ci-products.mjs ci/products.json; do
+  mkdir -p "$(dirname "${SCRATCH}/${file}")"
   cp "${REPO_ROOT}/${file}" "${SCRATCH}/${file}"
 done
 SCRATCH_GUARD="${SCRATCH}/scripts/ci-non-rust-readers-guard.mjs"

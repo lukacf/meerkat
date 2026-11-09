@@ -1,0 +1,21 @@
+{
+  "name": "@meerkat/examples",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.55.0",
+    "tsx": "4.20.5",
+    "yaml": "2.8.1"
+  },
+  "scripts": {
+    "mdm:smoke": "tsx 004-mdm-console-pack/ts_smoke.ts",
+    "mdm:browser-smoke": "node 004-mdm-console-pack/browser_smoke.cjs",
+    "mdm:real-target-smoke": "004-mdm-console-pack/scripts/real-target-smoke.sh",
+    "mdm:real-target-e2e": "MDM_REAL_TARGET_E2E=1 004-mdm-console-pack/scripts/real-target-smoke.sh",
+    "mdm:real-target-multi-e2e": "MDM_REAL_TARGET_E2E=1 MDM_REAL_TARGET_COUNT=2 004-mdm-console-pack/scripts/real-target-smoke.sh",
+    "mdm:upgrade-meerkat": "004-mdm-console-pack/scripts/use-meerkat-version.sh",
+    "mdm:local-target": "004-mdm-console-pack/scripts/local-target.sh start",
+    "mdm:console": "004-mdm-console-pack/scripts/start-console.sh",
+    "mdm:gcp-target": "004-mdm-console-pack/scripts/gcp-target.sh start"
+  }
+}

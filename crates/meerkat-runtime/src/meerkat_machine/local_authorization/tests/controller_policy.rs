@@ -19,6 +19,10 @@ struct AccountPolicy {
     domain: ResourceDomain,
     executor: PrincipalRef,
     commits: AtomicUsize,
+    /// Another actor's owner change on this publication, published and
+    /// completed during the next controller admission read; with `true` it
+    /// removes the controller.
+    change_during_read: Mutex<Option<(LocalAuthorizationPublication, bool)>>,
 }
 impl AccountPolicy {
     fn proposed_allowance(
@@ -89,6 +93,16 @@ impl OperationPolicyOwner for AccountPolicy {
         facts: &ControllerModelFacts,
         _: u64,
     ) -> Result<ControllerAdmissionAllowance, meerkat_core::OperationAuthorizationError> {
+        if let Some((publication, revoke)) = self.change_during_read.lock().expect("fixture").take()
+        {
+            let change = publication
+                .begin_owner_change()
+                .expect("another actor's owner change");
+            if revoke {
+                self.state.lock().expect("actual account owner").controller = false;
+            }
+            drop(change);
+        }
         self.proposed_allowance(
             *self.state.lock().expect("actual account owner"),
             association,
@@ -207,6 +221,7 @@ async fn fixture_with(
             .logical_executor
             .clone(),
         commits: AtomicUsize::new(0),
+        change_during_read: Mutex::new(None),
     });
     configuration.operation_owner = account.clone();
     let grants = configuration.grants.clone();
@@ -346,6 +361,68 @@ async fn removal_before_admission_denies_input_without_native_publication() {
     let id = fixture.prompt.id().clone();
     assert!(driver.accept_input(fixture.prompt).await.is_err());
     assert!(driver.ledger().get(&id).is_none());
+}
+
+/// Another actor's owner change that publishes and completes while native
+/// admission reads the controller's current policy leaves that read stale,
+/// with no change in progress any more. Admission reads it once more from
+/// the owners: the input is admitted while the controller is still allowed,
+/// and refused with the owners' current answer (`Denied`) when that change
+/// removed it, never answered as a changed policy that the completed change
+/// no longer explains.
+///
+/// RED on the base: both answered `ControllerReadinessUnavailable` with
+/// `PolicyChanged`.
+#[tokio::test]
+async fn admission_reads_a_controller_again_after_a_change_completed_during_its_read() {
+    for revoke in [false, true] {
+        let fixture = fixture().await;
+        *fixture.account.change_during_read.lock().expect("fixture") =
+            Some((fixture.publication.clone(), revoke));
+        let driver = Arc::clone(
+            &fixture
+                .machine
+                .sessions
+                .read()
+                .await
+                .get(&fixture.session)
+                .expect("session")
+                .driver,
+        );
+        let mut locked = driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *locked else {
+            panic!("storeless")
+        };
+        driver.set_executor_work_authorization_support(true);
+        let id = fixture.prompt.id().clone();
+        let answer = driver.accept_input(fixture.prompt).await;
+        assert!(
+            fixture
+                .account
+                .change_during_read
+                .lock()
+                .expect("fixture")
+                .is_none(),
+            "revoke={revoke}: the change completed during the admission read"
+        );
+        if revoke {
+            assert!(
+                matches!(
+                    &answer,
+                    Err(RuntimeDriverError::InputRefused { refusal })
+                        if refusal.kind() == OperationRefusalKind::Denied
+                ),
+                "the owners' current answer: {answer:?}"
+            );
+            assert!(driver.ledger().get(&id).is_none(), "nothing admitted");
+        } else {
+            assert!(
+                matches!(&answer, Ok(crate::accept::AcceptOutcome::Accepted { .. })),
+                "admitted after one more read: {answer:?}"
+            );
+            assert!(driver.ledger().get(&id).is_some(), "the input is admitted");
+        }
+    }
 }
 
 #[tokio::test]
@@ -670,6 +747,7 @@ async fn unfinished_work_references_every_selected_target_lineage_read_only() {
         let issue = |name: &str| {
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new(name).expect("id"),
                     candidate.logical_executor.clone(),
@@ -781,7 +859,12 @@ async fn unfinished_work_references_every_selected_target_lineage_read_only() {
     );
     let revoked = custody
         .revoke_if_unreferenced(&selected, &NoOriginals, |custody| {
-            fixture.grants.revoke(&root, &selected, custody)
+            fixture.grants.revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &root,
+                &selected,
+                custody,
+            )
         })
         .expect("custody held");
     assert_eq!(revoked, Some(Ok(())));
@@ -833,7 +916,12 @@ async fn controller_only_work_runs_on_its_controller_lineage_alone() {
         candidate.authority_basis = controller_only();
         let controller = candidate.controller_grant_lineage[0].clone();
         grants
-            .revoke(&controller.root_authority, &controller, &mut Unreferenced)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &controller.root_authority,
+                &controller,
+                &mut Unreferenced,
+            )
             .expect("controller lineage revoked before admission");
     })
     .await;

@@ -8,14 +8,3 @@ error[E0432]: unresolved imports `meerkat_machine_kernels::KernelEffect`, `meerk
   |                               |             |            no `KernelSignal` in the root
   |                               |             no `KernelInput` in the root
   |                               no `KernelEffect` in the root
-  |
-  = help: consider importing this struct instead:
-          meerkat_machine_kernels::test_oracle::KernelEffect
-  = help: consider importing this struct instead:
-          meerkat_machine_kernels::test_oracle::KernelInput
-  = help: consider importing this struct instead:
-          meerkat_machine_kernels::test_oracle::KernelSignal
-  = help: consider importing this struct instead:
-          meerkat_machine_kernels::test_oracle::KernelState
-  = help: consider importing this enum instead:
-          meerkat_machine_kernels::test_oracle::KernelValue

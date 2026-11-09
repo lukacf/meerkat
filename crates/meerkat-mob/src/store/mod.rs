@@ -12,19 +12,26 @@ mod temporary_council;
 pub use forked_participant::{
     ForkedParticipantRecord, ForkedParticipantSidecar, ForkedParticipantStore,
 };
+#[cfg(test)]
+pub(crate) use in_memory::InMemoryEventLogForTest;
 pub use in_memory::{
     InMemoryForkedParticipantStore, InMemoryMobEventStore, InMemoryMobIdentityStatusStore,
     InMemoryMobIdentityStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
     InMemoryMobSpecStore, InMemoryRealmProfileStore, InMemoryTemporaryCouncilStore,
 };
 pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
+#[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub use sqlite::{
+    IDENTITY_CENSUS_TEST_MOB, IDENTITY_CENSUS_TEST_OTHER_MOB, ParkedStoreReadForTest,
+    StoreReadReleaseForTest, park_next_store_read_for_test, seed_identity_census_rows_for_test,
+};
 #[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) use sqlite::{IDENTITY_RUNTIME_WRITE_FENCE_WAIT, identity_fence_test_hooks};
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use sqlite::{MemberBindingStoreRead, read_member_binding_store_at};
-#[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
-#[doc(hidden)]
-pub use sqlite::{ParkedStoreReadForTest, StoreReadReleaseForTest, park_next_store_read_for_test};
+pub(crate) use sqlite::{
+    MemberBindingStoreRead, read_identity_record_rows_at, read_member_binding_store_at,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{
     SqliteForkedParticipantStore, SqliteMobEventStore, SqliteMobIdentityStatusStore,
@@ -601,6 +608,14 @@ pub enum MobStoreError {
         mob_id: MobId,
         inconsistency: crate::error::IncarnationInconsistency,
     },
+
+    /// The store could not serve this read now (a host store that answered
+    /// unavailable): nothing is known to be wrong with the stored data, and
+    /// a later read may pass. A read that fails otherwise, stored data that
+    /// does not decode included, is [`Self::ReadFailed`] or
+    /// [`Self::Serialization`].
+    #[error("Store unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// The stored form of `provenance` in a creation record.
@@ -5871,6 +5886,288 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
         read.events.retain(|event| event.cursor >= from_cursor);
         Ok(read)
     }
+
+    /// Commit one identity change in one store transaction: its store-owned
+    /// identities' rows, its journal rows and its receipt land together, or
+    /// nothing does. The receipt is inserted once per operation: a receipt
+    /// already under the operation's id answers the change replayed (the
+    /// same request digest) or the id reused (another digest), and nothing
+    /// changes. Each row's write is checked against what the change expects
+    /// the identity's current row to be ([`CreatedIdentityRowExpectation`]);
+    /// one that differs answers a conflict, and nothing changes.
+    ///
+    /// The default answers that the storage cannot make the guarantee: a
+    /// custom composition never receives this capability.
+    async fn commit_identity_change(
+        &self,
+        write: &IdentityChangeWrite,
+    ) -> Result<IdentityChangeCommit, MobStoreError> {
+        let _ = write;
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+
+    /// Write one store-owned identity's row as a committed change's
+    /// follow-up, never as a change: checked against what the writer
+    /// expects the identity's current row to be
+    /// ([`CreatedIdentityRowExpectation`]), it answers `true` once it
+    /// landed and `false`, with nothing changed, when the current row
+    /// differs. A store-owned update's restamp lets the row's pending role
+    /// migration go through it once the restamp committed.
+    ///
+    /// The default answers that the storage cannot make the guarantee.
+    async fn settle_created_identity_row(
+        &self,
+        row: &CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        let _ = row;
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+
+    /// The receipt of the identity change `operation_id` of `mob_id`, if one
+    /// committed. Never writes.
+    async fn observe_identity_change_receipt(
+        &self,
+        mob_id: &MobId,
+        operation_id: &str,
+    ) -> Result<Option<crate::identity::IdentityChangeReceipt>, MobStoreError> {
+        let _ = (mob_id, operation_id);
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+
+    /// One page of `mob_id`'s created identity rows, as the identity store's
+    /// created identity scan reads them
+    /// ([`MobIdentityStore::scan_created_identities_page`]). Never writes.
+    ///
+    /// The default, a storage that never holds a created entry, reads none.
+    async fn scan_created_identity_rows(
+        &self,
+        mob_id: &MobId,
+        after: Option<&IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<CreatedIdentityScanPage, MobStoreError> {
+        let _ = (mob_id, after, limit);
+        Ok(CreatedIdentityScanPage::default())
+    }
+
+    /// `identity`'s row of `mob_id`'s intents table as the created identity
+    /// scan reads it: `None` when the identity has no row of schema version 2
+    /// or later (no row, or a host-adopted intent's). Never writes.
+    async fn observe_created_identity(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobStoreError> {
+        let _ = (mob_id, identity);
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+
+    /// Purge the receipt's mob's rows of schema version 2 and later in one
+    /// store transaction (the downgrade cycle, 0.9.11): every such row (a
+    /// store-owned identity's, an archived one's, a removed name's
+    /// tombstone) is removed, and the purge's receipt inserted, only when
+    /// the digest of the rows the store holds is the export's and the
+    /// receipt lists exactly their identities. Never a host-adopted
+    /// intent's row (schema version 1), a session, a journal row or another
+    /// receipt. A receipt already under the operation's id answers the
+    /// purge replayed (the same request digest) or the id reused, and
+    /// nothing changes; so does a row this build cannot read, which no
+    /// import would restore.
+    ///
+    /// The default answers that the storage cannot make the guarantee.
+    async fn purge_created_identity_rows(
+        &self,
+        write: &CreatedRowsPurgeWrite,
+    ) -> Result<CreatedRowsPurge, MobStoreError> {
+        let _ = write;
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+}
+
+/// A purge's store transaction
+/// ([`MobIdentityMemberStore::purge_created_identity_rows`]): its receipt,
+/// which lists the identities whose rows it removes, and the digest of the
+/// export those rows must match.
+#[derive(Debug, Clone)]
+pub(crate) struct CreatedRowsPurgeWrite {
+    pub(crate) receipt: crate::identity::IdentityChangeReceipt,
+    pub(crate) export_digest: String,
+}
+
+/// The answer of a purge's store transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreatedRowsPurge {
+    /// The rows were removed and the receipt inserted.
+    Purged,
+    /// The purge committed before under the same request digest: nothing
+    /// changed, and its receipt answers it.
+    Replayed {
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+    /// The operation's id holds the receipt of another request: nothing
+    /// changed.
+    OperationReused {
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+    /// The rows the store holds are not the export's (`current_digest` is
+    /// theirs): nothing changed.
+    ExportMismatch { current_digest: String },
+    /// Rows this build cannot read remain: nothing changed.
+    UnreadableRows { identities: Vec<AgentIdentity> },
+}
+
+/// Decide a purge over the rows a store holds (`rows`, every row of schema
+/// version 2 and later of the receipt's mob, by identity): `None` when the
+/// purge removes them, or the answer that refuses it.
+pub(crate) fn created_rows_purge_refusal(
+    write: &CreatedRowsPurgeWrite,
+    rows: &BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>,
+) -> Result<Option<CreatedRowsPurge>, MobStoreError> {
+    let unreadable: Vec<AgentIdentity> = rows
+        .iter()
+        .filter(|(_, observation)| {
+            matches!(
+                observation,
+                crate::identity::CreatedIdentityObservation::Unreadable { .. }
+            )
+        })
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    if !unreadable.is_empty() {
+        return Ok(Some(CreatedRowsPurge::UnreadableRows {
+            identities: unreadable,
+        }));
+    }
+    let current_digest = crate::identity::created_set_digest_of_rows(&write.receipt.mob_id, rows)
+        .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+    let listed: std::collections::BTreeSet<&AgentIdentity> = write
+        .receipt
+        .identities
+        .iter()
+        .map(|entry| &entry.identity)
+        .collect();
+    let held: std::collections::BTreeSet<&AgentIdentity> = rows.keys().collect();
+    if current_digest != write.export_digest || listed != held {
+        return Ok(Some(CreatedRowsPurge::ExportMismatch { current_digest }));
+    }
+    Ok(None)
+}
+
+/// What an identity change expects a store-owned identity's current row to
+/// be when it writes the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreatedIdentityRowExpectation {
+    /// The identity has no row of the intents table: a create, or a
+    /// roster-owned identity's first row (its removal's tombstone).
+    Absent,
+    /// The identity's current row is the store-owned row sealed under this
+    /// authority digest.
+    Current { authority_digest: String },
+}
+
+/// One store-owned identity's row an identity change writes.
+#[derive(Debug, Clone)]
+pub(crate) struct CreatedIdentityRowWrite {
+    pub(crate) record: crate::identity::CreatedIdentityRecord,
+    pub(crate) expected: CreatedIdentityRowExpectation,
+}
+
+/// One identity change's store transaction
+/// ([`MobIdentityMemberStore::commit_identity_change`]): the rows it writes,
+/// the journal rows it appends, and its receipt.
+#[derive(Debug, Clone)]
+pub(crate) struct IdentityChangeWrite {
+    pub(crate) receipt: crate::identity::IdentityChangeReceipt,
+    pub(crate) rows: Vec<CreatedIdentityRowWrite>,
+    pub(crate) events: Vec<NewMobEvent>,
+}
+
+impl IdentityChangeWrite {
+    /// Refuse a write whose parts are incoherent before any store is read:
+    /// a row of another mob than the receipt's, two rows of one identity, an
+    /// invalid row or receipt, or a journal row a change may not write.
+    pub(crate) fn validate(&self) -> Result<(), MobStoreError> {
+        self.receipt
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let mut identities = std::collections::BTreeSet::new();
+        for row in &self.rows {
+            row.record
+                .validate()
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+            if row.record.mob_id != self.receipt.mob_id {
+                return Err(MobStoreError::Internal(format!(
+                    "an identity change of mob '{}' writes a row of mob '{}'",
+                    self.receipt.mob_id, row.record.mob_id
+                )));
+            }
+            if !identities.insert(row.record.agent_identity.clone()) {
+                return Err(MobStoreError::Internal(format!(
+                    "an identity change writes two rows of '{}'",
+                    row.record.agent_identity
+                )));
+            }
+        }
+        for event in &self.events {
+            validate_mob_event_write_authority(&event.kind)?;
+            if event.mob_id != self.receipt.mob_id {
+                return Err(MobStoreError::Internal(format!(
+                    "an identity change of mob '{}' appends a journal row of mob '{}'",
+                    self.receipt.mob_id, event.mob_id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The answer of one identity change's store transaction.
+#[derive(Debug, Clone)]
+pub(crate) enum IdentityChangeCommit {
+    /// Everything landed: the journal rows as stored, in order.
+    Committed { events: Vec<MobEvent> },
+    /// The operation committed before under the same request digest:
+    /// nothing changed, and its receipt answers it.
+    Replayed {
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+    /// The operation's id holds the receipt of another request: nothing
+    /// changed.
+    OperationReused {
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+    /// An identity's current row is not the one the change expected:
+    /// nothing changed. `current` is the row the store holds, as the created
+    /// identity scan reads it (`None` for no row, or a host-adopted
+    /// intent's).
+    RowConflict {
+        identity: AgentIdentity,
+        current: Option<crate::identity::CreatedIdentityObservation>,
+    },
+}
+
+/// Whether `current`, an identity's row as the created identity scan reads
+/// it (`present` says whether the identity has any row of the intents table
+/// at all), is what `expected` names.
+pub(crate) fn created_row_matches(
+    expected: &CreatedIdentityRowExpectation,
+    present: bool,
+    current: Option<&crate::identity::CreatedIdentityObservation>,
+) -> bool {
+    match (expected, current) {
+        (CreatedIdentityRowExpectation::Absent, None) => !present,
+        (
+            CreatedIdentityRowExpectation::Current { authority_digest },
+            Some(crate::identity::CreatedIdentityObservation::Created(record)),
+        ) => record.authority_digest == *authority_digest,
+        _ => false,
+    }
+}
+
+/// The key a store keeps an identity change's receipt under, in the table of
+/// receipts keyed by one request id: the operation's id in its own namespace,
+/// which no member tool mutation's request id shares by accident.
+pub(crate) fn identity_change_receipt_request_key(operation_id: &str) -> String {
+    format!("identity-change/{operation_id}")
 }
 
 /// One store-transaction read of a mob store's structural event journal and
@@ -5884,6 +6181,22 @@ pub(crate) struct MemberBindingJournalRead {
     /// How each identity intent row (Present or Absent) of the read mob
     /// reads: [`intent_row_management`] of its stored observation.
     pub(crate) intent_rows: BTreeMap<AgentIdentity, crate::runtime::MemberIdentityManagement>,
+}
+
+/// How a member binding history reads one created identity entry's row: a
+/// row this build reads is a created entry, which MobMachine drives; any
+/// other is unreadable.
+pub(crate) fn created_row_management(
+    observation: &crate::identity::CreatedIdentityObservation,
+) -> crate::runtime::MemberIdentityManagement {
+    match observation {
+        crate::identity::CreatedIdentityObservation::Created(_) => {
+            crate::runtime::MemberIdentityManagement::CreatedEntry
+        }
+        crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
+            crate::runtime::MemberIdentityManagement::IntentUnreadable
+        }
+    }
 }
 
 /// How a member binding history reads one stored identity intent row: a row
@@ -6098,6 +6411,19 @@ pub struct IdentityIntentScanPage {
 /// Hard contract bound for one identity-intent discovery read.
 pub const IDENTITY_INTENT_SCAN_PAGE_MAX: usize = 256;
 
+/// One bounded, keyset-ordered page of created identity entries' rows (the
+/// intents table's rows of schema version 2 and later), in the identity
+/// intent scan's physical-key order.
+///
+/// `next` is present only when another row is known to exist; a page can
+/// name fewer rows than its limit (the scan skips the host-adopted intents'
+/// rows) and still have a `next`.
+#[derive(Debug, Clone, Default)]
+pub struct CreatedIdentityScanPage {
+    pub observations: BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>,
+    pub next: Option<IdentityIntentScanCursor>,
+}
+
 /// First-class persistence owner for level-triggered mob identity intent.
 ///
 /// This is intentionally separate from [`MobRuntimeMetadataStore`]: intent,
@@ -6207,6 +6533,23 @@ pub trait MobIdentityStore: Send + Sync {
         _limit: usize,
     ) -> Result<IdentityIntentScanPage, MobStoreError> {
         Err(MobStoreError::IdentityIntentScanUnavailable)
+    }
+
+    /// Read at most `limit` created identity entries' rows (schema version 2
+    /// and later) after `after`, in the intent scan's physical-key order: a
+    /// row this build reads and validates is `Created`, any other is
+    /// `Unreadable`, for its identity alone. The host-adopted intents' rows
+    /// are the intent scan's ([`Self::scan_identity_intents_page`]), and
+    /// the built-in stores leave the created rows out of it. The default, a
+    /// storage that never holds a created entry (a custom composition, which
+    /// refuses every created identity operation), reads none.
+    async fn scan_created_identities_page(
+        &self,
+        _mob_id: &MobId,
+        _after: Option<&IdentityIntentScanCursor>,
+        _limit: usize,
+    ) -> Result<CreatedIdentityScanPage, MobStoreError> {
+        Ok(CreatedIdentityScanPage::default())
     }
 
     async fn observe_identity_lease(
@@ -8281,6 +8624,8 @@ mod identity_member_target_generation_tests {
             agent_identity: identity.clone(),
             generation: Generation::new(generation),
             role: ProfileName::from("worker"),
+            session_archived: false,
+            facts: crate::event::MemberRetiredFacts::default(),
         }
     }
 

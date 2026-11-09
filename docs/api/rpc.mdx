@@ -139,8 +139,11 @@ of this full catalog.
 | `session/history` | Session | `ReadSessionHistoryParams` | `WireSessionHistory` | Get committed session transcript messages |
 | `session/export_atif` | Session | `ExportAtifParams` | `Value` | Export currently projected session replay evidence as an ATIF trajectory |
 | `session/update_system_prompt` | Session | `UpdateSystemPromptParams` | `SystemPromptUpdateResult` | Explicitly replace one durable versioned system-prompt key |
-| `session/activate_instruction` | Session | `ActivateInstructionParams` | `InstructionActivationReceipt` | Append one immutable instruction revision at an admitted idle transcript boundary |
+| `session/activate_instruction` | Session | `ActivateInstructionParams` | `InstructionActivationReceipt` | Deprecated since 0.9.11: use `session/set_instruction`. Append one immutable instruction revision at an admitted idle transcript boundary |
 | `session/instruction_activations` | Session | `ReadInstructionActivationsParams` | `InstructionActivationReadPage` | Read authoritative activation records from the durable ordered transcript |
+| `session/set_instruction` | Session | `SetSessionInstructionParams` | `SessionInstructionWriteResult` | Record one session-owned operator instruction (a slot's body at a revision); it applies at the session's next fresh run start |
+| `session/revoke_instruction` | Session | `RevokeSessionInstructionParams` | `SessionInstructionWriteResult` | Revoke one session-owned operator instruction at a higher revision |
+| `session/instruction_status` | Session | `SessionInstructionStatusParams` | `SessionInstructionStatusResult` | Read a session's committed operator-instruction state without materializing the session |
 | `session/rewrite_transcript` | Session | `RewriteSessionTranscriptParams` | `SessionTranscriptRewriteResult` | Commit a same-session transcript rewrite |
 | `session/transcript_revision` | Session | `ReadSessionTranscriptRevisionParams` | `WireSessionTranscriptRevision` | Read a transcript revision by id |
 | `session/transcript_revisions` | Session | `ListSessionTranscriptRevisionsParams` | `WireSessionTranscriptRevisionList` | List retained transcript revision commits with the current head |
@@ -155,6 +158,16 @@ of this full catalog.
 | `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval audit records |
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
+| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window |
+| `tool_grants/request` | Tool grants | `RequestToolGrantParams` | `RequestToolGrantResult` | Ask for a grant of a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server, which a person approves through a durable decision |
+| `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
+| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first |
+| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's or a mob member identity's scoped tool grants |
+| `decision/list` | Decisions | `DecisionListParams` | `DecisionListResult` | List a page of durable decisions, filtered by kind, phase, approver id or requester |
+| `decision/get` | Decisions | `DecisionGetParams` | `DecisionResult` | Get one durable decision, its expiry recorded when its deadline passed |
+| `decision/rendering` | Decisions | `DecisionRenderingParams` | `DecisionRenderingResult` | Get a durable decision's rendering and its canonical parts for a part size |
+| `decision/present` | Decisions | `DecisionPresentParams` | `DecisionResult` | Record a host presenter's presentation of a durable decision's rendering |
+| `decision/withdraw` | Decisions | `DecisionWithdrawParams` | `DecisionResult` | Withdraw an open durable decision as the host |
 | `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
@@ -163,6 +176,7 @@ of this full catalog.
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
+| `session/compact` | Session | `CompactSessionParams` | `CompactSessionResult` | Ask a live session's next compaction check to compact, without a rebuild |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
 | `turn/stop_run` | Turn | `StopRunParams` | `StopRunResult` | Stop one exact run and terminalize every contributor bound to it |
@@ -180,7 +194,7 @@ of this full catalog.
 | `session/stream_open` | Session | `SessionStreamOpenParams` | `SessionStreamOpenResult` | Open a standalone session event stream |
 | `session/stream_close` | Session | `SessionStreamCloseParams` | `SessionStreamCloseResult` | Close a standalone session event stream |
 | `mob/create` | Mob | `MobCreateParams` | `MobCreateResult` | Create a mob from a definition (mob feature) |
-| `mob/list` | Mob | — | `MobListResult` | List mobs (mob feature) |
+| `mob/list` | Mob | - | `MobListResult` | List mobs, and under `quarantined` the persisted mobs whose stores did not restore (mob feature) |
 | `mob/status` | Mob | `MobIdParams` | `MobStatusResult` | Get mob status (mob feature) |
 | `mob/members` | Mob | `MobIdParams` | `MobMembersResult` | List mob members (mob feature) |
 | `mob/member_tool_declaration` | Mob | `MobMemberToolDeclarationParams` | `MobMemberToolDeclarationResult` | Read one durable member-tool declaration and fresh identity convergence status (mob feature) |
@@ -201,23 +215,28 @@ of this full catalog.
 | `mob/stream_close` | Mob | `MobStreamCloseParams` | `MobStreamCloseResult` | Close mob or member event stream (mob feature) |
 | `mob/member_send` | Mob | `MobMemberSendParams` | `MobMemberSendResult` | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
 | `mob/append_system_context` | Mob | `MobAppendSystemContextParams` | `MobAppendSystemContextResult` | Append one ordinary durable ordered System message to a member session (mob feature) |
+| `mob/set_instruction` | Mob | `MobSetInstructionParams` | `MobInstructionWriteResult` | Write one operator instruction for the members a target selects (every member, a profile's members, or one member); delivery is asynchronous (mob feature) |
+| `mob/revoke_instruction` | Mob | `MobRevokeInstructionParams` | `MobInstructionWriteResult` | Revoke one operator instruction of a mob at a higher revision (mob feature) |
+| `mob/instruction_status` | Mob | `MobInstructionStatusParams` | `MobInstructionStatusResult` | Read a mob's operator-instruction records and, per member, its delivery and per-slot state, without waking a member (mob feature) |
 | `mob/flows` | Mob | `MobIdParams` | `MobFlowsResult` | List mob flows (mob feature) |
 | `mob/run` | Mob | `MobRunParams` | `MobFlowRunResult` | Invoke a mob as a typed callable run (mob feature) |
 | `mob/flow_run` | Mob | `MobFlowRunParams` | `MobFlowRunResult` | Start a mob flow run (mob feature) |
 | `mob/flow_status` | Mob | `MobFlowStatusParams` | `MobFlowStatusResult` | Get flow run status (mob feature) |
 | `mob/run_result` | Mob | `MobRunResultParams` | `MobRunResult` | Get a typed output envelope for a mob run (mob feature) |
 | `mob/flow_cancel` | Mob | `MobFlowCancelParams` | `MobFlowCancelResult` | Cancel a flow run (mob feature) |
-| `mob/ensure_member` | Mob | `MobEnsureMemberParams` | `MobEnsureMemberResult` | Idempotent spawn — returns existing entry if member already exists (mob feature) |
+| `mob/ensure_member` | Mob | `MobEnsureMemberParams` | `MobEnsureMemberResult` | Idempotent spawn: returns the existing member, waiting for one whose spawn is in flight (mob feature) |
 | `mob/reconcile` | Mob | `MobReconcileParams` | `MobReconcileResult` | Declarative roster reconcile against a desired spec list (mob feature) |
 | `mob/list_members_matching` | Mob | `MobListMembersMatchingParams` | `MobListMembersMatchingResult` | Label-filtered member listing with server-side filter (mob feature) |
 | `mob/spawn_helper` | Mob | `MobSpawnHelperParams` | `MobHelperResult` | Spawn a helper member and wait for its result (mob feature) |
 | `mob/fork_helper` | Mob | `MobForkHelperParams` | `MobHelperResult` | Fork a helper from an existing member and wait for its result (mob feature) |
+| `mob/fork_member` | Mob | `MobForkMemberParams` | `MobForkMemberResult` | Fork a member's session at a message boundary into a new member (mob feature) |
 | `mob/force_cancel` | Mob | `MobMemberParams` | `MobForceCancelResult` | Force-cancel a member's active work (mob feature) |
 | `mob/turn_start` | Mob | `MobTurnStartParams` | `WireRunResult` | Start a turn on a mob member by identity (mob feature) |
 | `mob/member_status` | Mob | `MobMemberParams` | `MobMemberStatusResult` | Read canonical status for a specific member (mob feature) |
 | `mob/snapshot` | Mob | `MobIdParams` | `MobSnapshotResult` | Point-in-time aggregate of mob status plus member list (mob feature) |
 | `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
 | `mob/rotate_supervisor` | Mob | `MobIdParams` | `MobRotateSupervisorResult` | Rotate the supervisor bridge for all members of a mob (mob feature) |
+| `mob/restore_retry` | Mob | `MobIdParams` | `MobRestoreRetryResult` | Re-attempt the restore of a quarantined persisted mob, for example after a repair (mob feature) |
 | `mob/claim_callback_route` | Mob | `MobClaimCallbackRouteParams` | `MobClaimCallbackRouteResult` | Bind a mob's member callback route to this connection with the mob's claim token (mob feature) |
 | `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
 | `mob/conclude_objective` | Mob | `MobConcludeObjectiveParams` | `MobConcludeObjectiveResult` | Explicitly conclude a durable kickoff objective (mob feature) |
@@ -240,6 +259,7 @@ of this full catalog.
 | `mob/revoke_host` | Mob | `MobRevokeHostParams` | `MobRevokeHostResult` | Revoke a bound (or bind-requested) member host (mob feature) |
 | `mob/hard_cancel_member` | Mob | `MobHardCancelParams` | `MobHardCancelResult` | Hard-cancel a mob member; immediate user-interrupt authority (mob feature) |
 | `mob/stop_member_run` | Mob | `MobStopMemberRunParams` | `MobStopMemberRunResult` | Stop one exact run of a mob member and terminalize its contributors (mob feature) |
+| `mob/compact_member` | Mob | `MobCompactMemberParams` | `MobCompactMemberResult` | Ask a live mob member's next compaction check to compact, without a respawn (mob feature) |
 | `mob/member_live_open` | Mob | `MobMemberLiveOpenParams` | `LiveOpenResult` | Open a live realtime channel on a mob member by identity (mob feature) |
 | `mob/member_live_close` | Mob | `MobMemberLiveChannelParams` | `LiveCloseResult` | Close one named live channel on a mob member (mob feature) |
 | `mob/member_live_status` | Mob | `MobMemberLiveStatusParams` | `LiveStatusResult` | Read live channel status for a mob member; omit channel_id to discover (mob feature) |
@@ -492,6 +512,21 @@ the same key. A tool whose effect must not happen twice records the key with
 the effect and answers a repeat from that record; see
 [Durable Runs: Tools That Run Again](/guides/durable-runs#tools-that-run-again).
 
+Since 0.9.11 a request also carries `requester` when the run the call serves
+has an original requester (see
+[Authorization](/concepts/authorization#sources%2C-peers%2C-and-knowledge-services)):
+`{"principal": {"kind": "human", "id": "...", "qualification": {"kind":
+"qualified", "trust_domain_id": "..."}}}`, with `"carried": true` when the
+run's work reached its agent through another actor, such as a peer hop. The
+runtime sets it from the run's admitted inputs; a `requester` inside
+`arguments` is only an argument. A tool that acts in one person's name serves
+only that person's requester, and only when it is not carried; it refuses a
+call with another requester or none. The `callback/job/start` request of a
+detached callback tool carries the same field: the requester of the run that
+submitted the job, recorded with the job. The SDKs pass it to a handler that
+declares a `requester` parameter (Python), or as the handler's optional third
+argument (TypeScript).
+
 Keep reading and answering reverse requests while waiting for the turn's
 result, or the turn cannot finish its callback. This foreground RPC exchange
 is neither MCP's `pending_tool_calls`/`meerkat_resume` continuation nor the
@@ -593,9 +628,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.8"
+      "version": "0.9.11"
     },
-    "contract_version": "0.9.8",
+    "contract_version": "0.9.11",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -803,7 +838,10 @@ During execution, `session/event` notifications are emitted (see
 <ParamField body="keep_alive" type="bool" default="false">
   Keep the new session alive after its turn for comms. Omission is `false`;
   `null` is rejected on create. `true` requires `comms_name`. This differs
-  from `turn/start`'s nullable override of existing session intent.
+  from `turn/start`'s nullable override of existing session intent. With
+  `true`, `session/create` answers once its first turn has built the session
+  and lets that turn run on, so the result carries none of the turn's output;
+  a build that fails is answered as for any create.
 </ParamField>
 
 <ParamField body="comms_name" type="string | null" default="null">
@@ -812,6 +850,22 @@ During execution, `session/event` notifications are emitted (see
 
 <ParamField body="provider_params" type="object | null" default="null">
   Provider-specific parameters (e.g., thinking config, reasoning effort).
+</ParamField>
+
+<ParamField body="grant_gated_tools" type="object | null" default="null">
+  Scoped tool grant gate, `{"families": [...], "tools": [...], "mcp_servers": [...], "unconfigured_mcp_servers": true}`:
+  built-in tool families, tool names and MCP servers whose tools the session
+  mounts hidden and refuses at dispatch until a live grant opens them (see
+  [Scoped tool grants](#scoped-tool-grants)). `unconfigured_mcp_servers` gates
+  every MCP server the session does not configure, so a server a later
+  `mcp/add` attaches is gated too.
+  The session records its gate. A field the gate does not know is an invalid
+  parameter, and a gate no grant could honour (an unknown or disabled family,
+  a name nothing mounts) fails the session's build with invalid params whose
+  `data` is
+  `{"kind": "tool_grant_gate_refused", "tool_grant_gate_refusal": {...}}`.
+  `session/create` answers it, with `keep_alive: true` too; a deferred create
+  reports it at its first `turn/start`.
 </ParamField>
 
 #### Response fields
@@ -892,7 +946,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.8",
+    "agent_version": "0.9.11",
     "model_name": "claude-opus-5"
   }
 }
@@ -1071,7 +1125,9 @@ Create a new idle session whose transcript is the source session prefix ending b
 
 `running_behavior` currently supports `"reject"`, which returns `SESSION_BUSY` if the source session has active work.
 
-`inherited_instructions` decides what the child does with the instruction activations it copies from the prefix. The child is not materialized, so nobody can activate it before its first turn: with the field absent or `"require_explicit_activation"` (the default), and with `"refuse"`, a prefix that carries activation rows is refused before anything is committed with `FORK_INSTRUCTION_REFUSED` (-32037), whose `data` carries `kind: "fork_instruction_refused"` and the typed `fork_instruction_refusal` (`cause`, `keys`). `"reactivate_inherited"` appends the child's own activation of every key that was effective in the source; the result's `reactivated_instruction_count` counts those rows, which `message_count` includes. A prefix without activation rows forks the same way under every value.
+`session/fork_at`, `session/fork_replace`, `session/rewrite_transcript` and `session/restore_transcript_revision` refuse a mob member's session with `INVALID_PARAMS` (-32602), since the member's mob owns its transcript; fork a member at a message boundary with `mob/fork_member` (below).
+
+`inherited_instructions` decides what the child does with the instruction activations it copies from the prefix. The child is not materialized, so nobody can activate it before its first turn: with the field absent or `"require_explicit_activation"` (the default), and with `"refuse"`, a prefix that carries activation rows is refused before anything is committed with `FORK_INSTRUCTION_REFUSED` (-32037), whose `data` carries `kind: "fork_instruction_refused"` and the typed `fork_instruction_refusal` (`cause`, `keys`). `"reactivate_inherited"` appends the child's own activation of every key that was effective in the source; the result's `reactivated_instruction_count` counts those rows, which `message_count` includes. Under it, a prefix whose last row of a key is one whose body a compaction of the source retired (a later row of that key, past the prefix, superseded it) is refused with cause `head_body_retired`; a fork at a later boundary copies the superseding row, with its body. A prefix without activation rows forks the same way under every value.
 
 ### session/fork_replace
 
@@ -1131,6 +1187,65 @@ The child's first turn continues the transcript prefix, System message included;
 
 A fork derives the child's build state from its source's. A source with session metadata but no build state is refused before anything is committed, with `INVALID_PARAMS` (-32602) and data `{"kind": "fork_source_build_state_missing", "source_session_id": "<source id>"}`. A child forked by Meerkat 0.9.3 or earlier that never ran a turn has no build state: its `turn/start` fails with `INTERNAL_ERROR` (-32603) "turn abandoned: persisted session `<id>` is missing session build state". Fork its source again instead.
 
+### mob/fork_member
+
+Fork a mob member's session at a message boundary into a new member: the
+member counterpart of `session/fork_at`. The new member `agent_identity` is
+seated on a committed fork of `source_member_id`'s session whose transcript is
+the source's messages before `message_index` (the source's committed end when
+it is absent), System message included. Requires the `mob` feature.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "mob/fork_member",
+  "params": {
+    "mob_id": "team",
+    "source_member_id": "main",
+    "agent_identity": "main-branch",
+    "message_index": 3
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "result": {
+    "agent_identity": "main-branch",
+    "member_ref": "...",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000011",
+    "source_session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "message_count": 3
+  }
+}
+```
+
+The new member takes the source member's profile and runtime mode unless
+`profile` or `runtime_mode` names others, runs with the source's tool
+restrictions, and records the source session as its fork source; the source
+member keeps its session and transcript. The host's fork instruction policy
+decides what the child does with the instruction activations it inherits, as
+for every member fork. A source that runs under the host's tool dispatch
+admission is forked only when the host's spawn customizer installs one for
+the child too, and the child then runs its tool calls under it; otherwise the
+call is refused with `-32602` and `data.kind` `dispatch_admission_required`
+(`member_id`), and nothing is forked. A source whose turn is in flight, or
+that owes queued work, is refused with `SESSION_BUSY` and `data.kind`
+`fork_source_unavailable` (`source_member_id`, `cause` `running`), and
+nothing is seated: fork it again once it is idle. A source without a session
+(`cause` `no_session`) is refused with `-32602` and the same `data.kind`. An
+`agent_identity` that is already a member is refused with `-32602` before
+anything is forked. A fork that committed but could not seat its member is
+refused with `data.kind` `fork_member_provision_failed`, whose
+`fork_session_id` names the committed child session (`recovery`
+`resume_committed_fork_session`); a member seated under `agent_identity`
+between that check and the fork's own seat is answered this way. That
+session is bound to `agent_identity`: resume it under that identity once the
+identity is free, or archive it.
+
 ### session/list
 
 List sessions.
@@ -1171,12 +1286,17 @@ present.
 `events/list_since`, `workgraph/list`, `workgraph/ready`,
 `workgraph/snapshot`, and `workgraph/events`.
 
-WorkGraph ready-set and snapshot projections are atomic only within explicit
-process bounds. A projection over more than 1,000 live (non-terminal) items,
-1,000 edges that touch a live item, or 1,000 attention bindings fails closed
-with `INVALID_PARAMS`; narrow the realm/namespace/filter and retry. Terminal
-items and edges between two terminal items do not count against these bounds,
-and an oversized graph is never truncated after the fact.
+WorkGraph `workgraph/ready` and `workgraph/snapshot` read one atomic
+observation of the whole namespace and classify readiness against all of it,
+however many items, edges and attention bindings the namespace holds. `limit`
+then cuts the result, and `workgraph/list`, `workgraph/ready` and
+`workgraph/snapshot` report the cut: `total_items` counts the items that
+matched before it (for `workgraph/ready`, the ready items), and `truncated` is
+true when matching items exist after the last one returned. A page that ended
+early names a `next_cursor`; pass it back as `cursor` for the next page (see
+`workgraph/list` below). `workgraph/events` pages with `after_seq` and
+reports `truncated` and `next_after_seq`. A result without
+these fields comes from an older server and may still have been cut.
 
 ### session/read
 
@@ -1232,6 +1352,185 @@ Remove a session from the runtime.
   Session ID to archive.
 </ParamField>
 
+### session/compact
+
+Ask a live session's next compaction check to compact. The session is not
+rebuilt and no compaction threshold changes: the check that precedes the
+session's next model request (in its running turn, once that turn's tool
+results are in, or in its next turn) consumes the request and runs a
+compaction whatever the thresholds and their cadence would decide. The
+compaction publishes the ordinary `compaction_started`, then
+`compaction_completed` or `compaction_failed`. Its own rules still hold: a
+turn in flight keeps its request and newest round, and before a session's
+first model request there is nothing to compact. When the check that
+consumes the request compacts nothing, it publishes
+`requested_compaction_skipped` instead, with the `run_id` of the run whose
+check it was and the `reason`: `first_model_request` (the check came before
+the session's first model request) or `nothing_to_fold` (the turn in flight
+keeps its request and newest round, and nothing else was left to fold).
+A `nothing_to_fold` skip records a compaction attempt like any other, so the
+ordinary trigger may then wait up to `min_turns_between_compactions` checks.
+If a store fence gap stops the run at the check that consumed the request,
+the request is dropped: nothing is compacted or published for it, and a host
+asks again.
+
+The request lives in the session's runtime registration only. It is never
+persisted: a restart of the server, an unload or a reload of the session
+drops it, and a per-build threshold override is neither read nor changed. A
+session whose agent has no compactor (a server built without the
+`session-compaction` feature, or a host that composes its agents without
+one) never consumes a request: it stays requested, and every later request
+answers `already_requested`.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":9,"method":"session/compact","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001"}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":9,"result":{"session_id":"01936f8a-7b2c-7000-8000-000000000001","outcome":"requested"}}
+```
+</CodeGroup>
+
+The `outcome` is `requested`, or `already_requested` when a request that no
+check consumed yet was already recorded (nothing changes, and the next check
+compacts once). A request never loads or wakes a session. Refusals:
+
+- an unknown or archived session: `-32001` (session not found);
+- a session with no live runtime in this server (not opened since the server
+  started, unloaded, a deferred session before its first turn, or a mob
+  member's session its mob has not woken): `-32003` (session not running);
+- a session runtime that is initializing, retired or stopped: `-32600`;
+- a session runtime that is being unregistered: `-32002` (session busy,
+  retryable; `data.code` is `SESSION_BUSY`);
+- a session runtime that needs a durability reload: `-32603`.
+
+A request that races the session's unregister can answer `-32600` where a
+later one answers `-32003`: the runtime went between the server's check and
+the request. No refusal records anything.
+
+`mob/compact_member` (`mob_id`, `agent_identity`) asks the same of a live mob
+member, without a respawn, and answers the same `outcome` with the member's
+`mob_id` and `agent_identity`. A member that is dormant or waking, or whose
+runtime is retired or stopped, is refused as not live and is never woken; a
+member placed on a member host is refused as unsupported.
+
+<ParamField body="session_id" type="string" required>
+  Session ID.
+</ParamField>
+
+### Operator instructions
+
+Operator instructions are standing System-plane instructions a host gives a
+session, or the members of a mob, by slot (a `namespace` the host owns and a
+`key`), revision and body. A write answers once it is durable; the session
+applies it at its next fresh run start as one System entry, never inside a
+run. They are host verbs: no agent tool sets, revokes or reads them. They
+replace instruction activations (`session/activate_instruction`, deprecated
+since 0.9.11).
+
+`session/set_instruction` records a session-owned write, and
+`session/revoke_instruction` revokes a slot at a higher revision:
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":6,"method":"session/set_instruction","params":{"session_id":"01936f8a-...","namespace":"app.example","key":"tone","revision":1,"body":"Answer formally."}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":6,"result":{"session_id":"01936f8a-...","namespace":"app.example","key":"tone","revision":1,"disposition":"recorded","target_generation":1}}
+```
+</CodeGroup>
+
+A revision is at least 1 and strictly increasing per slot. An exact retry
+answers `duplicate`. `content_sha256`, when given, is the body's digest
+(`sha256:` and 64 lowercase hex digits) and must match it. A body is at most
+256 KiB, and a session holds at most 64 slots and 1 MiB of Active bodies.
+
+`session/instruction_status` reads the session's committed state without
+materializing it: the `owner` (`unowned`, `session`, or `mob` with its
+`mob_id` and `agent_identity`), the `target_generation`, the highest
+`entry_sequence`, the model's `lowering` when the service can tell, and per
+slot what is `recorded`, the entry that put it in effect (`effective`: its
+`entry_sequence`, `kind` `delta` or `snapshot`, `run_id` and
+`message_index`) and its `state`: `effective`, `pending` with a `reason`, or
+`not_targeted`.
+
+A mob member's session belongs to its mob: `session/set_instruction` and
+`session/revoke_instruction` on it answer `owned_by_mob`, and
+`session/instruction_status` reads it (owner `mob`). Write to a member with
+`mob/set_instruction` and a member target.
+
+`mob/set_instruction` writes one slot for the members a `target` selects:
+`{"kind":"mob"}` (every member), `{"kind":"profile","profile":"worker"}` or
+`{"kind":"member","agent_identity":"worker-1"}`. A target is a predicate over
+the roster: a member added later, or moved to the profile later, receives the
+record then, and a target that names a missing profile or member selects
+nobody.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":7,"method":"mob/set_instruction","params":{"mob_id":"team","namespace":"app.example","key":"tone","revision":1,"body":"Answer formally.","target":{"kind":"profile","profile":"worker"}}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":7,"result":{"mob_id":"team","namespace":"app.example","key":"tone","revision":1,"disposition":"committed","generation":1,"matched_members":2}}
+```
+</CodeGroup>
+
+The result returns once the record is in the mob's journal: the
+`disposition` (`committed`, or `duplicate` for an exact repeat), the mob's
+operator-instruction `generation` after the write and `matched_members`, the
+members the target selects now. Delivery is asynchronous: the mob records
+each selected member's whole snapshot in the member's session, through the
+session while it is live and store-only while it is dormant, never waking
+it. A placed member's session is on its member host, which records the
+snapshot there over the supervisor bridge. A member placed by a spawn that
+mints its session on a 0.9.11 member host is born with the snapshot, so its
+first turn has the instructions; on an older or a governed member host it
+is born without them, and its delivery then blocks it as follows. A member
+host that runs a
+release before 0.9.11 refuses that, nothing is recorded, and the member
+reads `blocked` with reason `member_host_unsupported` until its host runs
+0.9.11 and a write selects it again. A governed member host refuses the
+record `prepared_authorization_required`, and a snapshot whose record would
+not fit the bridge's frame (about 1 MiB) is not sent; both block the member
+`member_host_unsupported` until a write selects it again. `mob/revoke_instruction` revokes a
+slot at a higher revision; the record keeps its target.
+
+`mob/instruction_status` reads the mob's records (`desired`) and one page of
+members in identity order (`offset`, and `limit` from 1 to 200, 100 when
+absent; `next_offset` names the next page), optionally for one `namespace`,
+`key`, `agent_identity` or `profile`. Each member carries its `residency`
+(`live`, `dormant` or `unborn`), its `delivery` (the `recorded_generation`,
+and `state` `current`, `owed` with the `generation` and the `last_failure`,
+or `blocked` with a `reason`), per slot the `desired`, `recorded` and
+`effective` views and the slot's `state` (as above, or `blocked` with a
+`reason`), `effective_read` (`ok`, or `unreadable` with a `reason`: the
+member's session could not be read, and the page still answers; a placed
+member's session is on its member host, which the read does not reach) and
+`live_channel_open` (operator instructions apply to the member's turns, not
+to a live channel). The read never wakes or materializes a member. Writes
+need the `AdminHost` scope, the read `ReadHistory`.
+
+A refused write answers `INVALID_PARAMS` (a malformed instruction history
+`INTERNAL_ERROR`) with its closed code in `error.data.instruction_set_code`:
+`invalid_request`, `digest_mismatch`, `stale_revision`, `revision_conflict`,
+`unknown_slot`, `slot_limit_exceeded`, `body_too_large`,
+`active_set_budget_exceeded`, `owned_by_mob`, `owned_by_session`,
+`owned_by_other_mob`, `slot_managed_by_activation`, `durability_unavailable`,
+`mob_terminal`, `malformed_instruction_history` or
+`prepared_authorization_required` (a governed runtime: see
+[Operator instructions](/reference/session-contracts#operator-instructions)).
+A mob that cannot answer fails as every mob method does.
+
+Dispositions, refusal codes, effects, entry kinds and the state kinds are
+closed. The advisory values of the status reads (a pending or blocked
+`reason`, `residency`, `lowering`) may grow: a reader keeps a value it does
+not know. A session observes each applied entry as an
+`operator_instructions_applied` event (see [Notifications](#notifications));
+the status read is the authority.
+
 ## Turn methods
 
 ### turn/start
@@ -1286,7 +1585,8 @@ Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
 `session/stream_open` subscription, or reads only the run result, sends it so
 each event reaches it once. Absent or `true` keeps them. A turn that also
-carries the input of another request that wants them still writes them.
+carries the input of another request that wants them still writes them, to
+that request's connection (see [Notifications](#notifications)).
 `session/create` (for its first turn) and `mob/turn_start` take the same
 field. A server before 0.9.5 refuses it on `turn/start` and `mob/turn_start`,
 so the Python and TypeScript SDKs send it, from calls that do not stream
@@ -1587,7 +1887,22 @@ delivery status, not a turn:
   Follow it with `session/input_status`.
 - `stranded`: committed and never admitted, because the member incarnation it
   was bound to was replaced. This is final: resend the content under a new key.
-- `refused`: settled as refused, never admitted; `reason` names why.
+  A member's runtime stops admitting external work only as a new incarnation
+  (a respawn or a rotation, onto a profile that admits none included), so a
+  keyed send committed before that settles `stranded`.
+- `refused`: settled as refused, never admitted; `reason` names why. A keyed
+  send whose member became an identity entry, or whose name became reserved
+  unreadable, after its commit settles `refused` with `reason`
+  `authority_denied` at delivery.
+
+A first keyed send asks the same external admission as an unkeyed one and
+answers exactly as it does, before anything is committed: a send to an
+identity entry, or to a member whose name is reserved unreadable, is refused
+with `data.kind` `identity_member`, and a send to a member whose runtime
+admits no external work is refused as not externally addressable. A
+profile's `external_addressable` defaults to false; setting it on the profile
+admits external sends, keyed or not, to its members that are no identity
+entries.
 
 Other content under a used key is refused with `-32602` and `data.kind`
 `input_idempotency_conflict`, naming the first delivery in `data.delivery_id`.
@@ -1960,6 +2275,12 @@ These methods maintain approval audit lifecycle records only. Creating or
 deciding a record does not automatically gate, authorize, or execute a shell
 command, tool call, device action, or any other side effect.
 
+Plain approval records emit no notification: a client polls `approval/list`
+or `approval/get` to see a request and its decision, and a host operation that
+needs its decision pushed holds a [durable decision](#durable-decisions)
+instead (`DurableDecisionService::hold`, through
+`SessionRuntime::decision_service`).
+
 <Warning>
 `requester` and the `actor` supplied to `approval/decide` are audit identities,
 not transport authentication proofs. `rkat-rpc` does not authenticate them.
@@ -2030,6 +2351,543 @@ a decision on an approval the pipe never presented is refused.
 }
 ```
 
+## Scoped tool grants
+
+A session created with `grant_gated_tools` mounts its gated tool families and
+names hidden, and the tools of its gated MCP servers too, from the moment they
+appear: the model is not shown them and every call is refused until a
+live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
+A mob member's build gates what its profile's `tools.grant_gated` and its
+role's current gate name; a gated MCP server a member's profile configures
+starts no process until a live grant of that server covers it at the member's
+build (the build decides this as it composes the member's tools), so after
+such a grant the member connects it at its next build (a `mob/respawn`, for
+one). `tool_grants/grant`, `tool_grants/revoke`,
+`tool_grants/list` and `tool_grants/audit` manage the grants of a session or
+of a mob member identity, and `tool_grants/request` asks for a grant a person
+approves. They read and write grant rows (and a request its decision) only:
+no method loads, registers or wakes the session or the member.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "method": "tool_grants/grant",
+  "params": {
+    "subject": {"kind": "session", "session_id": "01936f8a-7b2c-7000-8000-000000000001"},
+    "target": {"kind": "family", "family": "shell"},
+    "duration_ms": 3600000,
+    "reason": "incident response"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "result": {
+    "grant": {
+      "grant_id": "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10",
+      "subject": {"kind": "session", "session_id": "01936f8a-7b2c-7000-8000-000000000001"},
+      "target": {"kind": "family", "family": "shell", "names": ["monitor_start", "shell", "shell_job_cancel", "shell_job_status", "shell_jobs"]},
+      "issuer": {"kind": "operator"},
+      "reason": "incident response",
+      "status": "active",
+      "issued_at_ms": 1761735600000,
+      "expires_at_ms": 1761739200000,
+      "scope": {"kind": "window"}
+    }
+  }
+}
+```
+
+- **`tool_grants/grant`** opens a `target` for the `subject`: a tool name
+  (`{"kind": "tool", "name": ...}`) the subject's gate names or a gated family
+  provides, a family the gate names (`{"kind": "family", "family": ...}`;
+  the server fills in `names` with the names the family can provide, so omit
+  them), or an MCP server the gate gates (`{"kind": "mcp_server", "server":
+  ..., "tools": [...]}`): every tool that server provides when a boundary or
+  a call adjudicates the grant, or, with `tools` (a non-empty list), only those
+  of its tools named there. A server is gated when the gate names it, or when
+  the gate's `unconfigured_mcp_servers` is on and the subject's build does not
+  configure it; a grant of a server a session configured itself opens
+  nothing, since that server is not gated. A tool name only a gated server
+  provides is no `tool` target (`target_not_gated`, whose message names the
+  server form). The subject is a session (`{"kind": "session", "session_id": ...}`),
+  whose recorded gate the target must be in, or a mob member identity
+  (`{"kind": "identity", "mob_id": ..., "identity": ...}`), which must be in
+  the mob's roster and whose gate is the one its next build resolves: its
+  profile's gate joined with its role's current gate (the role's current gate
+  is the own gate of a store-owned identity declared with its role's named
+  profile). An identity grant is decided against the mob's live roster as it
+  commits, in order with the retirements that end an identity: a member
+  retired before the commit is refused `subject_unknown`, and a retirement
+  after the commit ends the grant. A grant between a respawn's retirement of
+  the old member and the seating of its replacement is refused
+  `subject_unknown` too, since the identity is out of the roster then: retry
+  it once the respawn answers. Exactly one of
+  `duration_ms` and `expires_at_ms` (UNIX ms) bounds the grant, at most the
+  host's maximum lifetime (24 hours by default). `scope` is `{"kind":
+  "window"}` (the default) or `{"kind": "current_run"}`: the grant then also
+  admits only the calls of the run its subject is running now, and ends with
+  that run (the grant's `scope` is `{"kind": "current_run", "run_id": ...}`).
+  A session's run is its own; an identity's is the run of the session its
+  member holds on this server, and the member's end of that run ends the
+  grant. A subject that runs no turn (an idle session, or an identity whose
+  member runs no turn here) refuses a `current_run` grant with the request
+  refusal `run_not_active` (below), and nothing is issued.
+  `decision_ref`, when given,
+  is the host's reference to the decision it made before issuing (non-empty,
+  at most 1024 bytes, no control character): the grant's `issuer` records it,
+  as attribution only. An identity grant answers `applies`, whether it
+  applies to the member's running build: `now` (that build gates the
+  target), `not_mounted` (that build, or with no live build the next one,
+  ignores the target as not mounted) or `at_next_build` (the member is not
+  live here, its live build predates the gate that names the target, or the
+  target is a gated MCP server the member's profile configures that its live
+  build left unattached, since no live grant covered it then). It
+  is advisory: the grant is issued either way. A session before or during its first turn is granted
+  from its staged build. A gate no grant could honour fails the session's
+  build, which a deferred create reports at its first `turn/start`.
+- **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
+  revoking a grant that already ended answers it as it stands, and `changed`
+  says whether this revoke ended it. A revoke at or after the deadline records
+  the expiry instead.
+- **`tool_grants/list`** answers the subject's grants, each due one settled as
+  `expired` first. Ended grants (`expired`, `revoked`, `run_ended`) are listed
+  only with `include_ended`; `unreadable` names any stored grant this server
+  cannot read (written by a newer version, or damaged), which opens nothing,
+  and any grant a host store quarantined (the store reports a conflict for
+  its scope, so its session and tools are unknown), whatever session it was
+  granted to. For a member identity in the roster it also answers the
+  member's `gate`: `running`, what its live build gates (its gated names
+  under `tools`, with its gated servers and `unconfigured_mcp_servers`) and
+  the names it ignored as not mounted, or `null` when no build of the member
+  is live here; and `next_build`, the gate its next build resolves, split the
+  same way. Advisory, like `applies`. On a server that keeps durable
+  decisions the subject's grant requests follow its grants: each open or
+  approved one as `requested`, and with `include_ended` each rejected,
+  expired, withdrawn or refused one whose deadline is within the grant
+  policy's maximum lifetime of now as `declined` (its `ended_at_ms` when it
+  ended; an older one stays readable through `decision/list`). A request
+  whose grant was issued is listed as that grant only.
+- **`tool_grants/audit`** answers a page of the subject's audit log, `granted`
+  (with the grant's `scope`), `expired` (with the `driver` that observed it:
+  `timer`, `boundary`, `dispatch`, `read`, `revoke`, `build` (a build reading
+  which gated servers a grant covers), or `run` and `recovery` for a run that
+  ended at or after the deadline), `revoked`, `run_ended` (with the `run_id`
+  and the `driver` that ended it: `run` at the run's end, `recovery` when
+  durable-tail recovery closed a run a stopped process left open, or the
+  `boundary` or `dispatch` of a later run) and `refused` rows, in `sequence`
+  order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
+  a full page carries `next_sequence`, the next page's `after_sequence`. A row
+  this server cannot read is named in `unreadable` with its `sequence`, and the
+  rest of the page is served.
+- **`tool_grants/request`** asks for a grant a person approves. It names a
+  `subject` (a session or a mob member identity), and the `target` and
+  `scope` as a grant does,
+  `duration_ms` (the grant's window from its issuance, at most the host's
+  maximum lifetime) and an optional `reason`, and holds a durable decision of
+  kind `tool_grant.issue` for the approver id `operator`, which expires after
+  an hour undecided. This server is its requester (the runtime host
+  `rkat-rpc` of the realm); the stdio operator can grant directly, so
+  approving a request this server made adds an approval record, not
+  authority. Nothing
+  is issued: the result is the request as a list shows it (status
+  `requested`, the `grant_id` its grant gets, its `issuer` `{"kind":
+  "approval", "approval_id": ...}` naming the decision) and the `decision`.
+  Once a person approves the decision (see
+  [durable decisions](#durable-decisions)), this server issues the grant under
+  that id, its window starting then, while the realm still lists the
+  approver id for the operator; a request rejected, withdrawn or left
+  undecided past its deadline issues nothing, and neither does an approval
+  of an identity's request executed while no member holds the identity's
+  name (its member retired, its entry ended, or its mob was reset) or after
+  its mob was replaced, refused with the reason `subject_ended`, or while
+  the server cannot tell what the identity is (`subject_unknown`, fail
+  closed). A request records the life of the identity it was asked in: an
+  approval executed after that life ended (its member retired, its entry
+  ended or its mob was reset, even when a new member took the name in the
+  same incarnation since) is refused `subject_ended` too, and its notice
+  reaches no member of a later life. A respawn keeps the life. A one-entry
+  unlist or a complete roster's seal of an identity entry with no member
+  leaves no record a restart reads, so after a restart an approval of a
+  request asked before such an end can reach a new member of the name:
+  reject or withdraw an identity's open requests before declaring its name
+  again (Known limitations). An identity end
+  that lands while the approval is being executed, after the server read
+  the identity and before the grant's commit, can leave the grant live on
+  the ended identity: revoke it. A `current_run` request names
+  the run its subject is running when it is asked, and is refused when the
+  subject runs another run by its approval. When the request ends, its
+  session receives a `tool_grant_request` external event, like any input:
+  the `decision_id`, the `outcome` (`granted` with the `grant_id`,
+  `rejected`, `expired`, `withdrawn`, or `refused` with a `reason`) and the
+  `target`. An identity's notice goes through the mob's member input
+  instead: a keyed member send under the decision's key, whose text is
+  `tool_grant_request: ` followed by the same fields as JSON, admitted into
+  the session the identity's member holds when it is delivered; an identity
+  with no member left ends the notice failed. A server whose persistence
+  keeps no durable decisions answers
+  capability unavailable (`data.kind = "no_decision_store"`). A gated
+  session's agent asks the same way through its `request_tool_grant` tool
+  (see [scoped tool grants](/concepts/tools#scoped-tool-grants)); while the
+  server runs the executor of the kind, its agents' requests name the
+  realm's agent `rkat-agent` as their requester. A replayed agent call
+  answers the request it held; an agent's call for a target its subject
+  already has an open or approved window request for joins that request
+  while it is open instead of holding another, and holds a new one after it
+  ends. A joined request keeps its own duration, which can differ from the
+  one asked: the tool's answer says the call joined and gives that
+  request's `duration_ms`.
+
+List and audit read the subject's grant rows without checking that the
+session or the member exists: an archived session's grants and a retired
+identity's grants stay listable and auditable, and a subject with no grants
+answers empty. An identity subject resolves its mob only, in the mob's running
+incarnation.
+
+A member identity's grant opens its names for the member's builds while the
+mob runs at the incarnation it was issued in, across respawns, restarts and
+upgrades; a mob destroyed and created again under the same id is a new
+incarnation, whose identities hold none of the old grants. A member's
+`tool_grant_required` refusals are audited under its identity. An identity's
+grants end, `revoked`, when the identity ends, and so do the grants of the
+session the mob holds for it then (its member's session, or an identity
+entry's archived session). The identity ends at the end of a plain retire
+of its member; at the end of a retirement that unlists or removes its
+identity entry; at the one-entry unlist of an unseated identity entry, or a
+complete roster's seal of one it does not list and no host's intent row
+names; at the removal of an unseated store-owned
+identity; when a respawn whose replacement fails after the old member's
+archive is abandoned, by its own step or by the resume after a stop; and at
+a reset of its mob, which ends every identity the mob held. A respawn keeps
+them, and so does a retirement an identity entry outlives (the entry stays
+unseated, and the next apply seats it on its own session), and so does a
+host's adoption of a declared identity, which ends the identity's entry,
+not the identity: the identity continues under the host's intent. A grant ended
+with its identity explains no later refusal: a name created or declared
+again, on a fresh session or on the old one, needs a grant of its own
+(`tool_grant_required`). The one exception is a session the mob no longer
+held for the identity when it ended (an archived session of an earlier
+fresh-session rotation, or the old session of a respawn abandoned after its
+old member's archive): its own session grants stay live until they expire,
+so revoke them before resuming that session (Known limitations).
+
+A grant's `status` is `active`, `expired`, `revoked` or `run_ended`; a grant
+request's is `requested` or `declined`. A request's
+`subject`, `target` and `scope` refuse a kind or a field this server does not
+know (invalid params), so a request is never read as wider than it asked.
+Every vocabulary a result carries (subject, target and scope kind, status,
+issuer, audit event kind, expiry driver, refusal reason) decodes a value a
+later version adds as `unknown`, which this server never sends: a client
+older than run scopes reads `run_ended` as `unknown`.
+
+Every refusal of a request's subject, target, scope, window or duration, grant
+id, decision reference or page limit answers invalid params with typed data,
+the request refusal under `tool_grant_request_refusal`:
+
+```json
+{"kind": "tool_grant_request_refused", "tool_grant_request_refusal": {"kind": "subject_unknown"}}
+```
+
+Its `kind` is `subject_unknown` (no such session, or no such mob or member
+identity; an unparseable session id included), `target_not_gated` (the
+subject's gate does not name the target), `invalid_window` (a window that is
+past, empty, longer than the maximum, or given twice or not at all),
+`empty_target`, `not_found` (an unknown or malformed grant id, with
+`grant_id`), `invalid_decision_ref`, `invalid_page_limit` (an audit `limit`
+of 0) or `run_not_active` (a `current_run` grant or request whose subject
+runs no turn). A request's `duration_ms` is refused as a grant's window is
+(`invalid_window`). `server_not_installed`, `no_live_grant` and `invalid_wait`
+are reserved for hosts that keep an installation list or attach a granted MCP
+server live; `rkat-rpc` never sends them. A request that does not decode (an
+unknown subject, target or scope kind, an unknown field, a malformed value)
+is refused as plain invalid params, with no `data`, and so is a request too
+large for a decision to hold (its `reason` past the 256 KiB bound of a
+decision's rendering or body). Other errors use the standard codes:
+`SESSION_BUSY` when concurrent writers changed the grant under a grant or
+revoke twice, which a retry resolves; capability unavailable for an
+`identity` subject on a server that runs no mobs, a store without grant
+support, or a request to a server that keeps no durable decisions. A
+request's decision is held as any decision is: its errors are the
+[durable decision errors](#durable-decisions).
+
+The stock governed stdio pipe serves a fixed method set: it does not serve the
+`tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`
+as an unsupported parameter.
+
+<Warning>
+`rkat-rpc` does not authenticate the caller of these methods: a grant's issuer
+is recorded as an operator without a caller, and a request's requester is the
+server itself. Authorize grant administration in the trusted host or an
+authenticated proxy before forwarding the call.
+</Warning>
+
+## Durable decisions
+
+A durable decision holds one operation until an attested party decides it, its
+requester or the host withdraws it, or its deadline passes (see
+[durable decisions](/concepts/authorization)). The `decision/*` methods read
+and act on the decisions of the runtime's persistence, one row or one index
+page per call: `decision/list`, `decision/get`, `decision/rendering`,
+`decision/present` and `decision/withdraw`. They are served since 0.9.11; an
+older server answers them method not found (`-32601`). A runtime whose
+persistence keeps no durable decisions answers them capability unavailable,
+with `data.kind = "no_decision_store"`.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "decision/list",
+  "params": {"phase": "open", "approver_id": "team:owners", "limit": 50}
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "result": {
+    "decisions": [
+      {
+        "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+        "kind": "release",
+        "subject_key": "build-7",
+        "operation_id": "release:build-7",
+        "request_digest": "sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5",
+        "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+        "approver_id": "team:owners",
+        "phase": "open",
+        "stage": "human",
+        "notice": "not_due",
+        "deadline_at_ms": 1761739200000,
+        "created_at_ms": 1761735600000,
+        "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+        "renderer": "render.v1",
+        "permit_issued": false,
+        "revision": 1
+      }
+    ],
+    "unreadable": []
+  }
+}
+```
+
+- **`decision/list`** reads one page, in decision id order, of the decisions
+  every set filter matches: `kind`, `phase`, `approver_id` and `requester` (a
+  principal key). `limit` is 100 when absent; a larger limit reads as 500, and
+  a limit of 0 is invalid params. `next_after`
+  names the decision id to read the next page `after`. A decision past its
+  deadline reads as expired. A row this server cannot read is listed under
+  `unreadable` and nothing executes it. A phase this version does not know is
+  refused, never read as no filter.
+- **`decision/get`** reads one decision, and records its expiry when its
+  deadline passed. `include_request: true` adds the held request. A row this
+  server cannot read answers `decision_unreadable`. An executed `grant.child`
+  decision carries `effect`, what its execution did: `{"grant_id": ...}`, the
+  id of the approval-carried grant it issued. A decision that is not
+  executed, and a decision of any other kind, carries no `effect`. Every
+  answer that carries a decision carries it alike: `decision/list`,
+  `decision/present`, `decision/withdraw` and the host adapter's
+  `decision/decide`. A later version may add fields to `effect`: read it
+  tolerantly.
+- **`decision/rendering`** returns the one canonical rendering of the held
+  request, its renderer and subject digest, and its canonical parts for
+  `max_part_bytes` (one part when absent): consecutive byte ranges on character
+  boundaries, each with its own digest. Like `decision/get`, it records the
+  decision's expiry when its deadline passed, and a row this server cannot
+  read answers `decision_unreadable`.
+- **`decision/present`** records what a host presenter showed: the
+  `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
+  "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
+  size and the parts shown, the channel and message references, and the host
+  clock reading `at_ms`. A surface with a size limit that showed a summary
+  saying it is shortened records it with the `link` the summary carried to
+  the full presentation: `{"reference": ..., "served_digest": ...}`, the
+  digest of the rendering that link served. It counts only when it shows
+  every canonical part of the held rendering, or its link served the held
+  rendering (its served digest is the subject digest), to the party that
+  decides now; a presentation at 0 is no reading of when it was shown and is
+  refused. A decision's `presentations` carry each recorded link.
+- **`decision/withdraw`** withdraws an open decision as the host.
+
+A failed call is a JSON-RPC error. The answers the decision methods type
+carry a closed `data.kind`:
+
+| `data.kind` | Code | Answer |
+| --- | --- | --- |
+| `no_decision_store` | `-32020` | The runtime's persistence keeps no durable decisions. |
+| `candidate_launch` | `-32020` | The runtime serves a candidate launch: it reads decisions and refuses every write. |
+| `decision_not_found` | `-32602` | No decision has the id. |
+| `decision_refused` | `-32602` | The decision refused the call; `data.decision_refusal.kind` names why. |
+| `decision_unreadable` | `-32603` | The decision's stored row cannot be read (undecodable, or torn); nothing executes it. |
+
+Store faults carry no `data` and use the approval store codes: `-32033`
+store unavailable (nothing was written), `-32034` conflict (another owner
+changed the decision) and `-32035` commit unknown (the write may have
+committed). Each decision call opens its own store connection and never
+waits, so a call made while another one writes (a connection recording a
+presentation, for one) can answer `-32033`: the caller makes it again. A
+request value this version cannot read is invalid params (`-32602`) with no
+`data`.
+
+The refusal kinds are closed, because they bear authority: a client can
+match on every kind, and this version sends no other.
+
+| `decision_refusal.kind` | The decision refused because |
+| --- | --- |
+| `invalid_window` | the hold's deadline is not after the hold's clock reading |
+| `self_review` | the hold names the requester as its own reviewer |
+| `hold_conflict` | the decision is held with another binding |
+| `not_open` | the decision is no longer open: the first valid decision won |
+| `expired` | the deadline passed; the call recorded the expiry |
+| `subject_changed` | the presented digest is not the held subject digest |
+| `presentation_incomplete` | the presentation did not cover the whole held subject, none reached the deciding party, or it was shown at 0 |
+| `wrong_audience` | the presentation was shown to a party that does not decide now |
+| `review_stage` | a human decision came while the review stage is open |
+| `human_stage` | a review verdict came while the human stage is open |
+| `evidence_required` | the decision carries no attested evidence |
+| `not_eligible` | the decider does not act for the approver id, or is not currently eligible |
+| `self_approval` | the requester tried to decide its own request |
+| `wrong_reviewer` | the verdict is not the named reviewer's |
+| `not_requester` | only the requester or the host may withdraw |
+| `not_approved` | the decision is not approved |
+| `binding_mismatch` | the execution names another operation or request |
+| `not_authorized` | no execution permit is outstanding |
+| `settlement_owed` | the deadline passed while a permit is outstanding: the permit must be settled first |
+| `not_owed` | no notice is owed, or the receipt contradicts the settled one |
+| `decided_before_presentation` | the human decision was observed before the decision's first presentation to the approver |
+
+The vocabularies a result carries (`phase`, `stage`, `notice` and the
+others) may gain values in a later version; a client keeps a value it does
+not know as the server wrote it.
+
+No request body names who decides a decision. A host's trusted transport adapter
+decides one by dispatching `decision/decide` through
+`MethodRouter::dispatch_with_decision_event` with the
+`AuthenticatedDecisionEvent` it built from the human's authenticated event: the
+attested decision (who decided, how they were authenticated, the ingress and
+event reference, the time the ingress observed the event and the digest of the
+rendering they saw) and the evidence that they may act for the decision's
+approver id. The request names only `decision_id`, `approve`,
+`presented_digest` and an optional `reason`, and must equal what the event
+binds; a request that names an approver, actor, assurance or scope is invalid
+params. Plain dispatch answers `decision/decide` method not found, except on a
+stdio connection whose operator decides (below).
+
+A host's adapter learns that a decision opened without polling:
+`DurableDecisionService::subscribe_openings`, on the owner
+`SessionRuntime::decision_service` returns, yields each decision the owner
+opens from then on (`DecisionOpening::Opened`), as the hold wrote it, with the
+rendering to show. The adapter shows it to the person and relays their
+authenticated answer through `MethodRouter::dispatch_with_decision_event`. A
+subscriber that falls behind reads `DecisionOpening::Missed` and lists the
+open decisions to catch up, as it does when it starts; a decision another
+process holds in the same store is not announced. A decision held in its
+review stage is announced when it opens; its later escalation to the human
+stage is not. A host's own hold, read or decide can
+answer store unavailable (`DecisionError::Unavailable`, `-32033` on the wire)
+while a connection records a presentation, with nothing written: the host
+makes it again. Only a connection whose operator decides a decision is told
+when it opens (below): a connection without an operator, a TCP connection
+among them, gets no `decision/notice`.
+
+### The operator of a stdio connection
+
+On a Unix build with local authorization, an `rkat-rpc` stdio connection has
+an operator who decides durable decisions on it: the operating-system user who
+started it, device trusted, in an authentication scope of the connection's
+own. The operator acts for the approver ids the realm's configuration lists
+for it, `["operator"]` unless
+[`[governance.decisions] operator_approver_ids`](/concepts/configuration#governance-settings)
+says otherwise.
+
+The connection presents decisions to its operator when they open and when its
+client lists them. A decision the runtime's decision owner opens while the
+connection is open, that waits for a human and is addressed to an approver id
+the operator acts for, is presented at once, without a request, as it stands
+when the connection reaches it: one decided in the meantime is not shown. A
+connection that falls behind the openings catches up: it presents, page by
+page, each open decision the operator acts for that it has not presented yet,
+one held before the connection started included. Before it
+answers a `decision/list`, the connection presents each decision of the
+returned page that is open, waits for a human, is addressed to an approver id
+the operator acts for and was not presented on this connection yet, in page
+order: one held before the connection started or by another process, or one
+that reached its human stage later. Starting the connection presents nothing,
+and the client's own paging (`after`, `limit`) reaches every decision. A
+decision is presented once per connection: a list does not present again a
+decision the connection presented when it opened. For each, the connection
+reads its clock, writes a `decision/notice` notification carrying the whole
+rendering as one canonical part, waits until the notice is on the pipe, and
+only then records the presentation: to the approver, on the connection's own
+channel (a `channel_ref` that starts with `rkat-rpc:stdio:`), under the
+notice's id (`message_ref` equals `notice_id`), at that clock reading. A
+list's notices precede its answer, and the answered page carries each decision
+it presented as recorded. A notice that could not be written records nothing,
+and a decision whose presentation was not recorded is presented again by a
+later list, so a client keys notices by `decision_id`. The `channel_ref` is an
+opaque string; nothing parses it.
+
+```json Notification
+{
+  "jsonrpc": "2.0",
+  "method": "decision/notice",
+  "params": {
+    "notice_id": "472e7eeb-5768-494e-9e4b-4193c676f0a3",
+    "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+    "kind": "release",
+    "event": "presented",
+    "phase": "open",
+    "approver_id": "team:owners",
+    "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+    "presentation": {
+      "rendering": "Release build 7 to production.",
+      "renderer": "render.v1",
+      "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+      "parts": [
+        {
+          "index": 0,
+          "count": 1,
+          "part_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3"
+        }
+      ]
+    }
+  }
+}
+```
+
+`event` is `presented`; a client reads an event it does not know as unknown
+and ignores it.
+
+The operator decides with `decision/decide`. The request names only
+`decision_id`, `approve`, `presented_digest` and an optional `reason`; the
+connection builds the authenticated event itself: the operator as the decider
+(`device_trusted`, in the connection's scope), ingress `rkat-rpc-stdio`, an
+event reference from the request id, the server's clock as the observed time,
+and the approver id of the stored decision. A decide is eligible only for a
+decision this connection presented, while the configuration still lists its
+approver id when the decide arrives and while the connection is open; a decide
+waits for a presentation in flight on the connection. Any other decide is
+refused as invalid params with `data.kind = "decision_refused"` and
+`data.decision_refusal.kind = "not_eligible"`. A client's own
+`decision/present` records a host presenter's showing; it never makes a
+decision decidable on the connection.
+
+A connection without an operator presents nothing on `decision/list`, is told
+nothing when a decision opens, and answers `decision/decide` method not found
+(`-32601`, no `data.kind`): a TCP connection, a build for another platform or
+without local authorization, and a router an embedder dispatches to directly.
+
+The stock governed stdio pipe serves the same two methods for its operator, in
+its consent surface's scope, presents to it in the same way, and lists the
+methods in its `initialize` answer. Its approver ids are the host's
+configuration as the pipe started; a change reaches the pipe at its next
+start.
+
 ## Schedules, WorkGraph, and multi-host mobs
 
 The schedule family provides CRUD, pause/resume, occurrence listing, tool
@@ -2092,6 +2950,12 @@ while that session's first turn has never started, and then once. Otherwise the
 resume runs no kickoff and does not deliver `initial_message`; a first turn that
 started and was interrupted is not re-run. A placed member follows the same rule;
 a resume on a member host of 0.9.4 or earlier still runs the first turn.
+
+A resume of a session that is bound to another member (its member binding, or
+the comms name it was created under, names another mob or member) is refused
+with `-32602` and `data.kind` `resume_session_bound_to_another_member`
+(`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`), and nothing is
+seated.
 
 ### workgraph/get
 
@@ -2156,17 +3020,22 @@ The response is abridged; the full `WorkItem` shape is in the
 Every evidence entry, here and everywhere a `WorkEvidenceRef` appears (the
 `workgraph_add_evidence` tool argument, host mutation surfaces such as Meta's
 `meta/workgraph/evidence/add`), has the shape
-`{"kind": string, "id": string, "label"?: string, "summary"?: string}`. `kind`
-is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
+`{"kind": string, "id": string, "label"?: string, "summary"?: string, "withdraws"?: string[]}`.
+`kind` is an opaque provenance label (`artifact`, `pr`, `log`, `summary`,
 `notification`, ...); the reserved confirmation kinds (`host_confirmation`,
 `principal_confirmation`, `supervisor_confirmation`, `reviewer_confirmation`)
 are refused from generic callers and stamped only by trusted goal-confirm
-authority.
+authority. `withdraws` lists the ids of earlier evidence on the same item that
+the entry withdraws; nothing is removed, and an entry is withdrawn when a later
+entry lists its id (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)).
 
 ### workgraph/list
 
-List items in the granted realm and namespace. Params are a `WorkItemFilter`;
-all fields are optional and an empty object lists live work.
+List items in the granted realm and namespace, most recently updated first
+(`updated_at`, then `id`, both descending), so a cut keeps the most recently
+updated items. Params are a `WorkItemFilter`; all fields are optional and an
+empty object lists live work.
 
 <CodeGroup>
 ```json Request
@@ -2191,7 +3060,11 @@ all fields are optional and an empty object lists live work.
   "result": {
     "items": [
       {"id": "work_release_notes", "status": "completed", "labels": ["release", "docs"], "revision": 6}
-    ]
+    ],
+    "total_items": 1,
+    "truncated": false,
+    "anchor_event_seq": 412,
+    "changed_since_anchor": false
   }
 }
 ```
@@ -2224,6 +3097,34 @@ all fields are optional and an empty object lists live work.
 <ParamField body="limit" type="integer" default="100">
   Maximum items returned. Omitted means 100; values above 1,000 fail with `INVALID_PARAMS` before the store is queried.
 </ParamField>
+
+<ParamField body="cursor" type="string">
+  The `next_cursor` of the previous page. The page holds the items strictly after the cursor's position, in the same order, so items never shift between pages. Pass it with any filter. A cursor is opaque and continues only the read that returned it: a cursor that does not decode, has another version, or came from `workgraph/ready` or `workgraph/snapshot` fails with `INVALID_PARAMS`. It is not authority: the namespace grant scopes every page.
+</ParamField>
+
+The result is `{"items": [...], "total_items": N, "truncated": bool,
+"next_cursor": "...", "anchor_event_seq": N, "changed_since_anchor": bool}`.
+`total_items` counts every item that matched the filter at this read, before
+the cursor and `limit` cut them. `truncated` is true when matching items exist
+after the last one returned, and `next_cursor` is present exactly then (a
+`limit: 0` page returns only the totals). `anchor_event_seq` is the event
+ledger's high-water mark when the walk began: the first page reads it before
+its rows, and the cursor carries it (it is absent when the ledger had no
+event). `changed_since_anchor` is true when the ledger has moved past it.
+
+A walk over every page keeps these promises:
+
+- An item that does not change during the walk is on exactly one page.
+- An item that changes during the walk is on at most one page. It can repeat
+  only when a write gives it an `updated_at` older than the one it had (the
+  store clock moved back), so a reader that dedupes by `id` and keeps the
+  higher `revision` is safe.
+- An item changed or created after the anchor can be missing from later
+  pages. Those pages say `changed_since_anchor: true`, and `workgraph/events`
+  with `after_seq` set to `anchor_event_seq` names every such item.
+  Execution-binding events also move the ledger, so the flag can be true with
+  no public change. The flag covers writes only: a change that writes no
+  event, such as readiness arriving as time passes, is not flagged.
 
 Items and edges are never deleted. There is no unlink or delete method on any
 surface and no tool for it; the graph is an append-only ledger. To take an item
@@ -2266,17 +3167,30 @@ are a `ReadyWorkFilter`.
   Maximum items returned after sorting by priority (high first), then creation time, then id. Omitted means 100; above 1,000 is `INVALID_PARAMS`.
 </ParamField>
 
+<ParamField body="cursor" type="string">
+  The `next_cursor` of the previous `workgraph/ready` page: the page holds the ready items after it in the same order. A cursor of another read, of another version, or one that does not decode fails with `INVALID_PARAMS`.
+</ParamField>
+
 There is no `include_terminal` here because a terminal item is never ready.
-Readiness is evaluated atomically over the namespace; a namespace with more
-than 1,000 live (non-terminal) items fails with `INVALID_PARAMS` and must be
-narrowed rather than truncated. Terminal items do not count. The result is `{"items": [...]}`.
+Readiness is evaluated atomically over every live item of the namespace,
+however many it holds, and the cursor and `limit` then cut the sorted ready
+items. The result has the page fields of `workgraph/list`, where
+`total_items` counts every ready item. The cursor's order key is the priority,
+creation time and id: an item whose priority changes during a walk can move
+across the cursor either way, so it can be missing or appear twice, and one
+whose readiness changes during the walk can be missing. `changed_since_anchor`
+flags the items an event changed after the anchor, such as a priority update
+or a blocker's close. Readiness that arrives by time passing (`not_before`,
+`snoozed_until`) writes no event, so it is not flagged. A reader that dedupes
+by `id` and keeps the higher `revision` is safe.
 
 ### workgraph/snapshot
 
 Read one atomic observation of the namespace. Params are a
 `WorkGraphSnapshotFilter` with the same fields and semantics as
 `WorkItemFilter` (`realm_id`, `namespace`, `all_namespaces`, `statuses`,
-`labels`, `include_terminal`, `limit`).
+`labels`, `include_terminal`, `limit`, `cursor`); a cursor continues only a
+`workgraph/snapshot` walk.
 
 <CodeGroup>
 ```json Request
@@ -2305,20 +3219,33 @@ Read one atomic observation of the namespace. Params are a
     "items": [],
     "edges": [],
     "attention": [],
-    "ready_item_ids": []
+    "ready_item_ids": [],
+    "total_items": 0,
+    "truncated": false,
+    "anchor_event_seq": 412,
+    "changed_since_anchor": false
   }
 }
 ```
 </CodeGroup>
 
 `statuses`, `labels`, and `include_terminal` select the items exactly as in
-`workgraph/list`; `limit` then bounds them (default 100, maximum 1,000).
-`edges` contains only edges whose both endpoints are among the returned items,
-`attention` only bindings on those items, and `ready_item_ids` the subset of
-returned items that is ready at `captured_at`. A snapshot therefore omits an
-edge to a terminal item unless `include_terminal` is true. The atomic scan is
-bounded before filtering: a namespace with more than 1,000 items, 1,000 edges,
-or 1,000 attention bindings fails with `INVALID_PARAMS` and must be narrowed.
+`workgraph/list`; `limit` then keeps the most recently updated of them after
+the cursor (default 100, maximum 1,000), and `total_items`, `truncated` and
+`next_cursor` report the cut as in `workgraph/list`. A first page's `edges`
+contains only edges whose both endpoints are among its items; a continuation
+page adds the edges from its items to the items at or before the cursor, so a
+walk reports every edge between the items it returned once, on the page of
+the edge's later end. `attention` holds only bindings on the page's items,
+and `ready_item_ids` the page's items that are ready at `captured_at`. A
+snapshot therefore omits an edge to a terminal item unless `include_terminal`
+is true. `limit` bounds the items only: `edges` and `attention` follow the
+returned items and are neither counted nor cut on their own. Readiness is
+classified against the whole namespace, however many items, edges and
+attention bindings it holds: a returned item is not ready while a blocker the
+cut left out is unresolved. The walk's anchor is the first page's own
+`event_high_water_mark`, and `changed_since_anchor` is true when a later
+page's `event_high_water_mark` is past it.
 
 ### workgraph/events
 
@@ -2352,12 +3279,14 @@ Read the public event history of the namespace. Params are a
         "item_id": "work_release_notes",
         "kind": "closed",
         "at": "2026-09-03T10:14:58Z",
-        "payload": {"status": "completed"},
+        "payload": {"item": {"id": "work_release_notes", "status": "completed", "revision": 7}},
         "facts": [
           {"kind": "namespace_terminal", "namespace": "default", "observed_at": "2026-09-03T10:14:58Z"}
         ]
       }
-    ]
+    ],
+    "truncated": false,
+    "event_high_water_mark": 401
   }
 }
 ```
@@ -2383,10 +3312,19 @@ Read the public event history of the namespace. Params are a
   Maximum events returned; above 1,000 is `INVALID_PARAMS`.
 </ParamField>
 
+The result is `{"events": [...], "truncated": bool, "next_after_seq": N,
+"event_high_water_mark": N}`, in `seq` order. `truncated` is true when
+matching events exist after the last one returned, and `next_after_seq` is
+then that event's `seq`: pass it back as `after_seq` for the next page.
+`event_high_water_mark` is the ledger's highest sequence in the namespace at
+this read. It counts the execution-binding events this projection omits, so
+it can be past the last event returned.
+
 Each event carries `seq`, `realm_id`, `namespace`, optional `item_id`, `kind`
 (`created`, `updated`, `readiness_observed`, `claimed`, `released`, `blocked`,
 `closed`, `linked`, `evidence_added`, `attention_created`,
-`attention_updated`), `at`, a kind-specific `payload`, and any typed `facts`
+`attention_updated`), `at`, a kind-specific `payload` (an item event carries
+the whole item), and any typed `facts`
 committed with the mutation (`{"kind": "item_ready" | "lease_expired" |
 "namespace_terminal", ...}`). Flow execution-binding events are kept in the
 durable journal but omitted from this projection.
@@ -2816,7 +3754,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 8},
+    "contract_version": {"major": 0, "minor": 9, "patch": 11},
     "providers": [
       {
         "provider": "anthropic",
@@ -2880,7 +3818,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 8},
+    "contract_version": {"major": 0, "minor": 9, "patch": 11},
     "capabilities": [
       {
         "id": "sessions",
@@ -3155,6 +4093,22 @@ Inspect `params.event.payload.type` and (for text deltas)
 `source`, `seq`, and `timestamp_ms` belong to the envelope; optional `mob_id`
 is envelope metadata.
 
+A turn's `session/event` notifications go to the connection whose request
+started it (`turn/start`, `session/create`, `mob/turn_start`, `help/ask`),
+unless that request sent `"session_events": false`; a turn that carries the
+inputs of several requests goes to each of their connections. A turn no
+request waits on (queued work such as `session/external_event`, comms,
+schedules, a resumed run) goes to the connection that holds the session: the
+one that created it (`session/create`, `help/ask`) or forked it
+(`session/fork_at`, `session/fork_replace`) or, once that one is gone, the
+next one that starts a turn on it. While the holder is gone the notifications
+are written nowhere; read the turn back with `session/history`, or watch the
+session with `session/stream_open`. No other connection receives them. On a
+TCP server (`--tcp`), a session no connection holds (one the host or a mob
+created, or one from before a restart, that no connection has started a turn
+on) has its turns written to no connection; a stdio server writes them to its
+one client.
+
 Event types match the `AgentEvent` enum in `crates/meerkat-core/src/event.rs`
 (`agent_event_type` assigns each variant its stable wire name) and its schema
 projection in `artifacts/schemas/events.json`. New variants must appear in
@@ -3207,6 +4161,8 @@ live transport's realtime observations. See
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished. Since 0.9.4 it carries `summary_source` (who wrote the summary: `{"kind": "provider_call", "source_bound": ...}` with bound `whole`, `trimmed` (`through`) or `requests_only` (`kept`, `of`), `{"kind": "host_curator"}` or `{"kind": "mechanical_fallback"}`) and optional `estimated_history_tokens_after`, in the unit of `compaction_started`'s `estimated_history_tokens` |
 | `compaction_failed` | Compaction failed |
+| `requested_compaction_skipped` | Since 0.9.11: the compaction check that consumed a host's compaction request (`session/compact`, `mob/compact_member`) compacted nothing. Carries `run_id` (the run whose check it was) and `reason`: `first_model_request` (the check came before the session's first model request) or `nothing_to_fold` (the run in flight keeps its request and newest round, and nothing else was left to fold). A check that compacts at the request publishes `compaction_started` instead |
+| `operator_instructions_applied` | Since 0.9.11: an operator-instruction entry of the session applied. It reports the instructions now in effect for the live session, not their durability: the `delta` a fresh run start appended is published once the run whose start appended it starts, and the `snapshot` a compaction folded the entry rows into once that compaction commits (for a staged memory projection, when the runtime commits it, right after its `compaction_completed`; a compaction rolled back before its commit is never observed, and its `entry_sequence` goes to the next entry). A restart before the entry is durable applies the changes again at the next fresh run start and publishes the event again. Carries `session_id`, `entry_sequence`, `kind`, `run_id` (the run whose start applied it), `active` (the whole active set after the entry) and a delta's `changes`. An observation only: `session/instruction_status` is the authority (see [Operator instructions](#operator-instructions)) |
 | `tool_results_bounded_for_request` | A model request carried some of its run's own tool results shortened, for that request only: with them whole it was over the provider's request-body cap, or its forecast was over the model's context window, and no compaction made room (a compaction inside a run keeps the run's request and newest round). Carries `run_id`, `results` (each `tool_use_id`, `tool_name`, `kept_bytes` and `total_bytes`) and `axis` (`request_bytes` or `context_window`). Published before the request is sent; the stored transcript keeps every result whole. With the default compactor the next run's first check then compacts the whole transcript once; with compaction off the request is still bounded and nothing is recorded |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error; the retry reuses `assistant_message_id`, so discard that id's live buffer |
@@ -3352,7 +4308,10 @@ then raise `EventSubscriptionError` when the terminal contains an error. The
 error retains the raw terminal, including unknown server codes, and the last
 delivered RPC and envelope sequence values. Error-free `remote_end` and
 `explicit_close` still end iteration normally. Subscription failure does not
-itself establish that the agent's run failed or stopped.
+itself establish that the agent's run failed or stopped. On a mob member
+stream the subscription also reports the last event's `epoch`
+(`last_event_epoch`, `lastEventEpoch`); with its envelope sequence it is the
+`cursor` that resumes the stream (see `mob/stream_event` below).
 
 ### mob/stream_event notifications
 
@@ -3365,12 +4324,57 @@ When a mob event stream is open (via `mob/stream_open`), the server emits `mob/s
   "params": {
     "stream_id": "550e8400-e29b-41d4-a716-446655440000",
     "sequence": 1,
+    "epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a",
     "event": { "...": "..." }
   }
 }
 ```
 
 For mob-wide streams the event is an `AttributedEvent` (`source` member identity + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`. Runtime incarnation ids and fence tokens are bridge-internal and are not part of public stream payloads.
+
+A member stream's events also carry `epoch`: the sequence space of the
+envelope's `event.seq`. `epoch` and `event.seq` together are the event's
+position in the member's event sequence. The epoch changes whenever the
+member's sequence space restarts: after a runtime restart, when the member
+moves to another session, or when a placed member moves to a new host
+binding. Mob-wide events interleave several members' sequences and carry no
+`epoch`.
+
+A member stream opened without `cursor` is live: it delivers only events
+published after it opens. To continue a member stream after a disconnect,
+open it again with `cursor` set to the position of the last event received:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "mob/stream_open",
+  "params": {
+    "mob_id": "team",
+    "agent_identity": "w1",
+    "cursor": { "epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a", "seq": 19 }
+  }
+}
+```
+
+The new stream first replays the events the member still retains after that
+position (each member keeps its latest 1024 events and 4 MiB by default),
+then streams live, with nothing delivered twice or skipped between the two.
+If the member is live when the stream opens and its retained events no
+longer reach back to the position, the replay starts with a
+`stream_truncated` event (`reason: {"kind":"stream_lagged","dropped":N}`). A
+`stream_truncated` event does not move the position a client resumes from. A
+cursor of another sequence space, or one ahead of the space's newest event,
+replays the current space from its earliest retained event instead; its
+events carry the current `epoch`, so the client sees the change. A member
+that is dormant when the stream opens (seated, but not materialized in this
+runtime) is not woken by it: the stream attaches when the member wakes and
+replays from the woken member's first event, whatever the cursor. The events
+the member published after the cursor and before it went dormant are not
+replayed, and no `stream_truncated` event marks them: a client that resumes a
+dormant member reads them from its history (`mob/member_history`). A
+`cursor` without `agent_identity`, or one whose `epoch` is not a UUID, is
+refused with `-32602` (invalid params).
 
 ### mob/stream_end notifications
 
@@ -3396,7 +4400,9 @@ As with session streams, `outcome` is `"remote_end"`, `"terminal_error"`, or
 `"explicit_close"`; `mob/stream_close` selects explicit-close termination.
 Conditional `error` contains `code` (`"stream_queue_overflow"` or
 `"stream_receiver_gone"`) and `message`; it is absent without an error.
-Stop using the terminated handle and reopen/reconcile as appropriate.
+Stop using the terminated handle and reopen/reconcile as appropriate. A
+member stream reopened with the last event's `cursor` continues after it (see
+`mob/stream_event` above).
 Transport disconnection can prevent delivery of this final notification.
 Neither stream-end notification is a callable RPC method.
 
@@ -3440,6 +4446,8 @@ and `data`, never on the message text.
 | -32035 | Approval commit unknown | The store cannot confirm the commit; reconcile from the store, never resend |
 | -32036 | Stale delivery scope | A scope-bound mob submit named a session that is no longer the member's; re-capture the delivery scope |
 | -32037 | Fork instruction refused | A fork was refused before commit because its child would inherit activated instructions that the fork instruction policy does not carry into it; `data.fork_instruction_refusal` names the cause and keys. Nothing was committed |
+| -32038 | Admission in progress | A realm admission fence the request needs is held, by an admission or another fenced write, beyond the request's bound: `config/set` and `config/patch` (with or without a config runtime). Nothing started and nothing was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts, so an immediate retry is not promised to succeed |
+| -32039 | Admission fence unavailable | A realm admission fence the request needs could not be opened, created, locked or identity-checked. Nothing started and nothing was written (fail closed) |
 
 ### comms/send error data
 
@@ -3472,7 +4480,7 @@ variant also carries a `message`.
 | `materialization_lost` | The member was woken, but its inbox was gone again before the hand-off | yes |
 | `non_authoritative_composition` | The member belongs to a candidate composition, which never materializes members | no |
 | `host_preparation_pending` | The member's host has preparation pending for it | yes |
-| `resume_gate_unavailable` | The member's durable resume gate was unavailable | yes |
+| `resume_gate_unavailable` | The member's durable resume gate was unavailable, or its session could not be built now for a cause that clears on its own (for example a provider credential whose source or store cannot answer: `source_unavailable`, `credential_store_unavailable`, `credential_access_pending`) | yes |
 | `host_owned` | The member is placed on a member host, which owns its materialization | no |
 | `lifecycle_origin_fenced` | The member's mob is quiescing its lifecycle | no |
 | `sender_waking` | The sender is itself being woken (it sent from inside its own build) and the recipient was not live; the send is refused instead of waiting on another wake | yes, once the sender is live |

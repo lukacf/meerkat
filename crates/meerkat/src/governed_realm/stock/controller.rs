@@ -63,10 +63,11 @@ impl RetainedControllerOwner for StockControllerPin {
 /// (`RuntimeSessionRegistrationWitness::has_ended`): once that entry is
 /// gone it is never served again, and it is removed at the next binding or
 /// resume check, so the cache does not grow with dead sessions in a
-/// long-running host. Only the composition's retained-resume check reads it:
-/// no authority decision does, the pin answers no selection but its own
-/// client's, and a resume whose destination its session has since moved is
-/// refused by the runtime before the check asks it.
+/// long-running host. Only the composition's retained-resume and
+/// kept-original checks read it: no authority decision does, the pin answers
+/// no selection but its own client's, and a resume whose destination its
+/// session has since moved is refused by the runtime before the check asks
+/// it.
 #[derive(Default)]
 pub(crate) struct StockResumePins {
     pins: std::sync::Mutex<HashMap<LogicalRuntimeId, RegistrationPin>>,
@@ -114,9 +115,9 @@ impl StockResumePins {
     /// while the runtime entry of the registration it was made on exists,
     /// otherwise one that has no client for any selection. The check then
     /// answers `Readiness(UnsupportedScope)`: a fresh resume stays owed, while
-    /// a kept resume (its client did not survive the store, and a pin is
-    /// never carried over to a later registration) ends as a refused resume
-    /// at once. An ended pin is removed here.
+    /// a kept resume or a kept governed input (its client did not survive the
+    /// store, and a pin is never carried over to a later registration) ends
+    /// as a refused resume at once. An ended pin is removed here.
     pub(crate) fn controller_owner(
         &self,
         runtime: &LogicalRuntimeId,

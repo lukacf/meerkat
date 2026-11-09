@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meerkat-toolkit-agno"
+version = "0.1.5"
+description = "Selected Agno integration profiles for Meerkat Toolkit over standard MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "(MIT OR Apache-2.0) AND Apache-2.0 AND BSD-2-Clause AND MIT"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-Agno", "THIRD_PARTY_NOTICES.md"]
+dependencies = [
+    "agno==3.0.11",
+    "jsonschema==4.26.0",
+    "mcp==2.2.0",
+    "anyio==4.15.1",
+    "referencing==0.37.0",
+    "requests==2.34.2",
+    "tavily-python==0.8.4",
+    "python-gitlab==8.6.0",
+    "pytz==2026.4",
+    "linkup-sdk==0.23.1",
+    "todoist-api-python==4.0.0",
+    "dataclass-wizard==0.39.1",
+    "exa-py==2.25.0",
+    "firecrawl-py==4.46.2",
+    "py-trello==0.20.1",
+    "simple-salesforce==1.12.10",
+    "twilio==9.11.2",
+    "webexpythonsdk==2.0.6",
+    "plivo==4.63.0",
+    "arxiv==4.0.1",
+    "pypdf==6.19.0",
+    "praw==8.0.3",
+    "prawcore==4.0.0",
+    "tweepy==4.17.0",
+    "oauthlib==3.3.1",
+    "oxylabs==3.0.0",
+    "boto3==1.43.108",
+    "botocore==1.43.108",
+    "beautifulsoup4==4.15.0",
+    "soupsieve==2.10",
+    "psycopg==3.3.6",
+    "psycopg-binary==3.3.6",
+]
+
+[project.scripts]
+meerkat-toolkit-agno-mcp = "meerkat_toolkit_agno.agno_mcp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+meerkat_toolkit_agno = ["PACKAGE-SOURCES.json", "PROFILE-GUIDE.md", "CONFIGURATION-GUIDES.json"]

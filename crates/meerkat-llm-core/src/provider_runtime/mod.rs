@@ -24,9 +24,11 @@ pub use binding::{
     ResolvedTextTarget, StaticLease,
 };
 pub use catalog::{ProviderRuntimeCatalog, ValidatedBinding};
-pub use errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};
+pub use errors::{
+    AccountModelRefusal, ProviderAuthError, ProviderBindingError, ProviderClientError,
+};
 pub use meerkat_core::AuthLease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use registry::HostLaunchGuard;
 pub use registry::{ExternalAuthResolverHandle, ProviderRuntimeRegistry, ResolverEnvironment};
-pub use runtime::{CredentialReadiness, ProviderRuntime};
+pub use runtime::{AccountModelLookup, CredentialReadiness, ProviderRuntime};

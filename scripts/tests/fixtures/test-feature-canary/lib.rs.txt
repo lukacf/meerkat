@@ -1,0 +1,37 @@
+//! The test-feature canary of the Core crates' lib.rs files, in a crate of
+//! its own (scripts/test-feature-canary-selftest.sh builds it).
+
+pub fn add(a: u32, b: u32) -> u32 {
+    a + b
+}
+
+// Test-feature canary. A test build of this crate without its test feature
+// fails to compile while MEERKAT_WORKSPACE_TEST_FEATURES is set (the
+// repository's .cargo/config.toml sets it). Only code generation instantiates
+// the generic function below (a test binary does), so `cargo check`, clippy
+// and an editor's check run, which generate no code, are not stopped by it.
+#[cfg(all(test, not(feature = "canary-test-feature")))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "test-feature-canary-fixture: this repository's test builds need the crate's test features: \
+                 `cargo test -p test-feature-canary-fixture --features canary-test-feature` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() {
+        assert_eq!(super::add(1, 2), 3);
+    }
+}

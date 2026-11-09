@@ -1,0 +1,344 @@
+---- MODULE identity_entry_lifecycle_audit ----
+\* Hand-written audit of MobMachine identity entries through the member
+\* lifecycle: the lifecycle run of identity_entry_audit.sh.
+\*
+\* identity_entry_audit drives the arms that record, refuse and replay an
+\* entry, but no live unseat: its members leave only by the replay of their
+\* retirement. This run takes member_residency_audit's retire run (one
+\* identity recovered, woken, released, retired by the routed or the
+\* archive-only start to its archive terminal, rotated, seated again on its
+\* first seat's session and destroyed) and makes its member an entry:
+\*
+\*   the replay of its entry row, on any incarnation it is seated as (its
+\*     first, its reseat's or its rotation's next), in Running and Stopped;
+\*   the reseat's spawn ladder, opened with or without entry custody, so
+\*     the dormant seat (CommitDormantSeatRunning) records the entry or a
+\*     worker.
+\*
+\* With an entry present the run reaches the dormant seat, the live and the
+\* archive-only retirement to every local archive terminal it drives, the
+\* rotation's terminals in Running and Stopped, the legacy fresh-life
+\* respawn's admission and its refusal of an entry (in Running and
+\* Stopped), the legacy respawn's topology-preserving archive terminals, a
+\* host's adoption over the entry (TakeOverIdentityEntry, every arm: the
+\* seated entry marked adopting, the unseated one ended at once, the one
+\* with a member step in flight deferred) and the host-adopted archive
+\* terminals that end it, and the mob's destroy:
+\* its admission, its member retirement and archive, DestroyMob and the
+\* forced DestroyFromAny (with an open ladder's entry custody too). The run
+\* leaves out the retire run's replay of the exempt row, which entries do not
+\* read.
+\*
+\* Properties: every generated invariant of ci.cfg (kept), among them
+\* entry_is_seated_or_has_an_unseated_cause (the end of a retirement the
+\* declared apply's seal did not start keeps the entry, unseated and owed its
+\* seat), unseated_entry_is_not_a_member, archived_session_record_is_unseated,
+\* entry_custody_ladder_is_open and destroyed_mob_holds_no_member_lifecycle
+\* (a destroyed mob holds no entry and no entry custody); the retire run's
+\* own properties
+\* (AuditAttemptEndsClosed, AuditRetireRoutesOnlyRegistered,
+\* AuditDestroyFencesRotation, AuditReseatUnbornIffNeverBorn,
+\* AuditRotationDecidesExemptionAnew, AuditWakingClosable and
+\* AuditRetirementArchivable); and
+\*   AuditSeatRecordsEntryFromCustody (action property): a dormant seat
+\*     records its member an entry exactly when its ladder holds entry
+\*     custody, and consumes the custody;
+\*   AuditRotationKeepsEntry (action property): a rotation's terminal leaves
+\*     the entries as they were (its next incarnation keeps the identity's
+\*     entry);
+\*   AuditLifecycleEntryOnlyWithCause (action property): an identity becomes
+\*     an entry only by a seat that consumes its entry custody or the replay
+\*     of its row;
+\*   AuditFreshLifeRespawnNeverAnEntry (action property): the legacy
+\*     fresh-life respawn is admitted only for a member that is no identity
+\*     entry (an entry's successor keeps its session and its entry);
+\*   AuditPreservingArchiveNeverAnEntry (action property): the legacy
+\*     respawn's topology-preserving archive terminal never takes an
+\*     identity entry, whatever the shell previewed;
+\*   AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry (action property): the
+\*     host-adopted archive terminal takes only a Declared entry a host's
+\*     adoption marked, and ends the entry and its mark;
+\*   AuditTakeOverEndsOnlyUnseated (action property): a host's adoption ends
+\*     an entry at once only when no member holds it; a seated entry ends
+\*     at the end of its member's retirement, whose archive keeps the
+\*     machine topology for the host's member;
+\*   AuditTakeOverExactlyOne (invariant): exactly one arm of the takeover
+\*     answers member 1, in every lifecycle phase of the run.
+\*
+\* AuditWitness* operators are reachability goals the runner checks as
+\* expected violations, so the properties are not vacuous. With --mutants the
+\* runner also seeds eight defects into a copy of the generated model and
+\* requires TLC to refuse each (see identity_entry_audit.sh).
+\*
+\* The TLC config is DERIVED from the generated ci.cfg on every run by
+\* identity_entry_audit.sh.
+EXTENDS member_residency_audit
+
+AuditEntryOrigin == "Declared"
+
+\* The replay of member 1's entry row for the incarnation it is seated as: its
+\* first (Rid1), its reseat (Rid2) or its rotation's next (Rid3), in a running
+\* or a stopped mob. The replay applies only before the boot plan is sealed;
+\* this run never seals it.
+LEntryReplay ==
+    \E rid \in {Rid1, Rid2, Rid3} :
+        \/ RecoverIdentityEntrySeatedRunning(Id1, rid, AuditEntryOrigin)
+        \/ RecoverIdentityEntrySeatedStopped(Id1, rid, AuditEntryOrigin)
+
+\* The reseat's ladder (the retire run's RReseatOpen), opened with or without
+\* entry custody.
+LReseatOpenAs(custody) ==
+    BeginSpawnExecFresh(Id1, Rid2, 2, 1, AuditDigest, FALSE, AuditMode, Some(Sess1), None, None,
+                        FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
+                        None, None, None, None, FALSE, FALSE, custody, FALSE)
+LReseatOpen == \E custody \in BOOLEAN : LReseatOpenAs(custody)
+
+\* The reseat itself (the retire run's RReseat).
+LSeatAs(unborn, ex) ==
+    CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE, ex)
+
+\* The destroy's member archives.
+LDestroyArchives ==
+    \/ ObserveDestroyMemberRetirementArchivedLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
+    \/ ObserveDestroyMemberRetirementArchivedRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
+
+\* The legacy fresh-life respawn (retire, then spawn on a new session) of
+\* member 1's incarnation, its first, its reseat's or its rotation's next:
+\* admitted for a worker, refused for an identity entry in every phase an
+\* entry lives in (this run reaches Running and Stopped). Neither changes
+\* anything.
+LRespawn ==
+    \E rid \in {Rid1, Rid2, Rid3} :
+        \/ RespawnRunning(Id1, rid)
+        \/ RespawnIdentityEntryRefusedRunning(Id1, rid)
+        \/ RespawnIdentityEntryRefusedStopped(Id1, rid)
+
+\* The legacy respawn's archive terminals, which keep the machine's
+\* topology for the respawn's successor: member 1's first incarnation, as
+\* the plain archives take it.
+LPreservingArchives ==
+    \/ ObserveMemberRetirementArchivedLivePreservingTopology(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+    \/ ObserveMemberRetirementArchivedRetiredPreservingTopology(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+
+\* A host's adoption over member 1's entry, in every arm.
+LTakeOver ==
+    \/ TakeOverIdentityEntryAdopting(Id1)
+    \/ TakeOverIdentityEntryEnded(Id1)
+    \/ TakeOverIdentityEntryDeferred(Id1)
+    \/ TakeOverIdentityEntryNotADeclaredEntry(Id1)
+    \/ TakeOverIdentityEntryNonAuthoritative(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningStopped(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningCompleted(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningDestroyed(Id1)
+
+LTakeOverEnabled ==
+    << ENABLED TakeOverIdentityEntryAdopting(Id1),
+       ENABLED TakeOverIdentityEntryEnded(Id1),
+       ENABLED TakeOverIdentityEntryDeferred(Id1),
+       ENABLED TakeOverIdentityEntryNotADeclaredEntry(Id1),
+       ENABLED TakeOverIdentityEntryNonAuthoritative(Id1),
+       ENABLED TakeOverIdentityEntryMobNotRunningStopped(Id1),
+       ENABLED TakeOverIdentityEntryMobNotRunningCompleted(Id1),
+       ENABLED TakeOverIdentityEntryMobNotRunningDestroyed(Id1) >>
+
+\* The archive terminals of a retirement a host's adoption took member 1's
+\* entry over for: they keep the machine topology for the host's member and
+\* end the entry.
+LHostAdoptedArchives ==
+    \/ ObserveMemberRetirementArchivedLiveHostAdopted(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+    \/ ObserveMemberRetirementArchivedRetiredHostAdopted(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, TRUE)
+
+LifecycleNext ==
+    \/ LTakeOver
+    \/ LHostAdoptedArchives
+    \/ WRecover
+    \/ WBind
+    \/ WEndpoint
+    \/ WSeatSession
+    \/ LEntryReplay
+    \/ RSeedHostPending
+    \/ ResolveMemberHostPreparationRunning(Id1)
+    \/ AuditOperatorWake(Id1)
+    \/ AuditWakePath(Id1)
+    \/ WReadyEpoch1
+    \/ WReleaseEpoch1
+    \/ RetireArms
+    \/ RRetry
+    \/ RRuntimeRetired
+    \/ WDetach
+    \/ PlainArchives
+    \/ LPreservingArchives
+    \/ RRecoverStarted
+    \/ RAuthorize
+    \/ RotationArms
+    \/ LReseatOpen
+    \/ RReseat
+    \/ LRespawn
+    \/ AuditQuiesceStop
+    \/ StopRunning
+    \/ ResumeStopped
+    \/ AuditQuiesceDestroy
+    \/ AdmitDestroyCleanup
+    \/ RDestroyMember
+    \/ DestroyMob(Sess1)
+    \/ DestroyFromAny
+
+LifecycleSpec == Init /\ [][LifecycleNext]_vars
+
+(***************************************************************************)
+(* Properties.                                                             *)
+(***************************************************************************)
+
+LEntries == DOMAIN identity_entry_origins
+LNewEntries == DOMAIN identity_entry_origins' \ DOMAIN identity_entry_origins
+
+\* A dormant seat records its member an entry exactly when its ladder holds
+\* entry custody, and consumes the custody.
+AuditSeatRecordsEntryFromCustody ==
+    [][\A unborn \in BOOLEAN, ex \in BOOLEAN :
+         LSeatAs(unborn, ex)
+           => /\ (Id1 \in DOMAIN identity_entry_origins' <=> Id1 \in spawn_exec_entry_custody)
+              /\ Id1 \notin spawn_exec_entry_custody'
+      ]_vars
+
+\* A rotation's terminal leaves the entries as they were: the identity's next
+\* incarnation keeps its entry.
+AuditRotationKeepsEntry == [][RCommitRotation => identity_entry_origins' = identity_entry_origins]_vars
+
+\* An identity becomes an entry only by a seat that consumes its entry
+\* custody or the replay of its row.
+AuditLifecycleEntryOnlyWithCause ==
+    [][\A id \in LNewEntries :
+         \/ id \in spawn_exec_entry_custody
+         \/ \E rid \in {Rid1, Rid2, Rid3} :
+                \/ RecoverIdentityEntrySeatedRunning(id, rid, AuditEntryOrigin)
+                \/ RecoverIdentityEntrySeatedStopped(id, rid, AuditEntryOrigin)
+      ]_vars
+
+\* The legacy fresh-life respawn is admitted only for a member that is no
+\* identity entry: an entry's successor keeps its session and its entry.
+AuditFreshLifeRespawnNeverAnEntry ==
+    [][\A rid \in {Rid1, Rid2, Rid3} : RespawnRunning(Id1, rid) => Id1 \notin LEntries]_vars
+
+\* The legacy respawn's topology-preserving archive terminal never takes an
+\* identity entry.
+AuditPreservingArchiveNeverAnEntry == [][LPreservingArchives => Id1 \notin LEntries]_vars
+
+\* The host-adopted archive terminal takes only a Declared entry a host's
+\* adoption marked, and ends the entry and its mark.
+AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry ==
+    [][LHostAdoptedArchives
+         => /\ Id1 \in identity_entry_adopting
+            /\ Id1 \in LEntries
+            /\ identity_entry_origins[Id1] = AuditEntryOrigin
+            /\ Id1 \notin DOMAIN identity_entry_origins'
+            /\ Id1 \notin identity_entry_adopting'
+      ]_vars
+
+\* A host's adoption ends an entry at once only when no member holds it.
+AuditTakeOverEndsOnlyUnseated ==
+    [][(LTakeOver /\ Id1 \in LEntries /\ Id1 \notin DOMAIN identity_entry_origins')
+         => Id1 \notin DOMAIN identity_to_runtime]_vars
+
+\* Exactly one arm of the takeover answers member 1.
+AuditTakeOverExactlyOne == Cardinality({i \in 1..8 : LTakeOverEnabled[i]}) = 1
+
+(***************************************************************************)
+(* Reachability goals, each checked as an expected violation of its        *)
+(* negation: a state goal joins the invariants, a step goal the properties.*)
+(***************************************************************************)
+
+\* A ladder opened with entry custody seats its member Dormant as an entry.
+AuditWitnessEntrySeated == \E unborn \in BOOLEAN, ex \in BOOLEAN : LSeatAs(unborn, ex) /\ Id1 \in LNewEntries
+\* An entry is woken Live (state goal).
+AuditWitnessEntryLive == Id1 \in LEntries /\ Phase1 = Some("Live")
+\* A Live entry's routed retirement starts.
+AuditWitnessEntryRetiredLive == Id1 \in LEntries /\ Phase1 = Some("Live") /\ RetireArms
+\* The archive terminal of an entry's retirement the seal did not start
+\* keeps the entry, unseated and owed its seat, with its archived session
+\* recorded.
+AuditWitnessEntryArchived ==
+    /\ Id1 \in LEntries
+    /\ PlainArchives
+    /\ Id1 \in DOMAIN identity_entry_origins'
+    /\ Id1 \in DOMAIN identity_entry_unseated'
+    /\ identity_entry_unseated'[Id1] = "SeatOwed"
+    /\ Id1 \in DOMAIN identity_entry_archived_sessions'
+\* The kept entry is seated again on its archived session by a seat that
+\* holds its custody: it comes back with its history.
+AuditWitnessEntryReseatedOnRecord ==
+    /\ Id1 \in LEntries
+    /\ Id1 \in DOMAIN identity_entry_archived_sessions
+    /\ identity_entry_archived_sessions[Id1] = Sess1
+    /\ \E unborn \in BOOLEAN, ex \in BOOLEAN : LSeatAs(unborn, ex)
+\* An entry is rotated: its next incarnation keeps the entry.
+AuditWitnessEntryRotated == Id1 \in LEntries /\ RCommitRotation
+\* The destroy's member archive ends an entry.
+AuditWitnessEntryDestroyArchived == Id1 \in LEntries /\ LDestroyArchives
+\* DestroyMob, and the forced DestroyFromAny, with an entry seated.
+AuditWitnessEntryDestroyedMob == LEntries # {} /\ DestroyMob(Sess1)
+AuditWitnessEntryDestroyedForced == LEntries # {} /\ DestroyFromAny
+\* The forced destroy while a ladder holds entry custody.
+AuditWitnessCustodyDestroyed == spawn_exec_entry_custody # {} /\ DestroyFromAny
+\* The fresh-life respawn of an entry's member is refused.
+AuditWitnessEntryRespawnRefused ==
+    /\ Id1 \in LEntries
+    /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnIdentityEntryRefusedRunning(Id1, rid)
+\* The fresh-life respawn of an entry's member is refused in a stopped mob.
+AuditWitnessEntryRespawnRefusedStopped ==
+    /\ Id1 \in LEntries
+    /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnIdentityEntryRefusedStopped(Id1, rid)
+\* A worker's topology-preserving archive terminal.
+AuditWitnessWorkerPreservingArchive ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ Id1 \notin LEntries
+    /\ LPreservingArchives
+\* A worker's fresh-life respawn is admitted.
+AuditWitnessWorkerRespawnAdmitted ==
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ Id1 \notin LEntries
+    /\ \E rid \in {Rid1, Rid2, Rid3} : RespawnRunning(Id1, rid)
+
+\* A host's adoption ends the entry at its member's archive, and the
+\* archive keeps the machine topology for the host's member.
+AuditWitnessEntryHostAdopted ==
+    /\ Id1 \in identity_entry_adopting
+    /\ LHostAdoptedArchives
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+    /\ Id1 \in pending_respawn_topology'
+\* The name the adoption freed takes the host's member: a ladder opens for
+\* it without entry custody, on the topology kept for it.
+AuditWitnessHostMemberStands ==
+    /\ Id1 \notin LEntries
+    /\ Id1 \in pending_respawn_topology
+    /\ Id1 \notin DOMAIN identity_to_runtime
+    /\ LReseatOpenAs(FALSE)
+\* A host's adoption over an unseated entry ends it at once.
+AuditWitnessTakeOverEndsUnseated ==
+    /\ Id1 \in LEntries
+    /\ Id1 \notin DOMAIN identity_to_runtime
+    /\ TakeOverIdentityEntryEnded(Id1)
+\* A host's adoption waits while the entry's member retires.
+AuditWitnessTakeOverDeferred ==
+    /\ Id1 \in LEntries
+    /\ TakeOverIdentityEntryDeferred(Id1)
+
+NotAuditWitnessEntryHostAdopted == [][~AuditWitnessEntryHostAdopted]_vars
+NotAuditWitnessHostMemberStands == [][~AuditWitnessHostMemberStands]_vars
+NotAuditWitnessTakeOverEndsUnseated == [][~AuditWitnessTakeOverEndsUnseated]_vars
+NotAuditWitnessTakeOverDeferred == [][~AuditWitnessTakeOverDeferred]_vars
+NotAuditWitnessEntrySeated == [][~AuditWitnessEntrySeated]_vars
+NotAuditWitnessEntryLive == ~AuditWitnessEntryLive
+NotAuditWitnessEntryRetiredLive == [][~AuditWitnessEntryRetiredLive]_vars
+NotAuditWitnessEntryArchived == [][~AuditWitnessEntryArchived]_vars
+NotAuditWitnessEntryReseatedOnRecord == [][~AuditWitnessEntryReseatedOnRecord]_vars
+NotAuditWitnessEntryRotated == [][~AuditWitnessEntryRotated]_vars
+NotAuditWitnessEntryDestroyArchived == [][~AuditWitnessEntryDestroyArchived]_vars
+NotAuditWitnessEntryDestroyedMob == [][~AuditWitnessEntryDestroyedMob]_vars
+NotAuditWitnessEntryDestroyedForced == [][~AuditWitnessEntryDestroyedForced]_vars
+NotAuditWitnessCustodyDestroyed == [][~AuditWitnessCustodyDestroyed]_vars
+NotAuditWitnessEntryRespawnRefused == [][~AuditWitnessEntryRespawnRefused]_vars
+NotAuditWitnessWorkerRespawnAdmitted == [][~AuditWitnessWorkerRespawnAdmitted]_vars
+NotAuditWitnessEntryRespawnRefusedStopped == [][~AuditWitnessEntryRespawnRefusedStopped]_vars
+NotAuditWitnessWorkerPreservingArchive == [][~AuditWitnessWorkerPreservingArchive]_vars
+====

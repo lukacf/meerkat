@@ -1,0 +1,226 @@
+---
+title: "Forge quickstart"
+description: "Download and verify the Forge release, open the guide, and install a first agent team on your own computer."
+icon: "play"
+---
+
+*Mirrored from Meerkat Meta main at [10d49fde733f](https://github.com/lukacf/meerkat/commit/10d49fde733fc7eb7fd1c18b73bad31e0423303c) on 2026-11-09; Meta version 0.9.11 at that commit.*
+
+This walkthrough installs Forge from its public release, connects a model
+provider, designs a small agent team and installs it on the same computer.
+
+<Note>
+The current release is **Meta Forge 0.3.0**, a developer alpha published as a
+prerelease under the tag
+[`forge-v0.3.0`](https://github.com/lukacf/meerkat-meta/releases/tag/forge-v0.3.0)
+in `lukacf/meerkat-meta`. Download the package for the computer that will run
+Forge and your applications.
+</Note>
+
+| Package | Supported destination |
+| --- | --- |
+| `meta-forge-0.3.0-linux-x86_64.zip` | Linux x86_64 with exactly glibc 2.39 |
+| `meta-forge-0.3.0-macos-arm64.zip` | Apple Silicon macOS 13.5 or newer |
+
+## Before you start
+
+- A complete CPython 3.11 installation with `venv` and `ensurepip`.
+  Applications install into Forge's own Python, and the packages in this
+  release are built for CPython 3.11.
+- Internet access for the first start, which installs Forge's pinned Python
+  dependencies. Node.js, npm and a source checkout are not needed to open
+  Forge.
+- An API key for OpenAI, Anthropic or Gemini.
+- `unzip`, to extract the package.
+
+Building a custom application (rather than an agent team) has extra
+[isolation prerequisites](#build-a-custom-application-instead) on Linux.
+
+## Install Forge and a first agent team
+
+<Steps>
+  <Step title="Download and verify the package">
+    Download the package and its `.sha256` companion:
+
+    ```sh
+    platform=linux-x86_64 # Use macos-arm64 on Apple Silicon macOS.
+    release=https://github.com/lukacf/meerkat-meta/releases/download/forge-v0.3.0
+    curl -fLO "$release/meta-forge-0.3.0-$platform.zip"
+    curl -fLO "$release/meta-forge-0.3.0-$platform.zip.sha256"
+    ```
+
+    On Linux, verify it with `sha256sum -c "meta-forge-0.3.0-$platform.zip.sha256"`;
+    on macOS, use `shasum -a 256 -c "meta-forge-0.3.0-$platform.zip.sha256"`.
+    Continue only when it reports `OK`.
+
+    Each package also has a GitHub build attestation. To check it with the
+    GitHub CLI:
+
+    ```sh
+    gh attestation verify "meta-forge-0.3.0-$platform.zip" --repo lukacf/meerkat-meta \
+      --signer-workflow lukacf/meerkat-meta/.github/workflows/forge-release.yml \
+      --source-ref refs/heads/main \
+      --source-digest 174dce50b292e730f9b03603d73d6325743019ad
+    ```
+  </Step>
+  <Step title="Unpack it into a folder you will keep">
+    The archive has no top-level folder, so extract it into a new one:
+
+    ```sh
+    mkdir ~/MetaForge
+    unzip "meta-forge-0.3.0-$platform.zip" -d ~/MetaForge
+    cd ~/MetaForge
+    ```
+
+    Keep this folder. Forge saves your setups inside it, in `.studio`. On
+    macOS, keep it outside Desktop, Documents, Downloads, iCloud Drive, cloud
+    storage folders and other volumes if you want installed applications to
+    run in the background.
+  </Step>
+  <Step title="Start Forge">
+    ```sh
+    bash start.sh
+    ```
+
+    The first start creates Forge's private Python environment in `.venv`,
+    installs the pinned dependencies and the bundled SDKs, and checks the
+    bundled Meta and Connect runtime. It then prints the address, normally
+    `http://127.0.0.1:8787`. Keep the terminal open while you use Forge, and
+    press Ctrl+C to stop it.
+
+    If your `python3` is not CPython 3.11 (Ubuntu 24.04's is 3.12), install
+    3.11 and start Forge with it:
+
+    ```sh
+    uv python install 3.11
+    PYTHON_BIN="$(uv python find 3.11)" bash start.sh
+    ```
+
+    To prepare everything without starting the web server or any agents, run
+    `bash start.sh --prepare-only`.
+  </Step>
+  <Step title="Connect a model provider">
+    Open the printed address. Open **Guide settings**, select your provider,
+    paste its API key and choose **Save locally**, then **Start guide**. Wait
+    for **Ready for your first message**. The first start may download the
+    guide's runtime.
+
+    The key powers Forge's own agents: the guide, the application builder and
+    the animation programmer. It is saved privately on the computer running
+    Forge and never enters the conversation or downloaded packages. Saving it
+    does not test it; your first message does. You can instead start Forge
+    with `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` set.
+  </Step>
+  <Step title="Describe one useful job">
+    At **What would you like to get done?**, describe one job, project or
+    recurring task in your own words, or choose **Answer two questions** for a
+    guided starting point. Nothing is sent until you choose **Send to guide**.
+
+    Answer the guide's questions. Select the answer cards that fit, add
+    context in the composer if you like, and choose **Send answer**. Say that
+    the team should run on this computer. The proposal and its animation take
+    shape on the right; the animation illustrates the design and does not run
+    your agents.
+
+    When the design fits and no necessary decisions remain open, choose
+    **Use this plan**. This saves the design and creates no infrastructure.
+  </Step>
+  <Step title="Install the agent team">
+    Choose **Install agent team**. When the plan's destination matches this
+    computer, Forge opens private setup:
+
+    - **Project folder**: a new empty folder, for example `~/my-app`.
+    - **Console port** and the private settings the plan needs, such as model
+      provider keys. To reuse the provider key you gave Forge, select that
+      option explicitly.
+
+    Choose **Install and start**. Forge installs the pinned Meta runtime,
+    checks the selected tool connections, and waits for the agents to start
+    and the Console to report healthy. Private values go to a mode-600 `.env`
+    in the project folder.
+  </Step>
+  <Step title="Try a real task">
+    Choose **Open agent team Console**. Sign in if asked, with the Console
+    password you chose during private setup, and select the conversation owner
+    Forge names. Send a small real request and check the answer. Correct a
+    fact and ask a follow-up in the same conversation.
+  </Step>
+  <Step title="Stop and come back">
+    **Stop agent team** keeps the installed files, private settings and saved
+    state. Stopping Forge with Ctrl+C also stops an application that Forge
+    supervises interactively.
+
+    Next time, run `bash start.sh` again in the same folder, choose the setup
+    under **Your setups**, and choose **Start installed agent team**. Starting
+    it again resumes the same configured identities.
+  </Step>
+</Steps>
+
+## Build a custom application instead
+
+Use a custom application when your outcomes need custom screens or
+application code. The agent team package does not implement them.
+
+1. On Linux, install the isolation that application checks need: working
+   unprivileged user namespaces, bubblewrap, libseccomp and the runtime
+   libraries of the checker. On Debian 12 the packages are `bubblewrap`,
+   `libseccomp2`, `libatomic1` and `libstdc++6`. On Ubuntu 24.04 and later,
+   also load the distribution's AppArmor profile for bubblewrap:
+
+   ```bash
+   sudo apt-get install --no-install-recommends -y python3-venv unzip bubblewrap \
+     libseccomp2 libatomic1 libstdc++6 apparmor apparmor-profiles
+   sudo cp /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/
+   sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+   ```
+
+   On macOS, checks use the system's `sandbox-exec`.
+2. Open **Build and checks**. If Forge asks for it, choose **Prepare app
+   checks**. Forge downloads a private, checksum-verified Node.js checker into
+   its own folder and confirms that it starts inside the isolation. This does
+   not start an agent.
+3. Choose **Build application**. The builder writes application code and
+   tests, and an independent reviewer checks them. The builder can repair the
+   reviewer's findings automatically, for up to two rounds.
+4. Optionally, open **Try with sample data (optional)** and run an
+   **Agent design** or **Built application** trial.
+5. In the installation panel, under **What to install**, choose
+   **Custom application - independently checked build**, a project folder and
+   the private settings. Then follow the action Forge offers: **Install and
+   start**, or **Install application** followed by **Prepare application
+   setup** and **Set up and start application** when they are offered.
+
+## Install an agent team package yourself
+
+**Download agent team package** gives you a ZIP to install yourself, for
+example on a Linux computer when you prepared a Linux plan on a Mac. Extract it
+into a new empty folder on the destination, open the folder that contains
+`install.sh` and `start.sh`, and run:
+
+```bash
+bash install.sh && \
+bash start.sh --doctor && \
+bash start.sh --connections-check && \
+bash start.sh
+```
+
+`install.sh` needs Python 3.11 or newer. It installs the pinned Meta release,
+checked against its published SHA-256 values, asks for credentials and keeps
+them in a private `.env`. If installation stops, follow its printed recovery
+steps and retry from the same folder. After startup, open the Console URL
+printed in the terminal. The package's own `README.md` lists its exact steps,
+and the [reference](/meta/forge/reference#generated-package-commands) describes
+every command.
+
+A custom application built on the release's selected Meta and Toolkit runtime
+cannot be installed this way: its `install.sh` and `start.sh` refuse and send
+you back to Forge. Install, set up, update and recover it from its saved setup
+in Forge.
+
+## Next steps
+
+- [Concepts](/meta/forge/concepts): what Forge saves, builds and checks, and how
+  updates work.
+- [Reference](/meta/forge/reference): settings, files and blueprint fields.
+- [Troubleshooting](/meta/forge/troubleshooting): startup, build and installation
+  messages.

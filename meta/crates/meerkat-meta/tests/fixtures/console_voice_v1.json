@@ -1,0 +1,100 @@
+{
+  "readiness_request": { "identity": "agent-a" },
+  "readiness_available": { "identity": "agent-a", "available": true },
+  "readiness_unavailable": { "identity": "agent-a", "available": false },
+  "readiness_external_live_active": {
+    "identity": "agent-a",
+    "available": false,
+    "reason": "external_live_active",
+    "holder": { "identity": "agent-b", "channel_id": "live-channel-b" }
+  },
+  "superseded_error": {
+    "code": -32000,
+    "message": "Voice conversation was superseded by another live owner",
+    "data": { "kind": "voice_superseded", "reason": "superseded_by_external_live" }
+  },
+  "readiness_timed_out_error": {
+    "code": -32000,
+    "message": "Voice readiness could not be checked in time; retry",
+    "data": { "kind": "voice_readiness_timed_out" }
+  },
+  "context_status_method": "meta/console/voice/context_status",
+  "context_status_request": {
+    "identity": "agent-a",
+    "request_id": "voice-request",
+    "channel_id": "voice-channel-a"
+  },
+  "context_status_responses": {
+    "not_requested": {
+      "identity": "agent-a",
+      "request_id": "voice-request",
+      "channel_id": "voice-channel-a",
+      "context_preparation": { "phase": "not_requested" }
+    },
+    "capturing": {
+      "identity": "agent-a",
+      "request_id": "voice-request",
+      "channel_id": "voice-channel-a",
+      "context_preparation": { "phase": "preparing", "stage": "capturing" }
+    },
+    "generating": {
+      "identity": "agent-a",
+      "request_id": "voice-request",
+      "channel_id": "voice-channel-a",
+      "context_preparation": { "phase": "preparing", "stage": "generating" }
+    },
+    "delivering": {
+      "identity": "agent-a",
+      "request_id": "voice-request",
+      "channel_id": "voice-channel-a",
+      "context_preparation": { "phase": "preparing", "stage": "delivering" }
+    },
+    "provider_acknowledged": {
+      "identity": "agent-a",
+      "request_id": "voice-request",
+      "channel_id": "voice-channel-a",
+      "context_preparation": { "phase": "provider_acknowledged" }
+    },
+    "failed": {
+      "identity": "agent-a",
+      "request_id": "voice-request",
+      "channel_id": "voice-channel-a",
+      "context_preparation": { "phase": "failed", "reason": "generation" }
+    }
+  },
+  "captions_method": "meta/console/voice/captions",
+  "captions_request": {
+    "identity": "agent-a",
+    "request_id": "voice-request",
+    "channel_id": "voice-channel-a",
+    "after": 3,
+    "wait_ms": 10000
+  },
+  "captions_response": {
+    "identity": "agent-a",
+    "request_id": "voice-request",
+    "channel_id": "voice-channel-a",
+    "cursor": 7,
+    "captions": [
+      { "kind": "caption", "item_id": "segment-a", "text": "The vault phrase is amber." },
+      { "kind": "retracted", "item_id": "segment-b" },
+      { "kind": "playback_hint", "hint": "duck" }
+    ]
+  },
+  "context_status_failure_reasons": [
+    "capture",
+    "generation",
+    "timed_out",
+    "input_too_large",
+    "output_too_large",
+    "empty",
+    "stale_snapshot",
+    "unsupported",
+    "source_read",
+    "producer_panicked",
+    "delivery_rejected",
+    "delivery_ambiguous",
+    "cancelled",
+    "authority_rejected"
+  ]
+}

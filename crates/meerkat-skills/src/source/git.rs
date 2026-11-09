@@ -822,7 +822,7 @@ mod tests {
             git_ref: GitRef::Branch("main".into()),
             cache_dir: base.join("cache"),
             skills_root: None,
-            refresh_interval: Duration::from_secs(60),
+            refresh_interval: Duration::from_mins(1),
             auth: None,
             depth: None,
             source_uuid: SourceUuid::builtin(),

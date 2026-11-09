@@ -210,6 +210,10 @@ impl PreparedOperationAuthorization for Allowed {
     ) -> Result<(), OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// `session`'s dispatch context under actual bound work.
@@ -363,7 +367,7 @@ fn resolution() -> ToolExecutionResolutionContext {
     ToolExecutionResolutionContext::new(
         ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
             ToolDeadlineOwner::CoreToolDispatch,
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         )])
         .unwrap(),
     )

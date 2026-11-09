@@ -125,7 +125,7 @@ pub(crate) const PEER_NOT_FOUND_CONSTRUCTIONS: &[SiteAllowance] = &[
     ),
     settled(
         "crates/meerkat-comms/src/router.rs",
-        "send_with_id",
+        "send_with_id_and_origin",
         "trust miss, unreachable for a seated, wired member with an endpoint. A seated member with no durable endpoint has no key and no trust row yet; the owed boot retry records its endpoint and publishes its wake route, and until then a peer cannot address it",
     ),
     settled(
@@ -201,8 +201,8 @@ pub(crate) const MOB_LIVE_SESSION_OBSERVATIONS: &[SiteAllowance] = &[
     ),
     settled(
         "crates/meerkat-mob/src/runtime/actor.rs",
-        "restore_member_local_cleanup_delivery",
-        "boot cleanup-delivery restore observes live, durable and residue state of the named session",
+        "restore_member_local_cleanup_delivery_staged",
+        "boot cleanup-delivery restore observes live, durable and residue state of the named session, in its staged body; the wrapper only maps the failure",
     ),
     settled(
         "crates/meerkat-mob/src/runtime/actor.rs",

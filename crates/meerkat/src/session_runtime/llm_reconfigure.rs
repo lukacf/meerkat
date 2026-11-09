@@ -236,6 +236,16 @@ pub trait SessionRuntimeLlmReconfigureService: Send + Sync {
         session_id: &SessionId,
     ) -> Result<bool, SessionError>;
 
+    /// Where the live ordered transcript holds the operator-instruction entry
+    /// rows the session wrote itself
+    /// ([`meerkat_core::Session::own_operator_instruction_entry_placement`]):
+    /// every request carries them there, so a target must carry them there
+    /// ([`meerkat_core::InstructionEntryPlacement::refusal`]).
+    async fn live_session_own_operator_instruction_entry_placement(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError>;
+
     /// Return the exact realm that owned the live session's initial build.
     ///
     /// Hot-swap credential resolution must begin from this per-session realm,
@@ -375,6 +385,16 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
                         if system.instruction_activation.is_some()
                 )
             }))
+    }
+
+    async fn live_session_own_operator_instruction_entry_placement(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError> {
+        self.export_live_session(session_id)
+            .await?
+            .own_operator_instruction_entry_placement()
+            .map_err(|error| SessionError::Agent(error.into()))
     }
 
     async fn live_realm_id(
@@ -590,6 +610,16 @@ impl SessionRuntimeLlmReconfigureService for EphemeralSessionService<FactoryAgen
                         if system.instruction_activation.is_some()
                 )
             }))
+    }
+
+    async fn live_session_own_operator_instruction_entry_placement(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError> {
+        self.export_session(session_id)
+            .await?
+            .own_operator_instruction_entry_placement()
+            .map_err(|error| SessionError::Agent(error.into()))
     }
 
     async fn live_realm_id(
@@ -1079,6 +1109,94 @@ impl SessionRuntimeLlmReconfigureHost {
         preserve_credential_account_affinity(&config, current, request, &mut target)?;
         Ok(target)
     }
+
+    /// Where the operator-instruction entry rows `session_id` wrote itself
+    /// stand: in the live session, or, for a session staged before its first
+    /// build (no live actor), in the session that build resumes
+    /// ([`StagedSessionRegistry::own_operator_instruction_entry_placement`]).
+    /// A session neither live nor staged holds none here.
+    async fn own_instruction_entry_placement(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::InstructionEntryPlacement, RuntimeDriverError> {
+        match self
+            .service()?
+            .live_session_own_operator_instruction_entry_placement(session_id)
+            .await
+        {
+            Ok(placement) => Ok(placement),
+            Err(SessionError::NotFound { .. }) => self
+                .staged_sessions
+                .own_operator_instruction_entry_placement(session_id)
+                .await
+                .map(Option::unwrap_or_default)
+                .map_err(|error| {
+                    RuntimeDriverError::Internal(format!(
+                        "session {session_id}'s staged build cannot be projected for a model request: {error}"
+                    ))
+                }),
+            Err(err) => Err(live_session_read_error_to_runtime_driver(session_id, err)),
+        }
+    }
+
+    /// The weakest operator-instruction lowering `identity` may be served
+    /// with for `session_id`, before any client for it is built
+    /// ([`ModelRegistry::weakest_instruction_lowering_for_target`], from the
+    /// session's own realm).
+    async fn weakest_target_lowering(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<meerkat_core::InstructionLowering, RuntimeDriverError> {
+        let config = self.load_config_for_hot_swap().await?;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .map_err(|e| {
+                RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
+            })?;
+        let preferred_realm = preferred_hot_swap_realm(
+            self.service()?.as_ref(),
+            session_id,
+            self.inheritance_head_realm(),
+        )
+        .await?;
+        Ok(registry.weakest_instruction_lowering_for_target(
+            &config,
+            identity,
+            preferred_realm.as_ref(),
+        ))
+    }
+
+    /// Refuse a live model change onto `identity` that cannot carry the
+    /// operator-instruction entry rows the session wrote itself where they
+    /// stand, before any client for it is built (a build resolves the
+    /// target's credential and publishes its lease). The target is judged by
+    /// the weakest lowering it may be served with
+    /// ([`Self::weakest_target_lowering`]); the refusal is typed as for
+    /// instruction activation rows. The session service's own hot swap
+    /// refuses the same placement for the lowering its request policy
+    /// carries (`Agent::hot_swap_llm_identity`), so no caller bypasses the
+    /// guard.
+    async fn refuse_target_that_cannot_carry_own_instruction_entries(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Result<(), RuntimeDriverError> {
+        let placement = self.own_instruction_entry_placement(session_id).await?;
+        if placement.is_empty() {
+            return Ok(());
+        }
+        let lowering = self.weakest_target_lowering(session_id, identity).await?;
+        match placement.refusal(lowering) {
+            None => Ok(()),
+            Some(refusal) => Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "model '{}' cannot represent the operator-instruction entries already applied in session {session_id}: {refusal}",
+                    identity.model
+                ),
+            }),
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -1183,6 +1301,8 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         let mut target_identity = self
             .resolve_target_llm_identity(current_identity, request)
             .await?;
+        self.refuse_target_that_cannot_carry_own_instruction_entries(session_id, &target_identity)
+            .await?;
         // A target that names no binding is served by the candidate the
         // session's client resolution selects: the resolution the apply runs.
         // That backend can only narrow the model's row, and only its
@@ -1207,6 +1327,11 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         self.resolved_reconfigure_target(target_identity).await
     }
 
+    /// Proves the target buildable now. The routing realization asks
+    /// `switch_target_carries_session_transcript` first and calls
+    /// this only for a target that can carry the session's transcript: one
+    /// that cannot is a permanent refusal, which generated authority denies,
+    /// and a failure here is a retriable hold.
     async fn preflight_target_session_llm_identity(
         &self,
         session_id: &SessionId,
@@ -1215,6 +1340,46 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         self.build_adapter_for_session_llm_identity(session_id, target_identity)
             .await
             .map(|_| ())
+    }
+
+    async fn switch_target_carries_session_transcript(
+        &self,
+        session_id: &SessionId,
+        target_model: &str,
+    ) -> Result<bool, RuntimeDriverError> {
+        // The turn-entry resync, as the plan step performs it, so the live
+        // transcript read below is the session's own.
+        let hydrated = self.hydrate_session_llm_state(session_id).await?;
+        let placement = self.own_instruction_entry_placement(session_id).await?;
+        // Ordered instruction activations are mid-conversation System rows;
+        // a session with no live actor has none to carry yet.
+        let activations = match self
+            .service()?
+            .live_session_has_instruction_activations(session_id)
+            .await
+        {
+            Ok(activations) => activations,
+            Err(SessionError::NotFound { .. }) => false,
+            Err(err) => return Err(live_session_read_error_to_runtime_driver(session_id, err)),
+        };
+        if placement.is_empty() && !activations {
+            return Ok(true);
+        }
+        // The target as a model-only change resolves it from the current
+        // identity. Nothing is built for it.
+        let request = SessionLlmReconfigureRequest {
+            model: Some(target_model.to_string()),
+            provider: None,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let target = self
+            .resolve_target_llm_identity(&hydrated.current_identity, &request)
+            .await?;
+        let lowering = self.weakest_target_lowering(session_id, &target).await?;
+        Ok(placement.refusal(lowering).is_none()
+            && (!activations || lowering == meerkat_core::InstructionLowering::MidConversation))
     }
 
     async fn apply_live_session_llm_identity(
@@ -1251,6 +1416,8 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
                 });
             }
         }
+        self.refuse_target_that_cannot_carry_own_instruction_entries(session_id, identity)
+            .await?;
         let (adapter, selection) = self
             .build_adapter_for_session_llm_identity(session_id, identity)
             .await?;
@@ -1268,6 +1435,11 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
         if let Some(credential_identity) = selected_credential {
             request_policy.credential_identity = Some(credential_identity);
         }
+        // The policy states how the backend of the binding the swap names (or
+        // just selected) lowers operator-instruction entries; the session
+        // service's hot swap refuses it where it cannot carry the session's
+        // own entry rows where they stand, which the guard above already
+        // decided for the weakest binding the target may be served with.
         self.service()?
             .apply_live_llm_identity_under_runtime_turn_boundary(
                 session_id,
@@ -1443,6 +1615,16 @@ mod tests {
             _session_id: &SessionId,
         ) -> Result<bool, SessionError> {
             unreachable!("realm selection does not inspect the transcript")
+        }
+
+        /// This service holds no live session actor.
+        async fn live_session_own_operator_instruction_entry_placement(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError> {
+            Err(SessionError::NotFound {
+                id: session_id.clone(),
+            })
         }
 
         async fn live_realm_id(
@@ -1643,6 +1825,12 @@ mod tests {
             ) -> Result<bool, SessionError> {
                 unreachable!("realm selection does not inspect the transcript")
             }
+            async fn live_session_own_operator_instruction_entry_placement(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError> {
+                unreachable!("realm selection does not inspect the transcript")
+            }
             async fn live_realm_id(
                 &self,
                 _session_id: &SessionId,
@@ -1763,6 +1951,108 @@ mod tests {
     /// The host holds its service weakly (the service owns the machine the
     /// host is installed on). Once the service is gone, every host entry point
     /// answers with a typed `Destroyed`; none panics.
+    /// A session staged before its first build has no live actor; its staged
+    /// build carries the session it resumes, so a model change is judged on
+    /// that session's own operator-instruction entries. A target that cannot
+    /// carry the entry where it stands (after the conversation) is refused at
+    /// the plan step, typed, rather than by the build that would resume it.
+    #[tokio::test]
+    async fn a_staged_session_is_judged_on_the_session_its_build_resumes() {
+        let service: Arc<dyn SessionRuntimeLlmReconfigureService> =
+            Arc::new(RealmOnlyService { realm_id: None });
+        let mut resumed = meerkat_core::Session::new();
+        let session_id = resumed.id().clone();
+        resumed.push(meerkat_core::Message::User(
+            meerkat_core::UserMessage::text("Hello"),
+        ));
+        resumed
+            .append_operator_instruction_activation_for_test(
+                "app.example",
+                "tone",
+                1,
+                "Answer formally.",
+            )
+            .expect("an entry after the conversation row");
+        let current = SessionLlmIdentity {
+            model: "gpt-5.5".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let mut build_config = crate::AgentBuildConfig::new("gpt-5.5");
+        build_config.resume_session = Some(resumed);
+        let staged = Arc::new(StagedSessionRegistry::new());
+        staged
+            .stage(
+                session_id.clone(),
+                crate::StagedSlot::new_staged(
+                    &session_id,
+                    build_config,
+                    current.clone(),
+                    None,
+                    None,
+                    Vec::new(),
+                    0,
+                    0,
+                    false,
+                )
+                .expect("a staged slot"),
+            )
+            .await
+            .expect("stage the session");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = Config::default();
+        config.models.custom.insert(
+            "custom-prefix-model".to_string(),
+            meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: None,
+                context_window: Some(128_000),
+                max_input_tokens: None,
+                max_output_tokens: Some(16_000),
+                vision: Some(false),
+                web_search: Some(false),
+                call_timeout_secs: None,
+            },
+        );
+        let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                config,
+                meerkat_models::canonical(),
+            )),
+            temp.path().join("config_state.json"),
+        ));
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let host = SessionRuntimeLlmReconfigureHost {
+            service: Arc::downgrade(&service),
+            staged_sessions: staged,
+            factory: AgentFactory::minimal(),
+            auth_lease: machine.generated_auth_lease_handle(),
+            default_llm_client: Arc::new(std::sync::RwLock::new(None)),
+            agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
+            config_runtime: Arc::new(std::sync::RwLock::new(Some(config_runtime))),
+            realm_inheritance: Arc::new(std::sync::RwLock::new(None)),
+        };
+
+        let error = host
+            .resolve_target_session_llm_identity_for_session(
+                &session_id,
+                &reconfigure_request(Some("custom-prefix-model"), None, None),
+                &current,
+            )
+            .await
+            .expect_err("a target that cannot carry the staged session's own entry is refused");
+        assert!(
+            matches!(
+                &error,
+                RuntimeDriverError::ValidationFailed { reason }
+                    if reason.contains("cannot represent the operator-instruction entries")
+            ),
+            "unexpected refusal: {error:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_host_whose_service_was_dropped_answers_destroyed_on_every_call() {
         let service: Arc<dyn SessionRuntimeLlmReconfigureService> =

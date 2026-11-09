@@ -1,0 +1,554 @@
+//! Actual SQLite transaction/custody controls. The local observer records only
+//! guard lifetime; it makes no Toolkit or native authorization decision.
+use super::*;
+use std::sync::{
+    Condvar,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+#[derive(Default)]
+struct Publication {
+    active: AtomicBool,
+    changes: AtomicUsize,
+    released: tokio::sync::Notify,
+}
+struct Guard<'a>(&'a Publication);
+impl RecordChangeGuard for Guard<'_> {}
+impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+        assert!(self.0.active.swap(false, Ordering::SeqCst));
+        self.0.released.notify_one();
+    }
+}
+impl RecordChangePublication for Publication {
+    fn begin_record_change(&self) -> StoreResult<Box<dyn RecordChangeGuard + '_>> {
+        assert!(!self.active.swap(true, Ordering::SeqCst));
+        self.changes.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(Guard(self)))
+    }
+}
+fn request() -> AdmissionRequest {
+    AdmissionRequest {
+        key: StoreKey {
+            realm: "realm".into(),
+            owner: "owner".into(),
+            id: "record".into(),
+        },
+        admission_key: "record".into(),
+        data: RecordData {
+            schema: "test.publication".into(),
+            version: 1,
+            body: serde_json::json!({ "value": 1 }),
+        },
+        events: vec![],
+        effects: vec![],
+    }
+}
+fn transition(prior: &StoredRecord) -> Transition {
+    Transition {
+        key: prior.key.clone(),
+        expected_revision: prior.revision,
+        expected_digest: Some(prior.content_digest.clone()),
+        claim: None,
+        data: RecordData {
+            body: serde_json::json!({ "value": 2 }),
+            ..prior.data.clone()
+        },
+        events: vec![],
+        effects: vec![],
+    }
+}
+
+#[test]
+fn installed_publication_custody_excludes_handles_and_inode_aliases_until_last_clone() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite");
+    let first = SqliteStore::open(&path).unwrap();
+    let second = SqliteStore::open_existing(&path).unwrap();
+    let publication: Arc<dyn RecordChangePublication> = Arc::new(Publication::default());
+    assert!(matches!(
+        SqliteStore::open_existing_published(&path, publication.clone()),
+        Err(StoreError::OwnerUnavailable)
+    ));
+    drop(first);
+    drop(second);
+    let owner = SqliteStore::open_existing_published(&path, publication.clone()).unwrap();
+    assert!(owner.record_publication_is(&publication));
+    let other: Arc<dyn RecordChangePublication> = Arc::new(Publication::default());
+    assert!(!owner.record_publication_is(&other));
+    assert!(matches!(
+        SqliteStore::open_existing(&path),
+        Err(StoreError::OwnerUnavailable)
+    ));
+    #[cfg(unix)]
+    {
+        let alias = directory.path().join("alias.sqlite");
+        std::fs::hard_link(&path, &alias).unwrap();
+        assert!(matches!(
+            SqliteStore::open_existing(&alias),
+            Err(StoreError::OwnerUnavailable)
+        ));
+        let symbolic = directory.path().join("symbolic.sqlite");
+        std::os::unix::fs::symlink(&path, &symbolic).unwrap();
+        assert!(matches!(
+            SqliteStore::open_existing(&symbolic),
+            Err(StoreError::OwnerUnavailable)
+        ));
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_file(symbolic).unwrap();
+    }
+    let retained = owner.clone();
+    drop(owner);
+    assert!(matches!(
+        SqliteStore::open_existing(&path),
+        Err(StoreError::OwnerUnavailable)
+    ));
+    drop(retained);
+    assert!(SqliteStore::open_existing(&path).is_ok());
+}
+
+struct Release(Arc<(Mutex<bool>, Condvar)>);
+impl Drop for Release {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.0;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
+struct IoLifetime {
+    publication: Arc<Publication>,
+    connection: std::sync::Weak<Mutex<Option<OwnedConnection>>>,
+    dropped: Mutex<Option<tokio::sync::oneshot::Sender<(bool, bool)>>>,
+}
+impl Drop for IoLifetime {
+    fn drop(&mut self) {
+        let publication_released = !self.publication.active.load(Ordering::SeqCst);
+        let connection_released = self.connection.upgrade().is_none_or(|connection| {
+            !matches!(
+                connection.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            )
+        });
+        if let Some(dropped) = self.dropped.get_mut().unwrap().take() {
+            let _ = dropped.send((publication_released, connection_released));
+        }
+    }
+}
+fn io_lifetime(
+    owner: &SqliteStore,
+    publication: &Arc<Publication>,
+) -> (
+    Arc<IoLifetime>,
+    tokio::sync::oneshot::Receiver<(bool, bool)>,
+) {
+    let (dropped, observed) = tokio::sync::oneshot::channel();
+    (
+        Arc::new(IoLifetime {
+            publication: publication.clone(),
+            connection: Arc::downgrade(&owner.connection),
+            dropped: Mutex::new(Some(dropped)),
+        }),
+        observed,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_sqlite_read_keeps_io_custody_through_return_or_worker_panic() {
+    for panic_after_read in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = SqliteStore::open(directory.path().join("store.sqlite")).unwrap();
+        let publication = Arc::new(Publication::default());
+        let (custody, mut dropped) = io_lifetime(&owner, &publication);
+        let block = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Release(block.clone());
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let reader = owner.clone();
+        let caller = tokio::spawn(async move {
+            retain_io_custody(
+                custody,
+                reader.with(move |connection, _| {
+                    let transaction = connection.transaction()?;
+                    let actual: i64 = transaction.query_row("SELECT 7", [], |row| row.get(0))?;
+                    entered.send(()).unwrap();
+                    let (lock, ready) = &*block;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = ready.wait(released).unwrap();
+                    }
+                    if panic_after_read {
+                        panic!("controlled SQLite worker panic after read");
+                    }
+                    transaction.commit()?;
+                    Ok(actual)
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            dropped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            owner.connection.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), dropped)
+                .await
+                .unwrap()
+                .unwrap(),
+            (true, true)
+        );
+        assert_eq!(owner.connection.is_poisoned(), panic_after_read);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoned_sqlite_write_retains_publication_and_physical_owner_through_commit_or_rollback()
+{
+    for rollback in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let initial = SqliteStore::open(&path).unwrap();
+        let prior = initial.admit(request()).await.unwrap().record().clone();
+        drop(initial);
+        let publication = Arc::new(Publication::default());
+        let owner = SqliteStore::open_existing_published(&path, publication.clone()).unwrap();
+        let block = Arc::new((Mutex::new(false), Condvar::new()));
+        // Always release the detached blocking worker, including after an assertion panic.
+        let release = Release(block.clone());
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let entered = Mutex::new(Some(entered));
+        let observed = publication.clone();
+        owner
+            .with(move |connection, _| {
+                connection.create_scalar_function(
+                    "hold_update",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    move |_| {
+                        assert!(observed.active.load(Ordering::SeqCst));
+                        if let Some(entered) = entered.lock().unwrap().take() {
+                            let _ = entered.send(());
+                        }
+                        let (lock, ready) = &*block;
+                        let mut released = lock.lock().unwrap();
+                        while !*released {
+                            released = ready.wait(released).unwrap();
+                        }
+                        assert!(observed.active.load(Ordering::SeqCst));
+                        Ok(1_i64)
+                    },
+                )?;
+                connection.execute_batch(if rollback {
+                    "CREATE TRIGGER hold_write BEFORE UPDATE ON toolkit_records BEGIN
+                 SELECT hold_update(); SELECT RAISE(ABORT, 'rollback control'); END;"
+                } else {
+                    "CREATE TRIGGER hold_write BEFORE UPDATE ON toolkit_records BEGIN
+                 SELECT hold_update(); END;"
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let writer = owner.clone();
+        let change = transition(&prior);
+        // Opaque lifetime probes exercise the actual detached transaction,
+        // not native permission. Nested scopes must preserve both owners.
+        let (outer, mut outer_dropped) = io_lifetime(&owner, &publication);
+        let (inner, mut inner_dropped) = io_lifetime(&owner, &publication);
+        let caller = tokio::spawn(async move {
+            retain_io_custody(
+                outer,
+                retain_io_custody(inner, writer.compare_and_swap(change)),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(publication.active.load(Ordering::SeqCst));
+        // The real WAL reader sees the old row until the blocked transaction ends.
+        let observer = Connection::open(&path).unwrap();
+        assert_eq!(
+            read_record(&observer, &prior.key).unwrap(),
+            Some(prior.clone())
+        );
+        drop(observer);
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            outer_dropped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            inner_dropped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        drop(owner);
+        assert!(
+            matches!(
+                SqliteStore::open_existing(&path),
+                Err(StoreError::OwnerUnavailable)
+            ),
+            "the detached worker still owns the same connection and file"
+        );
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(10), publication.released.notified())
+            .await
+            .unwrap();
+        for dropped in [outer_dropped, inner_dropped] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), dropped)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                (true, true),
+                "caller custody ends after publication and connection guards"
+            );
+        }
+        let reopened = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match SqliteStore::open_existing(&path) {
+                    Ok(store) => break store,
+                    Err(StoreError::OwnerUnavailable) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected reopen failure: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!publication.active.load(Ordering::SeqCst));
+        assert_eq!(publication.changes.load(Ordering::SeqCst), 1);
+        let actual = reopened.get(&prior.key).await.unwrap().unwrap();
+        if rollback {
+            assert_eq!(actual, prior);
+        } else {
+            assert_eq!(actual.revision, prior.revision + 1);
+            assert_eq!(actual.data.body["value"], 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn conflicting_cas_does_not_publish_but_failed_actual_update_invalidates_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite");
+    let initial = SqliteStore::open(&path).unwrap();
+    let prior = initial.admit(request()).await.unwrap().record().clone();
+    drop(initial);
+    let publication = Arc::new(Publication::default());
+    let owner = SqliteStore::open_existing_published(&path, publication.clone()).unwrap();
+    let mut conflict = transition(&prior);
+    conflict.expected_revision += 1;
+    assert!(matches!(
+        owner.compare_and_swap(conflict).await,
+        Err(StoreError::Conflict)
+    ));
+    assert_eq!(publication.changes.load(Ordering::SeqCst), 0);
+    owner
+        .with(|connection, _| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_update BEFORE UPDATE ON toolkit_records
+            BEGIN SELECT RAISE(ABORT, 'rollback control'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(owner.compare_and_swap(transition(&prior)).await.is_err());
+    assert_eq!(publication.changes.load(Ordering::SeqCst), 1);
+    assert!(!publication.active.load(Ordering::SeqCst));
+    assert_eq!(owner.get(&prior.key).await.unwrap(), Some(prior));
+}
+
+/// An installed store whose host closed while a task of that host still
+/// holds a clone of it: the release hands the physical owner back at once,
+/// so the same database opens again; the clone's next read or write is
+/// refused and publishes nothing, a second release changes nothing, and the
+/// clone's last drop leaves the successor's custody intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_store_frees_its_owner_while_a_clone_is_still_held() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite");
+    let initial = SqliteStore::open(&path).unwrap();
+    let prior = initial.admit(request()).await.unwrap().record().clone();
+    drop(initial);
+    let publication = Arc::new(Publication::default());
+    let owner = SqliteStore::open_existing_published(&path, publication.clone()).unwrap();
+    let straggler = owner.clone();
+    owner.release_custody().await.unwrap();
+    drop(owner);
+
+    let successor = SqliteStore::open_existing_published(&path, Arc::new(Publication::default()))
+        .expect("the released store opens again at once");
+    assert!(matches!(
+        straggler.get(&prior.key).await,
+        Err(StoreError::OwnerUnavailable)
+    ));
+    assert!(matches!(
+        straggler.compare_and_swap(transition(&prior)).await,
+        Err(StoreError::OwnerUnavailable)
+    ));
+    assert_eq!(
+        publication.changes.load(Ordering::SeqCst),
+        0,
+        "a refused change publishes nothing"
+    );
+    assert!(
+        straggler.release_custody().await.is_ok(),
+        "a second release changes nothing"
+    );
+    assert_eq!(successor.get(&prior.key).await.unwrap(), Some(prior));
+    drop(straggler);
+    assert!(
+        matches!(
+            SqliteStore::open_existing(&path),
+            Err(StoreError::OwnerUnavailable)
+        ),
+        "dropping the clone leaves the successor's custody intact"
+    );
+    drop(successor);
+    assert!(SqliteStore::open_existing(&path).is_ok());
+}
+
+/// The release takes the connection only once a write already entered on it
+/// ends, so the write commits and the next opener sees it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_waits_for_an_entered_write_then_frees_the_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite");
+    let initial = SqliteStore::open(&path).unwrap();
+    let prior = initial.admit(request()).await.unwrap().record().clone();
+    drop(initial);
+    let publication = Arc::new(Publication::default());
+    let owner = SqliteStore::open_existing_published(&path, publication.clone()).unwrap();
+    let block = Arc::new((Mutex::new(false), Condvar::new()));
+    // Always release the blocked write, including after an assertion panic.
+    let release = Release(block.clone());
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    owner
+        .with(move |connection, _| {
+            connection.create_scalar_function(
+                "hold_update",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                move |_| {
+                    if let Some(entered) = entered.lock().unwrap().take() {
+                        let _ = entered.send(());
+                    }
+                    let (lock, ready) = &*block;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = ready.wait(released).unwrap();
+                    }
+                    Ok(1_i64)
+                },
+            )?;
+            connection.execute_batch(
+                "CREATE TRIGGER hold_write BEFORE UPDATE ON toolkit_records BEGIN
+                 SELECT hold_update(); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let writer = owner.clone();
+    let change = transition(&prior);
+    let write = tokio::spawn(async move { writer.compare_and_swap(change).await });
+    tokio::time::timeout(Duration::from_secs(10), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let releasing = owner.release_custody();
+    tokio::pin!(releasing);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut releasing)
+            .await
+            .is_err(),
+        "the release waits for the entered write"
+    );
+    drop(release);
+    let written = tokio::time::timeout(Duration::from_secs(10), write)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), &mut releasing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        owner.get(&prior.key).await,
+        Err(StoreError::OwnerUnavailable)
+    ));
+    let successor = SqliteStore::open_existing(&path).expect("the release freed the owner");
+    assert_eq!(successor.get(&prior.key).await.unwrap(), Some(written));
+    assert_eq!(publication.changes.load(Ordering::SeqCst), 1);
+}
+
+/// A process this test spawns that holds a copy of one of the test's
+/// descriptors, as its standard input, until it is dropped: what any process
+/// spawned meanwhile holds until it executes its program.
+#[cfg(unix)]
+struct DescriptorCopy(std::process::Child);
+
+#[cfg(unix)]
+impl DescriptorCopy {
+    fn spawn(file: &File) -> Self {
+        let copy = file.try_clone().expect("a copy of the descriptor");
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .stdin(copy)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process holding the copy");
+        Self(child)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DescriptorCopy {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The release frees the physical owner at once even while a process spawned
+/// meanwhile still holds a copy of the owner file's descriptor: the release
+/// unlocks the owner, so its lock does not outlive the release in that copy.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_store_is_free_while_a_spawned_process_holds_its_descriptor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store.sqlite");
+    let initial = SqliteStore::open(&path).unwrap();
+    initial.admit(request()).await.unwrap();
+    drop(initial);
+    let owner =
+        SqliteStore::open_existing_published(&path, Arc::new(Publication::default())).unwrap();
+    let descriptor = owner
+        .owner_descriptor_copy()
+        .expect("the physical owner's descriptor");
+    let copy = DescriptorCopy::spawn(&descriptor);
+    drop(descriptor);
+    owner.release_custody().await.unwrap();
+    assert!(
+        SqliteStore::open_existing_published(&path, Arc::new(Publication::default())).is_ok(),
+        "a released store opens again while a spawned process holds a copy of its descriptor"
+    );
+    drop(copy);
+}

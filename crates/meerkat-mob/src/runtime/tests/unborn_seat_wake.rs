@@ -3,15 +3,17 @@
 //! retryable left (before or after its born row), is adopted or revived at
 //! the next wake or at an eager start, never created again; one member's
 //! create that fails for a passing cause leaves only that member Dormant at
-//! an eager start; a reload of a member whose session was never created is
-//! refused, typed. They run on the combined candidate: the machine, the wake
-//! path and the boot path together.
+//! an eager start; a first wake whose create meets a provider credential
+//! failure that clears on its own leaves the seat Dormant, and one that does
+//! not breaks the member; a reload of a member whose session was never
+//! created is refused, typed. They run on the combined candidate: the
+//! machine, the wake path and the boot path together.
 
 use super::*;
 use crate::machines::mob_machine as dsl;
 use crate::runtime::{DormantSeatOutcome, MemberRestorePolicy};
 
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 
 /// A mob over stored member keys with one fresh turn-driven member seated
 /// Dormant: its seat built nothing.
@@ -600,6 +602,143 @@ async fn an_eager_start_with_one_failing_seat_create_leaves_only_that_member_dor
     );
 }
 
+/// A first wake whose create meets a provider credential its build cannot
+/// get now, for a cause that clears on its own (`kind`), leaves the seat
+/// Dormant with its session unborn: the caller gets the retryable
+/// `ResumeGateUnavailable`, the member is not Broken, and once the cause
+/// clears the next wake creates the session once, under the seat's id.
+async fn a_passing_credential_failure_leaves_the_seat_dormant(
+    label: &str,
+    kind: meerkat_core::AuthErrorKind,
+) {
+    let mob = SeatedMob::new(label).await;
+    mob.service
+        .set_create_session_provider_auth_failure(&mob.session, kind)
+        .await;
+
+    let refused = mob
+        .handle
+        .ensure_member_live(&mob.identity)
+        .await
+        .expect_err("the first wake meets the credential failure");
+    assert!(
+        matches!(
+            &refused,
+            MobError::MemberWakeRefused {
+                refusal: crate::MemberWakeRefusal::ResumeGateUnavailable,
+                ..
+            }
+        ),
+        "{}: {refused:?}",
+        kind.as_str()
+    );
+    mob.wait_phase(dsl::MemberMaterializationPhase::Dormant)
+        .await;
+    assert!(
+        mob.unborn(),
+        "{}: the session was never created",
+        kind.as_str()
+    );
+    let status = mob
+        .handle
+        .member_status(&mob.identity)
+        .await
+        .expect("read the member's status");
+    assert_ne!(
+        status.status,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "{}: {status:?}",
+        kind.as_str()
+    );
+
+    mob.service.clear_create_session_failure(&mob.session).await;
+    mob.handle
+        .ensure_member_live(&mob.identity)
+        .await
+        .expect("the wake after the cause cleared creates the session");
+    assert_eq!(
+        mob.phase(),
+        Some(dsl::MemberMaterializationPhase::Live),
+        "{}: the member is live",
+        kind.as_str()
+    );
+    assert!(
+        !mob.unborn(),
+        "{}: the created session is born",
+        kind.as_str()
+    );
+    assert_eq!(
+        mob.creates_of_the_session().await,
+        1,
+        "{}: the session is created once, under the seat's id",
+        kind.as_str()
+    );
+}
+
+/// The credential's source (a token exchange) cannot answer now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_wake_whose_credential_source_is_unavailable_leaves_the_seat_dormant() {
+    a_passing_credential_failure_leaves_the_seat_dormant(
+        "unborn-source-unavailable",
+        meerkat_core::AuthErrorKind::SourceUnavailable,
+    )
+    .await;
+}
+
+/// The operating-system credential store cannot answer now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_wake_whose_credential_store_is_unavailable_leaves_the_seat_dormant() {
+    a_passing_credential_failure_leaves_the_seat_dormant(
+        "unborn-store-unavailable",
+        meerkat_core::AuthErrorKind::CredentialStoreUnavailable,
+    )
+    .await;
+}
+
+/// A lookup of the credential is already in flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_wake_whose_credential_access_is_pending_leaves_the_seat_dormant() {
+    a_passing_credential_failure_leaves_the_seat_dormant(
+        "unborn-access-pending",
+        meerkat_core::AuthErrorKind::CredentialAccessPending,
+    )
+    .await;
+}
+
+/// A first wake whose create meets a provider credential failure that does
+/// not clear on its own (the account needs a new sign-in) still breaks the
+/// member: trying the same wake again would answer the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_wake_whose_credential_needs_a_new_sign_in_breaks_the_member() {
+    let mob = SeatedMob::new("unborn-reauth-required").await;
+    mob.service
+        .set_create_session_provider_auth_failure(
+            &mob.session,
+            meerkat_core::AuthErrorKind::UserReauthRequired,
+        )
+        .await;
+
+    let woken = mob.handle.ensure_member_live(&mob.identity).await;
+    assert!(woken.is_err(), "the wake fails: {woken:?}");
+    assert!(
+        !matches!(
+            &woken,
+            Err(MobError::MemberWakeRefused { refusal, .. }) if refusal.is_retryable()
+        ),
+        "a failure that does not clear on its own is not retryable: {woken:?}"
+    );
+    let status = mob
+        .handle
+        .member_status(&mob.identity)
+        .await
+        .expect("read the member's status");
+    assert_eq!(
+        status.status,
+        crate::runtime::handle::MobMemberStatus::Broken,
+        "{status:?}"
+    );
+}
+
 /// The member binding history reads MobMachine's unborn-seat fact from the
 /// journal rows the machine's own replay restores it from, folded the same
 /// way. For every session a seat, a first wake, a rotation, a retirement
@@ -856,4 +995,34 @@ async fn a_member_whose_session_is_unborn_reads_an_empty_history() {
         )
         .await
         .expect("the history of the created session reads");
+}
+
+/// A seat's first create that the session builder refuses with structured
+/// data (the build a fresh identity's first wake makes) keeps that data on
+/// the member's restore failure, on the first wake and on a later wake
+/// answered from the member's record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seats_first_create_refused_with_structured_data_keeps_it() {
+    let mob = SeatedMob::new("seat-first-create-refused-with-data").await;
+    assert!(mob.unborn(), "the seat built nothing");
+    mob.service
+        .set_create_session_failure_error(&mob.session, host_build_refusal)
+        .await;
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+    for wake in ["the first wake", "a later wake"] {
+        let error = tokio::time::timeout(STEP, mob.handle.ensure_member_live(&mob.identity))
+            .await
+            .expect("the wake answers")
+            .expect_err("the wake fails");
+        assert!(
+            matches!(error, MobError::MemberRestoreFailed { .. }),
+            "{wake}: {error:?}"
+        );
+        assert_eq!(
+            restore_failure_cause_data(&error),
+            expected,
+            "{wake}: the restore failure keeps the build's structured data"
+        );
+    }
 }

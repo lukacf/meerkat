@@ -1,0 +1,299 @@
+# ToolGrantLifecycleMachine
+
+_Generated from the Rust machine catalog. Do not edit by hand._
+
+- Version: `2`
+- Rust owner: `self` / `catalog::dsl::tool_grant_lifecycle`
+
+## State
+- Phase enum: `Unissued | Active | Expired | Revoked | RunEnded`
+- `grant_id`: `String`
+- `issued_at_ms`: `u64`
+- `expires_at_ms`: `u64`
+- `ended_at_ms`: `Option<u64>`
+- `end_reason`: `Option<ToolGrantEndReason>`
+- `run_scope`: `Option<ToolGrantRunId>`
+
+## Inputs
+- `Issue`(grant_id: String, now_ms: u64, expires_at_ms: u64, max_lifetime_ms: u64, run_scope: Option<ToolGrantRunId>)
+- `Expire`(now_ms: u64)
+- `Revoke`(now_ms: u64)
+- `AdmitUse`(now_ms: u64, run_id: Option<ToolGrantRunId>)
+- `EndRun`(run_id: ToolGrantRunId, now_ms: u64)
+- `EndWithSubject`(now_ms: u64)
+
+## Signals
+
+## Effects
+- `Issued`(grant_id: String, expires_at_ms: u64)
+- `Expired`(grant_id: String, expires_at_ms: u64, observed_at_ms: u64)
+- `Revoked`(grant_id: String, observed_at_ms: u64)
+- `UseAdmitted`(grant_id: String)
+- `UseRefused`(grant_id: String, reason: ToolGrantUseRefusal)
+- `IssueRefused`(reason: ToolGrantIssueRefusal)
+- `RunEnded`(grant_id: String, observed_at_ms: u64)
+
+## Invariants
+- `unissued_is_empty`
+- `issued_window_is_nonempty`
+- `active_has_no_end`
+- `ended_grants_record_their_end`
+- `expiry_never_precedes_its_deadline`
+- `revocation_precedes_the_deadline`
+- `run_ended_records_its_end`
+- `run_scope_set_only_by_issue`
+
+## Transitions
+### `Issue`
+- From: `Unissued`
+- On: `Issue`(grant_id, now_ms, expires_at_ms, max_lifetime_ms, run_scope)
+- Guards:
+  - `named_grant`
+  - `window_is_not_past_or_empty`
+  - `window_within_maximum_lifetime`
+- Emits: `Issued`
+- To: `Active`
+
+### `IssueRefusedWindow`
+- From: `Unissued`
+- On: `Issue`(grant_id, now_ms, expires_at_ms, max_lifetime_ms, run_scope)
+- Guards:
+  - `window_is_past_empty_or_overlong`
+- Emits: `IssueRefused`
+- To: `Unissued`
+
+### `IssueRefusedIssuedActive`
+- From: `Active`
+- On: `Issue`(grant_id, now_ms, expires_at_ms, max_lifetime_ms, run_scope)
+- Emits: `IssueRefused`
+- To: `Active`
+
+### `IssueRefusedIssuedExpired`
+- From: `Expired`
+- On: `Issue`(grant_id, now_ms, expires_at_ms, max_lifetime_ms, run_scope)
+- Emits: `IssueRefused`
+- To: `Expired`
+
+### `IssueRefusedIssuedRevoked`
+- From: `Revoked`
+- On: `Issue`(grant_id, now_ms, expires_at_ms, max_lifetime_ms, run_scope)
+- Emits: `IssueRefused`
+- To: `Revoked`
+
+### `ExpireDue`
+- From: `Active`
+- On: `Expire`(now_ms)
+- Guards:
+  - `deadline_reached`
+- Emits: `Expired`
+- To: `Expired`
+
+### `ExpireNotDue`
+- From: `Active`
+- On: `Expire`(now_ms)
+- Guards:
+  - `deadline_not_reached`
+- To: `Active`
+
+### `ExpireSettledExpired`
+- From: `Expired`
+- On: `Expire`(now_ms)
+- To: `Expired`
+
+### `ExpireSettledRevoked`
+- From: `Revoked`
+- On: `Expire`(now_ms)
+- To: `Revoked`
+
+### `RevokeActive`
+- From: `Active`
+- On: `Revoke`(now_ms)
+- Guards:
+  - `deadline_not_reached`
+- Emits: `Revoked`
+- To: `Revoked`
+
+### `RevokeAfterDeadline`
+- From: `Active`
+- On: `Revoke`(now_ms)
+- Guards:
+  - `deadline_reached`
+- Emits: `Expired`
+- To: `Expired`
+
+### `RevokeSettledExpired`
+- From: `Expired`
+- On: `Revoke`(now_ms)
+- To: `Expired`
+
+### `RevokeSettledRevoked`
+- From: `Revoked`
+- On: `Revoke`(now_ms)
+- To: `Revoked`
+
+### `EndWithSubjectActive`
+- From: `Active`
+- On: `EndWithSubject`(now_ms)
+- Guards:
+  - `deadline_not_reached`
+- Emits: `Revoked`
+- To: `Revoked`
+
+### `EndWithSubjectAfterDeadline`
+- From: `Active`
+- On: `EndWithSubject`(now_ms)
+- Guards:
+  - `deadline_reached`
+- Emits: `Expired`
+- To: `Expired`
+
+### `EndWithSubjectSettledExpired`
+- From: `Expired`
+- On: `EndWithSubject`(now_ms)
+- To: `Expired`
+
+### `EndWithSubjectSettledRevoked`
+- From: `Revoked`
+- On: `EndWithSubject`(now_ms)
+- To: `Revoked`
+
+### `AdmitLive`
+- From: `Active`
+- On: `AdmitUse`(now_ms, run_id)
+- Guards:
+  - `deadline_not_reached`
+  - `use_within_scope`
+- Emits: `UseAdmitted`
+- To: `Active`
+
+### `AdmitDue`
+- From: `Active`
+- On: `AdmitUse`(now_ms, run_id)
+- Guards:
+  - `deadline_reached`
+- Emits: `Expired`, `UseRefused`
+- To: `Expired`
+
+### `AdmitEndedExpired`
+- From: `Expired`
+- On: `AdmitUse`(now_ms, run_id)
+- Emits: `UseRefused`
+- To: `Expired`
+
+### `AdmitEndedRevoked`
+- From: `Revoked`
+- On: `AdmitUse`(now_ms, run_id)
+- Guards:
+  - `revoked_by_an_operator`
+- Emits: `UseRefused`
+- To: `Revoked`
+
+### `AdmitEndedRunEnded`
+- From: `RunEnded`
+- On: `AdmitUse`(now_ms, run_id)
+- Emits: `UseRefused`
+- To: `RunEnded`
+
+### `AdmitOtherRun`
+- From: `Active`
+- On: `AdmitUse`(now_ms, run_id)
+- Guards:
+  - `deadline_not_reached`
+  - `use_from_another_run`
+- Emits: `RunEnded`, `UseRefused`
+- To: `RunEnded`
+
+### `AdmitOutsideRun`
+- From: `Active`
+- On: `AdmitUse`(now_ms, run_id)
+- Guards:
+  - `deadline_not_reached`
+  - `use_outside_any_run`
+- Emits: `UseRefused`
+- To: `Active`
+
+### `EndRunMatching`
+- From: `Active`
+- On: `EndRun`(run_id, now_ms)
+- Guards:
+  - `deadline_not_reached`
+  - `own_run`
+- Emits: `RunEnded`
+- To: `RunEnded`
+
+### `EndRunAfterDeadline`
+- From: `Active`
+- On: `EndRun`(run_id, now_ms)
+- Guards:
+  - `deadline_reached`
+  - `own_run`
+- Emits: `Expired`
+- To: `Expired`
+
+### `EndRunOther`
+- From: `Active`
+- On: `EndRun`(run_id, now_ms)
+- Guards:
+  - `another_run`
+- To: `Active`
+
+### `EndRunSettledExpired`
+- From: `Expired`
+- On: `EndRun`(run_id, now_ms)
+- To: `Expired`
+
+### `EndRunSettledRevoked`
+- From: `Revoked`
+- On: `EndRun`(run_id, now_ms)
+- To: `Revoked`
+
+### `EndRunSettledRunEnded`
+- From: `RunEnded`
+- On: `EndRun`(run_id, now_ms)
+- To: `RunEnded`
+
+### `IssueRefusedIssuedRunEnded`
+- From: `RunEnded`
+- On: `Issue`(grant_id, now_ms, expires_at_ms, max_lifetime_ms, run_scope)
+- Emits: `IssueRefused`
+- To: `RunEnded`
+
+### `ExpireSettledRunEnded`
+- From: `RunEnded`
+- On: `Expire`(now_ms)
+- To: `RunEnded`
+
+### `RevokeSettledRunEnded`
+- From: `RunEnded`
+- On: `Revoke`(now_ms)
+- To: `RunEnded`
+
+### `AdmitEndedWithSubject`
+- From: `Revoked`
+- On: `AdmitUse`(now_ms, run_id)
+- Guards:
+  - `ended_with_its_subject`
+- Emits: `UseRefused`
+- To: `Revoked`
+
+### `EndWithSubjectSettledRunEnded`
+- From: `RunEnded`
+- On: `EndWithSubject`(now_ms)
+- To: `RunEnded`
+
+## Coverage
+### Code Anchors
+- `tool_grant_lifecycle` (machine `ToolGrantLifecycleMachine`): `crates/meerkat-runtime/src/tool_grant/dsl.rs` — ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, the end of the run a run-scoped grant was issued for, its end with its subject (revoked, end reason SubjectEnded, its uses refused as ended with it), and the admission of each use; expired, revoked and run-ended grants are terminal
+- `tool_grant_service` (machine `ToolGrantLifecycleMachine`): `crates/meerkat-runtime/src/tool_grant/service.rs` — ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, the end of a subject's grants with it (a grant ended with its subject explains no refusal), settlement on list, audit read and timer fire, a boundary's open set in its run, each gated dispatch's admission in its run, and the end of a run
+
+### Scenarios
+- `tool_grant_issue_window` — tool_grant_lifecycle_machine.rs::issue_refuses_a_past_empty_or_overlong_window issues exactly the windows that are non-empty, in the future and within the maximum lifetime, and refuses a second issue of an issued record in every issued phase
+- `tool_grant_use_admission_at_the_deadline` — tool_grant_lifecycle_machine.rs::use_one_millisecond_before_the_deadline_is_admitted_and_at_the_deadline_expires_and_is_refused admits a use one millisecond before the deadline, expires the grant at the first use at the deadline and refuses it, and refuses every later use
+- `tool_grant_deadline_driver` — tool_grant_lifecycle_machine.rs::expire_before_the_deadline_is_a_byte_identical_noop leaves an early timer fire byte-identical and expires the grant at its deadline, and settled expired grants ignore later expiry observations; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended drives Expire into a revoked grant as a byte-identical self-loop
+- `tool_grant_revocation` — tool_grant_lifecycle_machine.rs::revoke_after_the_deadline_records_expiry_not_revocation revokes a live grant before its deadline, records expiry for a revoke at or after the deadline, and leaves settled grants unchanged; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended refuses a use of the revoked grant
+- `tool_grant_subject_end` — tool_grant_lifecycle_machine.rs::a_grant_ended_with_its_subject_refuses_its_use_as_ended_with_it ends a live grant with its subject before its deadline as revoked with the end reason SubjectEnded, refuses every later use as ended with its subject, records the expiry for an end at or after the deadline, and leaves ended grants unchanged; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended drives the end into every phase
+- `tool_grant_terminal_latch` — tool_grant_lifecycle_machine.rs::terminal_grants_refuse_use_after_a_clock_rollback and recover_from_state_rejects_torn_rows keep expired and revoked grants terminal under a rolled-back clock and refuse a recovered row that breaks any invariant
+- `tool_grant_run_scope_admission` — tool_grant_run_scope.rs::machine_admits_a_run_scoped_use_only_in_its_run admits a run-scoped grant's use of its own run only, refuses a use outside any run without ending the grant, ends the grant at a use of another run, and admits any use of a window grant
+- `tool_grant_run_end` — tool_grant_run_scope.rs::machine_ends_a_grant_only_at_the_end_of_its_own_run ends a run-scoped grant at the end of its own run before the deadline, records the expiry for a run end at or after the deadline, and leaves a window grant and a grant of another run unchanged
+- `tool_grant_run_ended_latch` — tool_grant_run_scope.rs::a_run_ended_grant_is_terminal_and_latched and recover_from_state_rejects_torn_run_scope_rows keep a run-ended grant terminal under every input and a rolled-back clock, settle a run end on every ended grant, and refuse a recovered row with a torn run scope
+- `tool_grant_run_ended_subject_end` — tool_grant_lifecycle_machine.rs::every_command_class_in_every_phase_is_total_and_only_mutates_where_intended ends the subject of a grant whose run already ended and leaves it unchanged, as an ended grant settles every other input

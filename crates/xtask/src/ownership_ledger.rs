@@ -2134,11 +2134,13 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 trait_name: "AuthLeaseHandle".into(),
                 method_names: vec![
                     "acquire_lease",
+                    "publish_source_credential",
                     "mark_expiring",
                     "begin_refresh",
                     "complete_refresh",
                     "refresh_failed",
                     "mark_reauth_required",
+                    "mark_publication_refused",
                     "release_lease",
                     "snapshot",
                 ]
@@ -3929,6 +3931,21 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "crates/meerkat-runtime/src/handles/auth_lease.rs",
+            "publish_source_credential",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine ResolveSourceCredentialPublication verdict, then the Acquire transition it asks for",
+            &[
+                "a credential value read from a source is acquired, with its fingerprint recorded on the lease, only when the machine's classifier answers publish; a refused or logged-out value is never acquired again",
+            ],
+            &[
+                "the verdict and the acquire it asks for run under one registry lock; every write goes through AuthMachineState::transition",
+            ],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
             "mark_expiring",
             BoundaryKind::TraitImpl,
             "RuntimeAuthLeaseHandle",
@@ -3983,6 +4000,19 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["machines"],
             "AuthMachine MarkReauthRequired transition",
             &["any known phase transitions to ReauthRequired"],
+            &["every phase write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
+            "mark_publication_refused",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine MarkPublicationRefused transitions",
+            &[
+                "a refusal withdraws the lease to ReauthRequired only while it carries the publication the refusal names (credential generation and recorded fingerprint); any other refusal changes nothing",
+            ],
             &["every phase write goes through AuthMachineState::transition"],
             EntryStatus::Closed,
         ),

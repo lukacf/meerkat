@@ -429,6 +429,7 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -438,6 +439,7 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -472,6 +474,7 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -766,8 +769,14 @@ async fn exercise_queued(server: &Server, barriers: Arc<QueueBarriers>) {
         .unwrap();
     assert_eq!(first_done.state.authority_contributors.len(), 1);
     assert_eq!(queued_done.state.authority_contributors.len(), 1);
-    assert!(first_done.state.authority_contributors[0].association() == &first_claims);
-    assert!(queued_done.state.authority_contributors[0].association() == &queued_claims);
+    assert_eq!(
+        first_done.state.authority_contributors[0].association(),
+        &first_claims
+    );
+    assert_eq!(
+        queued_done.state.authority_contributors[0].association(),
+        &queued_claims
+    );
     assert_eq!(first_done.seed.last_run_id.as_ref(), Some(&first_run));
     assert_eq!(queued_done.seed.last_run_id.as_ref(), Some(&queued_run));
     assert_originals(
@@ -832,7 +841,7 @@ async fn adr_a3_queued_work_survives_local_permission_refusal() {
     let barriers = Arc::new(QueueBarriers::default());
     let mut server = start_server(barriers.clone()).await;
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_queued(&server, barriers),
     ))
     .catch_unwind()

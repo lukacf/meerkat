@@ -3568,7 +3568,7 @@ mod tests {
             Duration::from_secs(30),
         );
         Arc::new(if routed {
-            review.with_human_consent(Arc::new(NoConsentRoute), Duration::from_secs(60))
+            review.with_human_consent(Arc::new(NoConsentRoute), Duration::from_mins(1))
         } else {
             review
         })
@@ -3768,6 +3768,50 @@ mod tests {
             first.session_owner_loss_proof(&session_id).await.is_some(),
             "the first issuing owner recorded the settlement"
         );
+    }
+
+    /// The executor contract for the runtime-backed (persistent) executor: a
+    /// boundary cancel the runtime loop applies while no run is active is a
+    /// no-op, so the session keeps serving input.
+    #[tokio::test]
+    async fn persistent_runtime_executor_idle_boundary_cancel_conformance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let captured = CapturedControllerClient::default();
+        let (service, adapter) = build_controller_setup_service(
+            &temp,
+            true,
+            Arc::clone(&calls),
+            Arc::clone(&constructions),
+            Arc::clone(&captured),
+        )
+        .await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let attachment = attach_empty_controller_runtime(&service, &adapter, &session_id).await;
+        let admission = service
+            .reserve_create_session_admission()
+            .await
+            .expect("capacity");
+        Box::pin(
+            materialize_attached_session_controller_with_reserved_admission(
+                &service,
+                &adapter,
+                attachment,
+                session,
+                make_request(SessionBuildOptions::default()),
+                admission,
+            ),
+        )
+        .await
+        .expect("materialize the session's actor");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &adapter,
+            &session_id,
+        )
+        .await;
+        expect_unregister_completion(&adapter, &session_id).await;
     }
 
     async fn expect_prompt_completion(
@@ -5443,6 +5487,10 @@ mod tests {
         #[async_trait::async_trait]
         impl SessionAgentBuilder for DrainBuilder {
             type Agent = DrainAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                meerkat_core::SessionCommsIdentityRoot::NotKept
+            }
 
             async fn build_agent(
                 &self,

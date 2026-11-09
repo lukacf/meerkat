@@ -1629,6 +1629,7 @@ impl MeerkatMachine {
         mcp_observation: meerkat_core::McpObservationSlot,
     ) -> Result<meerkat_core::SessionRuntimeBindings, RuntimeDriverError> {
         let compaction_runtime_epoch_id = dsl::RuntimeEpochId::from_domain(&epoch_id);
+        let tool_grants = self.session_tool_grants(&session_id);
         let shared_handle_authority = Arc::new(
             crate::handles::HandleDslAuthority::from_shared_with_runtime_gates(
                 Arc::clone(&dsl_authority_shared),
@@ -1711,7 +1712,8 @@ impl MeerkatMachine {
             runtime_authority,
         )
         .__with_tool_surface_gate(tool_surface_gate)
-        .__with_mcp_observation_slot(mcp_observation);
+        .__with_mcp_observation_slot(mcp_observation)
+        .__with_tool_grants(tool_grants);
         Ok(match configured_mcp_attachment {
             Some(authority) => bindings.__with_configured_mcp_attachment(authority),
             None => bindings,

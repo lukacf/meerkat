@@ -26,7 +26,8 @@ use meerkat_auth_core::resolver::{
     prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
 };
 use meerkat_auth_core::resolver::{
-    finalize_auth_metadata, resolve_external_authorizer, resolve_simple_secret,
+    finalize_auth_metadata, observe_simple_secret_readiness, resolve_external_authorizer,
+    resolve_simple_secret,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::{
@@ -49,7 +50,9 @@ use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
-use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
+use meerkat_llm_core::provider_runtime::runtime::{
+    AccountModelLookup, CredentialReadiness, ProviderRuntime,
+};
 
 use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
 
@@ -87,6 +90,28 @@ fn backend_supports_automatic_cache_control(backend: AnthropicBackendKind) -> bo
         // Amazon Bedrock's Anthropic Messages backend and the GitHub Copilot
         // route accept manual breakpoints but reject the request-wide
         // automatic policy.
+        AnthropicBackendKind::Bedrock | AnthropicBackendKind::Copilot => false,
+    }
+}
+
+/// Whether a backend documents Anthropic's thinking-block binding controls
+/// (`thinking.block_binding` with the `thinking-binding-controls-2026-08-01`
+/// beta).
+///
+/// Exhaustive on purpose, like the cache capability: a new
+/// `AnthropicBackendKind` is classified here explicitly. The preserved-thinking
+/// page lists the Claude API, Claude Platform on AWS, Claude Models on Google
+/// Cloud (Anthropic managed and Google managed) and Microsoft Foundry; it does
+/// not list Amazon Bedrock, and the GitHub Copilot route is an unverified
+/// gateway, so neither sends the control. Their requests replay the thinking
+/// of the turn in progress only, and one refused with a 400 while it replays
+/// thinking is sent once more without it; nothing new reaches either.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+fn backend_supports_thinking_binding_controls(backend: AnthropicBackendKind) -> bool {
+    match backend {
+        AnthropicBackendKind::AnthropicApi
+        | AnthropicBackendKind::Vertex
+        | AnthropicBackendKind::Foundry => true,
         AnthropicBackendKind::Bedrock | AnthropicBackendKind::Copilot => false,
     }
 }
@@ -216,8 +241,10 @@ impl ClaudeAiOAuthAuthorizer {
         cached: &ManagedClaudeAiCredential,
         current: &meerkat_core::handles::AuthLeaseSnapshot,
     ) -> bool {
+        // The cached record's marker names the publication with the marker
+        // generation the lease records for it.
         current.credential_present
-            && cached.publication.generation == Some(current.generation)
+            && cached.publication.generation == Some(current.marker_generation())
             && Some(cached.publication.expires_at) == current.expires_at
             && cached.publication.credential_published_at_millis
                 == current.credential_published_at_millis
@@ -282,10 +309,10 @@ impl ClaudeAiOAuthAuthorizer {
                 loaded.release_prelock_lifecycle_guard();
                 let env = self.env.clone();
                 let binding = self.binding.clone();
-                let prepare: oauth::TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: oauth::TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         meerkat_auth_core::resolver::prepare_existing_managed_store_oauth_refresh_under_lock(
-                            &env, &binding, loaded, locked, mode,
+                            fence, &env, &binding, loaded, locked, mode,
                         ).await.map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                     })
                 });
@@ -394,6 +421,22 @@ fn anthropic_oauth_refresh_error(
     } else {
         format!("{error}{authmachine_failure}")
     };
+    // AuthMachine's verdict on a refresh failure, when it issued one: a
+    // failure that clears on its own is a credential source that cannot
+    // answer now, one that needs a new sign-in a reauthorization. The
+    // verdict is read, never derived from the provider's answer here.
+    if let oauth::AnthropicOAuthError::Refresh(refresh) = &error
+        && let Some(verdict) = refresh.refresh_failure_disposition()
+    {
+        return ProviderAuthError::Auth(match verdict {
+            meerkat_core::auth::RefreshFailureDisposition::Transient => {
+                AuthError::SourceUnavailable { reason: detail }
+            }
+            meerkat_core::auth::RefreshFailureDisposition::ReauthRequired => {
+                AuthError::UserReauthRequired
+            }
+        });
+    }
     if authmachine_failure.is_empty() {
         match error {
             oauth::AnthropicOAuthError::InteractiveLoginRequired
@@ -432,6 +475,42 @@ impl AnthropicProviderRuntime {
 impl ProviderRuntime for AnthropicProviderRuntime {
     fn provider_id(&self) -> Provider {
         Provider::Anthropic
+    }
+
+    /// The operator GitHub token of a Copilot route is observed read-only
+    /// through the source table [`resolve_simple_secret`] resolves, without a
+    /// network request. Every other method is resolved at open.
+    async fn observe_credential_readiness(
+        &self,
+        binding: &ValidatedBinding,
+        env: &ResolverEnvironment,
+    ) -> Result<CredentialReadiness, ProviderAuthError> {
+        match binding.auth() {
+            NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::GitHubCopilotToken) => Ok(
+                observe_simple_secret_readiness(&binding.auth_profile().source, env, binding).await,
+            ),
+            NormalizedAuthMethod::Anthropic(_) => Ok(CredentialReadiness::MaterializedAtOpen),
+            _ => Err(ProviderAuthError::Binding(
+                ProviderBindingError::ProviderMismatch,
+            )),
+        }
+    }
+
+    /// A GitHub Copilot route's account states the models it serves: the
+    /// account's model list answers for a model the model registry does not
+    /// define. No other backend states an account model list.
+    fn account_model(&self, connection: &ResolvedConnection, model: &str) -> AccountModelLookup {
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        if matches!(
+            connection.backend,
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::Copilot)
+        ) && let Some(copilot) = self.copilot.as_ref()
+        {
+            return copilot.account_model(connection, model);
+        }
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        let _ = (connection, model);
+        AccountModelLookup::NotReported
     }
 
     async fn resolve_binding(
@@ -480,7 +559,9 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
-            AnthropicAuthMethod::GitHubCopilotOauth => {
+            // Both Copilot methods resolve through the shared Copilot runtime,
+            // which owns the device sign-in and the operator-token modes.
+            AnthropicAuthMethod::GitHubCopilotOauth | AnthropicAuthMethod::GitHubCopilotToken => {
                 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
                 {
                     let runtime = self.copilot.as_ref().ok_or_else(|| {
@@ -712,9 +793,10 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                     let prepare_env = env.clone();
                                     let prepare_binding = binding.clone();
                                     let prepare: oauth::TokenPrepareFn = Box::new(
-                                        move |locked_baseline, mode| {
+                                        move |fence, locked_baseline, mode| {
                                             Box::pin(async move {
                                                 prepare_managed_store_oauth_refresh_under_lock(
+                                                    fence,
                                                     &prepare_env,
                                                     &prepare_binding,
                                                     managed,
@@ -885,6 +967,11 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         .automatic_cache_control_supported(
                             backend_supports_automatic_cache_control(AnthropicBackendKind::Copilot),
                         )
+                        .thinking_binding_controls_supported(
+                            backend_supports_thinking_binding_controls(
+                                AnthropicBackendKind::Copilot,
+                            ),
+                        )
                         .build()
                         .map_err(ProviderClientError::from)?;
                     Ok(Arc::new(client) as Arc<dyn LlmClient>)
@@ -975,6 +1062,9 @@ fn build_anthropic_client(
             .automatic_cache_control_supported(backend_supports_automatic_cache_control(
                 backend_kind,
             ))
+            .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
+                backend_kind,
+            ))
             .build()
             .map_err(ProviderClientError::from)?;
         return Ok(client);
@@ -998,6 +1088,9 @@ fn build_anthropic_client(
             let mut builder = crate::AnthropicClient::builder(secret)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
                     backend_kind,
                 ));
             if let Some(url) = &connection.backend_profile.base_url {
@@ -1031,6 +1124,9 @@ fn build_anthropic_client(
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
                     backend_kind,
                 ))
                 .build()
@@ -1067,6 +1163,9 @@ fn build_anthropic_client(
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
                     backend_kind,
                 ))
                 .build()
@@ -1136,6 +1235,62 @@ mod tests {
     use super::*;
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
     use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy};
+
+    /// T16: the operator GitHub token of a Copilot route reports readiness
+    /// from its source, with no network request: missing without any of its
+    /// variables, ready with one.
+    #[tokio::test]
+    async fn github_copilot_token_readiness_reads_its_source() {
+        let auth_binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::global(),
+            binding: meerkat_core::BindingId::parse("copilot_anthropic").expect("valid binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let binding = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding,
+            &meerkat_core::BackendProfile {
+                id: "copilot_anthropic".into(),
+                provider: Provider::Anthropic,
+                backend_kind: "copilot".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            },
+            &meerkat_core::AuthProfile {
+                id: "copilot_anthropic".into(),
+                provider: Provider::Anthropic,
+                auth_method: "github_copilot_token".into(),
+                source: meerkat_core::CredentialSourceSpec::Env {
+                    env: "COPILOT_GITHUB_TOKEN".into(),
+                    fallback: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+            &meerkat_core::BindingPolicy::default(),
+        )
+        .expect("a valid Copilot token route");
+        let runtime = AnthropicProviderRuntime::default();
+
+        assert_eq!(
+            runtime
+                .observe_credential_readiness(&binding, &ResolverEnvironment::testing())
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Missing
+        );
+        let present = ResolverEnvironment::testing().with_env_lookup(|name| {
+            (name == "COPILOT_GITHUB_TOKEN").then(|| "github_pat_ready".to_string())
+        });
+        assert_eq!(
+            runtime
+                .observe_credential_readiness(&binding, &present)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Ready
+        );
+    }
     use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
     use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
@@ -1166,15 +1321,20 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                self.inner.save(key, tokens).await
+                self.inner.save(fence, key, tokens).await
             }
-            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+            async fn clear(
+                &self,
+                fence: &meerkat_core::AdmissionGuard,
+                key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                self.inner.clear(key).await
+                self.inner.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1262,7 +1422,10 @@ mod tests {
                 &transition,
             )
             .unwrap();
-            token_store.save(&key, &tokens).await.unwrap();
+            token_store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+                .await
+                .unwrap();
             drop(guard);
             let mut env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(persistence.clone())
@@ -1437,6 +1600,22 @@ mod tests {
         );
     }
 
+    /// Every backend is classified for the thinking-binding controls: the
+    /// backends the preserved-thinking page lists send them; Amazon Bedrock
+    /// (not listed) and the GitHub Copilot route (no live probe yet) do not.
+    #[test]
+    fn thinking_binding_controls_follow_the_documented_platforms() {
+        let unsupported: Vec<AnthropicBackendKind> = AnthropicBackendKind::ALL
+            .iter()
+            .copied()
+            .filter(|backend| !backend_supports_thinking_binding_controls(*backend))
+            .collect();
+        assert_eq!(
+            unsupported,
+            vec![AnthropicBackendKind::Bedrock, AnthropicBackendKind::Copilot]
+        );
+    }
+
     /// A resolved connection whose lease is an inline secret, which is what the
     /// API-key and Bedrock static-bearer paths receive from `resolve_binding`.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1517,6 +1696,60 @@ mod tests {
             bedrock_body.get("cache_control").is_none(),
             "Bedrock stays disabled by default: {bedrock_body}"
         );
+    }
+
+    /// The thinking-block binding control reaches the wire only through
+    /// backends whose documentation lists Anthropic's preserved thinking: the
+    /// Claude API, Claude Models on Google Cloud and Microsoft Foundry. The
+    /// preserved-thinking page does not list Amazon Bedrock, so a Bedrock
+    /// client sends no control and leaves omitted thinking omitted.
+    /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn thinking_binding_control_follows_the_documented_backends() {
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::LlmRequest;
+
+        let request = LlmRequest::new(
+            "claude-opus-5-5",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        for (backend, base_url, documented) in [
+            (AnthropicBackendKind::AnthropicApi, None, true),
+            (
+                AnthropicBackendKind::Vertex,
+                Some("https://us-east5-aiplatform.googleapis.com"),
+                true,
+            ),
+            (
+                AnthropicBackendKind::Foundry,
+                Some("https://example.services.ai.azure.com/anthropic"),
+                true,
+            ),
+            (
+                AnthropicBackendKind::Bedrock,
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+                false,
+            ),
+        ] {
+            let client = build_anthropic_client(inline_secret_connection(backend, base_url))
+                .unwrap_or_else(|error| panic!("{backend:?} client: {error}"));
+            let body = client
+                .build_request_body(&request)
+                .unwrap_or_else(|error| panic!("{backend:?} request body: {error}"));
+            if documented {
+                assert_eq!(
+                    body["thinking"],
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+                    }),
+                    "{backend:?}: {body}"
+                );
+            } else {
+                assert!(body.get("thinking").is_none(), "{backend:?}: {body}");
+            }
+        }
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]

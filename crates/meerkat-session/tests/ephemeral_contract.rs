@@ -321,6 +321,10 @@ impl MockAgentBuilder {
 impl SessionAgentBuilder for MockAgentBuilder {
     type Agent = MockAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -812,6 +816,10 @@ struct CompactionAgentBuilder {
 impl SessionAgentBuilder for CompactionAgentBuilder {
     type Agent = CompactionSessionAgent;
 
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -833,6 +841,10 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
 #[async_trait]
 impl SessionAgentBuilder for RealAgentBuilder {
     type Agent = RealSessionAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
 
     async fn build_agent(
         &self,
@@ -941,7 +953,7 @@ async fn predecessor_restrictions_fail_closed_without_a_record_and_never_wait_on
     gate.started.notified().await;
 
     let unrecorded = tokio::time::timeout(
-        std::time::Duration::from_secs(3600),
+        std::time::Duration::from_hours(1),
         service.predecessor_tool_restrictions(&worker),
     )
     .await
@@ -1013,19 +1025,16 @@ async fn session_map_is_not_held_across_a_command_parked_on_a_busy_turn() {
     );
 
     let child = tokio::time::timeout(
-        std::time::Duration::from_secs(3600),
+        std::time::Duration::from_hours(1),
         service.create_session(create_req_deferred("child")),
     )
     .await
     .expect("creating a child must not wait for the parent's turn to end")
     .expect("create child");
-    tokio::time::timeout(
-        std::time::Duration::from_secs(3600),
-        service.read(&bystander),
-    )
-    .await
-    .expect("reading another session must not wait for the parent's turn to end")
-    .expect("read bystander");
+    tokio::time::timeout(std::time::Duration::from_hours(1), service.read(&bystander))
+        .await
+        .expect("reading another session must not wait for the parent's turn to end")
+        .expect("read bystander");
     assert!(
         !parent_turn.is_finished(),
         "the parent's turn is still in flight"
@@ -1088,7 +1097,7 @@ async fn published_transcript_authority_answers_while_the_turn_is_held() {
     );
 
     let published = tokio::time::timeout(
-        std::time::Duration::from_secs(3600),
+        std::time::Duration::from_hours(1),
         service.observe_published_session_transcript_authority(&session),
     )
     .await

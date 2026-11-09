@@ -27,6 +27,7 @@ import type {
   LiveOpenResult,
   LiveStatusResult,
   MobBindHostResult,
+  MobForkMemberResult,
   MobHostStatus,
   MobMemberHistoryResult,
   MobRevokeHostResult,
@@ -47,8 +48,16 @@ import type {
   WireNonPortableResourceKind,
   WireReachability,
   MobStopMemberRunResult,
+  MobCompactMemberResult,
 } from "./generated/types.js";
-import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
+import type { MeerkatClient, MobMemberEventsOptions, MobMemberLiveOpenOptions } from "./client.js";
+import type {
+  InstructionTarget,
+  InstructionWriteOptions,
+  MobInstructionStatus,
+  MobInstructionStatusOptions,
+  MobInstructionWriteResult,
+} from "./instructions.js";
 import type { Usage } from "./events.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -174,9 +183,10 @@ export interface MobMemberSnapshot {
   /**
    * Set when this read did not observe the member's session: `outputPreview`
    * and `tokensUsed` are then missing, not an empty preview and a zero count.
-   * Absent when they are observations.
+   * Absent when they are observations. A reason this SDK does not know reads
+   * as `{ unknown: <value> }`.
    */
-  previewUnavailable?: WireMemberPreviewUnavailable;
+  previewUnavailable?: WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown;
   /**
    * Set when the member's host refused its restored registration: the hook
    * call that refused it. The member stays broken until an explicit repair.
@@ -196,6 +206,15 @@ export interface MobMemberSnapshot {
  * refused.
  */
 export interface MobMemberCustodyUnknown {
+  unknown: string;
+}
+
+/**
+ * A preview-unavailable reason this SDK does not know, as the server sent
+ * it: the vocabulary may grow, and an unknown reason is surfaced, not
+ * refused.
+ */
+export interface MobMemberPreviewUnavailableUnknown {
   unknown: string;
 }
 
@@ -224,7 +243,7 @@ export interface MobKickoffMemberSnapshot {
   isFinal: boolean;
   peerConnectivity?: MobPeerConnectivity;
   /** As on {@link MobMemberSnapshot.previewUnavailable}. */
-  previewUnavailable?: WireMemberPreviewUnavailable;
+  previewUnavailable?: WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown;
   /** As on {@link MobMemberSnapshot.registrationRefusal}. */
   registrationRefusal?: WireMemberRegistrationHookCall;
   /** As on {@link MobMemberSnapshot.custodyDeferred}. */
@@ -292,6 +311,20 @@ export interface MobForkHelperOptions extends MobHelperOptions {
   forkContext?: Record<string, unknown>;
 }
 
+/** Options for a member fork at a message boundary (`mob/fork_member`). */
+export interface MobForkMemberOptions {
+  /**
+   * Where the copied prefix ends, as on `session/fork_at`: the new member's
+   * transcript is the source's messages before this index. Absent takes the
+   * source's committed end.
+   */
+  messageIndex?: number;
+  /** The new member's profile. Absent takes the source member's. */
+  profile?: string;
+  /** The new member's runtime mode. Absent takes the source member's. */
+  runtimeMode?: WireMobRuntimeMode;
+}
+
 export class Member {
   private readonly client: MeerkatClient;
   readonly mobId: string;
@@ -311,8 +344,8 @@ export class Member {
     return this.client.sendMobMemberContent(this.mobId, this.agentIdentity, content, options);
   }
 
-  async events(): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity);
+  async events(options?: MobMemberEventsOptions): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity, options);
   }
 }
 
@@ -434,6 +467,14 @@ export class Mob {
   }
 
   /**
+   * Ask a live member's next compaction check to compact. No respawn and no
+   * threshold change; a dormant member is refused, never woken.
+   */
+  async compactMember(agentIdentity: string): Promise<MobCompactMemberResult> {
+    return this.client.compactMobMember(this.mobId, agentIdentity);
+  }
+
+  /**
    * Open a live realtime channel on a member. The result carries the
    * owning host's bootstrap (a WebSocket URL and token, or a WebRTC token
    * whose offer is answered with `liveWebrtcAnswer`) VERBATIM; treat it as
@@ -522,6 +563,15 @@ export class Mob {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);
   }
 
+  /** Fork a member's session at a message boundary into a new member. */
+  async forkMember(
+    sourceMemberId: string,
+    agentIdentity: string,
+    options?: MobForkMemberOptions,
+  ): Promise<MobForkMemberResult> {
+    return this.client.forkMobMember(this.mobId, sourceMemberId, agentIdentity, options);
+  }
+
   async wire(member: string, peer: MobPeerTarget): Promise<void> {
     await this.client.wireMobMembers(this.mobId, member, peer);
   }
@@ -552,6 +602,43 @@ export class Mob {
     return this.client.appendMobSystemContext(this.mobId, agentIdentity, text, options);
   }
 
+  /**
+   * Write one operator instruction for the members `target` selects;
+   * delivery to them is asynchronous.
+   */
+  async setInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target: InstructionTarget,
+    options?: InstructionWriteOptions,
+  ): Promise<MobInstructionWriteResult> {
+    return this.client.setMobInstruction(
+      this.mobId,
+      namespace,
+      key,
+      revision,
+      body,
+      target,
+      options,
+    );
+  }
+
+  /** Revoke one operator instruction at a higher revision; the record keeps its target. */
+  async revokeInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<MobInstructionWriteResult> {
+    return this.client.revokeMobInstruction(this.mobId, namespace, key, revision);
+  }
+
+  /** Read the mob's operator-instruction records and one page of members, without waking a member. */
+  async instructionStatus(options?: MobInstructionStatusOptions): Promise<MobInstructionStatus> {
+    return this.client.mobInstructionStatus(this.mobId, options);
+  }
+
   async listFlows(): Promise<string[]> {
     return this.client.listMobFlows(this.mobId);
   }
@@ -579,8 +666,11 @@ export class Mob {
     await this.client.cancelMobFlow(this.mobId, runId);
   }
 
-  async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity);
+  async subscribeMemberEvents(
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity, options);
   }
 
   async subscribeEvents(): Promise<EventSubscription<AttributedMobEvent>> {

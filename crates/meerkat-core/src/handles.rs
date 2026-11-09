@@ -745,6 +745,60 @@ pub struct OAuthLoginCredentialFacts {
     pub refresh_allowed: bool,
 }
 
+/// Opaque fingerprint of a credential value: equal values give equal
+/// fingerprints, and a fingerprint does not give the value back.
+///
+/// A publisher that re-reads its credential from a source hands AuthMachine
+/// the fingerprint of the value it read
+/// ([`AuthLeaseHandle::publish_source_credential`]), so the machine can tell a
+/// new value from the one the lease already carries (refused or logged out
+/// included) without anyone keeping a copy of the value. In memory only: it
+/// is never serialized, has no `Display`, and its `Debug` is redacted.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CredentialFingerprint([u8; 32]);
+
+impl CredentialFingerprint {
+    /// The SHA-256 fingerprint of `secret`.
+    #[must_use]
+    pub fn of_secret(secret: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        Self(Sha256::digest(secret.as_bytes()).into())
+    }
+
+    /// The opaque value AuthMachine records and compares (the digest as
+    /// lowercase hex). It is the generated machine's input encoding, never a
+    /// rendering: nothing logs or persists it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn machine_material(&self) -> String {
+        use std::fmt::Write as _;
+        let mut material = String::with_capacity(self.0.len() * 2);
+        for byte in self.0 {
+            let _ = write!(material, "{byte:02x}");
+        }
+        material
+    }
+}
+
+impl std::fmt::Debug for CredentialFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CredentialFingerprint(<redacted>)")
+    }
+}
+
+/// What [`AuthLeaseHandle::publish_source_credential`] did, as the
+/// AuthMachine's source-credential publication classifier decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCredentialPublication {
+    /// The machine answered `Publish` and the lease now carries the value,
+    /// under a new credential generation.
+    Published,
+    /// The machine answered `AlreadyPublished`: the lease's current
+    /// publication carries the value as it is (valid, refused or logged
+    /// out), and nothing changed.
+    AlreadyPublished,
+}
+
 /// Typed classification of why a DSL transition was rejected.
 ///
 /// Emitted by the generated kernel's `apply` / `apply_signal` methods and
@@ -1495,6 +1549,22 @@ pub trait TurnStateHandle: Send + Sync {
         let effects = self.apply_turn_input(input)?;
         Ok((effects, self.turn_phase()))
     }
+
+    /// Consume a host's compaction request at the compaction check of
+    /// `run_id`: `Ok(true)` when the authority held one and this check
+    /// consumed it, so the check compacts without asking the compactor's
+    /// trigger, or, with nothing to compact, skips and says so
+    /// ([`crate::event::AgentEvent::RequestedCompactionSkipped`]). The
+    /// runtime authority decides (MeerkatMachine
+    /// `ConsumeCompactionRequest`): only the current run's check, while its
+    /// turn calls the model, consumes a request; any other call leaves a held
+    /// request in place and answers `Ok(false)`. An agent without a
+    /// compactor never asks. The default answers `Ok(false)`: an authority
+    /// that no host can ask for a compaction holds no request.
+    fn consume_compaction_request(&self, run_id: RunId) -> Result<bool, DslTransitionError> {
+        let _ = run_id;
+        Ok(false)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1664,6 +1734,29 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
     fn register(&self, surface_id: String) -> Result<(), DslTransitionError>;
 
     fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
+
+    /// Stage `surface_id` as a grant-time live attach of a gated MCP server
+    /// stages it (`SurfaceStageGatedAdd`): the ordinary add stage, admitted
+    /// only for a server the build's scoped tool grant gate gates. It is the
+    /// live attach's check, and its caller lands with the live attach; a
+    /// build never calls it, since whether a build stages a gated server it
+    /// configures (lazy residency) is the factory's build-composition filter.
+    /// It answers the transition, whose `StageRecorded` effect names the
+    /// lineage the stager now holds.
+    ///
+    /// The default refuses: a handle without the generated machine's gate
+    /// cannot judge the server.
+    fn stage_gated_add(
+        &self,
+        surface_id: String,
+        now_ms: u64,
+    ) -> Result<ExternalToolSurfaceTransition, DslTransitionError> {
+        let _ = (surface_id, now_ms);
+        Err(DslTransitionError::no_matching(
+            "stage_gated_add",
+            "this surface handle has no tool grant gate",
+        ))
+    }
 
     fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
 
@@ -2118,6 +2211,22 @@ impl std::fmt::Display for LeaseKey {
 /// after credential rollback.
 /// `credential_published_at_millis` advances only when credential material is
 /// acquired/refreshed.
+/// `adopted_marker_generation` is the generation the durable lifecycle marker
+/// of the current publication carries when it is not `generation`: the lease
+/// took the publication from a durable record published at a lower generation
+/// (another process's login or refresh), or a rollback restored a publication
+/// the lease's own later publication had passed. `generation` never goes back,
+/// so the marker and the lease can name one publication by different
+/// generations. `None` when the marker carries `generation`, and while no
+/// credential is present. [`AuthLeaseSnapshot::marker_generation`] reads the
+/// one a marker carries.
+/// `released_publication_at_millis` is the publication time of the credential
+/// the lease last withdrew (a release or a clear while it held one), kept
+/// while no credential is present: a durable record published strictly after
+/// it is a later publication the lease takes (another process's login after
+/// this process's logout); one published at or before it is not. A release
+/// or clear with no credential held keeps it; a publication, or a restore with
+/// a credential, clears it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
@@ -2125,6 +2234,69 @@ pub struct AuthLeaseSnapshot {
     pub credential_present: bool,
     pub generation: u64,
     pub credential_published_at_millis: Option<u64>,
+    pub adopted_marker_generation: Option<u64>,
+    pub released_publication_at_millis: Option<u64>,
+}
+
+impl AuthLeaseSnapshot {
+    /// The generation the durable lifecycle marker of the current publication
+    /// carries: `adopted_marker_generation` when the lease records one, else
+    /// `generation`. A stored record's marker names this publication only with
+    /// this generation; a refusal or a [`CredentialLeasePublication`] names it
+    /// with `generation`.
+    pub fn marker_generation(&self) -> u64 {
+        self.adopted_marker_generation.unwrap_or(self.generation)
+    }
+}
+
+/// One publication of credential material to an auth lease, as a call
+/// records the credential it is served by: the lease, the generation that
+/// publication advanced it to, and its publication time
+/// ([`AuthLeaseSnapshot::credential_published_at_millis`]). The generation
+/// counts this process's publications: it advances with each one and never
+/// goes back, and a rollback after a failed durable write restores the
+/// material under the current generation. A lease that adopts a credential
+/// another process published (a newer durable row, after that process's own
+/// login or refresh) keeps the larger of the two generations, so two
+/// credentials can share a generation in one process. Their publication
+/// times tell them apart: the lease's durable lifecycle marker orders
+/// publications by that time. A recorded publication that differs from the
+/// lease's current one means the lease has published or adopted credential
+/// material since. Nonsecret: it names no credential value.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CredentialLeasePublication {
+    lease: LeaseKey,
+    generation: u64,
+    credential_published_at_millis: Option<u64>,
+}
+
+impl CredentialLeasePublication {
+    /// The publication `snapshot` of `lease` holds, or `None` when the lease
+    /// holds no credential material.
+    pub fn of(lease: LeaseKey, snapshot: &AuthLeaseSnapshot) -> Option<Self> {
+        snapshot.credential_present.then_some(Self {
+            lease,
+            generation: snapshot.generation,
+            credential_published_at_millis: snapshot.credential_published_at_millis,
+        })
+    }
+
+    /// The lease the credential was published to.
+    pub fn lease(&self) -> &LeaseKey {
+        &self.lease
+    }
+
+    /// The lease generation the publication advanced it to.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The publication time the lease records, in milliseconds since the
+    /// Unix epoch: for a credential the lease adopted from another process,
+    /// the time that process published it.
+    pub fn credential_published_at_millis(&self) -> Option<u64> {
+        self.credential_published_at_millis
+    }
 }
 
 /// Opaque token for restoring a previously captured auth lease snapshot.
@@ -2182,6 +2354,9 @@ impl AuthLeaseRestoreSnapshot {
 /// that published it without taking a later snapshot.
 /// `credential_published_at_millis` is the durable credential publication
 /// timestamp attached to acquired/refreshed credential material.
+/// `adopted_marker_generation` is the lease's
+/// [`AuthLeaseSnapshot::adopted_marker_generation`] after the transition: a
+/// durable marker written for it carries that generation when present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     lease_key: LeaseKey,
@@ -2189,6 +2364,7 @@ pub struct AuthLeaseTransition {
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 }
 
 impl AuthLeaseTransition {
@@ -2212,6 +2388,20 @@ impl AuthLeaseTransition {
         self.credential_published_at_millis
     }
 
+    /// The marker generation the lease records for the publication, when it
+    /// is not [`Self::generation`] (see
+    /// [`AuthLeaseSnapshot::adopted_marker_generation`]).
+    pub fn adopted_marker_generation(&self) -> Option<u64> {
+        self.adopted_marker_generation
+    }
+
+    /// The generation a durable lifecycle marker written for this transition
+    /// carries: [`Self::adopted_marker_generation`] when present, else
+    /// [`Self::generation`].
+    pub fn marker_generation(&self) -> u64 {
+        self.adopted_marker_generation.unwrap_or(self.generation)
+    }
+
     #[cfg_attr(
         any(not(meerkat_internal_generated_authority_bridge), test),
         allow(dead_code)
@@ -2222,6 +2412,7 @@ impl AuthLeaseTransition {
         expires_at: u64,
         generation: u64,
         credential_published_at_millis: Option<u64>,
+        adopted_marker_generation: Option<u64>,
     ) -> Self {
         Self {
             lease_key,
@@ -2229,6 +2420,7 @@ impl AuthLeaseTransition {
             expires_at,
             generation,
             credential_published_at_millis,
+            adopted_marker_generation,
         }
     }
 }
@@ -2305,7 +2497,7 @@ unsafe extern "Rust" {
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
-    "__meerkat_core_runtime_generated_auth_lease_transition_build_v1_",
+    "__meerkat_core_runtime_generated_auth_lease_transition_build_v2_",
     env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
 ))]
 pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
@@ -2315,6 +2507,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 ) -> Result<AuthLeaseTransition, String> {
     validate_runtime_generated_authority_bridge_token(token)?;
     Ok(
@@ -2324,6 +2517,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
             expires_at,
             generation,
             credential_published_at_millis,
+            adopted_marker_generation,
         ),
     )
 }
@@ -2606,6 +2800,79 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         Err(DslTransitionError::no_matching(
             "AuthLeaseHandle::resolve_oauth_login_credential_disposition",
             "classifying OAuth-login credential disposition requires generated AuthMachine authority",
+        ))
+    }
+
+    /// Publish a credential value the caller read from a source it re-reads
+    /// itself (an environment variable, a command, an external resolver),
+    /// unless the lease's current publication already carries it.
+    ///
+    /// Drives the per-credential AuthMachine's read-only
+    /// `ResolveSourceCredentialPublication` classifier with the value's
+    /// fingerprint and, on its `Publish` verdict, fires `Acquire` with that
+    /// fingerprint and `expires_at` (`u64::MAX` for none), as one step, so
+    /// callers sharing the lease publish one value once. The machine answers
+    /// `Publish` when nothing was published, when the value differs from the
+    /// one the lease records, or when the lease records it and its declared
+    /// freshness window ran out (`Expiring`, `Expired`: feed
+    /// [`Self::observe_credential_freshness`] first). Otherwise the lease
+    /// already carries the value, a value its consumer refused
+    /// (`ReauthRequired`) or the operator logged out (`Released`) included,
+    /// and it is never published again. The caller then takes the usual
+    /// credential-use admission.
+    ///
+    /// The record of the value lives in the lease's in-process AuthMachine
+    /// state only. Any publication that names no value (a login's or a
+    /// store's `acquire_lease`, a completed refresh, a restore, the rollback
+    /// of a failed login) replaces it, so a value refused before such a
+    /// publication is published, and used, once more.
+    ///
+    /// Production handles must implement this through generated AuthMachine
+    /// authority. The default fails closed so a handwritten handle cannot
+    /// become a publication reducer.
+    fn publish_source_credential(
+        &self,
+        lease_key: &LeaseKey,
+        material: &CredentialFingerprint,
+        expires_at: u64,
+    ) -> Result<SourceCredentialPublication, DslTransitionError> {
+        let _ = (lease_key, material, expires_at);
+        Err(DslTransitionError::no_matching(
+            "AuthLeaseHandle::publish_source_credential",
+            "publishing a source credential requires generated AuthMachine authority",
+        ))
+    }
+
+    /// Report that the credential of one publication was refused by its
+    /// consumer (a provider answered that it is revoked or invalid), naming
+    /// that publication: `credential_generation`, the
+    /// [`AuthLeaseSnapshot::generation`] the credential was admitted under,
+    /// and `material`, the fingerprint the publication recorded
+    /// ([`Self::publish_source_credential`]; `None` for a publication that
+    /// names no value, such as a login's or a store's).
+    ///
+    /// Fires the AuthMachine's `MarkPublicationRefused`, which withdraws the
+    /// lease (`ReauthRequired`) only while it still carries that publication.
+    /// A refusal that names another publication (a newer value was published
+    /// since, by another session or machine) or a lease that was already
+    /// refused or released is accepted and changes nothing, so a late refusal
+    /// never withdraws a newer credential. The caller takes
+    /// [`Self::resolve_credential_use_admission`] afterwards for the lease's
+    /// verdict.
+    ///
+    /// Production handles must implement this through generated AuthMachine
+    /// authority. The default fails closed so a handwritten handle cannot
+    /// become a refusal reducer.
+    fn mark_publication_refused(
+        &self,
+        lease_key: &LeaseKey,
+        credential_generation: u64,
+        material: Option<&CredentialFingerprint>,
+    ) -> Result<(), DslTransitionError> {
+        let _ = (lease_key, credential_generation, material);
+        Err(DslTransitionError::no_matching(
+            "AuthLeaseHandle::mark_publication_refused",
+            "refusing a credential publication requires generated AuthMachine authority",
         ))
     }
 
@@ -3230,6 +3497,36 @@ mod tests {
         PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
     };
     use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
+
+    /// Equal values give equal fingerprints and different values different
+    /// ones; neither the value nor its prefix is rendered, and the encoding
+    /// the AuthMachine compares is a fixed-width hex digest.
+    #[test]
+    fn credential_fingerprint_compares_values_without_rendering_them() {
+        use super::CredentialFingerprint;
+
+        let first = CredentialFingerprint::of_secret("github_pat_fingerprint_canary");
+        assert_eq!(
+            first,
+            CredentialFingerprint::of_secret("github_pat_fingerprint_canary")
+        );
+        let rotated = CredentialFingerprint::of_secret("github_pat_fingerprint_canary_rotated");
+        assert_ne!(first, rotated);
+        assert_ne!(first.machine_material(), rotated.machine_material());
+        let material = first.machine_material();
+        assert_eq!(material.len(), 64);
+        assert!(
+            material
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        );
+        let rendered = format!("{first:?} {first:#?}");
+        assert!(
+            !rendered.contains("canary") && !rendered.contains("github_pat"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(&material), "{rendered}");
+    }
 
     #[test]
     fn recovered_state_rejection_is_not_guard_noop() {

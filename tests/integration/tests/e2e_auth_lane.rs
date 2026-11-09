@@ -37,7 +37,7 @@ use meerkat_core::{
 };
 use meerkat_providers::ResolverEnvironment;
 use meerkat_providers::auth_store::{
-    FileTokenStore, InMemoryCoordinator, PersistedTokens, ProviderAuthPersistence,
+    FileLockCoordinator, FileTokenStore, PersistedTokens, ProviderAuthPersistence,
     RefreshCoordinator, TokenKey, TokenStore,
 };
 // RPC-host: this integration test directly drives the JSON-RPC dispatch surface
@@ -521,9 +521,16 @@ impl Drop for FixtureEnvGuard {
     }
 }
 
+/// The coordinator of a file store at `token_root`: its refresh locks live in
+/// the root's `refresh-locks`, and it takes the root's credential fences.
+fn coordinator_over(token_root: &std::path::Path) -> Arc<dyn RefreshCoordinator> {
+    Arc::new(FileLockCoordinator::new(token_root.join("refresh-locks")))
+}
+
 struct AuthHarness {
     _temp: TempDir,
     config: Config,
+    token_root: PathBuf,
     token_store: Arc<dyn TokenStore>,
     runtime: Arc<SessionRuntime>,
     router: MethodRouter,
@@ -543,11 +550,11 @@ impl AuthHarness {
 
     fn new_with_token_root(token_root: PathBuf, temp: TempDir) -> Self {
         let config = openai_oauth_config();
-        let token_store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(token_root));
+        let token_store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(&token_root));
         let factory = meerkat::AgentFactory::new(temp.path().join("sessions"))
             .with_provider_auth_persistence(ProviderAuthPersistence::new(
                 token_store.clone(),
-                Arc::new(InMemoryCoordinator::new()),
+                coordinator_over(&token_root),
             ));
         let registry = factory.provider_runtime_registry();
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -579,6 +586,7 @@ impl AuthHarness {
         Self {
             _temp: temp,
             config,
+            token_root,
             token_store,
             runtime,
             router,
@@ -588,6 +596,12 @@ impl AuthHarness {
 
     fn token_key(&self) -> TokenKey {
         TokenKey::from_auth_binding(&openai_auth_binding())
+    }
+
+    /// A coordinator over the harness's file store, as a persisted backend
+    /// pairs them: it fences the store's writes.
+    fn coordinator(&self) -> Arc<dyn RefreshCoordinator> {
+        coordinator_over(&self.token_root)
     }
 
     async fn stored_tokens(&self) -> Option<PersistedTokens> {
@@ -607,6 +621,7 @@ fn openai_oauth_config() -> Config {
         default_binding: Some(BINDING_ID.to_string()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
     section.backend.insert(
         "chatgpt_backend".to_string(),
@@ -877,7 +892,7 @@ async fn auth_mock_browser_oauth_login_round_trip() {
     assert_eq!(stored.primary_secret.as_deref(), Some("mock-access-1"));
     assert!(meerkat_core::tokens_lifecycle_published(&stored));
 
-    let resolved = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
+    let resolved = resolve_openai_binding(&harness, false, harness.coordinator())
         .await
         .expect("binding resolves after login");
     assert_eq!(
@@ -965,7 +980,7 @@ async fn auth_mock_oauth_expired_token_refreshes_and_persists() {
     let harness = AuthHarness::new();
 
     login_through_browser(&harness).await;
-    let resolved = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
+    let resolved = resolve_openai_binding(&harness, false, harness.coordinator())
         .await
         .expect("expired OAuth token refreshes during resolve");
     assert_eq!(
@@ -1001,7 +1016,7 @@ async fn auth_mock_oauth_failed_refresh_surfaces_reauth_required_or_explicit_aut
     let harness = AuthHarness::new();
 
     login_through_browser(&harness).await;
-    let err = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
+    let err = resolve_openai_binding(&harness, false, harness.coordinator())
         .await
         .expect_err("refresh failure must surface an auth error");
     let detail = err.to_string();
@@ -1093,7 +1108,7 @@ async fn auth_mock_concurrent_resolve_dedupes_refresh() {
     let harness = AuthHarness::new();
     login_through_browser(&harness).await;
 
-    let coordinator: Arc<dyn RefreshCoordinator> = Arc::new(InMemoryCoordinator::new());
+    let coordinator: Arc<dyn RefreshCoordinator> = harness.coordinator();
     let realm = Arc::new(openai_realm(&harness.config));
     let mut tasks = Vec::new();
     for _ in 0..5 {
@@ -1181,7 +1196,7 @@ async fn auth_mock_oauth_fixture_can_return_malformed_refresh_response() {
     let _env = FixtureEnvGuard::install(fixture.base_url()).await;
     let harness = AuthHarness::new();
     login_through_browser(&harness).await;
-    let err = resolve_openai_binding(&harness, false, Arc::new(InMemoryCoordinator::new()))
+    let err = resolve_openai_binding(&harness, false, harness.coordinator())
         .await
         .expect_err("malformed refresh should fail");
     assert!(
@@ -1203,7 +1218,7 @@ async fn auth_live_canary_openai_oauth_seeded_token_bundle() {
     );
     let harness = AuthHarness::new();
     save_seeded_tokens_with_lifecycle(&harness, &tokens).await;
-    let resolved = resolve_openai_binding(&harness, true, Arc::new(InMemoryCoordinator::new()))
+    let resolved = resolve_openai_binding(&harness, true, harness.coordinator())
         .await
         .expect("configured OpenAI OAuth seeded refresh must pass");
     assert!(
@@ -1317,9 +1332,16 @@ async fn save_seeded_tokens_with_lifecycle(harness: &AuthHarness, tokens: &Persi
         &transition,
     )
     .expect("mark seeded tokens with AuthMachine lifecycle");
+    // A seeding write outside any coordinator takes the credential fence of
+    // the key's realm under the store's root itself.
+    let fence = meerkat_core::AdmissionGuard::try_acquire(vec![
+        meerkat_core::AdmissionFence::credentials(&harness.token_root, harness.token_key().realm())
+            .expect("credential fence"),
+    ])
+    .expect("the credential fence is free");
     harness
         .token_store
-        .save(&harness.token_key(), &marked)
+        .save(&fence, &harness.token_key(), &marked)
         .await
         .expect("save seeded tokens");
 }

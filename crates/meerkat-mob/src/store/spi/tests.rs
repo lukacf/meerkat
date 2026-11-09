@@ -8,8 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeVersion,
-    VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeVersion, VersionedHead,
 };
 use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig};
 
@@ -40,6 +40,9 @@ struct HostState {
     landed: HashSet<String>,
     batches: Vec<BatchRecord>,
     fail_next_commit: Option<HostStoreError>,
+    /// Scopes the host loads as a typed conflict at their version, as a
+    /// store that met obligation 4 at load does, and lists per scope.
+    conflicted: BTreeMap<ScopeRef, ScopeVersion>,
 }
 
 /// A host store meeting every obligation at commit: versions are checked
@@ -84,6 +87,42 @@ impl MemoryHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = gate;
     }
+
+    /// Make the only scope whose name starts with `prefix` load as a typed
+    /// conflict at its version from now on: a superseded writer's late batch
+    /// was folded at that version. Answers its name.
+    fn conflict(&self, prefix: &str) -> String {
+        let mut state = self.state();
+        let matching: Vec<(ScopeRef, ScopeVersion)> = state
+            .scopes
+            .iter()
+            .filter(|(scope, _)| scope.name.as_str().starts_with(prefix))
+            .map(|(scope, stored)| (scope.clone(), stored.version))
+            .collect();
+        let [(scope, version)] = matching.as_slice() else {
+            panic!("exactly one scope starts with {prefix}: {matching:?}");
+        };
+        state.conflicted.insert(scope.clone(), *version);
+        scope.name.as_str().to_string()
+    }
+
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.state()
+            .conflicted
+            .get(scope)
+            .map(|version| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(*version),
+            })
+    }
+
+    /// The conflict of the scope named `name` is repaired in the store: one
+    /// of its two batches was kept, and the scope loads and lists as usual.
+    fn repair(&self, name: &str) {
+        self.state()
+            .conflicted
+            .retain(|scope, _| scope.name.as_str() != name);
+    }
 }
 
 #[async_trait]
@@ -108,6 +147,9 @@ impl HostStore for MemoryHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         Ok(self.state().scopes.get(scope).map(|stored| VersionedHead {
             version: stored.version,
             commit_id: stored.commit_id.clone(),
@@ -145,7 +187,17 @@ impl HostStore for MemoryHost {
         });
         let next = (heads.len() > limit).then(|| heads[limit - 1].name.clone());
         heads.truncate(limit);
-        Ok(HeadPage { heads, next })
+        let (conflicted, heads): (Vec<ScopeHead>, Vec<ScopeHead>) =
+            heads.into_iter().partition(|entry| {
+                state
+                    .conflicted
+                    .contains_key(&ScopeRef::new(kind, entry.name.clone()))
+            });
+        let conflicts = conflicted
+            .into_iter()
+            .map(|entry| ScopeConflict::new(entry.name, entry.head.version, Vec::new()))
+            .collect();
+        Ok(HeadPage::new(heads, next).with_conflicts(conflicts))
     }
 
     async fn read_rows(
@@ -154,6 +206,9 @@ impl HostStore for MemoryHost {
         from: RowIndex,
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         let state = self.state();
         let Some(stored) = state.scopes.get(scope) else {
             return Ok(Vec::new());
@@ -653,6 +708,183 @@ async fn the_mob_families_are_claimed_once_per_realm() {
     );
 }
 
+// A storage whose mob scope the store reports conflicted is listed by the
+// claim as quarantined, the conflict and the repair in its cause, not as a
+// stored mob with its summary; opening it refuses, and a storage beside it
+// opens.
+#[tokio::test]
+async fn a_storage_whose_scope_is_conflicted_is_listed_quarantined() {
+    let host = Arc::new(MemoryHost::default());
+    for storage_key in ["mob", "neighbour"] {
+        let process = start(&host, storage_key).await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:rmob~");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens beside the conflicted scope");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let quarantined = listed
+        .iter()
+        .find(|stored| stored.storage_key == "mob")
+        .expect("the quarantined storage is listed");
+    assert!(
+        quarantined.quarantined.as_deref().is_some_and(|cause| {
+            cause.contains(&name) && cause.contains("repair the scope in the store")
+        }),
+        "listed as quarantined: {quarantined:?}"
+    );
+    assert_eq!(quarantined.unreadable, None, "{quarantined:?}");
+    assert!(mobs.open("mob").await.is_err(), "opening it refuses");
+    let neighbour = listed
+        .iter()
+        .find(|stored| stored.storage_key == "neighbour")
+        .expect("the neighbour is listed");
+    assert_eq!(neighbour.quarantined, None);
+    mobs.open("neighbour")
+        .await
+        .expect("the storage beside it opens");
+}
+
+// A storage whose mob scope the store reports conflicted is listed
+// quarantined and refuses to open, typed with the quarantine. Once the scope
+// is repaired in the store and the realm reopened, the host finds the
+// storage listed as a stored mob again, and it opens with what it held.
+#[tokio::test]
+async fn a_quarantined_storage_lists_and_opens_again_after_a_repair_and_a_reopen() {
+    let host = Arc::new(MemoryHost::default());
+    {
+        let process = start(&host, "mob").await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:rmob~");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    {
+        let realm = SpiRealm::open(Arc::clone(&dyn_host), SpiRealmConfig::default())
+            .await
+            .expect("the realm opens beside the conflicted scope");
+        let mobs = SpiMobStoreHost::for_realm(&realm)
+            .await
+            .expect("the mob families claim");
+        let listed = mobs.stored_mobs();
+        let stored = listed
+            .iter()
+            .find(|stored| stored.storage_key == "mob")
+            .expect("the storage is listed");
+        assert!(
+            stored.quarantined.is_some(),
+            "listed quarantined: {stored:?}"
+        );
+        match mobs.open("mob").await {
+            Err(MobStoreError::ReadFailed(message)) => assert!(
+                message.contains("quarantined") && message.contains(&name),
+                "opening it refuses with the quarantine: {message}"
+            ),
+            other => panic!("opening a quarantined storage refuses: {:?}", other.err()),
+        }
+    }
+
+    host.repair(&name);
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm reopens after the repair");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let stored = listed
+        .iter()
+        .find(|stored| stored.storage_key == "mob")
+        .expect("the storage is listed");
+    assert_eq!(stored.quarantined, None, "{stored:?}");
+    assert_eq!(stored.unreadable, None, "{stored:?}");
+    let opened = mobs.open("mob").await.expect("the repaired storage opens");
+    let events = opened
+        .storage()
+        .events
+        .replay_all()
+        .await
+        .expect("its log replays");
+    assert_eq!(events.len(), 1, "it holds what it held: {events:?}");
+}
+
+// A storage key over 200 bytes is hashed in its scope names, so when the
+// store reports its only scope conflicted the realm knows that scope by its
+// store name alone, and no head names the key. The storage is still listed:
+// typed, as quarantined, under that name, the conflict and the repair in its
+// cause, and opening that name refuses with the quarantine instead of
+// creating a storage. The neighbour lists and opens as usual.
+#[tokio::test]
+async fn a_quarantined_storage_whose_key_its_scope_names_hash_is_listed_by_that_name() {
+    let host = Arc::new(MemoryHost::default());
+    let long = "m".repeat(250);
+    for storage_key in [long.as_str(), "neighbour"] {
+        let process = start(&host, storage_key).await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:h");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens beside the conflicted scope");
+    let quarantined = realm.quarantined_scopes();
+    assert_eq!(quarantined.len(), 1, "{name} is quarantined");
+    let scope = quarantined[0].scope.clone();
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let stored = listed
+        .iter()
+        .find(|stored| stored.storage_key == scope)
+        .unwrap_or_else(|| {
+            panic!("the hashed storage is listed by its scope's name, not left out: {listed:?}")
+        });
+    assert!(
+        stored.quarantined.as_deref().is_some_and(|cause| {
+            cause.contains(&name) && cause.contains("repair the scope in the store")
+        }),
+        "listed as quarantined: {stored:?}"
+    );
+    match mobs.open(&scope).await {
+        Err(MobStoreError::ReadFailed(message)) => assert!(
+            message.contains("quarantined") && message.contains(&name),
+            "opening it refuses with the quarantine: {message}"
+        ),
+        other => panic!("opening the listed name refuses: {:?}", other.err()),
+    }
+    let neighbour = listed
+        .iter()
+        .find(|stored| stored.storage_key == "neighbour")
+        .expect("the neighbour is listed");
+    assert_eq!(neighbour.quarantined, None);
+    mobs.open("neighbour")
+        .await
+        .expect("the storage beside it opens");
+}
+
 // Unrun until the candidate's validation.
 #[test]
 fn entries_of_an_unknown_format_are_refused() {
@@ -970,10 +1202,16 @@ async fn the_identity_write_fence_declares_the_hosts_longest_commit() {
 
 /// Every field the stored event codec keeps beyond the public event
 /// contract survives a reopen of the host store's mob storage: a member's
-/// bridge ref, placed spawn, identity intent digest, peer endpoint and direct
-/// fence; a recovered binding's session and endpoint; a retirement's endpoint
-/// and topology mark; an abandoned respawn's runtime and fence. A restarted
-/// mob rebuilds its roster and topology from them.
+/// bridge ref, placed spawn, identity intent digest, peer endpoint, direct
+/// fence, the rotation that seated it and the session the read names for
+/// it; a recovered binding's session and endpoint; a retirement's endpoint,
+/// topology mark and the rotation it carries out; a retired incarnation's
+/// session, cause, entry and rotation; an abandoned respawn's runtime and
+/// fence. A restarted mob rebuilds its roster and topology from them, and
+/// the journal read its facts.
+///
+/// RED (before the codec stores the journal read's facts): the reopen loses
+/// the seat's rotation and the retirement's facts.
 #[tokio::test]
 async fn a_reopen_keeps_every_replay_only_event_field() {
     use crate::event::{MemberSessionBindingRecoveredEvent, MemberSpawnedEvent};
@@ -999,28 +1237,34 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
         "inproc://mob/worker/worker",
     )
     .expect("member peer endpoint");
+    let mut spawned = MemberSpawnedEvent::new(
+        identity.clone(),
+        generation,
+        fence,
+        runtime.clone(),
+        ProfileName::from("worker"),
+    )
+    .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())))
+    .with_identity_intent_authority_digest(Some("sha256:intent".to_string()))
+    .with_placed_spawn_id(Some(PlacedSpawnId::new()))
+    .with_member_peer_endpoint(Some(endpoint.clone()))
+    .with_direct_member_fence(Some(BridgeDirectMemberFence {
+        mob_id: "mob".to_string(),
+        agent_identity: identity.to_string(),
+        generation: generation.get(),
+        fence_token: 1,
+        member_session_id: session.to_string(),
+        runtime_session_token: BridgeDirectRuntimeSessionToken::new(),
+    }))
+    .with_history_unavailable(Some(crate::runtime::HistoryUnavailable::new(
+        SessionId::new(),
+    )));
+    spawned.seat_rotation = Some(crate::runtime::SeatRotation::fresh_life_after(
+        Generation::new(7),
+    ));
+    spawned.seat_session = Some(SessionId::new());
     let kinds = vec![
-        MobEventKind::MemberSpawned(
-            MemberSpawnedEvent::new(
-                identity.clone(),
-                generation,
-                fence,
-                runtime.clone(),
-                ProfileName::from("worker"),
-            )
-            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session.clone())))
-            .with_identity_intent_authority_digest(Some("sha256:intent".to_string()))
-            .with_placed_spawn_id(Some(PlacedSpawnId::new()))
-            .with_member_peer_endpoint(Some(endpoint.clone()))
-            .with_direct_member_fence(Some(BridgeDirectMemberFence {
-                mob_id: "mob".to_string(),
-                agent_identity: identity.to_string(),
-                generation: generation.get(),
-                fence_token: 1,
-                member_session_id: session.to_string(),
-                runtime_session_token: BridgeDirectRuntimeSessionToken::new(),
-            })),
-        ),
+        MobEventKind::MemberSpawned(spawned),
         MobEventKind::MemberSessionBindingRecovered(
             MemberSessionBindingRecoveredEvent::new(
                 identity.clone(),
@@ -1035,9 +1279,48 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
             generation,
             role: ProfileName::from("worker"),
             releasing: Some(session.clone()),
-            session_id: Some(session),
+            session_id: Some(session.clone()),
             retiring_peer_endpoint: Some(endpoint),
             preserve_machine_topology: true,
+            rotation: Some(Box::new(crate::runtime::MemberRotationRecord {
+                target: crate::runtime::RotationTarget::FreshSession,
+                session_id: SessionId::new(),
+                peer_endpoint: None,
+                successor: crate::runtime::RotationSuccessor {
+                    generation: Generation::new(generation.get() + 1),
+                    profile: ProfileName::from("worker"),
+                    runtime_mode: crate::MobRuntimeMode::TurnDriven,
+                    labels: std::collections::BTreeMap::new(),
+                    continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
+                    effective_profile_override: None,
+                    effective_model_override: None,
+                    definition_wiring: crate::DefinitionWiring::Applies,
+                    kickoff_prompt: Some("start over".into()),
+                    objective_id: None,
+                    seat_build_inputs: None,
+                    spawned_by: None,
+                    resume_from_role: None,
+                },
+            })),
+            cause: Some(crate::runtime::MemberRetirementCause::Unlisted),
+        },
+        MobEventKind::MemberRetired {
+            agent_identity: identity.clone(),
+            generation,
+            role: ProfileName::from("worker"),
+            session_archived: true,
+            facts: crate::event::MemberRetiredFacts {
+                session_id: Some(session),
+                cause: Some(crate::runtime::MemberRetirementCause::Unlisted),
+                identity_entry: Some(crate::runtime::IdentityEntryOrigin::Declared),
+                unknown_identity_entry: None,
+                rotation: Some(crate::runtime::RetiredRotation::new(
+                    crate::runtime::RotationTarget::FreshSession,
+                    Generation::new(generation.get() + 1),
+                    ProfileName::from("lead"),
+                )),
+                identity_ended: true,
+            },
         },
         MobEventKind::RespawnTopologyAbandoned {
             agent_identity: identity,
@@ -1095,5 +1378,920 @@ fn a_pre_release_event_entry_is_refused_as_such() {
         message.contains("written by a pre-release 0.9.5 build")
             && message.contains("recreate the mob"),
         "{message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Created identity entries' rows in the identity intents group
+// ---------------------------------------------------------------------------
+
+/// A sealed created entry's row of `name` in the mob `mob`.
+fn created_record(
+    name: &str,
+    presence: crate::identity::CreatedIdentityPresence,
+) -> crate::identity::CreatedIdentityRecord {
+    crate::identity::CreatedIdentityRecord::sealed(
+        MobId::from("mob"),
+        AgentIdentity::from(name),
+        1,
+        presence,
+        crate::identity::CreatedIdentityProvenance::new(format!("create-{name}"), 1),
+    )
+    .expect("a sealed created row")
+}
+
+/// Write the identity intents group with `edit` applied to the in-memory
+/// identity state, as a write that touches every intent does.
+async fn write_intents(
+    process: &Process,
+    edit: impl FnOnce(&mut crate::store::in_memory::IdentityAuthorityState) + Send + 'static,
+) {
+    let bundle = Arc::clone(&process.stores.bundle);
+    let target = Arc::clone(&bundle);
+    bundle
+        .write(
+            Touch {
+                intents: true,
+                ..Touch::default()
+            },
+            async move {
+                let mut aggregate = target.events.aggregate.write().await;
+                edit(&mut aggregate.identity);
+                Ok(())
+            },
+        )
+        .await
+        .expect("the intents group is written");
+}
+
+/// Every created entry's row of the mob, as its created identity scan reads
+/// it.
+async fn created_rows(
+    store: &dyn MobIdentityStore,
+) -> BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation> {
+    let mut rows = BTreeMap::new();
+    let mut after = None;
+    loop {
+        let page = store
+            .scan_created_identities_page(&MobId::from("mob"), after.as_ref(), 2)
+            .await
+            .expect("the created scan answers");
+        rows.extend(page.observations);
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return rows,
+        }
+    }
+}
+
+/// The created entries' rows round-trip on every built-in store: a present
+/// entry, one pending its host's preparation and a removed entry's
+/// tombstone read back as written, from the in-memory store, from a SQLite
+/// store reopened over its file, and from a host store reopened over its
+/// host.
+#[tokio::test]
+async fn created_rows_round_trip_on_sqlite_memory_and_host_store() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let written = [
+        created_record("present", CreatedIdentityPresence::Present),
+        created_record(
+            "pending",
+            CreatedIdentityPresence::PendingPreparation {
+                attempt: 2,
+                constructed: false,
+            },
+        ),
+        created_record("removed", CreatedIdentityPresence::Removed),
+    ];
+    let expected: BTreeMap<AgentIdentity, CreatedIdentityObservation> = written
+        .iter()
+        .map(|record| {
+            (
+                record.agent_identity.clone(),
+                CreatedIdentityObservation::Created(record.clone()),
+            )
+        })
+        .collect();
+
+    let memory = crate::store::InMemoryMobIdentityStore::new();
+    for record in written.clone() {
+        memory
+            .put_created_identity(record)
+            .await
+            .expect("the in-memory store keeps the row");
+    }
+    assert_eq!(created_rows(&memory).await, expected, "in memory");
+
+    let dir = tempfile::tempdir().expect("a store directory");
+    let path = dir.path().join("mob.db");
+    {
+        let stores = crate::store::SqliteMobStores::open(&path).expect("open the store");
+        let store = stores.identity_store();
+        for record in &written {
+            store
+                .put_identity_row_for_test(
+                    &record.mob_id,
+                    &record.agent_identity,
+                    serde_json::to_vec(record).expect("encode the row"),
+                )
+                .await
+                .expect("the SQLite store keeps the row");
+        }
+    }
+    let reopened = crate::store::SqliteMobStores::open(&path).expect("reopen the store");
+    assert_eq!(
+        created_rows(&reopened.identity_store()).await,
+        expected,
+        "on SQLite, after a reopen"
+    );
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let rows = written.clone();
+    write_intents(&process, move |identity| {
+        for record in rows {
+            identity.created.insert(
+                (record.mob_id.clone(), record.agent_identity.clone()),
+                record,
+            );
+        }
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(
+        created_rows(process.stores.storage().identity.as_ref()).await,
+        expected,
+        "on a host store, after a reopen"
+    );
+}
+
+/// A row a later build wrote into a host store's identity intents group, in
+/// a schema this build cannot decode, fails closed for its identity alone:
+/// the mob still opens, a created entry's row and the other identities read
+/// as before, that identity reads unreadable to the intent reader and to
+/// the created identity scan, and no identity-first mutation acts on it.
+#[tokio::test]
+async fn a_later_build_row_on_a_host_store_reads_unreadable_for_that_identity_alone() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let created = created_record("created", CreatedIdentityPresence::Present);
+    let later_key = (MobId::from("mob"), AgentIdentity::from("later"));
+    let later_entry = encode_keyed(
+        &later_key,
+        &serde_json::json!({"schema_version": 3, "a_later_field": true}),
+    )
+    .expect("a later build's entry");
+    let stored = later_entry.to_vec();
+    let created_row = created.clone();
+    write_intents(&process, move |identity| {
+        identity.created.insert(
+            (
+                created_row.mob_id.clone(),
+                created_row.agent_identity.clone(),
+            ),
+            created_row,
+        );
+        identity.unreadable_intents.insert(
+            later_key,
+            crate::store::in_memory::RawIntentRow {
+                stored,
+                created_domain: true,
+                detail: "written by a later build".to_string(),
+            },
+        );
+    })
+    .await;
+    drop(process);
+
+    let reopened = start(&host, "mob").await;
+    let store = reopened.stores.storage().identity;
+    let rows = created_rows(store.as_ref()).await;
+    assert_eq!(
+        rows.get(&AgentIdentity::from("created")),
+        Some(&CreatedIdentityObservation::Created(created))
+    );
+    assert!(matches!(
+        rows.get(&AgentIdentity::from("later")),
+        Some(CreatedIdentityObservation::Unreadable { .. })
+    ));
+    assert!(matches!(
+        store
+            .observe_identity_intent(&MobId::from("mob"), &AgentIdentity::from("later"))
+            .await
+            .expect("the intent reader answers"),
+        IdentityStoredObservation::Unsupported { .. }
+    ));
+    assert!(matches!(
+        store
+            .observe_identity_intent(&MobId::from("mob"), &AgentIdentity::from("absent"))
+            .await
+            .expect("the intent reader answers"),
+        IdentityStoredObservation::Missing
+    ));
+
+    // No identity-first mutation acts on the later build's row or on the
+    // created entry's, and neither entry changes.
+    let mob_id = MobId::from("mob");
+    let before = full_export(&reopened.stores).await;
+    for name in ["later", "created"] {
+        let identity = AgentIdentity::from(name);
+        let (adoption, compiled) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            identity.clone(),
+            &format!("adopt-{name}"),
+            meerkat_core::SessionId::new(),
+        );
+        let declaration = match &compiled.intent {
+            crate::identity::IdentityIntent::Present { member, .. } => {
+                member.material.member_tool_declaration()
+            }
+            crate::identity::IdentityIntent::Absent { .. } => {
+                panic!("the adoption fixture compiles a present intent")
+            }
+        };
+        let tool_declaration = crate::identity::ApplyMemberToolDeclaration {
+            mob_id: mob_id.clone(),
+            agent_identity: identity.clone(),
+            request_id: crate::identity::MemberToolMutationId::new(format!("tools-{name}"))
+                .expect("a mutation id"),
+            expected_intent_revision: 1,
+            declaration,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        };
+        let resolution = crate::identity::ResolveIdentityConvergenceBlock {
+            mob_id: mob_id.clone(),
+            agent_identity: identity.clone(),
+            request_id: crate::identity::IdentityConvergenceResolutionId::new(format!(
+                "resolve-{name}"
+            ))
+            .expect("a resolution id"),
+            expected_desired_revision: 1,
+            observed_active_revision: 1,
+            convergence: crate::identity::IdentityConvergenceMode::CancelActive,
+        };
+        assert!(
+            matches!(
+                store
+                    .adopt_member_identity_declaration(&adoption, &compiled)
+                    .await,
+                Err(MobStoreError::IdentityAuthorityBlocked { .. })
+            ),
+            "{name}: the adoption is refused"
+        );
+        assert!(
+            matches!(
+                store.apply_member_tool_declaration(&tool_declaration).await,
+                Err(MobStoreError::IdentityAuthorityBlocked { .. })
+            ),
+            "{name}: the member tool declaration is refused"
+        );
+        assert!(
+            matches!(
+                store
+                    .resolve_identity_convergence_block(&resolution, 1)
+                    .await,
+                Err(MobStoreError::IdentityAuthorityBlocked { .. })
+            ),
+            "{name}: the convergence resolution is refused"
+        );
+    }
+    let after = full_export(&reopened.stores).await;
+    for name in ["later", "created"] {
+        let entry = format!(
+            "mbi:{}",
+            hashed_name(G_INTENT, &(mob_id.clone(), AgentIdentity::from(name)))
+                .expect("the entry's name")
+        );
+        assert!(before.contains_key(&entry), "{name}'s entry is stored");
+        assert_eq!(
+            after.get(&entry),
+            before.get(&entry),
+            "{name}'s entry is kept"
+        );
+    }
+}
+
+/// An identity intents entry this build cannot attribute to an identity (its
+/// envelope is of a format this build does not read) refuses the mob's open,
+/// as an entry of any other group does: no read could report it, so a name it
+/// may hold would read free.
+///
+/// RED: keep such an entry by name, unread, and open (the shape before this
+/// fix): the reopen succeeds.
+#[tokio::test]
+async fn an_unattributable_intents_entry_on_a_host_store_refuses_the_open() {
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let key = (MobId::from("mob"), AgentIdentity::from("later"));
+    // A later build's envelope format, under the name its key hashes to.
+    let stored = serde_json::to_vec(&serde_json::json!({
+        "v": 99,
+        "k": ["mob", "later"],
+        "d": {"schema_version": 1},
+    }))
+    .expect("a later build's entry");
+    write_intents(&process, move |identity| {
+        identity.unreadable_intents.insert(
+            key,
+            crate::store::in_memory::RawIntentRow {
+                stored,
+                created_domain: false,
+                detail: "an envelope of a later format".to_string(),
+            },
+        );
+    })
+    .await;
+    drop(process);
+
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("open the realm");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("claim the mob families");
+    assert!(
+        matches!(mobs.open("mob").await, Err(MobStoreError::ReadFailed(_))),
+        "the open refuses the entry"
+    );
+}
+
+/// Every rewrite of a host store's identity intents group writes an entry
+/// this build cannot decode back untouched: after another identity's row
+/// changes and the store reopens, the entry's bytes are the ones the later
+/// build wrote.
+#[tokio::test]
+async fn a_group_rewrite_keeps_an_undecodable_row_byte_identical() {
+    use crate::identity::CreatedIdentityPresence;
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let later_key = (MobId::from("mob"), AgentIdentity::from("later"));
+    let later_entry = encode_keyed(
+        &later_key,
+        &serde_json::json!({"schema_version": 3, "a_later_field": true}),
+    )
+    .expect("a later build's entry");
+    let name = hashed_name(G_INTENT, &later_key).expect("the entry's name");
+    let stored = later_entry.to_vec();
+    write_intents(&process, move |identity| {
+        identity.unreadable_intents.insert(
+            later_key,
+            crate::store::in_memory::RawIntentRow {
+                stored,
+                created_domain: true,
+                detail: "written by a later build".to_string(),
+            },
+        );
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    let entry = |export: &BTreeMap<String, Vec<u8>>| export.get(&format!("mbi:{name}")).cloned();
+    assert_eq!(
+        entry(&full_export(&process.stores).await),
+        Some(later_entry.to_vec()),
+        "the reopen keeps the entry as stored"
+    );
+
+    // Another identity's row changes: the whole group is rewritten.
+    let other = created_record("other", CreatedIdentityPresence::Present);
+    write_intents(&process, move |identity| {
+        identity
+            .created
+            .insert((other.mob_id.clone(), other.agent_identity.clone()), other);
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(
+        entry(&full_export(&process.stores).await),
+        Some(later_entry.to_vec()),
+        "the rewrite writes the entry back untouched"
+    );
+}
+
+/// A created entry's row stored under another identity's key reads
+/// unreadable for the key it sits under in every reader of a host store, as
+/// it does on SQLite: the created identity scan answers it unreadable, so
+/// MobMachine reserves the name, and the member binding history answers
+/// `IntentUnreadable`, never `CreatedEntry`. The row is written back as it
+/// was stored.
+///
+/// RED: keep the row by its entry's key at import without comparing the
+/// record's own mob and identity (the shape before this fix): the binding
+/// history answers `CreatedEntry` while the created scan answers
+/// `Unreadable`.
+#[tokio::test]
+async fn a_created_row_under_another_identitys_key_reads_unreadable_on_a_host_store() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let sealed_elsewhere = created_record("sealed-elsewhere", CreatedIdentityPresence::Present);
+    write_intents(&process, move |identity| {
+        identity.created.insert(
+            (MobId::from("mob"), AgentIdentity::from("mismatched")),
+            sealed_elsewhere,
+        );
+    })
+    .await;
+    let process = restart_and_compare(&host, "mob", process).await;
+    let storage = process.stores.storage();
+    assert!(matches!(
+        created_rows(storage.identity.as_ref())
+            .await
+            .get(&AgentIdentity::from("mismatched")),
+        Some(CreatedIdentityObservation::Unreadable { .. })
+    ));
+    let history = storage
+        .identity_member
+        .as_ref()
+        .expect("a host store pairs its identities with its members")
+        .read_member_binding_journal(&MobId::from("mob"))
+        .await
+        .expect("the member binding history reads");
+    assert_eq!(
+        history.intent_rows.get(&AgentIdentity::from("mismatched")),
+        Some(&crate::runtime::MemberIdentityManagement::IntentUnreadable)
+    );
+}
+
+/// Rollback of a host store holding created identities, in-process leg: the
+/// decode a published predecessor runs (the whole identity intents group as
+/// host-adopted intents, whose records deny unknown fields) fails on a group
+/// that holds a created entry's row, so that build does not open the mob's
+/// host storage at all. This build reads the group one entry at a time and
+/// opens it. A downgrade of a host store is unsupported while a created
+/// identity remains on it; the lane-run leg needs the pair's host store
+/// adapter.
+#[tokio::test]
+async fn a_whole_group_decode_refuses_a_host_store_holding_a_created_row() {
+    use crate::identity::{CreatedIdentityObservation, CreatedIdentityPresence};
+
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let created = created_record("created", CreatedIdentityPresence::Present);
+    let row = created.clone();
+    write_intents(&process, move |identity| {
+        identity
+            .created
+            .insert((row.mob_id.clone(), row.agent_identity.clone()), row);
+    })
+    .await;
+    let body = process
+        .stores
+        .bundle
+        .identity_image()
+        .await
+        .expect("the identity image");
+    assert!(
+        decode_group::<(MobId, AgentIdentity), crate::identity::IdentityIntentRecord>(
+            &body, G_INTENT
+        )
+        .is_err(),
+        "a whole-group decode of host-adopted intents refuses the created row"
+    );
+    let reopened = restart_and_compare(&host, "mob", process).await;
+    assert_eq!(
+        created_rows(reopened.stores.storage().identity.as_ref())
+            .await
+            .get(&AgentIdentity::from("created")),
+        Some(&CreatedIdentityObservation::Created(created))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Identity changes: store-owned rows, journal rows and a receipt in one
+// transaction, on every built-in store
+// ---------------------------------------------------------------------------
+
+/// A store-owned identity's spec with every field set but the backend, the
+/// binding and the placement.
+fn full_spec(name: &str) -> crate::identity::CreatedIdentitySpec {
+    crate::identity::CreatedIdentitySpec::new(name, "worker")
+        .with_addressability(crate::identity::IdentityAddressability::InternalOnly)
+        .with_display_name(format!("The {name} identity"))
+        .with_labels(BTreeMap::from([("team".to_string(), "alpha".to_string())]))
+        .with_context(serde_json::json!({"desk": name, "level": 2}))
+        .with_additional_instructions(vec![format!("You are {name}.")])
+        .with_initial_message(meerkat_core::ContentInput::from(format!("Start, {name}.")))
+        .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven)
+}
+
+/// The row a create of `name` writes, as the operation `operation`.
+fn spec_row(name: &str, operation: &str) -> crate::identity::CreatedIdentityRecord {
+    crate::identity::CreatedIdentityRecord::with_spec(
+        MobId::from("mob"),
+        full_spec(name),
+        1,
+        crate::identity::CreatedIdentityPresence::Present,
+        crate::identity::CreatedIdentityProvenance::new(operation, 7),
+    )
+    .expect("a sealed store-owned row")
+}
+
+/// The store transaction of a create of `names` as `operation`, under the
+/// request digest `digest`: one row and one journal row per identity, and
+/// the receipt.
+fn create_change(
+    operation: &str,
+    digest: &str,
+    names: &[&str],
+) -> crate::store::IdentityChangeWrite {
+    crate::store::IdentityChangeWrite {
+        receipt: crate::identity::IdentityChangeReceipt::sealed(
+            MobId::from("mob"),
+            operation,
+            digest,
+            crate::identity::IdentityChangeKind::Create,
+            names
+                .iter()
+                .map(|name| {
+                    crate::identity::IdentityChangeReceiptEntry::new(
+                        AgentIdentity::from(*name),
+                        crate::identity::IdentityChangeEntryOutcome::Committed,
+                    )
+                })
+                .collect(),
+            7,
+        )
+        .expect("a sealed receipt"),
+        rows: names
+            .iter()
+            .map(|name| crate::store::CreatedIdentityRowWrite {
+                record: spec_row(name, operation),
+                expected: crate::store::CreatedIdentityRowExpectation::Absent,
+            })
+            .collect(),
+        events: names
+            .iter()
+            .map(|_| event(MobEventKind::MobCompleted, None))
+            .collect(),
+    }
+}
+
+/// A fresh built-in storage of each kind, by name: in memory, SQLite over a
+/// file under `dir`, and a host store over `host` (its process kept beside
+/// it).
+async fn built_in_storages(
+    dir: &std::path::Path,
+    host: &Arc<MemoryHost>,
+) -> Vec<(&'static str, crate::MobStorage, Option<Process>)> {
+    let process = start(host, "mob").await;
+    vec![
+        ("in memory", crate::MobStorage::in_memory(), None),
+        (
+            "on SQLite",
+            crate::MobStorage::persistent(dir.join("mob.db")).expect("open the SQLite storage"),
+            None,
+        ),
+        ("on a host store", process.stores.storage(), Some(process)),
+    ]
+}
+
+/// The storage's member store: every built-in storage has one.
+fn member_store(storage: &crate::MobStorage) -> &dyn MobIdentityMemberStore {
+    storage
+        .identity_member
+        .as_deref()
+        .expect("a built-in storage joins identity rows to its journal")
+}
+
+/// The journal's whole length.
+async fn journal_len(storage: &crate::MobStorage) -> usize {
+    storage
+        .events
+        .replay_all()
+        .await
+        .expect("read the journal")
+        .len()
+}
+
+/// A store-owned identity's row keeps its spec, its revision, its presence
+/// and its provenance on every built-in store: read back by the created
+/// identity scan and by the row read, from memory, from a SQLite store
+/// reopened over its file, and from a host store reopened over its host.
+///
+/// RED: with the stores' commit of an identity change reverted to the
+/// unavailable default, the commit is refused on every store and nothing
+/// reads back.
+#[tokio::test]
+async fn the_v2_row_round_trips_the_spec_on_sqlite_memory_and_host_store() {
+    use crate::identity::CreatedIdentityObservation;
+
+    let dir = tempfile::tempdir().expect("a store directory");
+    let host = Arc::new(MemoryHost::default());
+    let change = create_change("create-pair", "sha256:pair", &["alpha", "beta"]);
+    let expected: BTreeMap<AgentIdentity, CreatedIdentityObservation> = change
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.record.agent_identity.clone(),
+                CreatedIdentityObservation::Created(row.record.clone()),
+            )
+        })
+        .collect();
+    for (name, storage, process) in built_in_storages(dir.path(), &host).await {
+        let committed = member_store(&storage)
+            .commit_identity_change(&change)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the change commits: {error}"));
+        assert!(
+            matches!(
+                committed,
+                crate::store::IdentityChangeCommit::Committed { .. }
+            ),
+            "{name}: {committed:?}"
+        );
+        // Read back from a reopened store, where the store outlives the
+        // process: SQLite's file, and the host store.
+        let (storage, _process) = match process {
+            Some(process) => {
+                drop(storage);
+                let reopened = restart_and_compare(&host, "mob", process).await;
+                (reopened.stores.storage(), Some(reopened))
+            }
+            None if name == "on SQLite" => {
+                drop(storage);
+                (
+                    crate::MobStorage::persistent(dir.path().join("mob.db"))
+                        .expect("reopen the SQLite storage"),
+                    None,
+                )
+            }
+            None => (storage, None),
+        };
+        assert_eq!(
+            created_rows(storage.identity.as_ref()).await,
+            expected,
+            "{name}"
+        );
+        for (identity, observation) in &expected {
+            assert_eq!(
+                member_store(&storage)
+                    .observe_created_identity(&MobId::from("mob"), identity)
+                    .await
+                    .expect("the row read answers")
+                    .as_ref(),
+                Some(observation),
+                "{name}: {identity}"
+            );
+        }
+        let CreatedIdentityObservation::Created(alpha) = &expected[&AgentIdentity::from("alpha")]
+        else {
+            panic!("alpha's row is a created row");
+        };
+        assert_eq!(alpha.spec.as_ref(), Some(&full_spec("alpha")), "{name}");
+    }
+}
+
+/// An identity change's receipt is inserted once: the same operation under
+/// the same request digest replays its receipt, the same operation under
+/// another digest is refused as a reused id, and neither writes a row, a
+/// journal row or a receipt, on every built-in store.
+///
+/// RED: with the stores' commit reverted to the unavailable default, the
+/// first commit is refused on every store.
+#[tokio::test]
+async fn same_operation_same_digest_replays_and_another_digest_is_operation_reused() {
+    let dir = tempfile::tempdir().expect("a store directory");
+    let host = Arc::new(MemoryHost::default());
+    for (name, storage, _process) in built_in_storages(dir.path(), &host).await {
+        let store = member_store(&storage);
+        let first = create_change("create-alpha", "sha256:first", &["alpha"]);
+        let committed = store
+            .commit_identity_change(&first)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the first commit: {error}"));
+        assert!(
+            matches!(
+                committed,
+                crate::store::IdentityChangeCommit::Committed { .. }
+            ),
+            "{name}: {committed:?}"
+        );
+        let journal = journal_len(&storage).await;
+        let rows = created_rows(storage.identity.as_ref()).await;
+
+        let replayed = store
+            .commit_identity_change(&first)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the retry: {error}"));
+        assert!(
+            matches!(
+                &replayed,
+                crate::store::IdentityChangeCommit::Replayed { receipt }
+                    if *receipt == first.receipt
+            ),
+            "{name}: {replayed:?}"
+        );
+
+        // Another request under the same operation id: another identity, so
+        // a row conflict cannot answer for it.
+        let reused = store
+            .commit_identity_change(&create_change("create-alpha", "sha256:second", &["gamma"]))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the reuse: {error}"));
+        assert!(
+            matches!(
+                &reused,
+                crate::store::IdentityChangeCommit::OperationReused { receipt }
+                    if *receipt == first.receipt
+            ),
+            "{name}: {reused:?}"
+        );
+        assert_eq!(
+            journal_len(&storage).await,
+            journal,
+            "{name}: no journal row"
+        );
+        assert_eq!(
+            created_rows(storage.identity.as_ref()).await,
+            rows,
+            "{name}: no row"
+        );
+        assert_eq!(
+            store
+                .observe_identity_change_receipt(&MobId::from("mob"), "create-alpha")
+                .await
+                .expect("the receipt read answers"),
+            Some(first.receipt.clone()),
+            "{name}: the receipt is the first commit's"
+        );
+    }
+}
+
+/// One identity change lands whole or not at all on every built-in store:
+/// a commit writes its rows, its journal rows and its receipt together; a
+/// commit whose expected row differs from the store's (a name a row holds
+/// already, the batch's second row) writes none of them, its first row
+/// included; and a commit whose journal row the store refuses (a second
+/// creation of the mob) writes none of them either.
+///
+/// RED: with the stores' commit reverted to the unavailable default, the
+/// first commit is refused on every store and nothing lands.
+#[tokio::test]
+async fn a_commit_writes_rows_events_and_receipt_in_one_transaction_on_every_built_in_store() {
+    let dir = tempfile::tempdir().expect("a store directory");
+    let host = Arc::new(MemoryHost::default());
+    for (name, storage, _process) in built_in_storages(dir.path(), &host).await {
+        let store = member_store(&storage);
+        let before = journal_len(&storage).await;
+        let change = create_change("create-alpha", "sha256:alpha", &["alpha"]);
+        let committed = store
+            .commit_identity_change(&change)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the commit: {error}"));
+        let crate::store::IdentityChangeCommit::Committed { events } = committed else {
+            panic!("{name}: the change commits: {committed:?}");
+        };
+        assert_eq!(events.len(), 1, "{name}");
+        assert_eq!(
+            journal_len(&storage).await,
+            before + 1,
+            "{name}: the journal row"
+        );
+        assert_eq!(
+            created_rows(storage.identity.as_ref()).await.len(),
+            1,
+            "{name}: the row"
+        );
+        assert!(
+            store
+                .observe_identity_change_receipt(&MobId::from("mob"), "create-alpha")
+                .await
+                .expect("the receipt read")
+                .is_some(),
+            "{name}: the receipt"
+        );
+
+        // A batch of a new name and a taken one, the taken one second:
+        // nothing of it lands, the new name's row included.
+        let conflicting = create_change("create-batch", "sha256:batch", &["beta", "alpha"]);
+        let refused = store
+            .commit_identity_change(&conflicting)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: the conflicting commit: {error}"));
+        assert!(
+            matches!(
+                &refused,
+                crate::store::IdentityChangeCommit::RowConflict { identity, current: Some(_) }
+                    if identity.as_str() == "alpha"
+            ),
+            "{name}: {refused:?}"
+        );
+        assert_eq!(
+            journal_len(&storage).await,
+            before + 1,
+            "{name}: no journal row"
+        );
+        assert_eq!(
+            created_rows(storage.identity.as_ref()).await.len(),
+            1,
+            "{name}: no row"
+        );
+        assert_eq!(
+            store
+                .observe_identity_change_receipt(&MobId::from("mob"), "create-batch")
+                .await
+                .expect("the receipt read"),
+            None,
+            "{name}: no receipt"
+        );
+        assert!(
+            !created_rows(storage.identity.as_ref())
+                .await
+                .contains_key(&AgentIdentity::from("beta")),
+            "{name}: the batch's first row did not land"
+        );
+
+        // A change whose journal row the store refuses (a second creation of
+        // the mob, after its rows were checked): nothing of it lands.
+        let mut refused_journal = create_change("create-delta", "sha256:delta", &["delta"]);
+        refused_journal.events.push(event(
+            MobEventKind::MobCreated {
+                definition: Box::new(MobDefinition::explicit("mob")),
+            },
+            None,
+        ));
+        let refused = store.commit_identity_change(&refused_journal).await;
+        assert!(refused.is_err(), "{name}: {refused:?}");
+        assert_eq!(
+            journal_len(&storage).await,
+            before + 1,
+            "{name}: no journal row"
+        );
+        assert!(
+            !created_rows(storage.identity.as_ref())
+                .await
+                .contains_key(&AgentIdentity::from("delta")),
+            "{name}: no row"
+        );
+        assert_eq!(
+            store
+                .observe_identity_change_receipt(&MobId::from("mob"), "create-delta")
+                .await
+                .expect("the receipt read"),
+            None,
+            "{name}: no receipt"
+        );
+    }
+}
+
+/// A host store whose batch commit fails lands nothing of the change: the
+/// commit answers the failure, and a process reopened over the host reads
+/// the changes before it only, with no row, journal row or receipt of the
+/// failed one.
+#[tokio::test]
+async fn a_change_whose_host_batch_fails_lands_nothing_on_a_host_store() {
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let storage = process.stores.storage();
+    let committed = member_store(&storage)
+        .commit_identity_change(&create_change("create-alpha", "sha256:alpha", &["alpha"]))
+        .await
+        .expect("the first change commits");
+    assert!(
+        matches!(
+            committed,
+            crate::store::IdentityChangeCommit::Committed { .. }
+        ),
+        "{committed:?}"
+    );
+    host.fail_next_commit(HostStoreError::Invalid("refused by the test".to_string()));
+    let refused = member_store(&storage)
+        .commit_identity_change(&create_change(
+            "create-batch",
+            "sha256:batch",
+            &["beta", "gamma"],
+        ))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    drop(storage);
+    drop(process);
+
+    let reopened = start(&host, "mob").await;
+    let storage = reopened.stores.storage();
+    assert_eq!(
+        journal_len(&storage).await,
+        1,
+        "the first change's row only"
+    );
+    let rows = created_rows(storage.identity.as_ref()).await;
+    assert_eq!(
+        rows.keys().cloned().collect::<Vec<_>>(),
+        vec![AgentIdentity::from("alpha")],
+        "the first change's identity only"
+    );
+    assert_eq!(
+        member_store(&storage)
+            .observe_identity_change_receipt(&MobId::from("mob"), "create-batch")
+            .await
+            .expect("the receipt read"),
+        None,
+        "no receipt"
     );
 }

@@ -1,0 +1,43 @@
+{
+  "name": "suppression-under-temptation",
+  "manifest": [
+    {
+      "id": "mem-080",
+      "kind": "Procedure",
+      "title": "BigQuery cost guard: always dry-run first",
+      "description": "Matters when running any BigQuery SQL: run with --dry_run first and abort if scanned bytes exceed 100GB.",
+      "age_days": 6,
+      "rank": 10
+    },
+    {
+      "id": "mem-081",
+      "kind": "Fact",
+      "title": "events_raw table is partitioned by ingest_date",
+      "description": "Matters when querying events_raw: filter on ingest_date or the query scans the full multi-TB table.",
+      "age_days": 15,
+      "rank": 8
+    },
+    {
+      "id": "mem-082",
+      "kind": "Reference",
+      "title": "Data team oncall rota",
+      "description": "Matters when a data pipeline is broken and you need a human owner.",
+      "age_days": 25,
+      "rank": 3
+    }
+  ],
+  "suppressed_ids": [
+    "mem-080"
+  ],
+  "turn_text": "Run a BigQuery query over events_raw to count yesterday's events.",
+  "expected": {
+    "must_select": [
+      "mem-081"
+    ],
+    "must_not_select": [
+      "mem-080",
+      "mem-082"
+    ]
+  },
+  "notes": "Suppression under temptation: the single best record for the turn is already in context; the selector must not re-select it and must still surface the complementary partition-filter fact."
+}

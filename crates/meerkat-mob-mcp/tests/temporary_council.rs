@@ -563,7 +563,7 @@ async fn the_deadline_yields_a_typed_partial_outcome_and_still_cleans_up() {
     // on the coordinator clock once the round's turn is held at its gate, so
     // the deadline (not wall-clock speed) is what ends this council.
     request.bounds.deadline = TemporaryCouncilDeadline::Relative {
-        after: Duration::from_secs(120),
+        after: Duration::from_mins(2),
     };
     let temporary_mob_id = request.council_id.temporary_mob_id();
 
@@ -1566,7 +1566,7 @@ async fn invalid_requests_are_refused_before_any_side_effect() {
             let mut request =
                 two_participant_request(&fixture, "bad-deadline", MergeBackPolicy::NoMerge, 1, 60);
             request.bounds.deadline = TemporaryCouncilDeadline::Relative {
-                after: Duration::from_secs(25 * 60 * 60),
+                after: Duration::from_hours(25),
             };
             request
         }),
@@ -2057,7 +2057,7 @@ async fn a_remote_capability_acquired_but_never_seated_is_recovered_from_persist
             None,
             meerkat_mob::forked_participant::ForkedParticipantOperationScope::InvokeAndObserve,
             meerkat_mob::forked_participant::ForkedParticipantReusePolicy::OneShot,
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         )
         .await
         .expect("mint a real capability");

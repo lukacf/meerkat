@@ -216,6 +216,18 @@ def declared_workspace_dependencies(manifest_text: str) -> set[str]:
     return names
 
 
+def baseline_publishable(manifest_text: str) -> bool:
+    """Whether a member's manifest lets Cargo publish it: `publish = false`
+    (or an empty registry list) does not; an unreadable manifest counts as
+    publishable, so the crate is measured and the gate fails closed."""
+    try:
+        package = tomllib.loads(manifest_text).get("package", {})
+    except tomllib.TOMLDecodeError:
+        return True
+    publish = package.get("publish", True)
+    return not (publish is False or publish == [])
+
+
 def classify(
     repo_root: pathlib.Path,
     baseline_tag: str,
@@ -249,6 +261,20 @@ def classify(
             else:
                 result.first_publish.append(name)
                 result.reasons[name] = f"not a workspace member at {baseline_tag}"
+            continue
+        # A member the baseline did not publish (`publish = false` then) has no
+        # published API to break; it is a first publication unless the
+        # registry has published it anyway (checked only for such members).
+        if not baseline_publishable(git_show(repo_root, baseline_tag, f"{baseline_dir}/Cargo.toml") or ""):
+            if registry_has_published(name):
+                result.changed.append(name)
+                result.reasons[name] = (
+                    f"published on the registry but publish = false at {baseline_tag}; "
+                    "measured to fail closed"
+                )
+            else:
+                result.first_publish.append(name)
+                result.reasons[name] = f"publish = false at {baseline_tag}, never published"
             continue
         if package_fields_changed:
             result.changed.append(name)

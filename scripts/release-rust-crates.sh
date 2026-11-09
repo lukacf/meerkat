@@ -38,6 +38,7 @@ printf '%s\n' \
   meerkat-capabilities \
   meerkat-machine-dsl \
   meerkat-machine-schema \
+  meerkat-machine-codegen \
   meerkat-authorization \
   meerkat-machine-kernels \
   meerkat-skills \

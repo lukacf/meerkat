@@ -83,8 +83,8 @@ fn unpolled_sleep_and_timeout_do_not_allocate_timers() {
     // Link the complete runtime composition and its authority bridge symbols.
     assert!(!meerkat_web_runtime::runtime_version().is_empty());
     let observer = observe_timers();
-    drop(sleep(Duration::from_secs(3600)));
-    drop(timeout(Duration::from_secs(3600), pending::<()>()));
+    drop(sleep(Duration::from_hours(1)));
+    drop(timeout(Duration::from_hours(1), pending::<()>()));
     let records = finish(&observer);
     assert!(records.is_empty(), "{records:?}");
 }
@@ -92,7 +92,7 @@ fn unpolled_sleep_and_timeout_do_not_allocate_timers() {
 #[wasm_bindgen_test]
 fn dropped_sleep_clears_its_exact_host_timer() {
     let observer = observe_timers();
-    let mut future = Box::pin(sleep(Duration::from_secs(3600)));
+    let mut future = Box::pin(sleep(Duration::from_hours(1)));
     let polled = poll_once(future.as_mut());
     drop(future);
     let records = finish(&observer);
@@ -104,7 +104,7 @@ fn dropped_sleep_clears_its_exact_host_timer() {
 #[wasm_bindgen_test]
 fn dropped_timeout_clears_its_exact_host_timer() {
     let observer = observe_timers();
-    let mut future = Box::pin(timeout(Duration::from_secs(3600), pending::<()>()));
+    let mut future = Box::pin(timeout(Duration::from_hours(1), pending::<()>()));
     let polled = poll_once(future.as_mut());
     drop(future);
     let records = finish(&observer);
@@ -119,7 +119,7 @@ fn timeout_inner_winner_releases_timer_before_wrapper_drop() {
     let ready = Rc::new(Cell::new(false));
     let inner_ready = Rc::clone(&ready);
     let mut future = Box::pin(timeout(
-        Duration::from_secs(3600),
+        Duration::from_hours(1),
         poll_fn(move |_| {
             if inner_ready.get() {
                 Poll::Ready(42)
@@ -222,7 +222,7 @@ async fn very_large_duration_uses_bounded_chunks_and_rechecks_after_callback() {
 #[wasm_bindgen_test]
 fn interval_drop_and_reset_release_pending_timer_without_immediate_tick() {
     let observer = observe_timers();
-    let mut ticker = interval(Duration::from_secs(3600));
+    let mut ticker = interval(Duration::from_hours(1));
     let first = {
         let mut tick = Box::pin(ticker.tick());
         poll_once(tick.as_mut())
@@ -254,7 +254,7 @@ fn timer_wakes_latest_waiter_once_and_releases_waker_on_drop() {
     let observer = observe_timers();
     let first = Arc::new(WakeCount::default());
     let second = Arc::new(WakeCount::default());
-    let mut future = Box::pin(sleep(Duration::from_secs(3600)));
+    let mut future = Box::pin(sleep(Duration::from_hours(1)));
     let first_poll = future
         .as_mut()
         .poll(&mut Context::from_waker(&waker(Arc::clone(&first))));

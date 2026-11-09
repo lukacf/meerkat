@@ -209,8 +209,11 @@ fn assert_stock_record_scope(
     assert_eq!(record.observation.run_id.as_ref(), Some(run_id));
     assert_eq!(record.contributors.len(), 1);
     assert_eq!(&record.contributors[0].input_id, input_id);
-    assert!(record.contributors[0].requester == principal("requester"));
-    assert!(record.contributors[0].logical_executor == principal("executor"));
+    assert_eq!(record.contributors[0].requester, principal("requester"));
+    assert_eq!(
+        record.contributors[0].logical_executor,
+        principal("executor")
+    );
     assert!(record.contributors[0].represented_subject.is_none());
     assert!(
         matches!(&record.observation.execution_scope, OperationExecutionScope::RuntimeInput {
@@ -395,6 +398,7 @@ async fn exercise_stock_persistent(
     }
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal(if delegated_controller {
@@ -412,6 +416,7 @@ async fn exercise_stock_persistent(
             meerkat_authorization_contracts::constraints::DelegationDepth::remaining(0);
         let leaf = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("controller-delegator"),
                 &controller,
                 id("controller-leaf"),
@@ -425,6 +430,7 @@ async fn exercise_stock_persistent(
     };
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -473,6 +479,7 @@ async fn exercise_stock_persistent(
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants: grants.clone(),
             ingress: ingress.clone(),
@@ -816,7 +823,12 @@ async fn exercise_stock_persistent(
                 .expect("persistent owner must inspect its actual unfinished contributor");
             for reference in &controller_lineage {
                 assert_eq!(
-                    grants.revoke(&principal("grant-owner"), reference, &mut custody),
+                    grants.revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &principal("grant-owner"),
+                        reference,
+                        &mut custody
+                    ),
                     Err(meerkat_authorization::grants::GrantRefusal::ControllerInUse),
                     "the actual unfinished contributor retains both its ancestor and leaf"
                 );
@@ -1282,6 +1294,7 @@ async fn exercise_stock_persistent(
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants: grants.clone(),
             ingress,
@@ -1343,6 +1356,7 @@ async fn exercise_stock_persistent(
                 );
                 assert_eq!(
                     grants.revoke(
+                        &meerkat_core::AdmissionGuard::none(),
                         &principal("intruder"),
                         &controller_lineage[index],
                         &mut custody
@@ -1357,6 +1371,7 @@ async fn exercise_stock_persistent(
                 );
                 grants
                     .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
                         &principal("grant-owner"),
                         &controller_lineage[index],
                         &mut custody,
@@ -1934,7 +1949,7 @@ async fn run_stock_persistent_case_with_options(
 ) {
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_stock_persistent(
             &server,
             &cleanup,

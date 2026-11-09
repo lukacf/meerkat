@@ -8,13 +8,15 @@ name: Nightly
 #
 # Coverage rationale:
 #   workspace-unit    - `make test-unit`: every workspace unit test (PR CI
-#                       runs only the directly changed packages), plus
-#                       meerkat-rpc unit tests with all features
+#                       runs only the directly changed packages)
 #   workspace-int     - `make test-int`: every integration-fast test
 #   e2e-fast          - deterministic real-binary end-to-end lane
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
 #                       Linux (17-22 minutes; does not fit PR CI)
-#   machine-verify    - bounded TLC verification of the canonical machines
+#   machine-verify    - the canonical TLC lane's machine-verify part: the
+#                       bounded adaptive witness and the `machine-verify
+#                       --all` sweep (ci.yml runs the lane's audit shards on
+#                       every machine-authority change)
 #   machine-verify-deep - Deep-profile TLC (deep.cfg, witnesses, coverage
 #                       audit) over the compositions that fit the 900 s
 #                       per-run cap; a capped run fails as TLC INCOMPLETE
@@ -33,9 +35,9 @@ name: Nightly
 #   wasm-contract     - wasm-pack browser contract test in headless Chrome
 #   release-packaging - per-crate `cargo package` dry-run (release hygiene)
 #   audit             - daily cargo-deny advisory sweep
-#   mobkit-docs-lag   - docs/mobkit mirror vs MobKit main (docs-touching commits);
-#                       fails when more than one release was published after
-#                       the mirrored one (publication has stalled silently)
+#   meta-docs-lag     - docs/meta mirror vs main: fails while a main commit
+#                       that changed meta/docs after the mirrored one is not
+#                       mirrored (publication has stalled silently)
 
 # Hosted-runner slots. The account runs at most 40 hosted jobs at once,
 # shared with every pull request and main push, and nightly once held 22 of
@@ -46,17 +48,26 @@ name: Nightly
 #      in parallel);
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
-#        release-packaging (140 min) > mobkit-docs-lag
-#        e2e-system (100) > sdk-web (24) > audit > machine-verify-deep
-#          (new, up to its 90-minute timeout)
-#        feature-matrix (89) > workspace-int (46)
-#        release-stack-budget (55) > minimal-and-modularity (42) > e2e-fast
-#          (18) > sdk-host (14)
-#        machine-verify (38) > workspace-unit (24) > clippy-full (24) >
-#          dense-topology (24) > wasm-contract (16)
-# Minutes are from the 2026-10-01 run. Each chain is at most about 145
-# minutes, so nightly takes about three hours instead of about two and a
-# half. A new job joins the shortest chain; a new chain is a new slot.
+#        release-packaging (143-304 min) > meta-docs-lag (2)
+#        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
+#          machine-verify-deep (3-8)
+#        feature-matrix (170-267) > workspace-int (134-240)
+#        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
+#          e2e-fast (3-34) > sdk-host (3-52)
+#        machine-verify (30-43) > workspace-unit (117-173) > clippy-full
+#          (30-63) > dense-topology (24-70) > wasm-contract (4-26)
+# Minutes are the range over the 2026-11-01 to 11-07 runs, a job that ran
+# out of time counted at its limit and a run that lost its runner left
+# out; most jobs swing several-fold from night to night. machine-verify's
+# and workspace-unit's are estimates for their current settings, and
+# workspace-int's and dense-topology's upper ends are their limits. The
+# longest chain, feature-matrix > workspace-int, takes up to about eight
+# and a half hours, and nightly took 4 h 46 min to 7 h 23 min. A new job
+# joins the shortest chain; a new chain is a new slot.
+#
+# A red run on main opens or updates the "Nightly failures" issue through
+# nightly-failure-issue.yml, which starts once this workflow's run has
+# completed, so no job here waits for the others.
 on:
   schedule:
     - cron: "17 2 * * *"
@@ -87,13 +98,23 @@ env:
   # reuse (rust-cache + sccache) requires registry source paths that do not
   # change between runs.
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (ci.yml's lanes do the same). sccache's idle clock
+  # restarts only on a new compile request, and at the default 600 s the
+  # server exits under a compile still running (it waits 10 s for it): a
+  # crate whose rustc ran that long with nothing else compiling was cut off
+  # and compiled again from the start without the cache ("The server looks
+  # like it shut down unexpectedly, compiling locally instead"). The system
+  # e2e lane printed that 90 times on 2026-11-07 and compiled for 343 of its
+  # 346.6 minutes, and 36 times on 11-04, when it ran out of its 360; it
+  # took 184 and 201 minutes in all on 10-28 and 11-03, which printed none.
+  SCCACHE_IDLE_TIMEOUT: "0"
   # A failed sccache install never fails a job either: each Setup sccache
   # step continues on error (so does the action's post step, which reads
   # the stats), and the step after it then sets an empty RUSTC_WRAPPER,
@@ -105,10 +126,16 @@ jobs:
     needs: machine-verify
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
-    # Measured ~91 min on 4 vCPU: make test-unit ~58 (38 compile + 20 run) + rpc all-features ~31.
-    timeout-minutes: 150
+    # At four Cargo jobs `make test-unit` took 60-79 minutes to compile and
+    # 27-31 to run its tests (2026-11-02 to 11-05). Two jobs compile for an
+    # estimated 1.5-1.8 times as long: 117-173 minutes in all.
+    timeout-minutes: 180
     env:
       RUSTC_WRAPPER: sccache
+      # At four Cargo jobs the 16 GB runner lost this job mid-compile (exit
+      # 143 after the log went silent, 2026-11-06 and 11-07), as it lost
+      # workspace-int below. Two jobs keep at most two rustc alive.
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -148,25 +175,26 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # meerkat-rpc's WebRTC router tests, which `live-webrtc` gates and this
+      # lane compiles out, run on every Rust-changing main push instead:
+      # ci.yml's "Main unit tests (rpc[openai-live])" row turns on every
+      # meerkat-rpc feature (experimental-gpt-live implies openai-live, which
+      # implies live-webrtc and mob).
       - name: Workspace unit tests
         run: make test-unit
-
-      # meerkat-rpc gates its WebRTC router tests on `live-webrtc`, which no
-      # default feature set enables, so `make test-unit` compiles them out.
-      - name: meerkat-rpc unit tests (all features)
-        run: |
-          # meerkat-rpc's MCP boundary tests spawn this exact fixture and fail without it.
-          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
-          export MEERKAT_MCP_TEST_SERVER
-          ./scripts/repo-cargo nextest run -p meerkat-rpc --all-features --lib --no-fail-fast --show-progress none --status-level none --final-status-level fail
 
   workspace-int:
     name: Workspace integration-fast tests
     needs: feature-matrix
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
-    # Two Cargo jobs build for up to about twice as long as four.
-    timeout-minutes: 180
+    # Two Cargo jobs build for up to about twice as long as four. On
+    # 2026-11-07 `make test-int` compiled for 79 minutes and ran its 23968
+    # tests in 81, all passing, then ran out of the former 180 minutes 19
+    # minutes into the HeadCanonical kill window's own build (a feature
+    # graph of its own, meerkat-mob with test-support), which still had
+    # meerkat-runtime and meerkat-mob to compile.
+    timeout-minutes: 240
     env:
       RUSTC_WRAPPER: sccache
       # At four Cargo jobs the 16 GB runner lost this job mid-build (exit 143
@@ -333,8 +361,15 @@ jobs:
         with:
           setup-java: "false"
 
-      - name: Canonical bounded machine verification
-        run: make machine-verify
+      # Only the lane's machine-verify part, which no per-change lane runs:
+      # the bounded adaptive witness, then `machine-verify --all`, an
+      # estimated 30-43 minutes with setup and the xtask build. The lane's
+      # twenty-four audit shards run in ci.yml's tlc-audits job on every
+      # change scripts/machine-authority-changed matches. The whole lane in
+      # one 4-vCPU job needs an estimated 218-260 minutes, and it hit this
+      # job's 90-minute limit every night from 2026-11-04.
+      - name: Adaptive witness and machine-verify --all sweep
+        run: make machine-verify MACHINE_VERIFY_PART=machine-verify
 
   machine-verify-deep:
     name: Deep TLC composition verification
@@ -929,61 +964,24 @@ jobs:
       - name: Cargo deny
         run: make audit
 
-  mobkit-docs-lag:
-    name: MobKit docs mirror lag
+  meta-docs-lag:
+    name: Meta docs mirror lag
     needs: release-packaging
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
     steps:
+      # The lag is read from this repository's own history (Meta's docs
+      # are meta/docs here), so the checkout needs all of it: a shallow
+      # checkout cannot place the mirrored commit and fails as "lag unknown"
+      # rather than report zero lag.
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
-      - name: Compare the mirrored MobKit commit with MobKit main
-        env:
-          # The workflow token can read another public repository's compare
-          # endpoint even with `contents: read` here. If lukacf/meerkat-meta
-          # stops being public, or the token loses that read, the API call
-          # fails and the job must fail as "lag unknown" rather than report
-          # zero lag.
-          GH_TOKEN: ${{ github.token }}
+      - name: Compare the mirrored commit with the main commits that changed meta/docs
         run: |
           set -euo pipefail
-          mirrored=$(python3 -c 'import json; print(json.load(open("docs/mobkit/_source.json"))["source_commit"])')
-          compare="${RUNNER_TEMP}/mobkit-compare.json"
-          if ! gh api "repos/lukacf/meerkat-meta/compare/${mirrored}...main" > "${compare}"; then
-            echo "::error::Could not compare the mirrored MobKit commit with main using the workflow token; the MobKit docs mirror lag is unknown, not zero." >&2
-            exit 1
-          fi
-          python3 scripts/check-mobkit-docs-lag.py \
-            --manifest docs/mobkit/_source.json \
-            --compare "${compare}" \
+          python3 scripts/check-meta-docs-lag.py \
+            --manifest docs/meta/_source.json \
             --max-lag 0
-
-  # A red nightly on main opens one tracking issue, or comments on it while
-  # it stays open (#1673). It follows the last chain and waits for the
-  # others there, since a nightly job may need only one job.
-  failure-issue:
-    name: Nightly failure issue
-    needs: wasm-contract
-    if: ${{ !cancelled() && !inputs.graph_only }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    permissions:
-      actions: read
-      issues: write
-    steps:
-      - name: Open or update the tracking issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          JOBS: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100
-        run: |
-          set -euo pipefail
-          others='[.jobs[] | select(.name != "Nightly failure issue")]'
-          until [[ "$(gh api "${JOBS}" --jq "${others} | map(select(.status != \"completed\")) | length")" == 0 ]]; do sleep 60; done
-          failed="$(gh api "${JOBS}" --jq "${others} | map(select(.conclusion == \"failure\" or .conclusion == \"timed_out\" or .conclusion == \"cancelled\") | .name) | join(\", \")")"
-          echo "failed jobs: ${failed:-none}"
-          [[ -n "${failed}" && "${GITHUB_REF}" == refs/heads/main ]] || exit 0
-          body="Run ${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID} failed: ${failed}"
-          issue="$(gh issue list --state open --search 'in:title "Nightly failures"' --json number,title --jq '[.[] | select(.title == "Nightly failures")][0].number // empty')"
-          if [[ -n "${issue}" ]]; then gh issue comment "${issue}" --body "${body}"; else gh issue create --title "Nightly failures" --body "${body}"; fi

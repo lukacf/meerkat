@@ -176,16 +176,39 @@ pub enum HostRunStartHoldReason {
     /// The member's tools are not published yet: it starts no run until
     /// its host releases this hold.
     ToolsNotPublished,
+    /// The member's host preparation is owed: the declared apply holds its
+    /// role move ([`crate::HostPreparationCause::RoleMigrationUndeclared`]).
+    /// The mob holds its run starts while the hold stands and releases them
+    /// when MobMachine ends it; a host does not release this hold
+    /// ([`crate::MobHandle::release_member_run_starts`] refuses it).
+    HostPreparation,
+    /// The member's host holds it while it recovers it, for example while it
+    /// settles a run a crash left open
+    /// ([`crate::MobHandle::settle_member_retained_run`]): it starts no run
+    /// until its host releases this hold. No mob or Meta code stages or
+    /// releases this reason; only the host does, with
+    /// [`crate::MobBuilder::hold_restored_member_run_starts`] and
+    /// [`crate::MobHandle::release_member_run_starts`]. A retire or destroy of
+    /// the member drops what the host staged for it, since the host can no
+    /// longer release it through the mob.
+    HostRecovery,
 }
 
 impl HostRunStartHoldReason {
-    /// Every reason a host holds a member's run starts for.
+    /// Every reason a member's run starts are held for until a release
+    /// other than a Resume.
     #[cfg(feature = "runtime-adapter")]
-    pub(crate) const ALL: [Self; 1] = [Self::ToolsNotPublished];
+    pub(crate) const ALL: [Self; 3] = [
+        Self::ToolsNotPublished,
+        Self::HostPreparation,
+        Self::HostRecovery,
+    ];
 
     pub(crate) fn runtime(self) -> meerkat_runtime::RunStartHoldReason {
         match self {
             Self::ToolsNotPublished => meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+            Self::HostPreparation => meerkat_runtime::RunStartHoldReason::HostPreparation,
+            Self::HostRecovery => meerkat_runtime::RunStartHoldReason::HostRecovery,
         }
     }
 }

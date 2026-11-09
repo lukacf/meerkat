@@ -7,16 +7,19 @@
 # generated constant and invariant, unchanged), then adds the audit's finite
 # model values (one identity, two runtime ids, two fence tokens, generations
 # 0..1, two sessions, the audit's strings) and its VIEW, which leaves out the
-# two counters no guard, other variable's update or invariant of the
-# generated model reads (model_step_count and topology_epoch). The runner
-# first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. With the counters left out the reachable space is finite,
+# four counters no guard, other variable's update or invariant of the
+# generated model reads (model_step_count, topology_epoch and the identity
+# life marker, identity_life_resets and identity_life_ends). The runner first
+# checks that the model still reads none of them anywhere else, and fails
+# otherwise. With the counters left out the reachable space is finite,
 # so each run explores all of it, with no step bound. It checks two runs over
 # their whole space with TLC coverage:
-# - the lifecycle run (AuditSpec) with its four action properties and the two
-#   invariants that check the reasons of its not-covered list;
-# - the scope run (AuditScopeSpec) with its two RetireAtScope invariants and
-#   the two destroy action properties.
+# - the lifecycle run (AuditSpec) with its four action properties, the two
+#   invariants that check the reasons of its not-covered list and the
+#   invariant that the replay of a respawn's abandonment of a generation the
+#   identity has moved past is answered once (AuditStaleAbandonmentAnsweredOnce);
+# - the scope run (AuditScopeSpec) with its two RetireAtScope invariants, its
+#   RetireAbsent invariant and the two destroy action properties.
 # Each run must finish without an error, reach at least its floor of distinct
 # states (so a guard that silently disables arms fails the lane instead of
 # shrinking the space), and fire every action of its covered list (TLC
@@ -24,7 +27,7 @@
 # space once per reachability witness, with that witness's negation as an
 # extra invariant (a state goal) or action property (a step goal), and
 # requires TLC to report exactly that violation, so the properties are not
-# vacuous. With --mutants it then seeds ten defects into a copy of the
+# vacuous. With --mutants it then seeds fourteen defects into a copy of the
 # generated model and requires TLC to refuse each: a progress arm without its
 # observation_monotonic guard (AuditObservationMonotonic); the same guard
 # rendered as a plain `<=` between option records, which TLC cannot evaluate
@@ -43,7 +46,15 @@
 # predecessor's execution-health entries (AuditMintClearsExecutionHealth);
 # a runtime destroy observation that ends the mob, one that leaves its
 # runtime live, and one that resets the mob's run count
-# (AuditRuntimeDestroyedRemovesOnlyItsRuntime).
+# (AuditRuntimeDestroyedRemovesOnlyItsRuntime); a completed mob without its
+# RetireAbsent arm, which leaves the retire of an absent identity to the
+# shell, and that arm without its identity_absent guard, which answers it
+# for a mapped identity (AuditRetireAbsentAnsweredInEveryPhase); and the
+# stale abandonment arm dropped, which leaves the replay of a respawn's
+# abandonment after a later incarnation ended unanswered (every resume of
+# such a mob failed), and that arm without its later_generation_recorded
+# guard, which answers a marker of a generation the identity never reached
+# (AuditStaleAbandonmentAnsweredOnce).
 # An anchor this script
 # expects but cannot find fails the run. Each TLC run is held to the
 # canonical lane's per-run cap (tlc_run_cap.sh) and fails closed as TLC
@@ -102,6 +113,7 @@ covered_actions=(
   RecoverRosterMemberRetirementStartedPreservingBinding
   RecoverRosterMemberRetirementStartedPeerOnly
   RecoverRosterMemberAddressabilityRunning
+  ObserveRespawnTopologyAbandonedStaleEndedSuccessor
   ObserveRuntimeRetired
   ObserveRuntimeRetiredStopped
   ObserveRuntimeDestroyed
@@ -125,8 +137,9 @@ covered_actions=(
 
 # Every RetireAtScope verdict arm, the completion and destruction arms that
 # reach the not-running verdict, the runtime destroy observation of a
-# completed mob, and the destroy admission with a runtime destroy
-# observation after it; each must fire in the scope run.
+# completed mob, the destroy admission with a runtime destroy observation
+# after it, and the RetireAbsent arms of a completed and a destroyed mob;
+# each must fire in the scope run.
 scope_covered_actions=(
   BeginPlacedCompletionLifecycleQuiesceFresh
   MarkCompleted
@@ -134,6 +147,8 @@ scope_covered_actions=(
   AdmitDestroyCleanup
   ObserveRuntimeDestroyed
   DestroyMob
+  RetireAbsentCompleted
+  RetireAbsentDestroyed
   RetireAtScopeCurrentRunning
   RetireAtScopeCurrentStopped
   RetireAtScopeNoCurrentIncarnationRunning
@@ -165,7 +180,8 @@ replace_exact_line() {
   mv "${file}.next" "${file}"
 }
 
-# The VIEW leaves out model_step_count and topology_epoch, so the generated
+# The VIEW leaves out model_step_count, topology_epoch and the identity life
+# marker (identity_life_resets, identity_life_ends), so the generated
 # model must read them nowhere but in their own updates, Init, the UNCHANGED
 # frames and the generated profiles' state constraints (which the audit does
 # not use). Prints their positions in the `vars` tuple.
@@ -189,6 +205,22 @@ allowed = {
         r"    /\\ topology_epoch' = ",
         r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
     ],
+    "identity_life_resets": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_resets = 0$",
+        r"    /\\ identity_life_resets' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+    ],
+    "identity_life_ends": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_ends = ",
+        r"    /\\ identity_life_ends' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+        r"CiStateConstraint == ",
+        r"DeepStateConstraint == ",
+    ],
 }
 for name, patterns in allowed.items():
     word = re.compile(r"\b" + name + r"\b")
@@ -202,16 +234,16 @@ names = [name.strip() for name in tuples[0][len("vars == << "):-len(" >>")].spli
 for name in allowed:
     if names.count(name) != 1:
         sys.exit(f"error: expected {name} once in the vars tuple of model.tla")
-print(names.index("model_step_count") + 1, names.index("topology_epoch") + 1)
+print(" ".join(str(names.index(name) + 1) for name in allowed))
 PY
 }
 view_positions="$(view_counter_positions)"
-step_index="${view_positions% *}"
-epoch_index="${view_positions#* }"
+read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_positions}"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is lifecycle (AuditSpec and its action properties) or scope
-# (AuditScopeSpec, its two invariants and the two destroy action properties).
+# (AuditScopeSpec, its three invariants and the two destroy action
+# properties).
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4"
   cp "${ci_cfg}" "${cfg}"
@@ -224,7 +256,9 @@ write_cfg() {
   replace_exact_line "  StringValues = {}" '  StringValues = {"profile_1", "token_1", "token_2"}' "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditStepIndex = ${step_index}
-  AuditEpochIndex = ${epoch_index}" "${cfg}"
+  AuditEpochIndex = ${epoch_index}
+  AuditLifeResetsIndex = ${life_resets_index}
+  AuditLifeEndsIndex = ${life_ends_index}" "${cfg}"
   case "${run}" in
     lifecycle)
       replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditSpec" "${cfg}"
@@ -236,7 +270,8 @@ write_cfg() {
   AuditDestroyedOnlyThroughAnAdmittedDestroy${properties}
 INVARIANTS
   AuditPlacementAbsent
-  AuditRetiringRuntimeMapped${invariants}" "${cfg}"
+  AuditRetiringRuntimeMapped
+  AuditStaleAbandonmentAnsweredOnce${invariants}" "${cfg}"
       ;;
     scope)
       replace_exact_line "SPECIFICATION Spec" "SPECIFICATION AuditScopeSpec" "${cfg}"
@@ -245,7 +280,8 @@ INVARIANTS
   AuditDestroyedOnlyThroughAnAdmittedDestroy
 INVARIANTS
   AuditRetireAtScopeCoherent
-  AuditRetireAtScopeExactlyOne${invariants}" "${cfg}"
+  AuditRetireAtScopeExactlyOne
+  AuditRetireAbsentAnsweredInEveryPhase${invariants}" "${cfg}"
       if [[ -n "${properties}" ]]; then
         echo "error: the scope run takes no action properties" >&2
         exit 1
@@ -353,6 +389,7 @@ check_space scope "${min_scope_distinct_states}" "${scope_states}" "${scope_cove
 for witness in "lifecycle:Invariant:Bound" "lifecycle:Action property:ObservationAdvances" \
   "lifecycle:Invariant:Retiring" "lifecycle:Invariant:Archived" \
   "lifecycle:Action property:Successor" "lifecycle:Action property:StaleIncarnation" \
+  "lifecycle:Action property:StaleAbandonment" \
   "scope:Invariant:RetiringScopeCurrent" \
   "scope:Invariant:CurrentRuntimeGone"; do
   run="${witness%%:*}"
@@ -581,6 +618,74 @@ body = body.replace(
     "    /\\ active_run_count' = 0\n    /\\ UNCHANGED << " + kept + " >>",
 )
 text = text[: block.start()] + body + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  # A completed mob without its RetireAbsent arm, which leaves the retire of
+  # an absent identity unanswered by the machine (the shell answered it),
+  # and that arm without its identity_absent guard, which answers it for an
+  # identity the machine still maps.
+  mutate scope retire_absent_completed_missing "Error: Invariant AuditRetireAbsentAnsweredInEveryPhase is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RetireAbsentCompleted\(.*?\n\n", text, re.S | re.M)
+assert block, "RetireAbsentCompleted not found"
+lines = block.group(0).split("\n")
+phase = [i for i, line in enumerate(lines) if line == '    /\\ phase = "Completed"']
+assert len(phase) == 1, "expected one Completed phase guard in RetireAbsentCompleted"
+lines[phase[0]] = "    /\\ FALSE"
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate scope retire_absent_completed_unguarded "Error: Invariant AuditRetireAbsentAnsweredInEveryPhase is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RetireAbsentCompleted\(.*?\n\n", text, re.S | re.M)
+assert block, "RetireAbsentCompleted not found"
+lines = block.group(0).split("\n")
+guard = [i for i, line in enumerate(lines)
+         if line == "    /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = FALSE)"]
+assert len(guard) == 1, "expected one identity_absent guard in RetireAbsentCompleted"
+del lines[guard[0]]
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  # The stale abandonment arm dropped, which leaves a respawn's abandonment
+  # of a generation the identity has moved past unanswered (every resume of
+  # such a mob failed), and that arm without its later_generation_recorded
+  # guard, which then answers a marker of a generation the identity never
+  # reached.
+  mutate lifecycle stale_abandonment_unanswered "Error: Invariant AuditStaleAbandonmentAnsweredOnce is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^ObserveRespawnTopologyAbandonedStaleEndedSuccessor\(.*?\n\n", text, re.S | re.M)
+assert block, "ObserveRespawnTopologyAbandonedStaleEndedSuccessor not found"
+lines = block.group(0).split("\n")
+phase = [i for i, line in enumerate(lines) if line == '    /\\ phase = "Running"']
+assert len(phase) == 1, "expected one Running phase guard in ObserveRespawnTopologyAbandonedStaleEndedSuccessor"
+lines[phase[0]] = "    /\\ FALSE"
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+
+  mutate lifecycle stale_abandonment_unordered "Error: Invariant AuditStaleAbandonmentAnsweredOnce is violated" "$@" <<'PY'
+import os, re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^ObserveRespawnTopologyAbandonedStaleEndedSuccessor\(.*?\n\n", text, re.S | re.M)
+assert block, "ObserveRespawnTopologyAbandonedStaleEndedSuccessor not found"
+lines = block.group(0).split("\n")
+guard = [i for i, line in enumerate(lines)
+         if line.startswith("    /\\ ")
+         and "(identity_runtime_generations)[agent_identity] > generation" in line]
+assert len(guard) == 1, "expected one later_generation_recorded guard in ObserveRespawnTopologyAbandonedStaleEndedSuccessor"
+del lines[guard[0]]
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
 open(path, "w").write(text)
 PY
 fi

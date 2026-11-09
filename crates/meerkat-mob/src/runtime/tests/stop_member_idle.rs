@@ -773,7 +773,7 @@ async fn a_stop_whose_blocker_never_settles_returns_the_refusal_at_the_hang_guar
         ),
         "the refusal stands at the hang guard, got {outcome:?}"
     );
-    assert!(started.elapsed() >= Duration::from_secs(600));
+    assert!(started.elapsed() >= Duration::from_mins(10));
     assert_eq!(
         stops.load(std::sync::atomic::Ordering::SeqCst),
         1,

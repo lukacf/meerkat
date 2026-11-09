@@ -74,6 +74,11 @@ one of a set of owners. A parent grant can then fix the application while each
 child grant names the exact session resource it needs; a child that names a
 resource of another owner permits nothing.
 
+A [scoped tool grant](/concepts/tools#scoped-tool-grants) is a different
+thing: it opens, for a bounded time, tool names a session's build marked
+grant-gated, and confers no authority of its own. A call it opens still needs
+every permission this page describes.
+
 ## Check the operation that will actually run
 
 The adapter retains an immutable binding with the actual request or execution
@@ -160,6 +165,49 @@ it cannot turn a denied request into a more privileged request of its own.
 Schedules retain their commissioning mandate. Console visibility and a signed-in
 provider account are not substitutes for those checks.
 
+Between agents in one process, Core carries the original requester itself. A
+comms delivery that governed work sends in process carries that work's origin:
+its requester, the sending agent, and every work it names. Core's peer binder
+(`OriginalRequesterPeerBinder`, which a host composition installs) binds the
+receiving work under that requester, with the sending agent as its ingress
+actor and every work of the sending work as a contributor. It takes only the
+receiving agent's own facts from the host (`PeerServiceBasis`): its basis for
+serving peers, its destination and its controller. Every operation of the
+receiving work is narrowed by the requester's current grant, at every hop, so
+the receiving agent's own access never widens what the requester may do. Core
+refuses any binder's binding of such a delivery that drops the requester, the
+sending agent or a work of the sending work. A delivery over a network carries
+no origin, and Core's binder refuses it (`origin_unverifiable`), as it refuses
+a sending work whose basis narrows nothing (`sender_basis_unbounded`).
+
+An ungoverned input can name its original requester too: an opaque, qualified
+principal that the host supplies from the caller it authenticated
+(`StartTurnRuntimeSemantics::with_requester`, `InputHeader.requester`), never
+one taken from a request body, a tool argument or model output. Core never
+interprets it. It is stored with the admitted input and returned on the input's
+receipt (`InputState::requester`) and on the turn's transcript rows
+(`TranscriptMessageIdentity.requester`), and a tool sees the run's requester in
+its dispatch context (`ToolDispatchContext::requester`). A governed input's
+requester is its work association's, and an input that names a different one
+besides is refused. The requester is direct when the person asked the agent
+itself, and carried when the work reached the agent through a peer hop or an
+approval; `ToolDispatchContext::direct_requester` answers only for a direct
+one, which is the only one a host should act for in that person's name. Inputs
+of different requesters, or of a requester and none, never share a run.
+
+A host tool callback names the run's requester too, typed, so a host can
+refuse a person-scoped tool (one person's mail, documents or accounts) for
+anyone else: the JSON-RPC `tool/execute` request carries it as `requester`,
+and a detached callback job records the requester of the run that submitted
+it and names it on every `callback/job/start`. Only the runtime sets it; a
+`requester` inside a call's arguments is just an argument.
+
+An MCP App's action runs for the requester its host's trusted ingress names
+(`ToolApplicationIngress::requester`), as a direct requester, and never for
+the requester of the model run whose result the app shows. An ingress that
+names no one runs the action without a requester, and one that names an
+unqualified principal is refused.
+
 ## Information handling has an explicit limit
 
 Once an agent reads allowed information into a model context, this system cannot
@@ -207,6 +255,115 @@ uncertainty distinct. Pending observations join existing native commits; an
 in-memory host provides process-lifetime history. An optional event exporter is
 not the authoritative record, and a missing record after a crash does not prove
 that no effect occurred.
+
+## Durable decisions hold one operation until it is decided
+
+Some operations wait for a decision longer than one run, across restarts. A
+**durable decision** holds one such operation, sealed by the operation id and
+request digest its owner computed, until an attested party decides it, its
+requester or the host withdraws it, or its deadline passes. The operation's
+owner then executes the held request at most once.
+
+- **One subject digest.** A decision binds one canonical rendering of the held
+  request. Core computes its digest from the rendering, and refuses a
+  presentation, decision or review that names another digest. A presentation
+  counts only when it is complete for the party that decides now: it shows
+  every canonical part of the rendering, or, from a surface with a size
+  limit, it is a summary that says it is shortened with a link to the full
+  presentation, and that link served the whole, unchanged rendering (its
+  digest is the subject digest). A summary without such a link, or whose
+  link served a changed rendering, is `presentation_incomplete`: nothing is
+  decided on a silently truncated presentation.
+- **Attested decisions.** A human decides for the decision's approver id with
+  an authenticated decision event and its evidence; the decider's eligibility is
+  checked when the decision commits, the requester never decides its own
+  request, and the first valid decision wins. A decision can name a reviewer
+  instead, whose verdict allows, denies or escalates to the human. The
+  evidence names the login the human decided in by its digest
+  (`HostAuthenticationScope::digest`), never the login itself;
+  [Human consent](/guides/authorization-integration#human-consent) says which
+  scopes that digest keeps private.
+- **Decided after it was shown.** A human decision event carries the time its
+  trusted ingress observed it (`observed_at_ms`, such as a chat provider's
+  message time), and its evidence records that time. An event observed before
+  the approver was first shown the decision (the earliest presentation,
+  recorded or carried by the event) is refused as
+  `decided_before_presentation`; one observed in the same millisecond is
+  accepted. The decision's machine makes this check; with no presentation at
+  all, the decision stays `presentation_incomplete`. It also decides whether
+  a presentation the event carries counts: only a complete presentation of
+  the held subject to the approver does (as for a recorded one), any other
+  counts as none, and only a counted one is kept with the decision. The two
+  times come from
+  different clocks: the observed time is the ingress's (a provider's message
+  timestamp, for example), and a presentation's time is the host's. An
+  ingress clock that truncates (to whole seconds, for example) or runs behind
+  the host's can only make a decision look earlier, so the worst case is a
+  retryable `decided_before_presentation`. An ingress clock that runs ahead of
+  the host's by d lets a decision made up to d before the presentation be
+  accepted, and a rounding clock runs ahead by up to half its unit, so the
+  ingress must bound that skew. A presentation time of 0 is no reading: a
+  presentation recorded at 0 is refused as `presentation_incomplete`, and so
+  is a decision that carries one, even after a valid presentation was
+  recorded.
+- **Execution once.** The owner executes an approved decision under an
+  execution permit, issued only before the deadline and only while the party
+  who decided is still current (not revoked, and not forbidden by policy
+  since; a login's natural expiry is not a revocation), and settles it:
+  executed, released (the decision stays approved) or permanently refused. A
+  party the host refuses gets no permit: the decision ends refused, records
+  `approver_not_current`, and owes its notice. An answer the host cannot give
+  now, or evidence an owner change made stale before the authorization
+  commits, decides nothing, and the host is asked again. A permit already
+  outstanding is settled first, so a commit made under it still counts. A
+  permit outstanding at the deadline holds the decision until its
+  settlement. Without one, an approved decision expires at its deadline and
+  never runs after it.
+- **One executor.** `DecisionExecutorLoop` executes the approved decisions of
+  a store, through one registered executor per decision kind. It holds the
+  executor claim of each kind it executes while it runs (for the SQLite file,
+  an OS lock on `approval_decisions.executor.<kind>.lock` beside it, and a
+  shared one on `approval_decisions.executor.lock`, released when its process
+  ends). Another executor of a kind, in this process or another, executes
+  none of its decisions while the claim lives: each pass lists the kind as
+  unclaimed and asks for it again, so it takes over once the first executor
+  ends. Executors of different kinds of one store run side by side, and a
+  candidate launch starts none. It keeps the three obligations the machine
+  cannot see: one executor per decision; after a commit, the only settlement
+  is recording it; and after a restart or a dropped pass it settles first,
+  from the owner's own record of the operation, which reports every commit
+  that can still land.
+- **One notice.** An ended decision whose requester can be told owes it one
+  notice, settled by its delivery receipt. A delivery whose receipt was not
+  recorded is made again, so the owner delivers idempotently.
+
+Decisions live in their own file beside the approval records,
+`approval_decisions.sqlite3` under the store path, created by the first hold;
+nothing is read at start, and a read touches one decision or one index page. A
+candidate launch reads decisions and writes none. Durable decisions share no
+record, file or machine with the in-run consent above, and `approval/list` never
+shows them. The RPC server reads, presents and withdraws them with the
+[`decision/*` methods](/api/rpc#durable-decisions); a runtime whose persistence
+keeps none answers them capability unavailable (`-32020`). No request body
+names who decides one: a host's trusted adapter decides through
+`MethodRouter::dispatch_with_decision_event`, with the
+`AuthenticatedDecisionEvent` it built from the event it authenticated, and
+learns that a decision opened from the owner's subscription
+(`DurableDecisionService::subscribe_openings`) instead of polling. The
+operator of an `rkat-rpc` stdio connection (Unix builds with local
+authorization) decides with `decision/decide` on that connection, which builds
+the event itself: the operator, device trusted in the connection's own scope.
+When such a decision opens while the connection is open, and when its client
+lists, the connection presents each decision held for an approver id
+`[governance.decisions] operator_approver_ids` names, writing a
+`decision/notice` before it records the presentation, and only a decision it
+presented, whose approver id is still listed, is eligible
+([the operator of a stdio connection](/api/rpc#the-operator-of-a-stdio-connection)).
+Elsewhere no connection is told that a decision opened, and `decision/decide`
+is method not found. A host
+builds its other decision surfaces on the Rust owner,
+`meerkat_runtime::decision::DurableDecisionService`,
+and executes them with `meerkat_runtime::decision::DecisionExecutorLoop`.
 
 Read the [integration and migration guide](/guides/authorization-integration)
 for host responsibilities and the remaining deployment checks.

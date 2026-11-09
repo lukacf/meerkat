@@ -1,0 +1,58 @@
+import { createAction, Property } from '@activepieces/pieces-framework';
+import { httpClient, HttpMethod } from '@activepieces/pieces-common';
+import { stripeAuth } from '../..';
+
+import { invoiceOutputSchema } from '../output-schemas';
+export const stripeCreateInvoice = createAction({
+  name: 'create_invoice',
+  classification: 'WRITE',
+  auth: stripeAuth,
+  displayName: 'Create Invoice',
+  description: 'Create an Invoice in stripe',
+  audience: 'human',
+  aiMetadata: {
+    description:
+      'Creates a draft invoice in Stripe for an existing customer in the given currency. Use to bill a customer for pending invoice items. Requires a valid Stripe customer ID; not idempotent, as each call creates a separate invoice.',
+    idempotent: false,
+  },
+  props: {
+    customer_id: Property.ShortText({
+      displayName: 'Customer ID',
+      description: 'Stripe Customer ID',
+      required: true,
+    }),
+    currency: Property.ShortText({
+      displayName: 'Currency',
+      description: 'Currency for the invoice (e.g., USD)',
+      required: true,
+    }),
+    description: Property.LongText({
+      displayName: 'Description',
+      description: 'Description for the invoice',
+      required: false,
+    }),
+  },
+  outputSchema: invoiceOutputSchema,
+  async run(context) {
+    const invoice = {
+      customer: context.propsValue.customer_id,
+      currency: context.propsValue.currency,
+      description: context.propsValue.description,
+    };
+
+    const response = await httpClient.sendRequest({
+      method: HttpMethod.POST,
+      url: 'https://api.stripe.com/v1/invoices',
+      headers: {
+        Authorization: 'Bearer ' + context.auth.secret_text,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: {
+        customer: invoice.customer,
+        currency: invoice.currency,
+        description: invoice.description,
+      },
+    });
+    return response.body;
+  },
+});

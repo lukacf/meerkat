@@ -189,7 +189,7 @@ async fn sse_fixture(endpoint: String) -> (u16, Arc<AtomicUsize>) {
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\nevent: endpoint\ndata: {endpoint}\n\n"
                 );
                 let _ = stream.write_all(head.as_bytes()).await;
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_mins(1)).await;
             });
         }
     });

@@ -27,6 +27,14 @@
 //! to rebuild ran nothing, so it takes the same wait as a stale read: a hold
 //! that ended before the step read it is no ordinary refusal there, and the
 //! step pauses one backoff step and rebuilds, as one of its free rebuilds.
+//! A fenced tool dispatch's prepared entry and its entry stagings (the root
+//! staging, the call-level policy gate's, a dispatch issuance's and a tool
+//! leaf's waiting effect entry,
+//! [`crate::ToolDispatchContext::enter_reviewed_effect_held_after_owner_change`])
+//! prepare a stale decision again through such an observation of the work's
+//! own publication, so their refusal to rebuild is a stale read that ran
+//! nothing too: they take the same wait and rebuild, as free rebuilds of the
+//! dispatch attempt.
 //! This is shell synchronization: no machine input changes.
 
 use crate::time_compat::{DeadlineInstant, Duration};
@@ -125,6 +133,23 @@ impl OwnerChangeChurn {
             report,
             ..Self::default()
         }
+    }
+
+    /// A waiting state for a host's own operation on `session_id` outside the
+    /// agent's dispatch (a governed input's bind, waiting out its binder's
+    /// "not now" answers): each wait is reported to `observer`, the operation
+    /// refusal observer the host installed, on `surface`, as
+    /// [`super::OperationRefusalDisposition::WaitedForOwnerChange`] of a
+    /// `ReprepareRequired` refusal, which makes no claim about tool code.
+    #[must_use]
+    pub fn reporting_to(
+        observer: std::sync::Arc<dyn super::OperationRefusalObserver>,
+        session_id: crate::types::SessionId,
+        surface: super::OperationRefusalSurface,
+    ) -> Self {
+        Self::reporting(Some(
+            super::RefusalObserverBinding::new(observer, session_id).wait_report(None, surface),
+        ))
     }
 
     /// After a `ReprepareRequired` refusal of an operation of `work`: when
@@ -262,23 +287,177 @@ impl OwnerChangeChurn {
                 waited: Duration::ZERO,
             }
         } else {
-            let deadline = *self.deadline.get_or_insert_with(|| {
-                let bound = budget_remaining.map_or(OWNER_CHANGE_WAIT_BOUND, |remaining| {
-                    remaining.min(OWNER_CHANGE_WAIT_BOUND)
-                });
-                DeadlineInstant::now() + bound
-            });
+            let deadline = self.deadline(budget_remaining);
             let wait = await_owner_change(work, deadline, pause_first).await;
             if wait.settled() {
                 self.free_rebuilds += 1;
             }
             wait
         };
+        self.report(wait, site, operation);
+        wait
+    }
+
+    /// After a "not now" answer (a host binder's `NotNow`, or a decision it
+    /// can wait out inside its own bind): wait for `until`, under this
+    /// churn's one deadline and free rebuilds, exactly as
+    /// [`Self::wait_for_settled_change`] waits for an owner change. The
+    /// first wait of the churn arms the deadline, [`OWNER_CHANGE_WAIT_BOUND`]
+    /// from then, clamped to `budget_remaining`; later waits keep it.
+    ///
+    /// - [`OwnerChangeWait::Settled`]: `until` cleared before the deadline.
+    ///   Ask again, afresh from the owners (one of this churn's free
+    ///   rebuilds). It promises nothing about the next answer.
+    /// - [`OwnerChangeWait::NotSettled`]: the deadline passed, or every free
+    ///   rebuild is spent. The "not now" stands, typed.
+    ///
+    /// Call it holding nothing: outside every protected section
+    /// ([`crate::protected_section`]), with no lock, guard or store
+    /// transaction. Cancellation is safe, as for every wait of this churn:
+    /// dropping the wait drops `until`, which undoes nothing. Each wait is
+    /// traced at `site` for `operation` ([`OwnerChangeWait::trace`]) and
+    /// reported to the operation refusal observer, when one is installed.
+    pub async fn wait_until_clear(
+        &mut self,
+        until: NotNowWait,
+        budget_remaining: Option<Duration>,
+        site: &'static str,
+        operation: Option<&crate::OperationId>,
+    ) -> OwnerChangeWait {
+        let wait = if self.free_rebuilds >= OWNER_CHANGE_FREE_REBUILDS {
+            OwnerChangeWait::NotSettled {
+                waited: Duration::ZERO,
+            }
+        } else {
+            let deadline = self.deadline(budget_remaining);
+            let wait = await_not_now(until, deadline).await;
+            if wait.settled() {
+                self.free_rebuilds += 1;
+            }
+            wait
+        };
+        self.report(wait, site, operation);
+        wait
+    }
+
+    /// The churn's one deadline, armed by its first wait.
+    fn deadline(&mut self, budget_remaining: Option<Duration>) -> DeadlineInstant {
+        *self.deadline.get_or_insert_with(|| {
+            let bound = budget_remaining.map_or(OWNER_CHANGE_WAIT_BOUND, |remaining| {
+                remaining.min(OWNER_CHANGE_WAIT_BOUND)
+            });
+            DeadlineInstant::now() + bound
+        })
+    }
+
+    fn report(
+        &self,
+        wait: OwnerChangeWait,
+        site: &'static str,
+        operation: Option<&crate::OperationId>,
+    ) {
         wait.trace(site, operation);
         if let Some(report) = self.report.as_ref() {
             report.report(wait, operation);
         }
-        wait
+    }
+}
+
+/// What a host that answered "not now" offers its caller to await before it
+/// asks again: a pure read until it clears, a future, or one backoff step.
+///
+/// The caller awaits it outside every protected section
+/// ([`crate::protected_section`]) and only within its own wait budget,
+/// through [`OwnerChangeChurn::wait_until_clear`]. It holds nothing a
+/// protected section needs. It is cancel-safe: dropping it releases and
+/// undoes nothing, and any host effect it starts runs in the host's own
+/// task. It may resolve early: the next ask decides again, from the owners.
+/// It never sends governed input.
+pub struct NotNowWait(NotNowWaitKind);
+
+enum NotNowWaitKind {
+    /// Read until it answers `false` (no longer held).
+    Probe(Box<dyn Fn() -> bool + Send + Sync>),
+    Future(std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>),
+    Pause,
+}
+
+impl std::fmt::Debug for NotNowWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            NotNowWaitKind::Probe(_) => "NotNowWait::UntilClear",
+            NotNowWaitKind::Future(_) => "NotNowWait::Future",
+            NotNowWaitKind::Pause => "NotNowWait::Pause",
+        })
+    }
+}
+
+impl NotNowWait {
+    /// Wait until `still_held` answers `false`. It is read with the
+    /// owner-change wait's backoff (1 ms, doubling to 64 ms), so it must be
+    /// a pure, non-blocking read: a try-lock, an atomic, a sequence.
+    #[must_use]
+    pub fn until_clear(still_held: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self(NotNowWaitKind::Probe(Box::new(still_held)))
+    }
+
+    /// Wait for `future`, which the host completes once asking again may
+    /// succeed.
+    #[must_use]
+    pub fn new(future: impl std::future::Future<Output = ()> + Send + 'static) -> Self {
+        Self(NotNowWaitKind::Future(Box::pin(future)))
+    }
+
+    /// Pause one backoff step (1 ms), then ask again.
+    #[must_use]
+    pub fn pause() -> Self {
+        Self(NotNowWaitKind::Pause)
+    }
+}
+
+/// Wait for `until`, or until `deadline`. The deadline is checked before
+/// every read: only a read (or a completion) before it settles.
+async fn await_not_now(until: NotNowWait, deadline: DeadlineInstant) -> OwnerChangeWait {
+    let start = DeadlineInstant::now();
+    if start >= deadline {
+        return OwnerChangeWait::NotSettled {
+            waited: Duration::ZERO,
+        };
+    }
+    let settled = match until.0 {
+        NotNowWaitKind::Probe(still_held) => {
+            let mut backoff = FIRST_BACKOFF;
+            loop {
+                let now = DeadlineInstant::now();
+                if now >= deadline {
+                    break false;
+                }
+                if !still_held() {
+                    break true;
+                }
+                tokio::time::sleep(backoff.min(deadline.saturating_duration_since(now))).await;
+                backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+            }
+        }
+        NotNowWaitKind::Future(future) => {
+            let expiry = Box::pin(tokio::time::sleep(
+                deadline.saturating_duration_since(start),
+            ));
+            matches!(
+                futures::future::select(future, expiry).await,
+                futures::future::Either::Left(_)
+            ) && DeadlineInstant::now() < deadline
+        }
+        NotNowWaitKind::Pause => {
+            tokio::time::sleep(FIRST_BACKOFF.min(deadline.saturating_duration_since(start))).await;
+            DeadlineInstant::now() < deadline
+        }
+    };
+    let waited = DeadlineInstant::now().saturating_duration_since(start);
+    if settled {
+        OwnerChangeWait::Settled { waited }
+    } else {
+        OwnerChangeWait::NotSettled { waited }
     }
 }
 
@@ -671,5 +850,167 @@ mod tests {
             churn.free_rebuilds, 0,
             "RED (c) wait_after_stale_read: spent a free rebuild past the deadline"
         );
+    }
+
+    /// A "not now" wait settles when its condition clears (a pure read, a
+    /// future the host completes, or one pause), within the churn's one
+    /// deadline, as a free rebuild.
+    #[tokio::test(start_paused = true)]
+    async fn a_not_now_wait_settles_once_its_condition_clears() {
+        let release_at = DeadlineInstant::now() + Duration::from_millis(300);
+        let mut churn = OwnerChangeChurn::new();
+        let wait = churn
+            .wait_until_clear(
+                NotNowWait::until_clear(move || DeadlineInstant::now() < release_at),
+                None,
+                SITE,
+                None,
+            )
+            .await;
+        assert!(wait.settled(), "the read cleared: {wait:?}");
+        assert!(
+            wait.waited() >= Duration::from_millis(300)
+                && wait.waited() < Duration::from_millis(300) + MAX_BACKOFF + FIRST_BACKOFF,
+            "settled at the first read after the release: {wait:?}"
+        );
+
+        let (done, completed) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = done.send(());
+        });
+        let wait = churn
+            .wait_until_clear(
+                NotNowWait::new(async move {
+                    let _ = completed.await;
+                }),
+                None,
+                SITE,
+                None,
+            )
+            .await;
+        assert!(wait.settled(), "the host completed it: {wait:?}");
+
+        let wait = churn
+            .wait_until_clear(NotNowWait::pause(), None, SITE, None)
+            .await;
+        assert_eq!(
+            wait,
+            OwnerChangeWait::Settled {
+                waited: FIRST_BACKOFF
+            },
+            "one backoff step"
+        );
+        assert_eq!(
+            churn.free_rebuilds, 3,
+            "each settled wait is a free rebuild"
+        );
+        let spent = churn
+            .wait_until_clear(NotNowWait::pause(), None, SITE, None)
+            .await;
+        assert_eq!(
+            spent,
+            OwnerChangeWait::NotSettled {
+                waited: Duration::ZERO
+            },
+            "past the free rebuilds nothing settles"
+        );
+    }
+
+    /// A "not now" wait never runs past the churn's one deadline (the bound,
+    /// or the caller's budget when less), never starts once it passed, and
+    /// shares that deadline with the owner-change waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_not_now_wait_never_outlasts_its_deadline() {
+        for (budget, deadline) in [
+            (None, OWNER_CHANGE_WAIT_BOUND),
+            (Some(Duration::from_millis(300)), Duration::from_millis(300)),
+        ] {
+            let mut churn = OwnerChangeChurn::new();
+            let started = DeadlineInstant::now();
+            let held = churn
+                .wait_until_clear(NotNowWait::until_clear(|| true), budget, SITE, None)
+                .await;
+            assert!(
+                !held.settled() && held.waited() >= deadline && started.elapsed() <= deadline,
+                "held throughout: it ends at the deadline: {held:?}"
+            );
+            let pending = churn
+                .wait_until_clear(NotNowWait::new(std::future::pending()), budget, SITE, None)
+                .await;
+            assert_eq!(
+                pending,
+                OwnerChangeWait::NotSettled {
+                    waited: Duration::ZERO
+                },
+                "no wait starts past the deadline"
+            );
+            let shared = churn
+                .wait_after_stale_read(&ClearsAfterFirstRead::default(), budget, SITE, None)
+                .await;
+            assert!(!shared.settled(), "one deadline for every wait: {shared:?}");
+        }
+    }
+
+    /// Every observation an observer received.
+    #[derive(Default)]
+    struct Observed(std::sync::Mutex<Vec<crate::authorization::OperationRefusalObservation>>);
+
+    impl crate::authorization::OperationRefusalObserver for Observed {
+        fn observe(&self, observation: &crate::authorization::OperationRefusalObservation) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(observation.clone());
+        }
+    }
+
+    /// A host's own churn reports each of its waits to the observer it
+    /// names, for its session and on its surface: a settled "not now" wait,
+    /// then one past the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_host_churn_reports_its_waits_to_its_observer() {
+        let observed = Arc::new(Observed::default());
+        let session = crate::types::SessionId::new();
+        let mut churn = OwnerChangeChurn::reporting_to(
+            observed.clone(),
+            session.clone(),
+            crate::authorization::OperationRefusalSurface::GovernedInput,
+        );
+        let settled = churn
+            .wait_until_clear(NotNowWait::pause(), None, SITE, None)
+            .await;
+        let held = churn
+            .wait_until_clear(
+                NotNowWait::until_clear(|| true),
+                Some(Duration::from_millis(300)),
+                SITE,
+                None,
+            )
+            .await;
+        let observations = observed
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(observations.len(), 2, "{observations:?}");
+        for (observation, wait) in observations.iter().zip([settled, held]) {
+            assert_eq!(observation.session_id(), &session);
+            assert_eq!(observation.run_id(), None);
+            assert_eq!(observation.operation_id(), None);
+            assert_eq!(
+                observation.surface(),
+                &crate::authorization::OperationRefusalSurface::GovernedInput
+            );
+            assert_eq!(
+                observation.disposition(),
+                crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                    waited_ms: u64::try_from(wait.waited().as_millis()).unwrap_or(u64::MAX),
+                    settled: wait.settled(),
+                }
+            );
+        }
+        assert!(settled.settled(), "{settled:?}");
+        assert!(!held.settled(), "{held:?}");
     }
 }

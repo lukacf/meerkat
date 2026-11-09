@@ -36,12 +36,22 @@ from .types import (
     CommsPeersResult,
     CommsSendParams,
     CommsSendResult,
+    CompactSessionParams,
+    CompactSessionResult,
     ConfigEnvelope,
     ConfigPatchParams,
     ConfigSetParams,
     ConfigWriteResult,
     CreateProfileParams,
     CreateScheduleRequest,
+    DecisionGetParams,
+    DecisionListParams,
+    DecisionListResult,
+    DecisionPresentParams,
+    DecisionRenderingParams,
+    DecisionRenderingResult,
+    DecisionResult,
+    DecisionWithdrawParams,
     DeferredCreateResult,
     DeviceCompleteParams,
     DeviceStartParams,
@@ -56,6 +66,8 @@ from .types import (
     ForkSessionReplaceParams,
     GoalStatusRequest,
     GoalStatusResult,
+    GrantToolParams,
+    GrantToolResult,
     HelpRequest,
     HelpResponse,
     InjectSystemContextParams,
@@ -87,6 +99,8 @@ from .types import (
     ListSessionTranscriptRevisionsParams,
     ListSessionsParams,
     ListSessionsResult,
+    ListToolGrantsParams,
+    ListToolGrantsResult,
     LiveChannelParams,
     LiveCloseResult,
     LiveCommitInputParams,
@@ -134,6 +148,8 @@ from .types import (
     MobCancelWorkResult,
     MobClaimCallbackRouteParams,
     MobClaimCallbackRouteResult,
+    MobCompactMemberParams,
+    MobCompactMemberResult,
     MobConcludeObjectiveParams,
     MobConcludeObjectiveResult,
     MobCreateParams,
@@ -152,6 +168,8 @@ from .types import (
     MobFlowsResult,
     MobForceCancelResult,
     MobForkHelperParams,
+    MobForkMemberParams,
+    MobForkMemberResult,
     MobGrantScopesParams,
     MobGrantScopesResult,
     MobGrantsResult,
@@ -162,6 +180,9 @@ from .types import (
     MobIdParams,
     MobIngressInteractionParams,
     MobIngressInteractionResult,
+    MobInstructionStatusParams,
+    MobInstructionStatusResult,
+    MobInstructionWriteResult,
     MobLifecycleParams,
     MobLifecycleResult,
     MobListMembersMatchingParams,
@@ -193,9 +214,11 @@ from .types import (
     MobResolveIdentityConvergenceBlockResult,
     MobRespawnParams,
     MobRespawnResult,
+    MobRestoreRetryResult,
     MobRetireResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
+    MobRevokeInstructionParams,
     MobRevokeScopesParams,
     MobRevokeScopesResult,
     MobRotateSupervisorResult,
@@ -203,6 +226,7 @@ from .types import (
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
+    MobSetInstructionParams,
     MobSnapshotResult,
     MobSpawnHelperParams,
     MobSpawnManyParams,
@@ -237,7 +261,12 @@ from .types import (
     ReadSessionTranscriptRevisionParams,
     ReadyWorkFilter,
     RealmIdParams,
+    RequestToolGrantParams,
+    RequestToolGrantResult,
     RestoreSessionTranscriptRevisionParams,
+    RevokeSessionInstructionParams,
+    RevokeToolGrantParams,
+    RevokeToolGrantResult,
     RewriteSessionTranscriptParams,
     RuntimeAcceptResult,
     RuntimeHostCapabilities,
@@ -255,16 +284,22 @@ from .types import (
     SessionForkResult,
     SessionInputStateParams,
     SessionInputStateResult,
+    SessionInstructionStatusParams,
+    SessionInstructionStatusResult,
+    SessionInstructionWriteResult,
     SessionPeerResponseTerminalParams,
     SessionStreamCloseParams,
     SessionStreamCloseResult,
     SessionStreamOpenParams,
     SessionStreamOpenResult,
     SessionTranscriptRewriteResult,
+    SetSessionInstructionParams,
     SkillListResponse,
     StopRunParams,
     StopRunResult,
     SystemPromptUpdateResult,
+    ToolGrantAuditParams,
+    ToolGrantAuditResult,
     ToolsRegisterParams,
     ToolsRegisterResult,
     UpdateScheduleParams,
@@ -543,6 +578,30 @@ class RpcRequest(Protocol):
     @overload
     def __call__(
         self,
+        method: Literal["session/set_instruction"],
+        params: SetSessionInstructionParams,
+        /,
+    ) -> Awaitable[SessionInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/revoke_instruction"],
+        params: RevokeSessionInstructionParams,
+        /,
+    ) -> Awaitable[SessionInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/instruction_status"],
+        params: SessionInstructionStatusParams,
+        /,
+    ) -> Awaitable[SessionInstructionStatusResult]: ...
+
+    @overload
+    def __call__(
+        self,
         method: Literal["session/transcript_revision"],
         params: ReadSessionTranscriptRevisionParams,
         /,
@@ -595,6 +654,14 @@ class RpcRequest(Protocol):
         params: StopRunParams,
         /,
     ) -> Awaitable[StopRunResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/compact"],
+        params: CompactSessionParams,
+        /,
+    ) -> Awaitable[CompactSessionResult]: ...
 
     @overload
     def __call__(
@@ -811,6 +878,86 @@ class RpcRequest(Protocol):
         params: HelpRequest,
         /,
     ) -> Awaitable[HelpResponse]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/grant"],
+        params: GrantToolParams,
+        /,
+    ) -> Awaitable[GrantToolResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/request"],
+        params: RequestToolGrantParams,
+        /,
+    ) -> Awaitable[RequestToolGrantResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/revoke"],
+        params: RevokeToolGrantParams,
+        /,
+    ) -> Awaitable[RevokeToolGrantResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/list"],
+        params: ListToolGrantsParams,
+        /,
+    ) -> Awaitable[ListToolGrantsResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/audit"],
+        params: ToolGrantAuditParams,
+        /,
+    ) -> Awaitable[ToolGrantAuditResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/list"],
+        params: DecisionListParams,
+        /,
+    ) -> Awaitable[DecisionListResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/get"],
+        params: DecisionGetParams,
+        /,
+    ) -> Awaitable[DecisionResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/rendering"],
+        params: DecisionRenderingParams,
+        /,
+    ) -> Awaitable[DecisionRenderingResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/present"],
+        params: DecisionPresentParams,
+        /,
+    ) -> Awaitable[DecisionResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/withdraw"],
+        params: DecisionWithdrawParams,
+        /,
+    ) -> Awaitable[DecisionResult]: ...
 
     @overload
     def __call__(
@@ -1335,6 +1482,30 @@ class RpcRequest(Protocol):
     @overload
     def __call__(
         self,
+        method: Literal["mob/set_instruction"],
+        params: MobSetInstructionParams,
+        /,
+    ) -> Awaitable[MobInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/revoke_instruction"],
+        params: MobRevokeInstructionParams,
+        /,
+    ) -> Awaitable[MobInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/instruction_status"],
+        params: MobInstructionStatusParams,
+        /,
+    ) -> Awaitable[MobInstructionStatusResult]: ...
+
+    @overload
+    def __call__(
+        self,
         method: Literal["mob/flows"],
         params: MobIdParams,
         /,
@@ -1399,6 +1570,14 @@ class RpcRequest(Protocol):
     @overload
     def __call__(
         self,
+        method: Literal["mob/fork_member"],
+        params: MobForkMemberParams,
+        /,
+    ) -> Awaitable[MobForkMemberResult]: ...
+
+    @overload
+    def __call__(
+        self,
         method: Literal["mob/force_cancel"],
         params: MobMemberParams,
         /,
@@ -1443,6 +1622,14 @@ class RpcRequest(Protocol):
         params: MobIdParams,
         /,
     ) -> Awaitable[MobRotateSupervisorResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/restore_retry"],
+        params: MobIdParams,
+        /,
+    ) -> Awaitable[MobRestoreRetryResult]: ...
 
     @overload
     def __call__(
@@ -1635,6 +1822,14 @@ class RpcRequest(Protocol):
         params: MobStopMemberRunParams,
         /,
     ) -> Awaitable[MobStopMemberRunResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/compact_member"],
+        params: MobCompactMemberParams,
+        /,
+    ) -> Awaitable[MobCompactMemberResult]: ...
 
     @overload
     def __call__(

@@ -106,6 +106,10 @@ fn stamp_input(
     semantics: crate::ingress_types::RuntimeInputSemantics,
 ) -> StampedInput {
     let mut metadata = input_own_turn_metadata(input);
+    // The turn's requester is runtime-owned: the admitted input's own (the
+    // one accessor over its association and its host-supplied requester),
+    // never a value written into caller-authored metadata.
+    metadata.transcript_identity.requester = input.turn_requester();
     // Directed terminal publication is runtime-minted capability data. Never
     // preserve IDs supplied through caller-authored turn metadata.
     metadata.directed_interaction_ids.clear();
@@ -229,6 +233,7 @@ pub(crate) fn merge_batch_turn_metadata(
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
     let mut transcript_identity = TranscriptIdentityConsensus::default();
+    let mut batch_requester = RequesterConsensus::default();
     let mut request_reasoning = ReasoningPreferenceConsensus::default();
     // A batch executes as one turn, so it cannot honor multiple per-input
     // handling modes. The machine has already admitted and ordered every
@@ -248,6 +253,7 @@ pub(crate) fn merge_batch_turn_metadata(
         meta.work_authorization = None; // Rebuilt only from accepted contributor rows at staging.
         meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity, own_interaction);
+        batch_requester.observe(meta.transcript_identity.requester.as_ref());
         // The reasoning preference is folded across the whole batch (set
         // semantics, never a pairwise conflict), from each contributor's own
         // preference and its own explicit reasoning settings.
@@ -268,6 +274,7 @@ pub(crate) fn merge_batch_turn_metadata(
     if let Some(metadata) = acc.as_mut() {
         metadata.handling_mode = batch_handling_mode;
         metadata.transcript_identity = transcript_identity.finish();
+        metadata.transcript_identity.requester = batch_requester.finish()?;
         metadata.request_reasoning_disposition = request_reasoning.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
@@ -417,6 +424,59 @@ impl TurnInputConsensus {
     }
 }
 
+/// The requester a batch's inputs share. Absence is a value here: an input
+/// without a requester and one with a requester never share a run, nor do
+/// two inputs of different requesters (the machine's batch key keeps them
+/// apart), so a disagreement fails the fold closed instead of naming a
+/// requester the batch does not have. The same principal that one input
+/// carried across a hop and another brought directly is carried for the
+/// batch: a run is direct only when every one of its inputs is.
+#[derive(Debug, Clone, Default)]
+enum RequesterConsensus {
+    #[default]
+    Unseen,
+    Agreed(Option<meerkat_core::types::TurnRequester>),
+    Conflicted,
+}
+
+impl RequesterConsensus {
+    fn observe(&mut self, candidate: Option<&meerkat_core::types::TurnRequester>) {
+        use meerkat_core::types::TurnRequester;
+        *self = match (std::mem::take(self), candidate) {
+            (Self::Unseen, candidate) => Self::Agreed(candidate.cloned()),
+            (Self::Agreed(None), None) => Self::Agreed(None),
+            (Self::Agreed(Some(current)), Some(candidate))
+                if current.principal() == candidate.principal() =>
+            {
+                Self::Agreed(Some(if current.is_carried() || candidate.is_carried() {
+                    TurnRequester::carried(current.principal().clone())
+                } else {
+                    current
+                }))
+            }
+            _ => Self::Conflicted,
+        };
+    }
+
+    fn finish(
+        self,
+    ) -> Result<
+        Option<meerkat_core::types::TurnRequester>,
+        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+    > {
+        match self {
+            Self::Unseen => Ok(None),
+            Self::Agreed(requester) => Ok(requester),
+            Self::Conflicted => Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "transcript_identity.requester",
+                    reason: "inputs of different requesters never share a run",
+                },
+            ),
+        }
+    }
+}
+
 impl TranscriptIdentityConsensus {
     fn observe(&mut self, identity: &TranscriptMessageIdentity, own_interaction: bool) {
         if own_interaction {
@@ -444,6 +504,7 @@ impl TranscriptIdentityConsensus {
             run_id: self.run_id.finish(),
             objective_id: self.objective_id.finish(),
             turn_input: self.turn_input.finish(),
+            requester: None,
         }
     }
 }
@@ -1606,13 +1667,13 @@ async fn realize_runtime_loop_terminal_owned(
                 crate::meerkat_machine::cancel_runtime_loop_run(&driver, run_id.clone())
                     .await
                     .map_err(|error| error.to_string()),
-                "runtime run cancelled".to_string(),
+                RunFailureCompletionDetail::from("runtime run cancelled".to_string()),
             ),
             OwnedRuntimeLoopTerminalization::Failed {
                 failure,
                 contributor_disposition,
             } => {
-                let completion_reason = failure.message().to_owned();
+                let completion_reason = RunFailureCompletionDetail::of_apply_failure(&failure);
                 (
                     crate::meerkat_machine::fail_runtime_loop_run(
                         &driver,
@@ -2749,17 +2810,23 @@ async fn recover_committed_runtime_projections_before_teardown(
             // This carrier represents durable RunFailed, not a fabricated
             // terminal for every contributor. Reuse the live resolver so a
             // mixed batch splits its durably terminal and requeued recipients
-            // identically during abnormal teardown.
-            let reason = pending
-                .completion_error_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.detail.clone())
-                .unwrap_or_else(|| {
-                    format!(
-                        "runtime run {} failed after admission and was requeued",
-                        pending.run_id
-                    )
-                });
+            // identically during abnormal teardown. The carrier keeps the
+            // run's whole failure metadata: the failure is rebuilt from its
+            // detail and its typed reason both, as the live path built it, or
+            // the waiters lose the reason and a batch the realization staged
+            // with it fails the candidate digest.
+            let staged_error = pending.completion_error_metadata.as_ref();
+            let failure = RunFailureCompletionDetail {
+                detail: staged_error
+                    .and_then(|metadata| metadata.detail.clone())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "runtime run {} failed after admission and was requeued",
+                            pending.run_id
+                        )
+                    }),
+                reason: staged_error.and_then(|metadata| metadata.reason.clone()),
+            };
             resolve_machine_terminal_completion_waiters_under_authority(
                 driver,
                 completions,
@@ -2774,7 +2841,7 @@ async fn recover_committed_runtime_projections_before_teardown(
                 teardown_slot,
                 &pending.input_ids,
                 &pending.run_id,
-                reason,
+                failure,
             )
             .await.map_err(|error| crate::RuntimeDriverError::Internal(format!(
                 "failed-attempt completion recovery remains pending: {error}"
@@ -2840,10 +2907,10 @@ fn resolve_process_local_failed_run_waiters(
     completions: &mut crate::completion::CompletionRegistry,
     input_ids: Vec<InputId>,
     run_id: &RunId,
-    reason: String,
+    failure: RunFailureCompletionDetail,
 ) -> Result<(), crate::completion::CompletionWaitError> {
     let finalization = machine_failed_completion_finalization(driver);
-    let error_metadata = machine_terminal_completion_error(driver, reason).map_err(|error| {
+    let error_metadata = machine_terminal_completion_error(driver, failure).map_err(|error| {
         crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
             "runtime process-local completion metadata missing: {error}"
         ))
@@ -2875,8 +2942,9 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
     teardown_slot: &RuntimeLoopTeardownSlot,
     input_ids: &[InputId],
     run_id: &RunId,
-    reason: String,
+    failure: impl Into<RunFailureCompletionDetail>,
 ) -> Result<(), crate::completion::CompletionWaitError> {
+    let failure = failure.into();
     let _authority_guard = authority_guard;
     let mut driver_guard = driver.lock().await;
     let durable_batch = driver_guard
@@ -2911,7 +2979,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
                 &mut *completions.lock().await,
                 process_local_input_ids,
                 run_id,
-                reason,
+                failure,
             )?;
         }
         teardown_slot.clear_pending_nondirected_run_terminal(run_id);
@@ -2937,7 +3005,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
         })?;
     let (finalization, error_metadata) =
         if let Some(receipt_error) = receipt_error {
-            if receipt_error.detail.as_deref() != Some(reason.as_str()) {
+            if receipt_error.detail.as_deref() != Some(failure.detail.as_str()) {
                 return Err(crate::completion::CompletionWaitError::AuthorityUnavailable(
                 "runtime retry detail differs from its exact abandoned completion candidate"
                     .to_string(),
@@ -2952,7 +3020,7 @@ async fn resolve_machine_terminal_completion_waiters_under_authority(
         } else {
             (
                 machine_failed_completion_finalization(&driver_guard),
-                machine_terminal_completion_error(&driver_guard, reason).map_err(|error| {
+                machine_terminal_completion_error(&driver_guard, failure).map_err(|error| {
                     crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
                         "runtime terminal completion metadata missing: {error}"
                     ))
@@ -3010,8 +3078,9 @@ async fn resolve_machine_terminal_completion_waiters(
     teardown_slot: &std::sync::Arc<RuntimeLoopTeardownSlot>,
     input_ids: &[InputId],
     run_id: &RunId,
-    reason: String,
+    failure: impl Into<RunFailureCompletionDetail>,
 ) -> Result<(), crate::completion::CompletionWaitError> {
+    let failure = failure.into();
     let driver = std::sync::Arc::clone(driver);
     let completions = completions.cloned();
     let teardown_slot = std::sync::Arc::clone(teardown_slot);
@@ -3025,7 +3094,7 @@ async fn resolve_machine_terminal_completion_waiters(
             &teardown_slot,
             &owned_input_ids,
             &owned_run_id,
-            reason,
+            failure,
         )
         .await
     })
@@ -4727,10 +4796,46 @@ fn fail_completion_waiters(
     fail_closed_completion_waiters(registry, input_ids, reason);
 }
 
+/// What a failed run's completion error reports of its apply failure: the
+/// cause's message as the detail, and the typed reason the cause keeps (a
+/// refused scoped tool grant gate). These are the facts the failed-run
+/// realization stages on the run's terminal completion candidate, so the
+/// error a waiter receives on either completion path stays byte-identical to
+/// it.
+#[derive(Debug, Clone)]
+struct RunFailureCompletionDetail {
+    detail: String,
+    reason: Option<meerkat_core::event::AgentErrorReason>,
+}
+
+impl RunFailureCompletionDetail {
+    /// The detail and typed reason of `failure`.
+    fn of_apply_failure(failure: &CoreApplyFailureCause) -> Self {
+        Self {
+            detail: failure.message().to_owned(),
+            reason: failure.reason().cloned(),
+        }
+    }
+}
+
+/// A failure known only by its detail, such as a cancellation: it carries no
+/// typed reason. A failed run is resolved from its cause
+/// ([`RunFailureCompletionDetail::of_apply_failure`]) or, at teardown, from
+/// the error its carrier staged, so its reason is never dropped.
+impl From<String> for RunFailureCompletionDetail {
+    fn from(detail: String) -> Self {
+        Self {
+            detail,
+            reason: None,
+        }
+    }
+}
+
 fn machine_terminal_completion_error(
     driver: &crate::meerkat_machine::driver::DriverEntry,
-    detail: String,
+    failure: impl Into<RunFailureCompletionDetail>,
 ) -> Result<Option<meerkat_core::TurnErrorMetadata>, crate::RuntimeDriverError> {
+    let RunFailureCompletionDetail { detail, reason } = failure.into();
     let authority = driver.shared_dsl_authority();
     let auth = authority
         .lock()
@@ -4871,11 +4976,13 @@ fn machine_terminal_completion_error(
                         .to_string(),
                 ));
             }
-            Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
+            let mut metadata = meerkat_core::TurnErrorMetadata::terminal(
                 meerkat_core::TurnTerminalCauseKind::from(cause_kind),
                 meerkat_core::TurnTerminalOutcome::from(outcome),
                 detail,
-            )))
+            );
+            metadata.reason = reason;
+            Ok(Some(metadata))
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::Completed => {
             // A runtime-failed run may legitimately still hold a `Completed`
@@ -4959,9 +5066,9 @@ fn machine_terminal_completion_error(
             // the failed-run realization staged on the input terminal-completion
             // batch - `TurnErrorMetadata::terminal(RuntimeApplyFailure, Failed,
             // detail)` is the definition of `runtime_apply_failure(detail)`
-            // over the same apply-failure message - so the completion authority
-            // accepts the payload digest rather than answering
-            // `AuthorityUnavailable`.
+            // over the same apply-failure message, with the cause's typed
+            // reason on both - so the completion authority accepts the payload
+            // digest rather than answering `AuthorityUnavailable`.
             //
             // Absent that fact the machine holds no cause this run can claim.
             // `Unknown` is the vocabulary's own "not classified", and the
@@ -4987,11 +5094,13 @@ fn machine_terminal_completion_error(
                 Some(_) => meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
                 None => meerkat_core::TurnTerminalCauseKind::Unknown,
             };
-            Ok(Some(meerkat_core::TurnErrorMetadata::terminal(
+            let mut metadata = meerkat_core::TurnErrorMetadata::terminal(
                 cause_kind,
                 meerkat_core::TurnTerminalOutcome::Failed,
                 detail,
-            )))
+            );
+            metadata.reason = reason;
+            Ok(Some(metadata))
         }
         crate::meerkat_machine::dsl::TurnTerminalOutcome::None => {
             // Unlike `Completed`, `None` is not preserved: the generated
@@ -5485,6 +5594,17 @@ impl RuntimeLoopAuthorityBinding {
     /// this process's writer never resumes, and the store refuses its writes.
     fn store_fence_lost(&self) -> bool {
         self.store_self_fence().is_some_and(|fence| fence.lost())
+    }
+
+    /// Whether the session's store refuses every later call that needs the
+    /// session's runtime until its realm is reopened (a batch of it left
+    /// unsettled poisoned its scope, or the realm lost its fence): nothing
+    /// this process writes for the session lands, and the store keeps its
+    /// inputs as it last committed them.
+    fn store_refuses_session_until_reopen(&self) -> bool {
+        self.machine
+            .upgrade()
+            .is_some_and(|machine| machine.store_refuses_session_until_reopen(&self.session_id))
     }
 
     /// Whether the session store's fence reads closed with no other writer
@@ -6048,11 +6168,12 @@ async fn wait_out_store_fence_gap(fence: &dyn meerkat_core::host_store::SelfFenc
 
 /// Tell the local waiters of the session's inputs that the store keeps (every
 /// unfinished input but an ephemeral one) that their inputs stay queued
-/// (`RequeuedAcrossStop`): another writer holds the session store's fence, so
-/// nothing this process does for them lands, and the new owner runs them. An
-/// ephemeral input is in no store: the session's teardown ends it, and
-/// answers its waiters, as before.
-async fn answer_waiters_for_lost_store_fence(
+/// (`RequeuedAcrossStop`): another writer holds the session store's fence, or
+/// the store refuses the session's writes until its realm is reopened, so
+/// nothing this process does for them lands, and the new owner, or the next
+/// start, runs them. An ephemeral input is in no store: the session's
+/// teardown ends it, and answers its waiters, as before.
+async fn answer_waiters_for_store_kept_inputs(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
 ) {
@@ -7528,6 +7649,24 @@ async fn admit_resumed_run(
     if held || waits_for_destination {
         return ResumedRunAdmissionLap::Exit(false);
     }
+    // A kept run past its stop's max age is settled as expired before its
+    // admission is asked: a run its admission could not decide, held across
+    // laps, ends here once that age passes.
+    if driver
+        .lock()
+        .await
+        .resumable_run_stop_requeue_expired(&run_id, chrono::Utc::now())
+    {
+        return settle_unresumed_run(
+            driver,
+            completions,
+            executor,
+            authority_binding,
+            &run_id,
+            UnresumedRun::Expired,
+        )
+        .await;
+    }
     let Some(machine) = authority_binding.machine.upgrade() else {
         return ResumedRunAdmissionLap::Exit(true);
     };
@@ -7558,6 +7697,17 @@ async fn admit_resumed_run(
     match crate::resumed_run_admission::ask_resumed_run_admission(Some(&admission), &request).await
     {
         crate::resumed_run_admission::ResumedRunAdmissionVerdict::Continue => {
+            // A run an earlier lap held because its admission could not
+            // decide is released before it resumes.
+            if let Err(error) = driver.lock().await.release_resumed_run_admission(&run_id) {
+                tracing::error!(
+                    session_id = %authority_binding.session_id,
+                    %run_id,
+                    %error,
+                    "the resumed run's admission hold could not be released"
+                );
+                return ResumedRunAdmissionLap::Exit(true);
+            }
             ResumedRunAdmissionLap::Resume(run_id)
         }
         crate::resumed_run_admission::ResumedRunAdmissionVerdict::Refused { detail } => {
@@ -7570,6 +7720,38 @@ async fn admit_resumed_run(
                 detail,
             )
             .await
+        }
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { detail } => {
+            // Neither resumed nor settled: the run stays marked, its inputs
+            // bound and none ended, and the machine holds it until a later
+            // answer. The next wake of the loop, or the session's next
+            // registration, asks again; nothing asks on a timer.
+            match driver.lock().await.hold_resumed_run_for_admission(&run_id) {
+                Ok(()) => {
+                    tracing::warn!(
+                        session_id = %authority_binding.session_id,
+                        %run_id,
+                        attempts = crate::resumed_run_admission::RESUMED_RUN_ADMISSION_ATTEMPTS,
+                        %detail,
+                        "the resumed run's admission could not decide; the run stays marked and \
+                         is asked again at the next wake or registration"
+                    );
+                    ResumedRunAdmissionLap::Exit(false)
+                }
+                Err(error) => {
+                    // The machine refuses the hold of a run no longer marked,
+                    // or whose stop was asked meanwhile: the next lap settles
+                    // or serves what it finds.
+                    tracing::warn!(
+                        session_id = %authority_binding.session_id,
+                        %run_id,
+                        %error,
+                        "the resumed run's admission could not decide, and the run can no longer \
+                         be held; the loop goes round again"
+                    );
+                    ResumedRunAdmissionLap::Again
+                }
+            }
         }
     }
 }
@@ -7611,6 +7793,10 @@ enum UnresumedRun {
     /// while it was marked resumable (suspended by the gap, or left open by
     /// a restart).
     Stopped,
+    /// The graceful stop that kept it open outlived its max age: checked
+    /// before each admission ask, so a run its admission could not decide
+    /// ends here once that age passes.
+    Expired,
 }
 
 impl UnresumedRun {
@@ -7618,6 +7804,7 @@ impl UnresumedRun {
         match self {
             Self::Refused { .. } => crate::input_state::InputAbandonReason::ResumeRefused,
             Self::Stopped => crate::input_state::InputAbandonReason::Cancelled,
+            Self::Expired => crate::input_state::InputAbandonReason::RequeueExpired,
         }
     }
 
@@ -7627,6 +7814,7 @@ impl UnresumedRun {
         match self {
             Self::Refused { .. } => "the resumed run was refused",
             Self::Stopped => STOPPED_RESUMABLE_RUN_TERMINATION_REASON,
+            Self::Expired => crate::meerkat_machine::EXPIRED_KEPT_RUN_TERMINATION_REASON,
         }
     }
 
@@ -7635,6 +7823,10 @@ impl UnresumedRun {
         match self {
             Self::Refused { detail } => format!("the resumed run was refused: {detail}"),
             Self::Stopped => "the suspended run was stopped before it resumed".to_string(),
+            Self::Expired => {
+                "the kept run outlived its stop's max age and was settled instead of resumed"
+                    .to_string()
+            }
         }
     }
 }
@@ -7675,6 +7867,12 @@ async fn settle_unresumed_run(
             %run_id,
             "the suspended run was stopped; it is settled without resuming"
         ),
+        UnresumedRun::Expired => tracing::info!(
+            session_id = %authority_binding.session_id,
+            %run_id,
+            "a run a graceful stop kept open outlived the stop's max age; it is settled instead \
+             of resumed"
+        ),
     }
     let mut runless_terminal = authority_binding.runless_terminal_announcement();
     let queue_authority_guard = match authority_binding
@@ -7687,14 +7885,16 @@ async fn settle_unresumed_run(
     // A stop of the run is staged under the session mutation gate this
     // guard holds: one recorded since the admission read the run is read
     // here, and the run is settled as stopped, never as a refused resume
-    // (the machine refuses that settlement of a stopped run).
-    let stopped_since = matches!(why, UnresumedRun::Refused { .. })
+    // (the machine refuses that settlement of a stopped run) or as expired
+    // (every settlement of a stopped run is a stop's).
+    let stopped_since = matches!(why, UnresumedRun::Refused { .. } | UnresumedRun::Expired)
         && driver.lock().await.resumable_run_stop_requested();
     let why = if stopped_since {
         tracing::info!(
             session_id = %authority_binding.session_id,
             %run_id,
-            "the run was stopped before its refused resume was settled; it is settled as stopped"
+            "the run was stopped before its refused or expired resume was settled; it is settled \
+             as stopped"
         );
         UnresumedRun::Stopped
     } else {
@@ -7747,12 +7947,23 @@ async fn settle_unresumed_run(
     // the transcript, and the session layer resynchronizes the seeded actor
     // from the repaired boundary at its next step. A tail the repair leaves
     // standing would refuse the next run's first round commit, so then the
-    // session reloads at once, before any run, and the lap exits.
+    // session reloads at once, before any run, and the lap exits. The reload
+    // is required before the gate is released: a host's settle waits for
+    // this gate to read the settlement, and must find the registration
+    // degraded, never the run settled while its tail stands.
     let reload = driver
         .lock()
         .await
         .repair_settled_run_tail(&authority_binding.session_id, run_id)
         .await;
+    if reload {
+        authority_binding
+            .require_session_durability_reload(
+                "settled_resumable_run_tail_repair",
+                format!("settled run {run_id}'s provisional tail still stands"),
+            )
+            .await;
+    }
     drop(queue_authority_guard);
     if let Some(terminal) = settled_terminal.as_ref() {
         crate::control_plane::publish_settled_run_terminal(
@@ -7762,12 +7973,6 @@ async fn settle_unresumed_run(
         .await;
     }
     if reload {
-        authority_binding
-            .require_session_durability_reload(
-                "settled_resumable_run_tail_repair",
-                format!("settled run {run_id}'s provisional tail still stands"),
-            )
-            .await;
         return ResumedRunAdmissionLap::Exit(true);
     }
     if !abandoned.is_empty()
@@ -7975,6 +8180,10 @@ fn resumed_run_primitive(
     };
     let metadata = staged.turn_metadata.get_or_insert_with(Default::default);
     metadata.work_authorization = work_authorization;
+    // Request-only context lives only with the admission that carried it: a
+    // resumed run carries none, even while this process still holds the
+    // input, so it recalls nothing rather than replay a stale value.
+    metadata.request_only_context.clear();
     if from_tail {
         metadata.execution_kind = Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
     }
@@ -8184,6 +8393,22 @@ async fn process_queue(
                     )
                     .await
             };
+            // Kept governed work whose host supplies no controller client
+            // again ends as before the host was asked: with the kept-governed
+            // termination reason.
+            let ended_kept = if asks.refused_kept.is_empty() {
+                crate::meerkat_machine::SettledRefusedResumes::default()
+            } else {
+                driver
+                    .lock()
+                    .await
+                    .settle_refused_queued_resumes(
+                        &asks.refused_kept,
+                        crate::meerkat_machine::KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        || refused_terminals.owe(),
+                    )
+                    .await
+            };
             drop(queue_authority_guard);
             let published = publish_refused_retained_resumes(
                 driver,
@@ -8193,13 +8418,27 @@ async fn process_queue(
                 REFUSED_RETAINED_RESUME_REASON,
             )
             .await;
+            let published_kept = publish_refused_retained_resumes(
+                driver,
+                completions,
+                &*executor,
+                &ended_kept.settled,
+                crate::meerkat_machine::KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+            )
+            .await;
             refused_terminals.release();
-            if let Some(error) = ended.failure.or(published.err()) {
-                let reason = format!("refused retained-work resumes could not be settled: {error}");
-                tracing::error!(%error, "failed closed settling refused retained-work resumes");
+            if let Some(error) = ended
+                .failure
+                .or(published.err())
+                .or(ended_kept.failure)
+                .or(published_kept.err())
+            {
+                let reason = format!("refused kept inputs could not be settled: {error}");
+                tracing::error!(%error, "failed closed settling refused kept inputs");
                 if let Some(completions) = completions {
                     let mut completions = completions.lock().await;
                     fail_completion_waiters(&mut completions, &asks.refused, reason.clone());
+                    fail_completion_waiters(&mut completions, &asks.refused_kept, reason.clone());
                 }
                 return stop_runtime_loop_executor_from_dsl_effect(
                     driver,
@@ -8211,16 +8450,27 @@ async fn process_queue(
                 )
                 .await;
             }
-            if let Some(run_id) = asks.refused_run.clone() {
+            let refused_run = match (asks.refused_run.clone(), asks.refused_kept_run.clone()) {
+                (Some(run_id), _) => Some((
+                    run_id,
+                    "its host supplied no controller for the retained work an input of the run \
+                     resumes",
+                )),
+                (None, Some(run_id)) => Some((
+                    run_id,
+                    "its first input is kept governed work whose controller cannot be supplied \
+                     again",
+                )),
+                (None, None) => None,
+            };
+            if let Some((run_id, detail)) = refused_run {
                 match settle_refused_resumed_run(
                     driver,
                     completions,
                     executor,
                     authority_binding,
                     &run_id,
-                    "its host supplied no controller for the retained work an input of the run \
-                     resumes"
-                        .to_string(),
+                    detail.to_string(),
                 )
                 .await
                 {
@@ -8243,7 +8493,7 @@ async fn process_queue(
                     ResumedRunAdmissionLap::Exit(wake) => return wake,
                 }
             }
-            if asks.changed_plan(ended.settled.len()) {
+            if asks.changed_plan(ended.settled.len() + ended_kept.settled.len()) {
                 continue;
             }
         }
@@ -8281,7 +8531,7 @@ async fn process_queue(
                      resume in this process, the session's waiters are told their inputs stay \
                      queued for the new owner, and the session is torn down"
                 );
-                answer_waiters_for_lost_store_fence(driver, completions).await;
+                answer_waiters_for_store_kept_inputs(driver, completions).await;
                 handoff.disposition = RuntimeLoopTeardownDisposition::UnregisterRequired;
                 // As a teardown-required apply does: returning exits the
                 // loop, and the watcher starts the canonical unregister.
@@ -8655,26 +8905,27 @@ async fn process_queue(
                     input_ids: superseded,
                 };
             }
-            // No batch can select a kept resume of retained work still
+            // No batch can select a kept input (a resume of retained work, or
+            // governed work admitted under its own association) still
             // without its client, by construction: this lap's first step
             // asked every such row the machine did not hold (a client pins
             // it, a definite answer ends it, any other answer holds it), or,
             // while the registration drains for its unregister, held each
             // through the machine without asking; a released resumable run
-            // holds its requeued kept resumes again; and the machine's batch
+            // holds its requeued kept inputs again; and the machine's batch
             // filter never selects a held input. One here means the shell
             // and the machine disagree: fail closed instead of staging it
             // without its client.
             if let Some(unpinned) = batch
                 .input_ids()
                 .iter()
-                .find(|input_id| d.kept_retained_resume_without_client(input_id))
+                .find(|input_id| d.kept_input_without_client(input_id))
             {
                 break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
                     input_ids: batch.input_ids().to_vec(),
                     reason: format!(
-                        "the selected batch names kept retained-work resume {unpinned} without its \
-                         controller client"
+                        "the selected batch names kept input {unpinned} without its controller \
+                         client"
                     ),
                 };
             }
@@ -8925,7 +9176,8 @@ async fn process_queue(
                         );
                         let failure =
                             CoreApplyFailureCause::primitive_rejected(conflict.to_string());
-                        let completion_reason = failure.message().to_owned();
+                        let completion_reason =
+                            RunFailureCompletionDetail::of_apply_failure(&failure);
                         let nondirected_input_ids = nondirected_completion_input_ids(
                             &input_ids,
                             &staged_directed_interaction_ids,
@@ -9084,7 +9336,7 @@ async fn process_queue(
                 if let Err(error) = turn_start {
                     tracing::error!(%run_id, error = %error, "failed to start runtime turn state");
                     let failure = CoreApplyFailureCause::executor_internal(error.to_string());
-                    let completion_reason = failure.message().to_owned();
+                    let completion_reason = RunFailureCompletionDetail::of_apply_failure(&failure);
                     let nondirected_input_ids = nondirected_completion_input_ids(
                         &input_ids,
                         &staged_directed_interaction_ids,
@@ -9938,6 +10190,17 @@ async fn process_queue(
                         // that it ended, so no caller resubmits work the new
                         // owner runs.
                         let store_fence_lost = authority_binding.store_fence_lost();
+                        // A run torn down because its store could not settle
+                        // one of its writes (a round commit whose outcome
+                        // stayed unknown: the teardown class) leaves the
+                        // session's scope refusing every write until the realm
+                        // is reopened. Nothing this teardown realizes for the
+                        // session's inputs lands either, and the store keeps
+                        // them as last committed, pending, for the next start:
+                        // their waiters are told so, as at a lost fence.
+                        let store_refuses_session = !store_fence_lost
+                            && e.requires_runtime_teardown()
+                            && authority_binding.store_refuses_session_until_reopen();
                         let teardown_required = e.requires_runtime_teardown()
                             || completed_terminal_before_failure
                             || store_fence_lost;
@@ -9953,7 +10216,16 @@ async fn process_queue(
                                  waiters are told their inputs stay queued for the new owner, and \
                                  the session is torn down"
                             );
-                            answer_waiters_for_lost_store_fence(driver, completions).await;
+                            answer_waiters_for_store_kept_inputs(driver, completions).await;
+                        } else if store_refuses_session {
+                            tracing::warn!(
+                                session_id = %authority_binding.session_id,
+                                %run_id,
+                                "the session store refuses the session's writes until its realm \
+                                 is reopened; the session's waiters are told their inputs stay \
+                                 queued for the next start, and the session is torn down"
+                            );
+                            answer_waiters_for_store_kept_inputs(driver, completions).await;
                         }
                         let terminal_authority_guard = match authority_binding
                             .lock_current_driver_authority(driver, "runtime loop terminal failure")
@@ -9981,12 +10253,14 @@ async fn process_queue(
                         // one the failed-run realization stages on the input
                         // terminal-completion batch
                         // (`TurnErrorMetadata::runtime_apply_failure` over the
-                        // apply-failure cause message). The completion authority
-                        // refuses to deliver a payload whose digest differs from
-                        // the staged candidate, so a second wording here would
-                        // resolve the caller with `AuthorityUnavailable` instead
-                        // of the typed reason the run terminal carries.
-                        let completion_detail = e.apply_failure_cause().message().to_owned();
+                        // apply-failure cause message, with the cause's typed
+                        // reason). The completion authority refuses to deliver
+                        // a payload whose digest differs from the staged
+                        // candidate, so a second wording here would resolve the
+                        // caller with `AuthorityUnavailable` instead of the
+                        // typed reason the run terminal carries.
+                        let completion_detail =
+                            RunFailureCompletionDetail::of_apply_failure(&e.apply_failure_cause());
                         if executor_stopped || legacy_machine_terminal {
                             // `Stopped` and the legacy error-shaped terminal
                             // are fail-closed executor exits. Neither carries
@@ -10621,6 +10895,7 @@ mod tests {
             messages_after: 1,
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         };
         session
             .add_compaction_projection_intent(intent.clone())
@@ -11587,6 +11862,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: text.into(),
             typed_turn_appends: Vec::new(),
@@ -11624,6 +11900,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: None,
             content: "peer message".into(),
@@ -11658,6 +11935,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: "plain body payload".into(),
@@ -11693,6 +11971,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Request {
                 request_id: "req-123".into(),
@@ -11739,6 +12018,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -11798,6 +12078,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12028,6 +12309,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12105,6 +12387,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -12166,6 +12449,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12223,6 +12507,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12295,6 +12580,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
                 request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
@@ -12372,6 +12658,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: body.into(),
@@ -12998,6 +13285,77 @@ mod tests {
             .expect("generated admission semantics")
     }
 
+    fn requester_principal(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("qualified requester")
+    }
+
+    /// The turn's requester is the admitted input's own. A requester written
+    /// into a prompt's caller-authored turn metadata never reaches the turn:
+    /// the input's own requester replaces it, and an input without one
+    /// stamps none.
+    #[test]
+    fn a_caller_written_turn_requester_is_replaced_by_the_input_s_own() {
+        use meerkat_core::types::TurnRequester;
+        let written = TurnRequester::direct(requester_principal("caller-written"));
+        let prompt = |own: Option<meerkat_core::PrincipalRef>| {
+            let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+            metadata.transcript_identity.requester = Some(written.clone());
+            let mut input = make_prompt("a prompt whose metadata names a requester");
+            if let Input::Prompt(prompt) = &mut input {
+                prompt.turn_metadata = Some(metadata);
+            }
+            input.header_mut().requester = own;
+            input
+        };
+        for (own, expected) in [
+            (None, None),
+            (
+                Some(requester_principal("own")),
+                Some(TurnRequester::direct(requester_principal("own"))),
+            ),
+        ] {
+            let input = prompt(own);
+            let stamped = for_input(&input, admission_semantics(&input));
+            assert_eq!(
+                stamped.transcript_identity.requester, expected,
+                "the turn names the input's own requester, never the caller-written one"
+            );
+        }
+    }
+
+    /// One principal, carried across a hop by one input of a batch and
+    /// brought directly by another, is carried for the batch, in either
+    /// order: a run is direct only when every one of its inputs is. Two
+    /// direct inputs stay direct.
+    #[test]
+    fn one_principal_direct_and_carried_folds_to_carried() {
+        use meerkat_core::types::TurnRequester;
+        let principal = requester_principal("p");
+        let direct = TurnRequester::direct(principal.clone());
+        let carried = TurnRequester::carried(principal.clone());
+        for (batch, expected) in [
+            ([direct.clone(), carried.clone()], carried.clone()),
+            ([carried.clone(), direct.clone()], carried.clone()),
+            ([direct.clone(), direct.clone()], direct.clone()),
+        ] {
+            let mut consensus = RequesterConsensus::default();
+            for requester in &batch {
+                consensus.observe(Some(requester));
+            }
+            assert_eq!(
+                consensus.finish().expect("one principal agrees"),
+                Some(expected),
+                "batch {batch:?}"
+            );
+        }
+    }
+
     fn reply_context_from_overlay(
         overlay: &meerkat_core::service::TurnToolOverlay,
     ) -> meerkat_core::comms::PeerReplyDispatchContext {
@@ -13260,6 +13618,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_id.into(),
@@ -14216,7 +14575,15 @@ mod tests {
     async fn stage_one_run_for_disposition_test(
         driver: &crate::meerkat_machine::SharedDriver,
     ) -> (RunId, InputId) {
-        let input_id = accept_queued_input_id(driver, make_prompt("is the door locked?")).await;
+        stage_one_run_of(driver, make_prompt("is the door locked?")).await
+    }
+
+    /// [`stage_one_run_for_disposition_test`] for a given input.
+    async fn stage_one_run_of(
+        driver: &crate::meerkat_machine::SharedDriver,
+        input: Input,
+    ) -> (RunId, InputId) {
+        let input_id = accept_queued_input_id(driver, input).await;
         let batch = {
             let guard = driver.lock().await;
             crate::meerkat_machine::driver::machine_authorize_runtime_loop_batch(&guard)
@@ -14332,6 +14699,38 @@ mod tests {
                 "describing the resumed batch changes no input"
             ),
             _ => panic!("expected ephemeral driver"),
+        }
+    }
+
+    /// A resumed run carries no request-only context, even while this
+    /// process still holds the input that brought it: request-only context
+    /// lives only with the admission that carried it, so a run resumed from
+    /// its ledger (from its tail or from its inputs) recalls nothing.
+    #[tokio::test]
+    async fn a_resumed_run_carries_no_request_only_context() {
+        let driver = make_shared_ephemeral_driver("resumed-request-only");
+        let mut prompt = make_prompt("recall for this admission only");
+        if let Input::Prompt(prompt) = &mut prompt {
+            prompt
+                .turn_metadata
+                .get_or_insert_with(Default::default)
+                .request_only_context = vec![
+                meerkat_core::lifecycle::TurnRequestContext::new("a person's section")
+                    .expect("section"),
+            ];
+        }
+        let (run_id, input_id) = stage_one_run_of(&driver, prompt).await;
+        let guard = driver.lock().await;
+        for from_tail in [true, false] {
+            let primitive =
+                resumed_run_primitive(&guard, &run_id, std::slice::from_ref(&input_id), from_tail)
+                    .expect("the run's own staged input describes its resumed batch");
+            assert!(
+                primitive
+                    .turn_metadata()
+                    .is_none_or(|metadata| metadata.request_only_context.is_empty()),
+                "a resumed run (from_tail {from_tail}) carries no request-only context"
+            );
         }
     }
 
@@ -14873,6 +15272,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -14941,6 +15341,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15003,6 +15404,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15064,6 +15466,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: meerkat_core::types::ContentInput::Blocks(blocks.clone()),
@@ -15125,6 +15528,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             step_id: "step-1".into(),
             content: meerkat_core::types::ContentInput::Blocks(blocks),
@@ -15182,6 +15586,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see this event"}),
@@ -15234,6 +15639,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "see attached screenshot"}),
@@ -15280,6 +15686,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "invoice.created".into(),
             payload: serde_json::json!({"invoice_id": "inv_123"}),
@@ -15348,6 +15755,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "build failed"}),
@@ -15386,6 +15794,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             event_type: "webhook".into(),
             payload: serde_json::json!({"body": "urgent"}),
@@ -16923,6 +17332,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
@@ -16972,6 +17382,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: "msg".into(),
@@ -17256,6 +17667,93 @@ mod tests {
             meerkat_core::TurnErrorMetadata::runtime_apply_failure(DETAIL),
             "the delivered payload must digest identically to the staged candidate, or the \
              durable batch answers AuthorityUnavailable instead of this terminal"
+        );
+    }
+
+    /// The same digest contract for an apply failure that keeps a typed
+    /// reason: a scoped tool grant gate the session's build refused.
+    ///
+    /// The failed-run realization stages `runtime_apply_failure` over the
+    /// cause's message with the cause's reason, so the metadata a waiter
+    /// receives must carry that reason too. Without it the caller is told a
+    /// generic runtime apply failure instead of the refusal, and a durable
+    /// batch refuses the payload's digest.
+    #[test]
+    fn failed_run_metadata_carries_the_apply_failure_reason_as_staged() {
+        const DETAIL: &str = "agent error: scoped tool grant gate refused";
+        let (driver, failed_run) = bound_ephemeral_driver();
+        crate::meerkat_machine::driver::machine_recover_runtime_completion_result_correlation(
+            &driver,
+            &failed_run,
+            crate::input_state::RuntimeCompletionTerminalRecovery::MachineFailure {
+                outcome: meerkat_core::TurnTerminalOutcome::Failed,
+                cause: meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
+            },
+        )
+        .expect("a durable machine-failure terminal must be recoverable");
+        let failure = CoreApplyFailureCause::runtime_turn(DETAIL).with_reason(
+            meerkat_core::event::AgentErrorReason::ToolGrantGateRefused {
+                refusal: meerkat_core::tool_grant::GrantGateRefusal::UnknownFamily {
+                    family: "shel".to_string(),
+                },
+            },
+        );
+
+        let metadata = machine_terminal_completion_error(
+            &driver,
+            RunFailureCompletionDetail::of_apply_failure(&failure),
+        )
+        .expect("a failed runtime completion must resolve")
+        .expect("a failed runtime completion must carry typed metadata");
+
+        let mut staged = meerkat_core::TurnErrorMetadata::runtime_apply_failure(DETAIL);
+        staged.reason = failure.reason().cloned();
+        assert!(
+            staged.reason.is_some(),
+            "the fixture's cause keeps a reason"
+        );
+        assert_eq!(
+            metadata, staged,
+            "the delivered payload must carry the staged candidate's typed reason"
+        );
+    }
+
+    /// The `Completed` arm keeps the same contract: a runtime-failed run
+    /// still holding a completed machine terminal resolves metadata that
+    /// carries its apply failure's typed reason, exactly as the realization
+    /// staged it.
+    #[test]
+    fn completed_terminal_metadata_carries_the_apply_failure_reason_as_staged() {
+        const DETAIL: &str = "agent error: scoped tool grant gate refused";
+        let driver = stale_completed_terminal_driver(
+            crate::meerkat_machine::dsl::TurnTerminalCauseKind::LlmFailure,
+            Some(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RuntimeTurn),
+            DETAIL,
+        );
+        let failure = CoreApplyFailureCause::runtime_turn(DETAIL).with_reason(
+            meerkat_core::event::AgentErrorReason::ToolGrantGateRefused {
+                refusal: meerkat_core::tool_grant::GrantGateRefusal::UnknownFamily {
+                    family: "shel".to_string(),
+                },
+            },
+        );
+
+        let metadata = machine_terminal_completion_error(
+            &driver,
+            RunFailureCompletionDetail::of_apply_failure(&failure),
+        )
+        .expect("a completed terminal with a failed runtime completion must resolve")
+        .expect("a failed runtime completion must carry typed metadata");
+
+        let mut staged = meerkat_core::TurnErrorMetadata::runtime_apply_failure(DETAIL);
+        staged.reason = failure.reason().cloned();
+        assert!(
+            staged.reason.is_some(),
+            "the fixture's cause keeps a reason"
+        );
+        assert_eq!(
+            metadata, staged,
+            "the delivered payload must carry the staged candidate's typed reason"
         );
     }
 

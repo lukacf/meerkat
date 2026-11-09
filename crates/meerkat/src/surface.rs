@@ -2587,7 +2587,7 @@ mod tests {
                 respawn_summary(older_id.clone(), base, &labels),
                 respawn_summary(
                     newer_id.clone(),
-                    base + std::time::Duration::from_secs(60),
+                    base + std::time::Duration::from_mins(1),
                     &labels,
                 ),
             ],
@@ -3088,6 +3088,7 @@ mod native_admission_projection_tests {
             AuthErrorKind::CredentialInteractionRequired,
             AuthErrorKind::CredentialAccessPending,
             AuthErrorKind::CredentialStoreUnavailable,
+            AuthErrorKind::SourceUnavailable,
         ] {
             let error = RuntimeDriverError::ControllerReadinessUnavailable {
                 reason: Ready::CredentialPreparationFailed { kind },

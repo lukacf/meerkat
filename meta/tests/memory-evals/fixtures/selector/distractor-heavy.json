@@ -1,0 +1,123 @@
+{
+  "name": "distractor-heavy",
+  "manifest": [
+    {
+      "id": "mem-050",
+      "kind": "Gotcha",
+      "title": "Flow Editor source-contract regexes pin source text",
+      "description": "Matters when editing flow-editor authoring components: the source-contract regexes pin exact source text, so refactors that touch pinned lines must update the contracts in the same change.",
+      "age_days": 28,
+      "rank": 1
+    },
+    {
+      "id": "mem-051",
+      "kind": "Fact",
+      "title": "Flow Editor reconcile has a circuit breaker",
+      "description": "Matters when reconcile loops or stalls during flow-editor testing: a circuit breaker trips after repeated failed reconciles and must be reset.",
+      "age_days": 28,
+      "rank": 12
+    },
+    {
+      "id": "mem-052",
+      "kind": "Fact",
+      "title": "Favicon route shadows flow-editor asset paths",
+      "description": "Matters when adding new static asset routes to the flow-editor server: the favicon route can shadow them.",
+      "age_days": 28,
+      "rank": null
+    },
+    {
+      "id": "mem-053",
+      "kind": "Preference",
+      "title": "Feature branches use feat/ fix/ docs/ refactor/ prefixes",
+      "description": "Matters when creating a new branch: follow the repo prefix convention.",
+      "age_days": 120,
+      "rank": 14
+    },
+    {
+      "id": "mem-054",
+      "kind": "Fact",
+      "title": "Gateway profile capabilities fixed in 0.7.19",
+      "description": "Matters when triaging capability-advertisement bugs reported on gateway versions before 0.7.19.",
+      "age_days": 10,
+      "rank": 13
+    },
+    {
+      "id": "mem-055",
+      "kind": "Procedure",
+      "title": "Python SDK tests run with PYTHONPATH=sdk/python",
+      "description": "Matters when invoking the Python SDK test suite directly rather than through make.",
+      "age_days": 65,
+      "rank": 6
+    },
+    {
+      "id": "mem-056",
+      "kind": "Fact",
+      "title": "Cross-mob peer messages drop prompt body in meerkat 0.7.3",
+      "description": "Matters when cross-mob sends arrive empty: confirmed meerkat-side defect in actor.rs, not a meta bug.",
+      "age_days": 22,
+      "rank": 4
+    },
+    {
+      "id": "mem-057",
+      "kind": "Reference",
+      "title": "Meerkat upstream asks doc",
+      "description": "Matters when deciding whether a defect should be fixed meta-side or filed upstream: docs/design/upstream-asks.md tracks the filed asks.",
+      "age_days": 18,
+      "rank": 8
+    },
+    {
+      "id": "mem-058",
+      "kind": "OpenLoop",
+      "title": "Encapsulated flows shared primitive still in flight",
+      "description": "Matters when designing callable-flow features: the shared primitive with adaptive-flow-mobpacks is in an in-flight meerkat worktree; coordinate before building on it.",
+      "age_days": 33,
+      "rank": 9
+    },
+    {
+      "id": "mem-059",
+      "kind": "Fact",
+      "title": "Structured-output flow validates schema against target-keyed aggregate",
+      "description": "Matters when flow structured-output validation fails unexpectedly: meerkat validates against the target-keyed aggregate, which blocks the flow-editor schema story.",
+      "age_days": 22,
+      "rank": 5
+    },
+    {
+      "id": "mem-060",
+      "kind": "Preference",
+      "title": "Never modify prompt or model when driving codemob",
+      "description": "Matters when orchestrating codemob consultations: report timeouts instead of substituting models or rewriting prompts.",
+      "age_days": 95,
+      "rank": 15
+    },
+    {
+      "id": "mem-061",
+      "kind": "Fact",
+      "title": "Bazel builds are remote-only for meta",
+      "description": "Matters when someone tries a local bazel build: only hosted BuildBuddy RBE is supported.",
+      "age_days": 44,
+      "rank": 16
+    },
+    {
+      "id": "mem-062",
+      "kind": "Procedure",
+      "title": "Version parity verified by scripts/verify-version-parity.sh",
+      "description": "Matters when release CI fails on version parity: the script compares crate and SDK version strings.",
+      "age_days": 75,
+      "rank": 17
+    },
+    {
+      "id": "mem-063",
+      "kind": "Fact",
+      "title": "Flow editor visual contract tests run under npm test:visual-contract",
+      "description": "Matters when choosing which flow-editor test lane to run for a rendering-only change.",
+      "age_days": 28,
+      "rank": null
+    }
+  ],
+  "turn_text": "I need to refactor the flow-editor authoring components to extract a shared node-palette module. What should I watch out for before I start moving code around?",
+  "expected": {
+    "must_select": ["mem-050"],
+    "must_not_select": ["mem-053", "mem-054", "mem-055", "mem-060", "mem-061", "mem-062"]
+  },
+  "notes": "Distractor-heavy manifest: 14 records, many mentioning 'flow editor' or general repo practice. Only the source-contract-pinning gotcha is certain to be helpful for a component refactor; same-domain records (circuit breaker, favicon, visual tests) are left don't-care, while clearly off-task records must not ride along."
+}

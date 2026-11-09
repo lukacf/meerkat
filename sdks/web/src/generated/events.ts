@@ -75,6 +75,9 @@ export type AgentErrorReason = {
   detail?: ProviderStopDetail | null;
   reason_type: "content_filtered";
   stop: ContentFilteredStop;
+} | {
+  reason_type: "tool_grant_gate_refused";
+  refusal: GrantGateRefusal;
 };
 
 export type AgentErrorReport = {
@@ -374,6 +377,28 @@ export type GeminiThinkingConfig = {
 
 export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
 
+export type GrantGateRefusal = {
+  family: string;
+  kind: "unknown_family";
+} | {
+  family: string;
+  kind: "family_disabled";
+} | {
+  family: string;
+  kind: "family_not_mounted";
+} | {
+  kind: "tool_not_mounted";
+  tool: string;
+} | {
+  kind: "unknown_tool";
+  tool: string;
+} | {
+  kind: "policy_refused";
+  tool: string;
+} | {
+  kind: "no_grant_service";
+};
+
 export type HookFailureReason = {
   reason_code: "timeout";
   timeout_ms: number;
@@ -398,10 +423,44 @@ export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_v
 
 export type InputId = string;
 
+export interface InstructionActiveRef {
+  body_bytes: number;
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+}
+
+export type InstructionChange = {
+  body_bytes: number;
+  change: "activate";
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  supersedes?: InstructionRevision | null;
+} | {
+  change: "revoke";
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  revokes: InstructionRevision;
+};
+
+export type InstructionContentDigest = string;
+
+export type InstructionEntryKind = "delta" | "snapshot";
+
+export type InstructionKey = string;
+
 export interface InstructionKeyRef {
   key: string;
   namespace: string;
 }
+
+export type InstructionNamespace = string;
+
+export type InstructionRevision = number;
 
 export type InteractionFailureReason = {
   kind: "cancelled";
@@ -559,6 +618,23 @@ export type PendingCallbackToolCall = {
 
 export type PresentedTokenConvention = "anthropic_disjoint_input_components" | "open_ai_input_includes_cached_subset" | "gemini_prompt_includes_cached_subset" | "open_ai_compatible_prompt_includes_cache_details" | "host_declared_inclusive_input_total";
 
+export type PrincipalId = string;
+
+export type PrincipalKind = "human" | "personal_agent" | "shared_agent" | "runtime_host" | "service_account";
+
+export type PrincipalQualification = {
+  kind: "unqualified";
+} | {
+  kind: "qualified";
+  trust_domain_id: TrustDomainId;
+};
+
+export interface PrincipalRef {
+  id: PrincipalId;
+  kind: PrincipalKind;
+  qualification?: PrincipalQualification;
+}
+
 export type ProfileId = string;
 
 export interface PromptText {
@@ -705,6 +781,8 @@ export type ReasoningLoweringOutcome = {
 export type ReasoningMode = "emit" | "silent" | "off";
 
 export type ReasoningNotAppliedReason = "no_catalog_fact" | "unsupported_level" | "unknown_supported_levels" | "budget_conflict" | "thinking_mode_conflict" | "opaque_reasoning_body" | "reasoning_disabled_by_baseline";
+
+export type RequestedCompactionSkipReason = "first_model_request" | "nothing_to_fold";
 
 export type RevisedPromptDisposition = {
   disposition: "not_requested";
@@ -1085,6 +1163,7 @@ export type TranscriptMessageIdentity = {
   interaction_id?: InteractionId | null;
   objective_id?: ObjectiveId | null;
   realtime_origin?: RealtimeMessageOrigin | null;
+  requester?: TurnRequester | null;
   run_id?: RunId | null;
   turn_input?: TranscriptTurnInput | null;
 };
@@ -1146,6 +1225,13 @@ export type TranscriptRewriteSelection = {
 };
 
 export type TranscriptTurnInput = "runtime_authored" | "typed_text";
+
+export type TrustDomainId = string;
+
+export interface TurnRequester {
+  carried?: boolean;
+  principal: PrincipalRef;
+}
 
 export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
 
@@ -1556,6 +1642,22 @@ export interface ToolResultsBoundedForRequestEvent {
   type: "tool_results_bounded_for_request";
 }
 
+export interface RequestedCompactionSkippedEvent {
+  reason: RequestedCompactionSkipReason;
+  run_id: RunId;
+  type: "requested_compaction_skipped";
+}
+
+export interface OperatorInstructionsAppliedEvent {
+  active?: InstructionActiveRef[];
+  changes?: InstructionChange[];
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  run_id?: RunId | null;
+  session_id: SessionId;
+  type: "operator_instructions_applied";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1609,7 +1711,9 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "live_channel_closed",
   "request_reasoning_lowered",
   "run_resumed",
-  "tool_results_bounded_for_request"
+  "tool_results_bounded_for_request",
+  "requested_compaction_skipped",
+  "operator_instructions_applied"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1667,4 +1771,6 @@ export type AgentEvent =
   HookLaunchRefusedEvent |
   RequestReasoningLoweredEvent |
   RunResumedEvent |
-  ToolResultsBoundedForRequestEvent;
+  ToolResultsBoundedForRequestEvent |
+  RequestedCompactionSkippedEvent |
+  OperatorInstructionsAppliedEvent;

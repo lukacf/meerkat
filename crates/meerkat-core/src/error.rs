@@ -225,7 +225,7 @@ pub enum ToolError {
     /// This is an ordinary tool result, never a run or session disposition.
     /// Its model payload's `data` is exactly the closed refusal kind and
     /// whether the guarded tool code ran (`tool_invoked`: `false` when a
-    /// core certifier met the refusal before invoking it, `"unknown"`
+    /// core certifier met the refusal before that code ran, `"unknown"`
     /// otherwise); see [`crate::authorization::RefusalDispatch`].
     #[error("{refusal}")]
     AuthorizationRefused {
@@ -257,8 +257,11 @@ pub enum ToolError {
         kind: crate::approval::review::ReviewUnavailableKind,
     },
 
-    /// Application consequence policy denied an otherwise statically admitted call.
-    #[error("Tool call denied by application policy: {denial:?}")]
+    /// A consequence denial refused an otherwise statically admitted call:
+    /// the application's consequence policy, or a scoped tool grant gate
+    /// (`tool_grant_*` codes). The message names the denial's code and its
+    /// own model-facing text.
+    #[error("Tool call denied ({}): {}", denial.code, denial.message)]
     PolicyDenied {
         denial: crate::ToolConsequenceDenial,
     },
@@ -749,6 +752,12 @@ pub enum AgentError {
     /// `AgentError` small.
     #[error(transparent)]
     ToolArtifactRefused(Box<crate::types::ToolArtifactRefusal>),
+
+    /// A build's scoped tool grant gate was refused: no grant could honour
+    /// it, so nothing of the build was published. Boxed to keep `AgentError`
+    /// small.
+    #[error("scoped tool grant gate refused: {0}")]
+    ToolGrantGateRefused(Box<crate::tool_grant::GrantGateRefusal>),
 
     /// MeerkatMachine DSL observed an auth lease in `reauth_required`
     /// state at a CallingLlm boundary; the lease cannot proceed
@@ -1435,13 +1444,13 @@ mod tests {
         let err = AgentError::llm(
             "anthropic",
             LlmFailureReason::RateLimited {
-                retry_after: Some(std::time::Duration::from_secs(60)),
+                retry_after: Some(std::time::Duration::from_mins(1)),
             },
             "rate limited",
         );
         assert_eq!(
             err.retry_after_hint(),
-            Some(std::time::Duration::from_secs(60))
+            Some(std::time::Duration::from_mins(1))
         );
     }
 

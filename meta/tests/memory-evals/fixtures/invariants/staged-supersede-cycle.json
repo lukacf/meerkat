@@ -1,0 +1,40 @@
+{
+  "name": "staged-supersede-cycle",
+  "invariant": "supersede_cycle_rejected",
+  "stage": "staged-validator",
+  "store": [
+    {
+      "id": "mem-proc-2",
+      "scope": { "scope": "identity", "realm": "family", "identity": "identity:asa" },
+      "trust": "agent_observed",
+      "status": { "status": "active" },
+      "supersedes": "mem-proc-1",
+      "derived_from": [],
+      "has_verification": false
+    }
+  ],
+  "batch": {
+    "realm": "family",
+    "author": { "author": "steward", "run_id": "dream-2026-07-01" },
+    "ops": [
+      {
+        "op": "supersede",
+        "id": "mem-proc-1",
+        "prior": "mem-proc-2",
+        "record": {
+          "kind": "procedure",
+          "title": "Deploy the gateway with the direct rollout path",
+          "description": "Matters when deploying the gateway to production.",
+          "body": "Run the direct rollout; the blue-green script is optional.",
+          "tags": [],
+          "evidence": []
+        },
+        "trust": "agent_observed",
+        "derived_from": [],
+        "rationale": "dream restores the earlier procedure under its original id"
+      }
+    ]
+  },
+  "expected": { "verdict": "reject", "error": "supersede_cycle", "op_index": 0 },
+  "notes": "No-supersede-cycles invariant (arch doc §11): the store holds mem-proc-2 (active) superseding mem-proc-1; re-creating mem-proc-1 as a supersession of mem-proc-2 closes the loop proc-1 -> proc-2 -> proc-1, which the deterministic staged validator must reject before commit. Executable check: cycle tests in crates/meerkat-meta/src/memory/staged.rs; schema-validated only here."
+}

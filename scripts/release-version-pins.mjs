@@ -18,7 +18,10 @@
 // Never scanned: the projection surfaces themselves
 // (scripts/release-projection-only.mjs), CHANGELOG.md, MODULE.bazel.lock,
 // Markdown and MDX prose, scripts/ (its release-tooling tests run in every
-// plan's format + governance lane), .claude/ and .github/.
+// plan's format + governance lane), .claude/ and .github/, and the roots of
+// the repository's other products (ci/products.json at --revision: meta/,
+// connect/), which release on version lines of their own and may spell
+// their own or Core's versions.
 //
 // usage: release-version-pins.mjs --from X.Y.Z --to X.Y.Z [--revision REV]
 // Exit 0 when clean, 1 on any pin, 2 on an error.
@@ -37,7 +40,9 @@ export function versionToken(version) {
 }
 
 // "rust" (non-comment lines only), "file" (every line) or null (not scanned).
-export function pinScope(path) {
+// `productRoots` are the other products' root directories.
+export function pinScope(path, productRoots = []) {
+  if (productRoots.some((productRoot) => path === productRoot || path.startsWith(`${productRoot}/`))) return null;
   if (isProjectedPath(path) || path === "CHANGELOG.md" || path === "MODULE.bazel.lock") return null;
   if (/^(scripts|\.claude|\.github)\//.test(path) || /\.mdx?$/.test(path)) return null;
   if (path.endsWith(".rs")) return "rust";
@@ -56,8 +61,19 @@ function isRustComment(line) {
   return /^\s*(\/\/|\/\*|\*)/.test(line);
 }
 
+// The root directories of the products other than Core at `revision`
+// (ci/products.json); none when the revision has no registry.
+export function productRootsAt(revision, cwd) {
+  const shown = spawnSync("git", ["show", `${revision}:ci/products.json`], { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (shown.status !== 0) return [];
+  const products = JSON.parse(shown.stdout).products;
+  if (!Array.isArray(products)) throw new Error(`ci/products.json at ${revision} lists no products`);
+  return products.map((product) => product.root).filter((root) => typeof root === "string" && root !== "");
+}
+
 // Every pinned line at `revision`: { path, line, text, version }.
 export function findReleaseVersionPins({ from, to, revision = "HEAD", cwd = process.cwd() }) {
+  const productRoots = productRootsAt(revision, cwd);
   const result = spawnSync(
     "git",
     ["grep", "-z", "-n", "-I", "--full-name", "-F", "-e", from, "-e", to, revision, "--"],
@@ -73,7 +89,7 @@ export function findReleaseVersionPins({ from, to, revision = "HEAD", cwd = proc
     const [location, lineNumber, ...rest] = record.split("\0");
     const text = rest.join("\0");
     const path = location.startsWith(`${revision}:`) ? location.slice(revision.length + 1) : location;
-    const scope = pinScope(path);
+    const scope = pinScope(path, productRoots);
     if (scope === null || (scope === "rust" && isRustComment(text))) continue;
     for (const [version, token] of tokens) {
       if (token.test(text)) pins.push({ path, line: Number(lineNumber), text: text.trim(), version });

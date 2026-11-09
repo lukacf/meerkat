@@ -391,6 +391,13 @@ pub enum AgentErrorReason {
         )]
         detail: Option<crate::types::ProviderStopDetail>,
     },
+    /// The session's build refused its scoped tool grant gate
+    /// ([`AgentError::ToolGrantGateRefused`]): no grant could honour it. A
+    /// turn whose build was refused carries it, so a surface answers the
+    /// turn with the refusal it answers the session error with.
+    ToolGrantGateRefused {
+        refusal: crate::tool_grant::GrantGateRefusal,
+    },
 }
 
 impl AgentErrorReason {
@@ -511,6 +518,9 @@ impl AgentErrorReason {
                 stop: *stop,
                 detail: detail.as_deref().cloned(),
             }),
+            AgentError::ToolGrantGateRefused(refusal) => Some(Self::ToolGrantGateRefused {
+                refusal: (**refusal).clone(),
+            }),
             _ => None,
         }
     }
@@ -553,7 +563,8 @@ impl From<&AgentError> for AgentErrorClass {
             AgentError::BuildError(_)
             | AgentError::SessionIdentityInUse(_)
             | AgentError::DeclaredToolUnknown(_)
-            | AgentError::ToolArtifactRefused(_) => Self::Build,
+            | AgentError::ToolArtifactRefused(_)
+            | AgentError::ToolGrantGateRefused(_) => Self::Build,
             AgentError::AuthReauthRequired { .. } => Self::Auth,
             AgentError::CallbackPending { .. } | AgentError::CallbackBatchPending { .. } => {
                 Self::CallbackPending
@@ -1173,6 +1184,8 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         }
         AgentEvent::RunResumed { .. } => "run_resumed",
         AgentEvent::ToolResultsBoundedForRequest { .. } => "tool_results_bounded_for_request",
+        AgentEvent::RequestedCompactionSkipped { .. } => "requested_compaction_skipped",
+        AgentEvent::OperatorInstructionsApplied { .. } => "operator_instructions_applied",
     }
 }
 
@@ -3186,6 +3199,59 @@ pub enum AgentEvent {
         /// The limit that set how much of each result the request kept.
         axis: ToolResultBoundAxis,
     },
+    /// The compaction check that consumed a host's compaction request
+    /// (`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and
+    /// `mob/compact_member`) compacted nothing.
+    ///
+    /// A check that compacts at the request publishes the ordinary
+    /// `compaction_started`, then `compaction_completed` or
+    /// `compaction_failed`. When the check has nothing to compact, it
+    /// publishes this event instead, so the host can tell that the request
+    /// was consumed and that nothing was compacted. Published at that check,
+    /// before its model request is sent. A check that consumed no request
+    /// publishes nothing new.
+    RequestedCompactionSkipped {
+        /// The run whose compaction check consumed the request.
+        run_id: crate::lifecycle::RunId,
+        /// Why the check compacted nothing.
+        reason: RequestedCompactionSkipReason,
+    },
+
+    /// An operator-instruction entry of this session was applied. It reports
+    /// the instructions now in effect for the live session, not their
+    /// durability: the delta entry a fresh run start appended is published
+    /// once the run whose start appended it starts, and the snapshot entry a
+    /// compaction folded the session's entry rows into once that compaction
+    /// commits (for a staged memory projection, when the runtime commits it,
+    /// right after its `CompactionCompleted`; a compaction rolled back before
+    /// its commit is never observed, and its entry sequence goes to the next
+    /// entry). A restart before the entry is durable (the run's first
+    /// checkpoint, or the projection's commit) applies the changes again at
+    /// the next fresh run start and publishes this event again.
+    ///
+    /// An observation only, projected from the entry row's typed identity:
+    /// the session's operator-instruction status read is the authority on
+    /// what is in effect. A run that never starts takes its entry back, so
+    /// the changes stay pending and a later run start applies them again.
+    ///
+    /// Appended after every released variant: declaration order is the
+    /// implicit discriminant (the xtask `released_enum_ordinals` test).
+    OperatorInstructionsApplied {
+        session_id: SessionId,
+        /// Strictly increasing per session, across deltas and snapshots.
+        entry_sequence: u64,
+        kind: crate::InstructionEntryKind,
+        /// The run whose start applied the entry; none for a snapshot of
+        /// what was already in effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<crate::lifecycle::RunId>,
+        /// The whole active set after the entry, sorted by slot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        active: Vec<crate::InstructionActiveRef>,
+        /// A delta's changes, sorted by slot; empty for a snapshot.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<crate::InstructionChange>,
+    },
 }
 
 /// One tool result a model request carried shortened, as
@@ -3241,6 +3307,22 @@ impl From<&crate::session::RunResumePoint> for RunResumePointKind {
     }
 }
 
+/// Why the compaction check that consumed a host's compaction request
+/// compacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports
+/// it. The vocabulary may grow.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RequestedCompactionSkipReason {
+    /// The check came before the session's first model request, when the
+    /// session has nothing to compact yet.
+    FirstModelRequest,
+    /// A run in flight keeps its request and its newest round, and nothing
+    /// else was left to fold.
+    NothingToFold,
+}
+
 /// Exact negative application fact projected from durable boundary join resolution.
 ///
 /// This does not terminalize an input or invalidate a later application in a
@@ -3254,6 +3336,23 @@ pub struct BoundaryAppendsDiscarded {
 }
 
 impl AgentEvent {
+    /// The observation of an applied operator-instruction entry
+    /// ([`AgentEvent::OperatorInstructionsApplied`]), projected from the
+    /// entry row's typed identity.
+    pub(crate) fn operator_instructions_applied(
+        session_id: SessionId,
+        entry: &crate::InstructionEntryIdentity,
+    ) -> Self {
+        Self::OperatorInstructionsApplied {
+            session_id,
+            entry_sequence: entry.entry_sequence(),
+            kind: entry.kind(),
+            run_id: entry.run_id().cloned(),
+            active: entry.active().to_vec(),
+            changes: entry.changes().to_vec(),
+        }
+    }
+
     /// The assistant message this event belongs to or references, when the
     /// event carries one.
     ///
@@ -3647,6 +3746,19 @@ pub fn format_verbose_event_with_config(
                  session: {shortened}"
             ))
         }
+        AgentEvent::RequestedCompactionSkipped { reason, .. } => {
+            let why = match reason {
+                RequestedCompactionSkipReason::FirstModelRequest => {
+                    "the session had made no model request yet"
+                }
+                RequestedCompactionSkipReason::NothingToFold => {
+                    "nothing to fold outside the open run's request and newest round"
+                }
+            };
+            Some(format!(
+                "  Requested compaction consumed, nothing compacted: {why}"
+            ))
+        }
         _ => None,
     }
 }
@@ -3797,6 +3909,103 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ToolResultBoundAxis::RequestBytes).unwrap(),
             "request_bytes"
+        );
+    }
+
+    /// A check that consumed a host's compaction request and compacted
+    /// nothing says so under its own wire name, with the run and the reason,
+    /// and reads back unchanged.
+    #[test]
+    fn requested_compaction_skipped_has_its_own_wire_name_and_round_trips() {
+        let run_id = crate::lifecycle::RunId::new();
+        let event = AgentEvent::RequestedCompactionSkipped {
+            run_id: run_id.clone(),
+            reason: RequestedCompactionSkipReason::FirstModelRequest,
+        };
+        assert_eq!(agent_event_type(&event), "requested_compaction_skipped");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "requested_compaction_skipped",
+                "run_id": run_id,
+                "reason": "first_model_request",
+            })
+        );
+        let AgentEvent::RequestedCompactionSkipped {
+            run_id: parsed_run,
+            reason,
+        } = serde_json::from_value::<AgentEvent>(wire).unwrap()
+        else {
+            panic!("the event reads back as itself");
+        };
+        assert_eq!(parsed_run, run_id);
+        assert_eq!(reason, RequestedCompactionSkipReason::FirstModelRequest);
+        assert_eq!(
+            serde_json::to_value(RequestedCompactionSkipReason::NothingToFold).unwrap(),
+            "nothing_to_fold"
+        );
+    }
+
+    /// The applied-instructions observation has its own wire name, carries
+    /// the entry's identity fields and reads back as itself; a snapshot with
+    /// nothing in effect omits its empty sets and run.
+    #[test]
+    fn operator_instructions_applied_has_its_own_wire_name_and_round_trips() {
+        let session_id = SessionId::new();
+        let run_id = crate::lifecycle::RunId::new();
+        let namespace = crate::InstructionNamespace::new("host").unwrap();
+        let key = crate::InstructionKey::new("tone").unwrap();
+        let revision = crate::InstructionRevision::new(2).unwrap();
+        let digest = crate::InstructionContentDigest::for_body("Be brief.");
+        let event = AgentEvent::OperatorInstructionsApplied {
+            session_id: session_id.clone(),
+            entry_sequence: 3,
+            kind: crate::InstructionEntryKind::Delta,
+            run_id: Some(run_id.clone()),
+            active: vec![crate::InstructionActiveRef {
+                namespace: namespace.clone(),
+                key: key.clone(),
+                revision,
+                content_sha256: digest.clone(),
+                body_bytes: 9,
+            }],
+            changes: vec![crate::InstructionChange::Activate {
+                namespace,
+                key,
+                revision,
+                supersedes: None,
+                content_sha256: digest,
+                body_bytes: 9,
+            }],
+        };
+        assert_eq!(agent_event_type(&event), "operator_instructions_applied");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "operator_instructions_applied");
+        assert_eq!(wire["entry_sequence"], 3);
+        assert_eq!(wire["kind"], "delta");
+        assert_eq!(wire["run_id"], serde_json::to_value(&run_id).unwrap());
+        assert_eq!(wire["changes"][0]["change"], "activate");
+        assert_eq!(wire["active"][0]["revision"], 2);
+        let parsed: AgentEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+
+        let empty_snapshot = AgentEvent::OperatorInstructionsApplied {
+            session_id: session_id.clone(),
+            entry_sequence: 4,
+            kind: crate::InstructionEntryKind::Snapshot,
+            run_id: None,
+            active: Vec::new(),
+            changes: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&empty_snapshot).unwrap(),
+            serde_json::json!({
+                "type": "operator_instructions_applied",
+                "session_id": session_id,
+                "entry_sequence": 4,
+                "kind": "snapshot",
+            })
         );
     }
 
@@ -5565,6 +5774,32 @@ mod tests {
         );
     }
 
+    /// A refused scoped tool grant gate is a typed reason: the agent error's
+    /// report carries it, and its wire form is the refusal under the
+    /// `tool_grant_gate_refused` tag, which reads back to the same reason.
+    #[test]
+    fn refused_grant_gate_reason_is_typed_on_the_wire() {
+        let refusal = crate::tool_grant::GrantGateRefusal::UnknownFamily {
+            family: "shel".to_string(),
+        };
+        let error = crate::error::AgentError::ToolGrantGateRefused(Box::new(refusal.clone()));
+        let reason = AgentErrorReason::ToolGrantGateRefused { refusal };
+        let report = AgentErrorReport::from_agent_error(&error);
+        assert_eq!(report.class, AgentErrorClass::Build);
+        assert_eq!(report.reason, Some(reason.clone()));
+
+        let wire = serde_json::to_value(&reason).expect("serialize");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "reason_type": "tool_grant_gate_refused",
+                "refusal": {"kind": "unknown_family", "family": "shel"},
+            })
+        );
+        let decoded: AgentErrorReason = serde_json::from_value(wire).expect("decode");
+        assert_eq!(decoded, reason);
+    }
+
     #[test]
     fn provider_error_projection_uses_canonical_retryability() {
         for (kind, raw_retryability, expected_retryable) in [
@@ -5946,6 +6181,18 @@ mod tests {
                     total_bytes: 600_000,
                 }],
                 axis: ToolResultBoundAxis::RequestBytes,
+            },
+            AgentEvent::RequestedCompactionSkipped {
+                run_id: crate::lifecycle::RunId::new(),
+                reason: RequestedCompactionSkipReason::NothingToFold,
+            },
+            AgentEvent::OperatorInstructionsApplied {
+                session_id: SessionId::new(),
+                entry_sequence: 1,
+                kind: crate::InstructionEntryKind::Snapshot,
+                run_id: None,
+                active: Vec::new(),
+                changes: Vec::new(),
             },
         ];
 

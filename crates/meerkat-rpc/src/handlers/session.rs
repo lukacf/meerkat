@@ -396,6 +396,13 @@ pub struct CreateSessionParams {
     /// Optional session-local tool visibility filter.
     #[serde(default)]
     pub tool_filter: Option<ToolFilter>,
+    /// Scoped tool grant gate: built-in tool families and tool names the
+    /// session mounts hidden and refuses at dispatch until a live
+    /// `tool_grants/grant` opens them. The session records it, and a gate no
+    /// grant could honour (an unknown or disabled family, a name nothing
+    /// mounts) refuses the build with typed invalid-params data.
+    #[serde(default)]
+    pub grant_gated_tools: Option<meerkat_contracts::WireGrantGatedTools>,
     /// Enable WorkGraph tools. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_workgraph: Option<bool>,
@@ -689,6 +696,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         // channel that could fail to serialize), so this is infallible.
         build_config.set_initial_tool_filter(tool_filter);
     }
+    build_config.grant_gated_tools = params.grant_gated_tools.map(Into::into);
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
     // it at build time.
@@ -808,6 +816,10 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     if let Some(route) = callback_route {
         runtime.bind_session_callback_route(session_id.clone(), route);
     }
+    // The creating connection holds the session's session/event route: the
+    // turns no request waits on write their copies to it, and to no other
+    // connection.
+    runtime.hold_session_event_route(session_id.clone(), notification_sink.clone());
 
     // Immediate creates need a live runtime loop before the first turn starts.
     // Deferred creates register on-demand through the session/* router entry
@@ -867,6 +879,12 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     // Start the initial turn — route through runtime for V9 consistency
     let session_events = params.session_events.unwrap_or(true);
     let result = if params.keep_alive {
+        // The create answers once its first turn has built the session,
+        // and that turn runs on. A turn that ends before its session was
+        // built (a refused scoped tool grant gate, for example) answers the
+        // create as it answers an immediate create.
+        let mut first_build = runtime.first_build_wait(&session_id);
+        let (first_turn_tx, mut first_turn) = tokio::sync::oneshot::channel();
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
@@ -875,9 +893,10 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         let skill_refs_for_turn = skill_refs.clone();
         let request_context_for_turn = request_context.clone();
         let initial_turn_overrides_for_turn = initial_turn_overrides.clone();
+        let connection_for_turn = notification_sink.clone();
         tokio::spawn(async move {
-            if let Err(rpc_err) = runtime_for_turn
-                .start_turn_via_runtime_with_request_context(
+            let result = runtime_for_turn
+                .start_turn_via_runtime_on_connection(
                     &sid_for_turn,
                     prompt_for_turn,
                     injected_context_for_turn,
@@ -887,24 +906,47 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
                     None,
                     initial_turn_overrides_for_turn,
                     request_context_for_turn,
+                    Some(connection_for_turn),
                     session_events,
                 )
-                .await
-            {
-                tracing::error!(
-                    session_id = %sid_for_turn,
-                    error = %rpc_err.code,
-                    "Host-mode session start failed: {}",
-                    rpc_err.message
-                );
+                .await;
+            // Once the session was built the create has answered, and a
+            // failure of the turn is only logged.
+            if let Err(Err(rpc_err)) = first_turn_tx.send(result) {
+                log_unanswered_first_turn_failure(&sid_for_turn, &rpc_err);
             }
         });
 
-        if !await_comms_runtime_ready(&runtime, &session_id).await {
-            tracing::warn!(
-                session_id = %session_id,
-                "Host-mode session started without comms runtime before create response timeout"
-            );
+        // The promotion signals a successful build before it hands the
+        // turn's result on, so with `biased` polling a signalled build wins
+        // whenever it happened. A result that reaches the create unsignalled
+        // means no promotion signalled this create: an error (a build that
+        // failed) is answered as an immediate create answers it, and a
+        // success (a session some other path built) answers the placeholder.
+        tokio::select! {
+            biased;
+            () = first_build.built() => {
+                // The create answers the build. A turn that already ended
+                // left its result here unread: log a failure as the turn's
+                // task would, and close the channel so that the task logs a
+                // later one itself.
+                first_turn.close();
+                if let Ok(Err(rpc_err)) = first_turn.try_recv() {
+                    log_unanswered_first_turn_failure(&session_id, &rpc_err);
+                }
+            }
+            outcome = &mut first_turn => match outcome {
+                // Built by some other path than a promotion.
+                Ok(Ok(_)) => {}
+                Ok(Err(rpc_err)) => return RpcResponse::from_error(id, rpc_err),
+                Err(_) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("the first turn of session {session_id} ended without a result"),
+                    );
+                }
+            },
         }
 
         meerkat_core::RunResult {
@@ -923,7 +965,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         }
     } else {
         match runtime
-            .start_turn_via_runtime_with_request_context(
+            .start_turn_via_runtime_on_connection(
                 &session_id,
                 params.prompt,
                 injected_context,
@@ -933,6 +975,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
                 None,
                 initial_turn_overrides,
                 request_context.clone(),
+                Some(notification_sink.clone()),
                 session_events,
             )
             .await
@@ -951,27 +994,18 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     RpcResponse::success(id, response)
 }
 
-#[cfg(feature = "comms")]
-async fn await_comms_runtime_ready(
-    runtime: &SessionRuntime,
+/// Log a failure of a `keep_alive` create's first turn that the create does
+/// not answer: it answered once that turn had built the session.
+fn log_unanswered_first_turn_failure(
     session_id: &meerkat_core::SessionId,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(250);
-    while tokio::time::Instant::now() < deadline {
-        if runtime.comms_runtime(session_id).await.is_some() {
-            return true;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    }
-    false
-}
-
-#[cfg(not(feature = "comms"))]
-async fn await_comms_runtime_ready(
-    _runtime: &SessionRuntime,
-    _session_id: &meerkat_core::SessionId,
-) -> bool {
-    true
+    rpc_err: &crate::protocol::RpcError,
+) {
+    tracing::error!(
+        session_id = %session_id,
+        error = %rpc_err.code,
+        "Host-mode session start failed: {}",
+        rpc_err.message
+    );
 }
 
 /// Handle `session/list`.
@@ -1433,6 +1467,34 @@ pub async fn handle_archive(
 
     match runtime.archive_session(&session_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"archived": true})),
+        Err(rpc_err) => RpcResponse::from_error(id, rpc_err),
+    }
+}
+
+/// Handle `session/compact`: ask a live session's next compaction check to
+/// compact, without a rebuild. A session with no live runtime in this
+/// process is refused, never loaded or woken.
+pub async fn handle_compact(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: meerkat_contracts::CompactSessionParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
+    };
+    match runtime.request_compaction(&session_id).await {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::CompactSessionResult {
+                session_id: session_id.to_string(),
+                outcome: receipt.wire_outcome(),
+            },
+        ),
         Err(rpc_err) => RpcResponse::from_error(id, rpc_err),
     }
 }

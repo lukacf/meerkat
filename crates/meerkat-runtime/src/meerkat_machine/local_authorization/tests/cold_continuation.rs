@@ -30,7 +30,7 @@ use crate::input_authority::NativeAdmissionError;
 use crate::input_state::InputLifecycleState;
 use crate::meerkat_machine::{
     AuthenticatedOriginal, AuthenticatedOriginalSource, RetainedControllerOwner,
-    RetainedInvocationOwner, ScopedGrantComposition, ScopedMandateOwner,
+    RetainedInvocationOwner, ScopedGrantComposition, ScopedInvocation, ScopedMandateOwner,
 };
 use crate::service_ext::SessionServiceRuntimeExt;
 use crate::store::{InMemoryRuntimeStore, RuntimeStore};
@@ -387,13 +387,16 @@ impl AuthenticatedOriginalSource for Custody {
 /// owner whose session moved to another controller. Every ask is counted
 /// (the third field), and while the fourth field is nonzero each ask answers
 /// that the owner cannot say now, as a contended owner does, and counts it
-/// down.
+/// down. Once the fifth field is set it supplies a client for another
+/// selection than the one asked for (another backend profile), as an owner
+/// whose route moved to another account would.
 #[derive(Default)]
 struct Controllers(
     std::sync::Mutex<Vec<ControllerModelClient>>,
     std::sync::atomic::AtomicBool,
     AtomicUsize,
     AtomicUsize,
+    std::sync::atomic::AtomicBool,
 );
 
 impl Controllers {
@@ -410,6 +413,11 @@ impl Controllers {
     /// Every reacquisition asked so far, answered or not.
     fn asks(&self) -> usize {
         self.2.load(Ordering::SeqCst)
+    }
+
+    /// From now on, a client for another selection than the one asked for.
+    fn supply_another_selection(&self) {
+        self.4.store(true, Ordering::SeqCst);
     }
 }
 
@@ -431,10 +439,15 @@ impl RetainedControllerOwner for Controllers {
         if self.1.load(Ordering::SeqCst) {
             return Ok(None);
         }
-        let client = ControllerModelClient::new(
-            selection.clone(),
-            Arc::new(SelectedClient(selection.clone())),
-        );
+        let supplied = if self.4.load(Ordering::SeqCst) {
+            let mut other = serde_json::to_value(selection).expect("a selection's form");
+            other["backend_profile_id"] = serde_json::Value::String("another-profile".into());
+            serde_json::from_value(other).expect("another selection")
+        } else {
+            selection.clone()
+        };
+        let client =
+            ControllerModelClient::new(supplied.clone(), Arc::new(SelectedClient(supplied)));
         self.0.lock().expect("controllers").push(client.clone());
         Ok(Some(client))
     }
@@ -529,12 +542,42 @@ async fn open(
     blobs: &Arc<MemoryBlobStore>,
     owners: &HostOwners,
 ) -> Arc<MeerkatMachine> {
+    open_configured(store, blobs, || owners.configuration()).await
+}
+
+/// [`open`] over the same owners composed without the retained-resume
+/// composition: a host that supplies no client again for any kept input.
+async fn open_without_resume_composition(
+    store: &InMemoryRuntimeStore,
+    blobs: &Arc<MemoryBlobStore>,
+    owners: &HostOwners,
+) -> Arc<MeerkatMachine> {
+    open_configured(store, blobs, || {
+        ScopedGrantComposition {
+            grants: Arc::clone(&owners.grants),
+            ingress_domain: owners.ingress_domain.clone(),
+            originals: Arc::clone(&owners.custody) as Arc<dyn AuthenticatedOriginalSource>,
+            invocation: ScopedInvocation::from_policy(Arc::clone(&owners.policy)),
+            operation_owner: Arc::clone(&owners.operation_owner),
+            retained_resume: None,
+            kept_original: None,
+        }
+        .into_configuration()
+    })
+    .await
+}
+
+async fn open_configured(
+    store: &InMemoryRuntimeStore,
+    blobs: &Arc<MemoryBlobStore>,
+    configuration: impl Fn() -> NativeGrantWorkConfiguration,
+) -> Arc<MeerkatMachine> {
     tokio::time::timeout(BOUND, async {
         loop {
             match MeerkatMachine::persistent_with_local_grant_authorization(
                 Arc::new(store.clone()),
                 Some(Arc::clone(blobs) as Arc<dyn meerkat_core::BlobStore>),
-                owners.configuration(),
+                configuration(),
             ) {
                 Ok(machine) => return Arc::new(machine),
                 Err(RuntimeDriverError::ControllerReadinessUnavailable {
@@ -974,7 +1017,7 @@ async fn an_undelivered_continuation_resumes_its_original_once_after_a_same_proc
         .context
         .controller_client()
         .expect("the resume runs on a controller client");
-    assert!(running.selection() == &selection);
+    assert_eq!(running.selection(), &selection);
     assert!(
         reacquired
             .0
@@ -1863,9 +1906,9 @@ impl Reopened {
                 assert!(self.boundary.is_held(), "the step runs under B");
                 assert_eq!(admitted.session_id(), &self.session);
                 assert_eq!(admitted.input_id(), &self.original_id);
-                assert!(
-                    Some(admitted.association())
-                        == self.original.header().authority_association.as_ref()
+                assert_eq!(
+                    Some(admitted.association()),
+                    self.original.header().authority_association.as_ref()
                 );
                 assert_eq!(
                     admitted.phase(),
@@ -2296,7 +2339,7 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
         .controller_model
         .clone()
         .expect("another controller selection");
-    assert!(other != reopened.selection);
+    assert_ne!(other, reopened.selection);
     reopened.actor.select(&other);
     assert_eq!(
         reopened
@@ -2382,8 +2425,8 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
     )
     .await;
     let (current_registration, current_attachment) = reopened.current().await;
-    assert!(current_registration != registration);
-    assert!(current_attachment != attachment);
+    assert_ne!(current_registration, registration);
+    assert_ne!(current_attachment, attachment);
     for (label, registration, attachment) in [
         (
             "the replaced registration and attachment",
@@ -2448,7 +2491,7 @@ async fn a_stale_witness_or_inexact_evidence_runs_no_publication_step() {
         .await
         .expect("a new actor");
     let (newest_registration, new_attachment) = reopened.current().await;
-    assert!(new_attachment != current_attachment);
+    assert_ne!(new_attachment, current_attachment);
     let replaced_observed = replaced_actor.identity();
     for (label, registration, attachment) in [
         (
@@ -3122,7 +3165,7 @@ async fn the_durable_read_refuses_inexact_evidence_and_unreadable_stores() {
         .expect("claims")
         .candidate()
         .clone();
-    assert!(candidate.controller_model.as_ref() != Some(&other_selection));
+    assert_ne!(candidate.controller_model.as_ref(), Some(&other_selection));
     candidate.controller_model = Some(other_selection);
     let mut reassociated = expected.clone();
     reassociated.header_mut().authority_association =
@@ -4962,13 +5005,15 @@ async fn a_kept_resume_whose_host_cannot_say_now_waits_with_its_attempts_for_the
 /// answer, has passed, the next such answer ends it as a refused resume,
 /// `Abandoned { ResumeRefused }`, with its attempts unchanged and nothing
 /// run. While it waits without its client, the machine refuses the
-/// controller's credential publication; once it ended, that publication
-/// succeeds, as the machine-wide refusal cleared. RED at base: nothing asked
-/// the host again; three stagings without a client used the attempts up and
-/// it ended `Abandoned { MaxAttemptsExhausted }`.
+/// controller's credential publication and every controller grant mutation
+/// (a held kept governed prompt, which waits without a time bound, refuses
+/// neither: `a_controller_grant_mutation_proceeds_while_a_kept_governed_prompt_is_held`);
+/// once it ended, both succeed, as the machine-wide refusal cleared. RED at
+/// base: nothing asked the host again; three stagings without a client used
+/// the attempts up and it ended `Abandoned { MaxAttemptsExhausted }`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() {
-    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let (configuration, template, account, _publication) = mutable_controller_configuration(true);
     let owners = owners_of(&configuration, &template);
     drop(configuration);
     let store = InMemoryRuntimeStore::new();
@@ -4988,6 +5033,10 @@ async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() 
     assert_eq!(
         error.context, "NativeControllerCredentialRelease::AuthorityUnavailable",
         "the kept resume without its client refuses it"
+    );
+    assert!(
+        grant_mutations_refused_throughout(&machine, Duration::from_millis(250)).await,
+        "the kept resume without its client refuses every controller grant mutation while it waits"
     );
 
     let row = terminal_row(&machine, &session, &resume_id).await;
@@ -5014,17 +5063,20 @@ async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() 
     publish_credential(&machine, &controller_selection(&template))
         .await
         .expect("the machine-wide refusal cleared with the kept resume's end");
+    mutate_controller_account(&machine, &account, true)
+        .await
+        .expect("the machine-wide refusal of grant mutations cleared with the kept resume's end");
 }
 
 /// An ordinary governed prompt (authenticated fresh, under its own
-/// association) that a restart finds queued cannot run: its controller
-/// client did not survive the store, and the host contract can supply it
-/// again only with a fresh authentication of its caller. The attachment ends
-/// it before it serves, as a refused resume, `Abandoned { ResumeRefused }`,
-/// with its runtime-termination receipt, without staging it: nothing runs,
-/// even once its destination is bound again. RED at base: it was staged once
-/// its destination was bound, every staging failed before the executor, and
-/// it ended `Abandoned { MaxAttemptsExhausted }` after three attempts.
+/// association) that a restart finds queued, whose host supplies no client
+/// for it again (its controller owner has none for the prompt's selection,
+/// `Readiness(UnsupportedScope)`), cannot run. The attachment ends it before
+/// it serves, as a refused resume, `Abandoned { ResumeRefused }`, with its
+/// runtime-termination receipt, without staging it: nothing runs, even once
+/// its destination is bound again. RED at base: it was staged once its
+/// destination was bound, every staging failed before the executor, and it
+/// ended `Abandoned { MaxAttemptsExhausted }` after three attempts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_governed_prompt_ends_refused_before_the_attachment_serves() {
     let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
@@ -5036,6 +5088,7 @@ async fn a_kept_governed_prompt_ends_refused_before_the_attachment_serves() {
     let (destination, prompt_id) =
         keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
 
+    owners.controllers.withdraw_clients();
     let machine = open(&store, &blobs, &owners).await;
     let (effects, mut applied) = attach(&machine, &session, "never runs").await;
     // The attachment's own settlement ends it: the attach returns only once
@@ -5091,6 +5144,600 @@ async fn a_kept_governed_prompt_ends_refused_before_the_attachment_serves() {
             reason: crate::input_state::InputAbandonReason::ResumeRefused,
         }
     );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+}
+
+/// A governed custody stand-in for a grant change made while no machine runs
+/// (between a crash and the restart): no attached native owner can veto it.
+struct NoControllerCustody;
+
+impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody
+    for NoControllerCustody
+{
+    fn with_unreferenced_controller_grant<T, E>(
+        &mut self,
+        _: &meerkat_authorization_contracts::grant::GrantLineageRef,
+        mutate: impl FnOnce() -> Result<T, E>,
+    ) -> Result<
+        Result<T, E>,
+        meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal,
+    > {
+        Ok(mutate())
+    }
+}
+
+/// Set the controller account's state through `machine`'s grant-mutation
+/// custody (`with_preserved_controllers`), as a host's controller policy
+/// change does: `enabled` false removes the controller admission every
+/// governed input of this fixture needs, true keeps it. The custody answers
+/// `Unavailable` both while it is busy and when unfinished work vetoes the
+/// change, so the change is retried while `Unavailable`, within bound, and
+/// the last answer returned.
+async fn mutate_controller_account(
+    machine: &MeerkatMachine,
+    account: &MutableControllerAccount,
+    enabled: bool,
+) -> Result<(), meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal> {
+    use meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal;
+    let deadline = tokio::time::Instant::now() + BOUND;
+    loop {
+        let changed = machine
+            .try_controller_grant_mutation()
+            .and_then(|mut custody| {
+                custody.with_preserved_controllers(
+                    |_, _| Ok(()),
+                    || account.enabled.store(enabled, Ordering::SeqCst),
+                )
+            });
+        match changed {
+            Err(ControllerCustodyRefusal::Unavailable)
+                if tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Whether every controller grant mutation tried through `machine`'s custody
+/// (`with_preserved_controllers`) for `period`, one every 20 ms, is refused
+/// as unavailable: the machine-wide refusal while work waits without its
+/// client. A busy custody answers so too, but only for the moment a runtime
+/// loop holds a driver, never for a whole period.
+async fn grant_mutations_refused_throughout(machine: &MeerkatMachine, period: Duration) -> bool {
+    use meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal;
+    let deadline = tokio::time::Instant::now() + period;
+    while tokio::time::Instant::now() < deadline {
+        let changed = machine
+            .try_controller_grant_mutation()
+            .and_then(|mut custody| custody.with_preserved_controllers(|_, _| Ok(()), || ()));
+        if changed != Err(ControllerCustodyRefusal::Unavailable) {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+/// Whether `session`'s machine holds `input_id` for its controller
+/// (`input_controller_holds`).
+async fn controller_held(
+    machine: &MeerkatMachine,
+    session: &SessionId,
+    input_id: &InputId,
+) -> bool {
+    machine_state(machine, session)
+        .await
+        .input_controller_holds
+        .contains(&input_id.to_string())
+}
+
+/// Wait, bounded, until `controllers` was asked `count` times in all.
+async fn wait_for_controller_asks(controllers: &Controllers, count: usize) {
+    tokio::time::timeout(BOUND, async {
+        while controllers.asks() < count {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the host is asked within bound");
+}
+
+/// A governed prompt (admitted under its own association) that a restart
+/// finds queued runs again on the client its host supplies for it. The
+/// runtime asks the installed host with the prompt's stored association,
+/// which re-attests the original through its custody, decides the
+/// invocation and the controller admission again under the current grants,
+/// and reacquires the client for the stored selection; once the
+/// registration owner binds the prompt's destination again, the prompt runs
+/// once on that client, staged once. RED before: the attachment ended it as
+/// a refused resume and nothing ran.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_runs_on_the_client_its_host_supplies_again() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    let reacquired = owners.controllers.0.lock().expect("reacquisitions").len();
+    let (effects, mut applied) = attach(&machine, &session, "the kept prompt ran").await;
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+
+    let entered = next_apply(&mut applied, "kept governed prompt").await;
+    assert_eq!(entered.ids, vec![prompt_id.clone()]);
+    let running = entered
+        .context
+        .controller_client()
+        .expect("the prompt runs on a controller client");
+    assert!(
+        owners.controllers.0.lock().expect("reacquisitions")[reacquired..]
+            .iter()
+            .any(|client| Arc::ptr_eq(running.client(), client.client())),
+        "the prompt runs on the client its host supplied after the restart"
+    );
+    assert_eq!(
+        completed_text(&machine, &session, &prompt_id).await,
+        "the kept prompt ran"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "it ran once");
+    let row = machine
+        .input_state(&session, &prompt_id)
+        .await
+        .expect("row read")
+        .expect("the prompt's row");
+    assert_eq!(row.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(row.seed.attempt_count, 1, "staged once");
+}
+
+/// A run a stop or a restart left open whose first input is a kept governed
+/// prompt resumes once the prompt's host supplies its client again: under
+/// its own id, with the prompt as its input, on the client the host supplied
+/// after the restart, once. RED before: the attachment settled the run as a
+/// refused resume, and nothing ran.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_run_of_a_governed_prompt_resumes_on_the_client_its_host_supplies_again() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id, run_id) =
+        keep_prompt_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    let reacquired = owners.controllers.0.lock().expect("reacquisitions").len();
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the registration keeps the run resumable, its prompt bound to it"
+    );
+    // A resumed run does not stage again, so the destination is bound before
+    // anything is attached.
+    bind_when_settled(&machine, &session, &destination).await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) =
+        attach_registered_holding(&machine, &session, "resumed run", Arc::clone(&hold)).await;
+
+    let entered = next_apply(&mut applied, "the kept run").await;
+    assert_eq!(entered.run, run_id, "the run resumes under its own id");
+    assert_eq!(entered.ids, vec![prompt_id.clone()]);
+    let running = entered
+        .context
+        .controller_client()
+        .expect("the resumed run runs on a controller client");
+    assert!(
+        owners.controllers.0.lock().expect("reacquisitions")[reacquired..]
+            .iter()
+            .any(|client| Arc::ptr_eq(running.client(), client.client())),
+        "the resumed run runs on the client its host supplied after the restart"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "the run resumed once");
+    hold.notify_waiters();
+}
+
+/// A kept governed prompt whose host cannot say at the restart (its
+/// controller owner is contended, `Readiness(PolicyUnavailable)`) is held by
+/// the machine, queued with its attempts. As for a resumed run whose
+/// admission could not decide, nothing asks again on a timer: the runtime
+/// loop asks at its first pass and at each wake, and once the host answers
+/// the prompt runs once on the client it supplies. RED before: the
+/// attachment ended it as a refused resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_whose_host_cannot_say_is_asked_again_at_the_next_wake() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    // The recovery's ask and the loop's first pass cannot say now.
+    owners.controllers.contend(2);
+    let machine = open(&store, &blobs, &owners).await;
+    let asked = owners.controllers.asks();
+    let (effects, mut applied) = attach(&machine, &session, "the kept prompt ran").await;
+    bind_when_settled(&machine, &session, &destination).await;
+    wait_for_controller_asks(&owners.controllers, asked + 2).await;
+    assert!(
+        controller_held(&machine, &session, &prompt_id).await,
+        "the machine holds the kept prompt for its controller"
+    );
+    // Much longer than the pause after which a held retained-work resume is
+    // asked again: a held kept prompt is asked at wakes only.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        2,
+        "the recovery and the loop's first pass asked, and no timer asked again"
+    );
+    assert!(applied.try_recv().is_err(), "nothing ran while it was held");
+
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    let entered = next_apply(&mut applied, "kept governed prompt").await;
+    assert_eq!(entered.ids, vec![prompt_id.clone()]);
+    assert_eq!(
+        completed_text(&machine, &session, &prompt_id).await,
+        "the kept prompt ran"
+    );
+    assert_eq!(
+        owners.controllers.asks() - asked,
+        3,
+        "the wake asked again, and the host answered"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "it ran once");
+    let row = machine
+        .input_state(&session, &prompt_id)
+        .await
+        .expect("row read")
+        .expect("the prompt's row");
+    assert_eq!(
+        row.seed.attempt_count, 1,
+        "the answers that could not say now used no attempt"
+    );
+}
+
+/// A run left open whose kept governed prompt's host keeps answering that it
+/// cannot say is held, as a resumed run whose admission could not decide is:
+/// past the budget after which a held retained-work resume ends refused, and
+/// across a wake, the run stays marked, its prompt bound and not ended, and
+/// nothing runs; nothing settles it on a timer. RED before: the attachment
+/// settled the run as a refused resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_run_of_a_governed_prompt_whose_host_cannot_say_stays_marked() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id, run_id) =
+        keep_prompt_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(usize::MAX);
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    bind_when_settled(&machine, &session, &destination).await;
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) =
+        attach_registered_holding(&machine, &session, "never runs", Arc::clone(&hold)).await;
+
+    tokio::time::sleep(crate::retained_work::CONTROLLER_HOLD_BUDGET + Duration::from_millis(500))
+        .await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the run stays marked"
+    );
+    assert!(
+        controller_held(&machine, &session, &prompt_id).await,
+        "its prompt is held for its controller"
+    );
+    let row = machine
+        .input_state(&session, &prompt_id)
+        .await
+        .expect("row read")
+        .expect("the prompt's row");
+    assert!(
+        row.seed.terminal_outcome.is_none(),
+        "its prompt is not ended: {:?}",
+        row.seed.terminal_outcome
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+    hold.notify_waiters();
+}
+
+/// A kept governed prompt whose host supplies a client for another selection
+/// than the prompt's stored association names (another backend profile here;
+/// another account or credential is another selection too) is refused: the
+/// host supplies a client for the stored selection only, never a principal.
+/// It ends as a refused resume before the attachment serves, and nothing
+/// runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_whose_host_supplies_another_selection_is_refused() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.supply_another_selection();
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    assert_refused_before_it_ran(&machine, &session, &prompt_id, &effects, &mut applied).await;
+}
+
+/// A kept governed prompt whose original the host adapter no longer holds
+/// (its custody was released since the admission) is refused: the custody
+/// record of the original's authentication is the re-attestation, and
+/// without it nothing re-attests the caller. It ends as a refused resume,
+/// and nothing runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_whose_original_is_no_longer_held_is_refused() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    owners.custody.0.lock().expect("custody").clear();
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    assert_refused_before_it_ran(&machine, &session, &prompt_id, &effects, &mut applied).await;
+}
+
+/// A kept governed prompt whose controller grant was revoked between the
+/// crash and the restart is refused: its controller admission is decided
+/// again under the current grants. It ends as a refused resume, and nothing
+/// runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_whose_controller_grant_was_revoked_is_refused() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    let controller = template
+        .header()
+        .authority_association
+        .as_ref()
+        .expect("claims")
+        .candidate()
+        .controller_grant_lineage[0]
+        .clone();
+    owners
+        .grants
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &controller.root_authority,
+            &controller,
+            &mut NoControllerCustody,
+        )
+        .expect("the controller grant is revoked while no machine runs");
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    assert_refused_before_it_ran(&machine, &session, &prompt_id, &effects, &mut applied).await;
+}
+
+/// A host whose composition installs no retained-resume composition (so no
+/// kept-original check) supplies no client for a kept governed prompt: it
+/// ends as a refused resume before the attachment serves, as before, and
+/// nothing runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_governed_prompt_on_a_host_without_the_resume_composition_is_refused() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open_without_resume_composition(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    assert_refused_before_it_ran(&machine, &session, &prompt_id, &effects, &mut applied).await;
+}
+
+/// While a kept governed prompt is held for its controller (its host cannot
+/// say), a controller grant mutation through the machine's custody proceeds,
+/// and so does a credential publication: the held prompt has no client for
+/// the veto to protect, and its pin decides again under the grants current
+/// then. A retained-work resume held for its controller still vetoes both
+/// within its budget
+/// (`a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget`).
+/// RED before: the attachment ended the prompt, so it was never held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_controller_grant_mutation_proceeds_while_a_kept_governed_prompt_is_held() {
+    let (configuration, template, account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(usize::MAX);
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, _applied) = attach(&machine, &session, "never runs").await;
+    assert!(
+        controller_held(&machine, &session, &prompt_id).await,
+        "the machine holds the kept prompt for its controller"
+    );
+    mutate_controller_account(&machine, &account, true)
+        .await
+        .expect("a controller grant mutation proceeds while the kept prompt is held");
+    publish_credential(&machine, &controller_selection(&template))
+        .await
+        .expect("a credential publication proceeds while the kept prompt is held");
+    assert!(
+        controller_held(&machine, &session, &prompt_id).await,
+        "the kept prompt is still held"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+}
+
+/// A mutation that removes the controller admission a held kept governed
+/// prompt needs proceeds, and the prompt's next ask, once its host can
+/// answer, refuses it typed: it ends as a refused resume, and nothing runs.
+/// RED before: the attachment ended the prompt, so it was never held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_kept_governed_prompt_whose_admission_a_mutation_removed_is_refused_at_its_next_ask()
+{
+    let (configuration, template, account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(usize::MAX);
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "never runs").await;
+    assert!(
+        controller_held(&machine, &session, &prompt_id).await,
+        "the machine holds the kept prompt for its controller"
+    );
+    mutate_controller_account(&machine, &account, false)
+        .await
+        .expect("the mutation proceeds while the kept prompt is held");
+    owners.controllers.contend(0);
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    let row = terminal_row(&machine, &session, &prompt_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "its next ask refuses it: the controller admission no longer holds"
+    );
+    assert_eq!(row.seed.attempt_count, 0, "it was never staged");
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+}
+
+/// A mutation that keeps the controller admission a held kept governed
+/// prompt needs proceeds, and the prompt's next ask, once its host can
+/// answer, pins its client: it runs once. RED before: the attachment ended
+/// the prompt, so it was never held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_kept_governed_prompt_runs_after_a_mutation_that_kept_its_admission() {
+    let (configuration, template, account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (destination, prompt_id) =
+        keep_admitted_prompt(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.contend(usize::MAX);
+    let machine = open(&store, &blobs, &owners).await;
+    let (effects, mut applied) = attach(&machine, &session, "the kept prompt ran").await;
+    assert!(
+        controller_held(&machine, &session, &prompt_id).await,
+        "the machine holds the kept prompt for its controller"
+    );
+    mutate_controller_account(&machine, &account, true)
+        .await
+        .expect("the mutation proceeds while the kept prompt is held");
+    owners.controllers.contend(0);
+    bind_when_settled(&machine, &session, &destination).await;
+    machine
+        .wake_runtime_if_active_inputs(&session)
+        .await
+        .expect("the attached loop takes a wake");
+    let entered = next_apply(&mut applied, "kept governed prompt").await;
+    assert_eq!(entered.ids, vec![prompt_id.clone()]);
+    assert_eq!(
+        completed_text(&machine, &session, &prompt_id).await,
+        "the kept prompt ran"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1, "it ran once");
+}
+
+/// `prompt_id`, a kept governed prompt, ended as a refused resume before it
+/// was staged, and nothing ran.
+async fn assert_refused_before_it_ran(
+    machine: &MeerkatMachine,
+    session: &SessionId,
+    prompt_id: &InputId,
+    effects: &AtomicUsize,
+    applied: &mut tokio::sync::mpsc::UnboundedReceiver<Applied>,
+) {
+    let row = terminal_row(machine, session, prompt_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "the kept governed prompt ends as a refused resume"
+    );
+    assert_eq!(row.seed.attempt_count, 0, "it was never staged");
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
     assert!(
         applied.try_recv().is_err(),
@@ -5407,9 +6054,9 @@ async fn a_stop_of_a_parked_resumable_run_wakes_its_loop_and_settles_it() {
     hold.notify_waiters();
 }
 
-/// A run a restart left open whose first input is a kept governed prompt (its
-/// controller client cannot be supplied again without a fresh authentication
-/// of its caller), and whose stop was asked once the restart registered it,
+/// A run a restart left open whose first input is a kept governed prompt
+/// whose host supplies no client for it again, and whose stop was asked once
+/// the restart registered it,
 /// is settled by the attachment as stopped: the prompt ends
 /// `Abandoned { Cancelled }`, and its runtime-termination receipt carries the
 /// stop's reason, as the settlement's durable carrier does, not the reason of
@@ -5427,6 +6074,7 @@ async fn a_stopped_kept_run_of_a_governed_prompt_ends_with_the_stop_reason() {
     let (_destination, prompt_id, run_id) =
         keep_prompt_in_open_run(&store, &blobs, &owners, &session, &template).await;
 
+    owners.controllers.withdraw_clients();
     let machine = open(&store, &blobs, &owners).await;
     machine
         .register_session(session.clone())
@@ -5757,7 +6405,7 @@ async fn a_requeue_stop_keeps_a_governed_consent_notice_that_runs_and_spends_its
             .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
                 &registration,
                 crate::UnregisterQueuedInputs::Requeue {
-                    max_age: Duration::from_secs(600),
+                    max_age: Duration::from_mins(10),
                 },
             )
             .await
@@ -5831,3 +6479,7 @@ async fn a_requeue_stop_keeps_a_governed_consent_notice_that_runs_and_spends_its
         "a second spend is refused"
     );
 }
+
+/// A governed run whose round commit stays unsettled past its retry budget
+/// on a host store realm, across a restart.
+mod unsettled_restart;

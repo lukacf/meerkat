@@ -1,0 +1,14 @@
+{
+  "name": "@flow-editor-components",
+  "private": true,
+  "version": "0.0.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles": "./src/styles/index.ts"
+  },
+  "peerDependencies": {
+    "@flow-editor-core": "0.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

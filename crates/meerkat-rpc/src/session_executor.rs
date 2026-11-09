@@ -127,16 +127,19 @@ pub struct MobRpcRuntimeExecutor {
     session_id: SessionId,
     actor_witness: meerkat::LiveSessionActorWitness,
     publication_handle: RpcRuntimePublicationHandle,
-    notification_sink: NotificationSink,
 }
 
 #[cfg(feature = "mob")]
 impl MobRpcRuntimeExecutor {
+    /// The executor of one mob member's session. Each turn it applies writes
+    /// its `session/event` copies where `runtime` routes that turn, resolved
+    /// when the turn is applied; `_notification_sink` is not used (an
+    /// executor without a runtime applies no turn).
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
         runtime: Option<Arc<SessionRuntime>>,
         actor_witness: meerkat::LiveSessionActorWitness,
-        notification_sink: NotificationSink,
+        _notification_sink: NotificationSink,
     ) -> Self {
         let session_id = actor_witness.session_id().clone();
         let publication_handle =
@@ -150,7 +153,6 @@ impl MobRpcRuntimeExecutor {
             session_id,
             actor_witness,
             publication_handle,
-            notification_sink,
         }
     }
 
@@ -162,9 +164,9 @@ impl MobRpcRuntimeExecutor {
 impl SessionRuntimeExecutor {
     /// Create a new executor for a specific session.
     ///
-    /// The notification sink is NOT captured here — the executor reads the
-    /// current sink from the runtime at apply time so reconnected TCP clients
-    /// always get events routed to the live transport.
+    /// No notification sink is captured here: each turn resolves where its
+    /// `session/event` copies go when it is applied (the connections of its
+    /// requests, or the connection holding the session).
     #[allow(clippy::expect_used)]
     pub fn new(
         runtime: Arc<SessionRuntime>,
@@ -791,6 +793,39 @@ mod typed_context_append_tests {
             }
         ));
     }
+
+    /// A scoped tool grant gate the session's build refused crosses this
+    /// process's own bridge as an apply failure that keeps the typed refusal
+    /// as its reason, so the failed turn's error carries it. An apply failure
+    /// without the refusal's data carries no reason.
+    #[test]
+    fn a_refused_grant_gate_crosses_the_rpc_bridge_with_its_typed_reason() {
+        let refusal = meerkat_core::tool_grant::GrantGateRefusal::UnknownFamily {
+            family: "shel".to_string(),
+        };
+        let rpc_error = crate::session_runtime::session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::ToolGrantGateRefused(Box::new(refusal.clone())),
+        ));
+        let error = core_executor_error_from_rpc(rpc_error);
+        assert!(
+            matches!(error, CoreExecutorError::ApplyFailed { .. }),
+            "a refused gate is an apply failure of the turn's build: {error:?}"
+        );
+        let cause = error.apply_failure_cause();
+        assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeTurn);
+        assert_eq!(
+            cause.reason(),
+            Some(&meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal })
+        );
+
+        let error = core_executor_error_from_rpc(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "store fault".to_string(),
+            data: None,
+        });
+        assert!(matches!(error, CoreExecutorError::ApplyFailed { .. }));
+        assert_eq!(error.apply_failure_cause().reason(), None);
+    }
 }
 
 /// The data key with which the session runtime hands its executor a run that
@@ -882,6 +917,14 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         .and_then(serde_json::Value::as_str)
         .and_then(CoreApplyFailureCauseKind::from_wire_str)
         .or((err.code == error::HOOK_DENIED).then_some(CoreApplyFailureCauseKind::HookDenied));
+    // A scoped tool grant gate the session's build refused crosses this
+    // bridge in the typed data `session_error_to_rpc` projected it into; the
+    // apply failure keeps it as its typed reason, so the failed turn's error
+    // carries the refusal.
+    let gate_refusal = err
+        .data
+        .as_ref()
+        .and_then(SessionError::tool_grant_gate_refusal_from_data);
     let message = err.message;
     let cause = match kind {
         Some(CoreApplyFailureCauseKind::ExecutorStopped) => {
@@ -893,6 +936,11 @@ pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
         }
         Some(kind) => CoreApplyFailureCause::new(kind, message),
         None => CoreApplyFailureCause::runtime_turn(message),
+    };
+    let cause = match gate_refusal {
+        Some(refusal) => cause
+            .with_reason(meerkat_core::event::AgentErrorReason::ToolGrantGateRefused { refusal }),
+        None => cause,
     };
     CoreExecutorError::apply_failed(cause)
 }
@@ -1031,20 +1079,20 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
         let prompt = primitive.extract_content_input();
 
-        // Create an event channel and forward events to the notification sink.
-        // Read the CURRENT sink from the runtime (not the one captured at
-        // executor creation) so reconnected TCP clients get events. A turn
-        // whose requests all opted out of its session/event copies drains
-        // the channel without writing them.
+        // Create an event channel and forward events to the connections the
+        // turn's session/event copies go to: those of the requests that
+        // admitted its inputs, and for an input no request waits on, the
+        // connection holding the session (see
+        // `SessionRuntime::turn_session_event_sinks`). A turn whose requests
+        // all opted out drains the channel without writing them.
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
-        let sink = self.runtime.current_notification_sink();
-        let sid = self.session_id.clone();
-        let write_session_events = self
+        let sinks = self
             .runtime
-            .turn_writes_session_events(&self.session_id, primitive.contributing_input_ids());
+            .turn_session_event_sinks(&self.session_id, primitive.contributing_input_ids());
+        let sid = self.session_id.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                if write_session_events {
+                for sink in &sinks {
                     sink.emit_event(&sid, &event).await;
                 }
             }
@@ -1413,16 +1461,17 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         let prompt = primitive.extract_content_input();
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
-        let sink = self.notification_sink.clone();
-        let sid = self.session_id.clone();
-        // A turn whose requests all opted out of its session/event copies
-        // drains the channel without writing them.
-        let write_session_events = self.runtime.as_ref().is_none_or(|runtime| {
-            runtime.turn_writes_session_events(&self.session_id, primitive.contributing_input_ids())
+        // The member's turn writes its session/event copies where a session's
+        // turn does, resolved now rather than when the executor was created
+        // (see `SessionRuntime::turn_session_event_sinks`). A turn whose
+        // requests all opted out drains the channel without writing them.
+        let sinks = self.runtime.as_ref().map_or_else(Vec::new, |runtime| {
+            runtime.turn_session_event_sinks(&self.session_id, primitive.contributing_input_ids())
         });
+        let sid = self.session_id.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                if write_session_events {
+                for sink in &sinks {
                     sink.emit_event(&sid, &event).await;
                 }
             }
@@ -1883,6 +1932,10 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     impl MobSessionService for BoundaryCancelSessionService {
+        fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+            meerkat_core::SessionCommsIdentityRoot::NotKept
+        }
+
         async fn subscribe_session_activity(
             &self,
             _session_id: &meerkat_core::SessionId,
@@ -2040,7 +2093,6 @@ mod tests {
             session_id,
             actor_witness,
             publication_handle: RpcRuntimePublicationHandle::new(Arc::new(UnusedPublicationHandle)),
-            notification_sink: NotificationSink::noop(),
         };
 
         CoreExecutor::reconcile_committed_compaction_projections(&mut executor, &[])

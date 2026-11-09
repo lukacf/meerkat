@@ -80,7 +80,7 @@ use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeControlPlane;
 
 /// Default idle timeout for session-backed comms drains.
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const SUPERVISOR_RESPONSE_ROUTE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a background task that drains the comms inbox and routes
@@ -245,10 +245,12 @@ pub fn spawn_comms_drain(
             {
                 let candidate_class = claim.class();
                 let raw_item_id = claim.raw_item_id();
-                // How the transport established this item's sender, read
+                // How the transport established this item's sender, and the
+                // governed origin an in-process sender carried with it, read
                 // before a volatile handoff consumes the claim: the governed
                 // binder is offered only a sender the transport established.
                 let sender_authentication = claim.sender_authentication();
+                let governed_send_origin = claim.governed_send_origin().cloned();
                 let (claim, candidate) = match claim.delivery_contract() {
                     meerkat_core::PeerIngressDeliveryContract::DurableRuntime => {
                         let candidate = claim.candidate().cloned();
@@ -511,6 +513,7 @@ pub fn spawn_comms_drain(
                             let governed = governed_comms_origin(
                                 &candidate,
                                 sender_authentication,
+                                governed_send_origin.as_ref(),
                                 &claim,
                                 raw_item_id,
                             );
@@ -615,6 +618,7 @@ pub fn spawn_comms_drain(
                             let governed = governed_comms_origin(
                                 &candidate,
                                 sender_authentication,
+                                governed_send_origin.as_ref(),
                                 &claim,
                                 raw_item_id,
                             );
@@ -790,6 +794,7 @@ pub fn spawn_comms_drain(
                         let governed = governed_comms_origin(
                             &candidate,
                             sender_authentication,
+                            governed_send_origin.as_ref(),
                             &claim,
                             raw_item_id,
                         );
@@ -866,24 +871,50 @@ async fn accept_routed_peer_ingress(
     // only this claim: no drain, session, runtime or recovery lock.
     let (input, custody) = match governed {
         None => (input, None),
-        Some(origin) => match bind_governed_peer_ingress(
-            adapter,
-            session_id,
-            crate::input_authority::PeerIngressOrigin::Comms(origin),
-            input,
-            expected_member,
-            None,
-        )
-        .await
-        {
-            GovernedPeerBind::Unbound(input) => (input, None),
-            GovernedPeerBind::Bound { input, custody } => (input, Some(custody)),
-            GovernedPeerBind::Refused(refusal) => {
-                refuse_peer_ingress_before_admission(adapter, claim, refusal.to_string())?;
-                return Ok(None);
+        Some(origin) => {
+            // A volatile delivery keeps nothing to retry once it is handed
+            // off, so a pending answer parks it here: Core offers it again
+            // after a backoff, until one deadline from its first offer, and
+            // then drops it with a typed warning. A durable claim keeps its
+            // path: released, it stays the session's FIFO head.
+            let volatile = matches!(claim, RoutedPeerIngressClaim::Volatile);
+            let deadline = crate::tokio::time::Instant::now()
+                + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+            let mut backoff = Duration::from_millis(1);
+            loop {
+                match bind_governed_peer_ingress(
+                    adapter,
+                    session_id,
+                    crate::input_authority::PeerIngressOrigin::Comms(origin.clone()),
+                    input.clone(),
+                    expected_member,
+                    None,
+                )
+                .await
+                {
+                    GovernedPeerBind::Unbound(input) => break (input, None),
+                    GovernedPeerBind::Bound { input, custody } => break (input, Some(custody)),
+                    GovernedPeerBind::Refused(refusal) => {
+                        refuse_peer_ingress_before_admission(adapter, claim, refusal.to_string())?;
+                        return Ok(None);
+                    }
+                    GovernedPeerBind::Pending(error) if volatile => {
+                        let now = crate::tokio::time::Instant::now();
+                        if now >= deadline {
+                            tracing::warn!(
+                                %session_id,
+                                %error,
+                                "comms_drain: dropped a volatile peer delivery whose binding stayed pending past its deadline"
+                            );
+                            return Ok(None);
+                        }
+                        crate::tokio::time::sleep(backoff.min(deadline - now)).await;
+                        backoff = (backoff * 2).min(Duration::from_millis(64));
+                    }
+                    GovernedPeerBind::Pending(error) => return Err(error),
+                }
             }
-            GovernedPeerBind::Pending(error) => return Err(error),
-        },
+        }
     };
     let residency = || match expected_member {
         Some(expected) => {
@@ -981,6 +1012,8 @@ async fn accept_routed_peer_ingress(
 enum GovernedPeerRefusal {
     /// The installed binder's verdict.
     Denied,
+    /// The installed binder's verdict for a typed cause.
+    DeniedFor(crate::input_authority::PeerIngressBindDenial),
     /// The host's binding is not Core's exact input bound for this delivery
     /// (see `check_bound_original`): a deterministic host fault, refused for
     /// good so it never wedges the session's FIFO head.
@@ -991,6 +1024,12 @@ impl std::fmt::Display for GovernedPeerRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Denied => f.write_str("the installed binder denied the peer delivery's binding"),
+            Self::DeniedFor(denial) => {
+                write!(
+                    f,
+                    "the installed binder refused the peer delivery: {denial}"
+                )
+            }
             Self::HostBindingMalformed(detail) => {
                 write!(f, "host binding malformed: {detail}")
             }
@@ -1040,6 +1079,12 @@ async fn bind_governed_peer_ingress(
         return GovernedPeerBind::Unbound(input);
     };
     let runtime_id = MeerkatMachine::logical_runtime_id(session_id);
+    // A delivery that carries a governed origin is pinned to it: its binding
+    // keeps the origin's requester and names the sending work.
+    let governed_origin = match &origin {
+        crate::input_authority::PeerIngressOrigin::Comms(comms) => comms.governed_origin.clone(),
+        crate::input_authority::PeerIngressOrigin::SupervisorDelivery(_) => None,
+    };
     // One input id per delivery, the same across every redelivery. A
     // supervisor delivery already has one, its payload input id, which the
     // supervisor checks its answers against and addresses the delivery by; a
@@ -1057,7 +1102,11 @@ async fn bind_governed_peer_ingress(
         event_key,
         handed.clone(),
     ) {
-        Ok(request) => request,
+        Ok(request) => match bound {
+            // The binder's one wait ends within the bound on the whole bind.
+            Some(limit) => request.with_wait_bound(limit),
+            None => request,
+        },
         Err(detail) => {
             return GovernedPeerBind::Refused(GovernedPeerRefusal::HostBindingMalformed(detail));
         }
@@ -1084,6 +1133,14 @@ async fn bind_governed_peer_ingress(
         Err(PeerIngressBindRefusal::Denied) => {
             GovernedPeerBind::Refused(GovernedPeerRefusal::Denied)
         }
+        Err(PeerIngressBindRefusal::Refused(denial)) => {
+            tracing::warn!(
+                %session_id,
+                refusal = denial.as_str(),
+                "comms_drain: the installed binder refused a peer delivery"
+            );
+            GovernedPeerBind::Refused(GovernedPeerRefusal::DeniedFor(denial))
+        }
         Err(PeerIngressBindRefusal::NotReady(reason)) => {
             GovernedPeerBind::Pending(crate::RuntimeDriverError::ControllerReadinessUnavailable {
                 reason,
@@ -1098,11 +1155,18 @@ async fn bind_governed_peer_ingress(
             let (bound_input, custody) = binding.into_parts();
             let custody =
                 custody.map(crate::input_admission_custody::NativeInputAdmissionGuard::new);
+            let pin = match &governed_origin {
+                Some(origin) => BoundOriginalPin::GovernedDelivery {
+                    work: &delivery_work,
+                    origin,
+                },
+                None => BoundOriginalPin::DeliveryWork(&delivery_work),
+            };
             match crate::input_authority::check_bound_original(
                 &handed,
                 &bound_input,
                 &runtime_id,
-                BoundOriginalPin::DeliveryWork(&delivery_work),
+                pin,
             ) {
                 Ok(()) => match custody {
                     Some(custody) => GovernedPeerBind::Bound {
@@ -1253,6 +1317,7 @@ fn is_definite_governed_peer_refusal(error: &crate::RuntimeDriverError) -> bool 
 fn governed_comms_origin(
     candidate: &PeerInputCandidate,
     sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    governed_send_origin: Option<&meerkat_core::GovernedSendOrigin>,
     claim: &RoutedPeerIngressClaim,
     raw_item_id: meerkat_core::InteractionId,
 ) -> Option<crate::input_authority::PeerIngressCommsOrigin> {
@@ -1285,6 +1350,14 @@ fn governed_comms_origin(
             RoutedPeerIngressClaim::Volatile => {
                 crate::input_authority::PeerIngressClaimKind::Volatile
             }
+        },
+        // Only an in-process sender carries a governed origin: what a queue
+        // item names for any other sender is no origin. A carrier that holds
+        // anything but a native runtime's own origin is none either.
+        governed_origin: match sender_authentication {
+            meerkat_core::PeerIngressSenderAuthentication::InProcess => governed_send_origin
+                .and_then(crate::input_authority::GovernedPeerOrigin::from_send_origin),
+            _ => None,
         },
     })
 }
@@ -1896,6 +1969,7 @@ fn peer_input_from_delivery_payload(
         // transcript identity. Absence stays absent so the ordinary runtime
         // lane retains its own minting semantics.
         correlation_id,
+        requester: None,
     };
     if let Some(context) = payload.transient_turn_context {
         if !payload.injected_context.is_empty() {
@@ -3073,7 +3147,7 @@ async fn stage_correlated_reply_endpoint(
 
 /// Upper bound on a held rotation observation, whatever the supervisor
 /// requests: a hang guard for the waiter, never a retry trigger.
-const MAX_ROTATION_OBSERVE_HOLD: Duration = Duration::from_secs(60);
+const MAX_ROTATION_OBSERVE_HOLD: Duration = Duration::from_mins(1);
 
 /// One observation of a supervisor rotation as `observer`, projected to its
 /// bridge reply, and whether it is settled (completed or rejected).
@@ -8519,6 +8593,8 @@ mod tests {
         >,
         /// How the transport established each claimed item's sender.
         sender_authentication: std::sync::Mutex<meerkat_core::PeerIngressSenderAuthentication>,
+        /// The governed origin each claimed item carries, if any.
+        governed_send_origin: std::sync::Mutex<Option<meerkat_core::GovernedSendOrigin>>,
     }
 
     impl TestPeerIngressQueue {
@@ -8530,7 +8606,17 @@ mod tests {
                 sender_authentication: std::sync::Mutex::new(
                     meerkat_core::PeerIngressSenderAuthentication::Unverified,
                 ),
+                governed_send_origin: std::sync::Mutex::new(None),
             })
+        }
+
+        /// Claim every later item as carrying `origin`, as an in-process
+        /// sender's queue item does.
+        fn carry_governed_origin(&self, origin: Option<meerkat_core::GovernedSendOrigin>) {
+            *self
+                .governed_send_origin
+                .lock()
+                .expect("governed origin mutex") = origin;
         }
 
         /// Claim every later item as admitted by a transport that
@@ -8604,6 +8690,11 @@ mod tests {
                 .sender_authentication
                 .lock()
                 .expect("sender authentication mutex");
+            let governed_send_origin = self
+                .governed_send_origin
+                .lock()
+                .expect("governed origin mutex")
+                .clone();
             Some(
                 PeerIngressQueueClaim::from_comms_queue(
                     claim_id,
@@ -8613,7 +8704,8 @@ mod tests {
                     Some(candidate),
                     Arc::clone(self) as Arc<dyn PeerIngressClaimLease>,
                 )
-                .with_sender_authentication(sender_authentication),
+                .with_sender_authentication(sender_authentication)
+                .with_governed_send_origin(governed_send_origin),
             )
         }
     }
@@ -10203,7 +10295,7 @@ mod tests {
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
 
@@ -10233,7 +10325,7 @@ mod tests {
             adapter.clone(),
             session_id.clone(),
             runtime.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
 
@@ -10404,7 +10496,7 @@ mod tests {
             adapter.clone(),
             session_id.clone(),
             runtime_dyn.clone(),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await;
         tokio::time::timeout(Duration::from_secs(2), paused_rx)
@@ -13226,6 +13318,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: Some(crate::CorrelationId::from_uuid(interaction_id.0)),
+                requester: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
             content: "poke".to_string().into(),
@@ -16035,7 +16128,7 @@ mod tests {
         /// The held reply; the outer bound is a hang guard past the hold.
         async fn held_reply(&self) -> BridgeSupervisorRotationObservation {
             let (status, reply) = tokio::time::timeout(
-                std::time::Duration::from_secs(120),
+                std::time::Duration::from_mins(2),
                 await_first_bridge_reply(&self.sent_commands, &self.sent_notify),
             )
             .await

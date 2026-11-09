@@ -8,6 +8,7 @@ pub mod capabilities;
 #[cfg(feature = "comms")]
 pub mod comms;
 pub mod config;
+pub mod decision;
 // Runtime-backed external-event convenience handler.
 pub mod event;
 pub mod help;
@@ -23,6 +24,7 @@ pub mod runtime_host;
 pub mod schedule;
 pub mod session;
 pub mod skills;
+pub mod tool_grants;
 pub mod turn;
 pub mod workgraph;
 
@@ -100,6 +102,45 @@ pub(crate) fn parse_session_id_for_runtime(
         }
     }
     Ok(locator.session_id)
+}
+
+/// The JSON-RPC error of a typed operator-instruction refusal: its closed
+/// code in `data.instruction_set_code` ([`meerkat_contracts::InstructionSetErrorData`])
+/// under `INVALID_PARAMS`, or `INTERNAL_ERROR` for a malformed instruction
+/// history, which is the server's fault.
+pub(crate) fn instruction_set_rpc_error(
+    code: meerkat_core::InstructionSetErrorCode,
+    message: String,
+) -> crate::protocol::RpcError {
+    let rpc_code = match code {
+        meerkat_core::InstructionSetErrorCode::MalformedInstructionHistory => error::INTERNAL_ERROR,
+        _ => error::INVALID_PARAMS,
+    };
+    match serde_json::to_value(meerkat_contracts::InstructionSetErrorData {
+        instruction_set_code: code,
+    }) {
+        Ok(data) => crate::protocol::RpcError {
+            code: rpc_code,
+            message,
+            data: Some(data),
+        },
+        Err(serialize_error) => crate::protocol::RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!(
+                "failed to serialize operator-instruction refusal data: {serialize_error}"
+            ),
+            data: None,
+        },
+    }
+}
+
+/// [`instruction_set_rpc_error`] as the response to request `id`.
+pub(crate) fn instruction_set_error_response(
+    id: Option<RpcId>,
+    code: meerkat_core::InstructionSetErrorCode,
+    message: String,
+) -> RpcResponse {
+    RpcResponse::from_error(id, instruction_set_rpc_error(code, message))
 }
 
 /// K17 ratchet: RPC handler responses are constructed ONLY from

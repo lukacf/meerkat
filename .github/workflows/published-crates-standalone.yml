@@ -38,12 +38,15 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_HOME: /home/runner/.cargo
-  RUSTUP_TOOLCHAIN: 1.94.1
+  RUSTUP_TOOLCHAIN: 1.97.0
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (nightly.yml says why): at the default 600 s the
+  # server exits under a long compile, which then starts again uncached.
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   census:

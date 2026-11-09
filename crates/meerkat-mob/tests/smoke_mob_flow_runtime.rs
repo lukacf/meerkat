@@ -286,6 +286,7 @@ fn flow_profile(model: &str, peer_description: &str) -> Profile {
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -2856,6 +2857,7 @@ fn external_tcp_smoke_definition(
             model: "claude-haiku-4-5-20251001".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -3091,7 +3093,7 @@ async fn wait_for_remote_mob_smoke_drain(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "lane:e2e-system"]
 async fn e2e_mob_host_partition_retains_route_install_obligations() {
-    const CONVERGE_WAIT: Duration = Duration::from_secs(60);
+    const CONVERGE_WAIT: Duration = Duration::from_mins(1);
     async fn wait_for<F, Fut>(what: &str, mut predicate: F)
     where
         F: FnMut() -> Fut,

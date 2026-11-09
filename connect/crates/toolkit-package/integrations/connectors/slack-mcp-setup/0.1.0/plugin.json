@@ -1,0 +1,70 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "slack-mcp-setup",
+  "version": "0.1.0",
+  "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+  "author": {
+    "name": "Meerkat Toolkit"
+  },
+  "license": "MIT OR Apache-2.0",
+  "extensions": {
+    "ai.rkat.toolkit": {
+      "schema_version": 1,
+      "identity": {
+        "publisher": "meerkat-toolkit",
+        "name": "slack-mcp-setup",
+        "version": "0.1.0"
+      },
+      "display_name": "Slack MCP host registration",
+      "description": "Guidance-only setup recipe with explicit source observations and newcomer prerequisites.",
+      "provenance": {
+        "source": "https://docs.slack.dev/ai/slack-mcp-server/",
+        "source_revision": "sha256:7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad",
+        "license": "MIT OR Apache-2.0 for Toolkit-authored recipe metadata only. Provider documentation and hosted service retain their own terms. No implementation is copied.",
+        "notices": [
+          "This package is authored by Meerkat Toolkit, not by the provider.",
+          "No upstream implementation is vendored. Hosted endpoints are mutable services, not pinned executable artifacts.",
+          "Offline recipe validation does not establish installation, authentication, readiness or supported live operations."
+        ],
+        "local_patches": []
+      },
+      "strategies": [
+        {
+          "id": "setup",
+          "kind": "remote_mcp",
+          "instructions": "The provider endpoint is https://mcp.slack.com/mcp. Slack requires an eligible Marketplace or internal app and fixed app identity. Dynamic client registration is not supported. Configure the host app and callback, then use protected OAuth credential handling and selected user scopes. Service history/send access does not create a Slack frontend.",
+          "sources": [
+            "https://docs.slack.dev/ai/slack-mcp-server/"
+          ],
+          "known_requirements": [],
+          "unresolved_details": [
+            "No Toolkit-owned Slack app registration or callback is retained in this package.",
+            "Current tool schemas, selected operations and credential-owner binding remain required."
+          ]
+        }
+      ],
+      "known_exports": [
+        {
+          "id": "slack-mcp-setup.service",
+          "role": "service_connector",
+          "description": "Slack MCP host registration; only individually selected and owner-verified capabilities may be bound."
+        }
+      ],
+      "assessments": [
+        {
+          "status": "experimental",
+          "scope": "Retained recipe and source inspection only. Live operation and deployment conformance are unverified.",
+          "source_revision": "sha256:7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad",
+          "assessed_at_unix_ms": 1790772921474,
+          "evidence": [
+            {
+              "owner": "toolkit-library-source-observations",
+              "record": "slack",
+              "revision": "sha256:7db6c89782fdbd3bc823637d780ce39a7ad403e97d664be78a6607c21f29ecad"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

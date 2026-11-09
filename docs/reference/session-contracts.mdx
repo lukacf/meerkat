@@ -108,7 +108,13 @@ Admission remains durable per input, but there is no promise of one model call
 per input. Applications that require one side effect per admitted input must
 iterate the durable input records deterministically in a tool or host-owned
 worker. Do not rely on the model to notice and act once for every item in a
-batched prompt.
+batched prompt. Inputs of different original requesters never share a turn:
+the runtime coalesces only inputs that carry the same requester, or none, and
+a steer from another requester waits for a turn of its own instead of joining
+a running one. Steers keep the order they were admitted in across
+requesters: a steer waiting for a turn of its own keeps its place, so a later
+steer of the running turn's own requester waits behind it too rather than
+join the running turn.
 </Warning>
 
 ### Ordered System messages
@@ -117,6 +123,16 @@ batched prompt.
 message at that turn boundary. System messages are repeatable and may appear
 anywhere in the transcript; an append never replaces row zero or rewrites an
 earlier message.
+
+A resume that names an explicit system prompt appends it as such a row too,
+except, since 0.9.9, when the prompt is exactly the newest System row the
+model reads as a prompt (one without an append identity, an instruction
+activation or an operator-instruction entry, that is not a superseded prompt
+version): then it appends nothing, where earlier releases appended another
+identical row. A different prompt, and an earlier prompt sent again after a
+change, still append; a bare resume appends nothing; and
+`StartTurnRequest.system_prompt` keeps its per-turn append. A host that
+materializes a resumed session itself asks `Session::newest_prompt_row_is`.
 
 Keyed system-prompt updates instead append rows carrying
 `SystemPromptVersionIdentity`: a `SystemPromptKey` and `SystemPromptVersion`.
@@ -130,9 +146,28 @@ never infer a System message from current host configuration. A host that
 wants to add an instruction supplies it through the admitted update path,
 where it becomes a new ordered System row rather than an overwrite.
 
+A host that wants earlier ordinary System rows gone (prompts that earlier
+boots wrote, for example) names them to the system-row prune,
+`SessionServiceTranscriptEditExt::prune_system_rows`: one audited rewrite,
+reason kind `system-row-prune`, removes exactly the named rows. Each row is
+named as a history read showed it, by its 0-based message index and
+`sha256:<64 lowercase hex>` over its content as UTF-8 text; Core never picks
+rows, and a stale reference is refused typed with nothing written. Only
+ordinary System rows are removable: a keyed prompt version, an instruction
+activation row and an operator-instruction entry row each keep their own
+lifecycle, and a row an operator-instruction entry follows in its group of
+System rows stays. A session running a turn answers `Busy`; a dormant one is
+not woken, and no model is called. The prune can also retire superseded
+instruction activation bodies in the same commit.
+
 Compaction retains active keyed and unkeyed System rows verbatim in relative
 order, while discarding superseded keyed versions from the compacted active
-head. This does not rewrite their retained revision history.
+head. This does not rewrite their retained revision history. Instruction
+activation rows keep their places too; the one change a compaction makes to
+one is to retire the body of an activation row that a later activation of its
+key superseded, which then reads as a header that names its key, revision and
+body length (see
+[Durable Instruction Activation](/architecture/durable-instruction-activation)).
 
 Provider adapters lower the active instruction view without rewriting durable
 history. Wires accepting ordered `role=system` messages normally preserve their
@@ -144,6 +179,57 @@ Providers with only a top-level instruction field reject later System rows
 with a typed projection error; unsupported placements on other wires also fail
 typed rather than silently hoisting or merging canonical rows. Provider
 capability never changes, rejects, or rewrites the durable Session itself.
+
+### Operator instructions
+
+Since 0.9.9 a host gives a session standing System-plane instructions by
+slot (a namespace and a key), revision and body. Since 0.9.11 they are on
+JSON-RPC (`session/set_instruction`, `session/revoke_instruction` and
+`session/instruction_status`; see
+[RPC operator instructions](/api/rpc#operator-instructions)) and in the Python
+and TypeScript SDKs; in Rust,
+`SessionServiceInstructionExt::set_session_instruction` records a
+session-owned write (activate a body, or revoke, at a higher revision; an
+exact retry answers as a duplicate), and `read_session_instructions` reads
+the recorded target, the entries in effect and how the session's model lowers
+them (`lowering`). They replace instruction activations
+(`session/activate_instruction`), deprecated since 0.9.11. The persistent
+service records a live session's write
+through a task it owns and a dormant session's store-only, without waking it;
+the ephemeral service refuses `durability_unavailable`. A write changes only
+the recorded target. The pending changes apply at the session's next fresh
+run start as one System entry appended before the run's own input, naming the
+run; a resumed run applies nothing, and a run that never starts takes its
+entry back, so the changes stay pending. A model that lowers System rows only
+in its leading prompt defers them (`leading_prefix_only`) until a compaction
+at a run's first request carries them in its snapshot, and a backend whose
+wire carries only one leading System row keeps them pending
+(`lowering_unavailable`). A compaction folds every entry row into one
+snapshot of the instructions in effect after the leading System prefix, and
+no summary request, host curator window or compactor input carries an
+instruction body. Each applied entry is published as an
+`operator_instructions_applied` event: a delta once the run whose start
+appended it starts, a snapshot once its compaction commits (a staged memory
+projection's when the runtime commits it, right after its
+`compaction_completed`; a compaction rolled back before its commit is never
+observed). The event reports what is now in effect for the live session, not
+durability: a restart before the entry is durable applies the changes again
+and publishes the event again. The status read is the authority. A stale or conflicting revision, a slot that instruction
+activations manage, more than 64 slots, a body over 256 KiB and more than
+1 MiB of Active bodies are refused typed (`InstructionSetErrorCode`), and so
+is a model change onto a target that cannot carry the entry rows the session
+wrote where they stand. On a governed runtime (a runtime with a native work
+authorization host) every operator-instruction write, session-owned or a
+mob's, is refused `prepared_authorization_required` and nothing is written:
+such a write needs prepared authorization, which this release does not mint,
+so a retry is refused the same way. A mob member's session belongs to its mob, which
+writes through `MobHandle::set_operator_instruction` (`mob/set_instruction`):
+the session's own
+host's writes are refused `owned_by_mob` (see
+[Operator instructions](/guides/mobs#operator-instructions)). A
+session that holds operator-instruction facts is written at session envelope
+5, which releases before 0.9.9 refuse (see
+[Upgrading](/guides/upgrading#downgrading-to-0-9-8)).
 
 ### interrupt
 
@@ -575,6 +661,13 @@ history and normally report `CompactionFailed`, allowing the run to continue.
   the next request, and once after a request that did not fit: one the
   provider refused for not fitting the model's context, or one that carried
   the open run's own tool results shortened.
+- Also triggered once by a host's compaction request
+  (`MeerkatMachine::request_compaction`, JSON-RPC `session/compact` and
+  `mob/compact_member`): the session's next check consumes it and compacts
+  whatever the thresholds and cadence say. A check that consumes it and
+  compacts nothing (before the session's first model request, or with
+  nothing to fold beside the open run's request and newest round) publishes
+  `requested_compaction_skipped` with the reason.
 - A request still over the provider's request-body cap or the model's input
   budget after the compaction check carries the open run's own oversized
   tool results shortened for that request only, and publishes
@@ -622,6 +715,7 @@ database through the [host store SPI](/reference/host-store-spi).
 - SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows. Declare `[storage] hosting = "multiprocess"` so each session is hosted by one process and deliveries route to it (see [Realms: multi-process hosting](/concepts/realms#multi-process-hosting)).
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
+A per-build compaction threshold (`SessionBuildOptions::auto_compact_threshold_override`) is not part of it: it holds for the build that names it, so a recovered or resumed session is built without it unless its host supplies it again, while realm `[compaction]` config and a mob profile's `auto_compact_threshold` apply to every build.
 
 ### Domain document and store authority
 
@@ -943,9 +1037,10 @@ session that commits each round durably) fails the
 completion waiters of the inputs it keeps with
 `CompletionWaitError::RequeuedAcrossStop`. Such an input is neither failed nor
 consumed: it stays durably queued, and the session's next start runs it, or
-ends it abandoned with reason `requeue_expired` when it is older than the
-Shutdown's max age by then. Every start that still finds it queued (after a
-crash before it ran, say) checks its age again. Retiring, archiving or
+ends it abandoned with reason `requeue_expired` when more than the
+Shutdown's max age has passed since the Shutdown kept it, however long before
+the Shutdown it was admitted. Every start that still finds it queued (after a
+crash before it ran, say) checks that age again. Retiring, archiving or
 destroying the session before a start runs it ends it as any other queued
 input: abandoned with reason `retired` (retire, archive) or `destroyed`. Do
 not resubmit it; after the restart, the same
@@ -1209,6 +1304,22 @@ yet; attach it to the eventual turn instead. Browser/WASM sessions carry it
 through the same runtime-input path, with in-memory retention for the page
 lifetime.
 
+A Rust host that admits runtime input in its own process can also give a turn
+`RuntimeTurnMetadata::request_only_context`: request-only context that lives
+only in that process. It is projected exactly like `transient_turn_context`
+(an injected-context message at the tail of every foreground model request of
+the turn, never Session state), but it is never persisted: it is not
+serialized, so a stored input never holds it and no wire value carries it. It
+is not part of the prompt replay identity, so a retry of the same input with
+another value replays the original. An input recovered after a restart, and a
+run resumed from its ledger, carry none, so the turn recalls nothing rather
+than a stale value. A batch merge keeps each distinct value once, in order,
+and a durable steer that joins a running turn adds its own values to that
+turn's later requests. A mob member's work carries it
+(`WorkSpec::with_request_only_context`) only into a local session-backed
+member's runtime input; remote, peer-only and autonomous inbox delivery refuse
+it.
+
 ## Durable steer
 
 A `steer` input admitted while its session's turn is running reaches that
@@ -1219,7 +1330,7 @@ from its content:
 
 | Steer input | Delivery class | What the running turn sees |
 | --- | --- | --- |
-| A content input (a prompt, a peer message, request or lifecycle notice, an external event or a local flow step) whose transcript rows are all `system_notice`, `user` or `injected_context` rows (for example a peer message's comms notice, a text prompt's user row, or a detached job's persisted background-job notice), and whose own turn metadata carries only the handling mode, execution kind, objective and transcript identity | durable | The rows are written into the running turn's transcript after that boundary's tool results and before the next assistant message. The same request and every later request of the run see them, and they commit with the run like tool results. The input is consumed with the run terminal. |
+| A content input (a prompt, a peer message, request or lifecycle notice, an external event or a local flow step) whose transcript rows are all `system_notice`, `user` or `injected_context` rows (for example a peer message's comms notice, a text prompt's user row, or a detached job's persisted background-job notice), and whose own turn metadata carries only the handling mode, execution kind, objective, transcript identity and request-only context | durable | The rows are written into the running turn's transcript after that boundary's tool results and before the next assistant message. The same request and every later request of the run see them (and the input's request-only context, which is never a row), and they commit with the run like tool results. The input is consumed with the run terminal. |
 | A content input carrying any other row (a `system` row), a synthetic refresh-projection notice, turn metadata only a fresh turn can apply, or a directed interaction | follow-up only | Never joins the running turn. |
 | An ordinary continuation that carries a turn append, or a peer response progress notice (inputs with no content row of their own) | request-only | A temporary injected-context row at the tail of exactly one model request; never Session state. A continuation steer takes the next open boundary of the running turn and is consumed at injection (with none open it is normalised to `queue` and runs as one follow-up turn). Peer response progress never interrupts a running turn: it reaches the next turn that runs and is consumed with that run. |
 

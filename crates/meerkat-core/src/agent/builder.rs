@@ -100,6 +100,7 @@ pub struct AgentBuilder {
     pub(super) tool_visibility_owner: Option<GeneratedToolVisibilityOwner>,
     pub(super) capability_base_filter_override: Option<ToolFilter>,
     pub(super) policy_base_filter: ToolFilter,
+    pub(super) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
     pub(super) initial_visibility_authority: Option<InheritedToolVisibilityAuthority>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) model_routing_handle: Option<Arc<dyn crate::handles::ModelRoutingHandle>>,
@@ -114,6 +115,7 @@ pub struct AgentBuilder {
     pub(super) auth_credential_identity: Option<crate::AuthCredentialIdentity>,
     pub(super) mcp_server_lifecycle_handle:
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
+    pub(super) operator_instruction_lowering: Option<crate::InstructionLowering>,
 }
 
 /// Error returned when the canonical factory has not composed the policy state
@@ -156,6 +158,12 @@ pub enum AgentBuildPolicyError {
     CompactionMemoryReconcile { message: String },
     #[error("durable compaction-memory stages require a resultful runtime commit coordinator")]
     MissingCompactionCommitCoordinator,
+    /// The agent carries a scoped tool grant gate, but its dispatcher does
+    /// not adjudicate tool grants, so a closed gated call would reach its tool.
+    #[error(
+        "an agent with a scoped tool grant gate requires a dispatcher that adjudicates tool grants"
+    )]
+    ToolGrantGateWithoutAdjudication,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -274,6 +282,7 @@ impl AgentBuilder {
             tool_visibility_owner: None,
             capability_base_filter_override: None,
             policy_base_filter: ToolFilter::All,
+            tool_grant_gate: None,
             initial_visibility_authority: None,
             turn_state_handle: None,
             model_routing_handle: None,
@@ -285,6 +294,7 @@ impl AgentBuilder {
             auth_lease_handle: None,
             auth_credential_identity: None,
             mcp_server_lifecycle_handle: None,
+            operator_instruction_lowering: None,
         }
     }
 
@@ -310,7 +320,10 @@ impl AgentBuilder {
     ///
     /// On a resumed transcript this is a new instruction boundary, not a
     /// replacement for any earlier System event. Provider projection cannot
-    /// suppress or reposition the authored row.
+    /// suppress or reposition the authored row. A resume whose prompt is
+    /// exactly the newest System row the model reads as a prompt (no append
+    /// identity, instruction activation or operator-instruction entry, and
+    /// not a superseded prompt version) appends nothing.
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
@@ -564,6 +577,17 @@ impl AgentBuilder {
             self.requires_explicit_runtime_tool_visibility_owner();
         let capability_base_filter_override = self.capability_base_filter_override.clone();
         let policy_base_filter = self.policy_base_filter.clone();
+        let tool_grant_gate = self.tool_grant_gate.clone();
+        // A grant gate's closed names pass the agent's visibility precheck to
+        // the dispatcher, which must refuse them: only a dispatcher that
+        // adjudicates tool grants may carry one.
+        if tool_grant_gate.is_some() && !tools.adjudicates_tool_grants() {
+            return Err(AgentBuildPolicyError::ToolGrantGateWithoutAdjudication);
+        }
+        let tool_grant_install = tool_grant_gate
+            .as_ref()
+            .map(|gate| gate.install().clone())
+            .unwrap_or_default();
         let initial_visibility_authority = self.initial_visibility_authority.clone();
         let tool_visibility_owner = self.tool_visibility_owner.clone();
         if runtime_tool_visibility_owner_required && tool_visibility_owner.is_none() {
@@ -576,8 +600,9 @@ impl AgentBuilder {
         let transient_turn_context_state = crate::session::TransientTurnContextStateHandle::new();
 
         // An explicitly supplied prompt is an ordinary ordered System append,
-        // including on resume. Only implicit default composition is limited to
-        // a fresh transcript.
+        // including on resume, unless it is exactly the newest prompt row the
+        // model reads: then the resume changes nothing, and appends nothing.
+        // Only implicit default composition is limited to a fresh transcript.
         let system_prompt = if let Some(prompt) = self.system_prompt {
             Some(prompt)
         } else if session.messages().is_empty()
@@ -594,7 +619,9 @@ impl AgentBuilder {
         } else {
             None
         };
-        if let Some(prompt) = system_prompt {
+        if let Some(prompt) = system_prompt
+            && !session.newest_prompt_row_is(&prompt)
+        {
             session.append_system_message(prompt);
         }
 
@@ -683,7 +710,11 @@ impl AgentBuilder {
 
         // Seed active model limits only from the captured effective registry
         // and the durable session identity. The LLM client is an execution
-        // adapter, not capability or token-limit authority.
+        // adapter, not capability or token-limit authority. This catalog
+        // witness names no binding: the operator-instruction lowering it
+        // states is the model row's, not the one the binding's backend
+        // serves, which the factory passes on its own
+        // (`with_operator_instruction_lowering`).
         let active_model_profile = self.effective_model_registry.as_ref().and_then(|registry| {
             session.session_metadata().and_then(|metadata| {
                 let identity = metadata.llm_identity();
@@ -728,6 +759,8 @@ impl AgentBuilder {
             client,
             tools,
             tool_scope,
+            tool_grant_gate,
+            dropped_run_tool_grants_owed: None,
             store,
             session,
             budget,
@@ -789,6 +822,9 @@ impl AgentBuilder {
             runtime_execution_kind_required: self.runtime_execution_kind_required,
             runtime_execution_kind: self.runtime_execution_kind,
             runtime_started_run_id: None,
+            run_started_fresh: false,
+            run_start_reserved_run_id: None,
+            unconcluded_run_start_instructions: None,
             runtime_terminal_failure_witness: None,
             active_transcript_identity: None,
             active_turn_request_contexts: Vec::new(),
@@ -800,6 +836,7 @@ impl AgentBuilder {
             pending_callback_async_ops: None,
             effective_model_registry: self.effective_model_registry,
             active_model_profile,
+            operator_instruction_lowering: self.operator_instruction_lowering,
             external_tool_surface_handle: self.external_tool_surface_handle,
             live_mcp_attachment: None,
             auth_lease_handle: self.auth_lease_handle,
@@ -995,6 +1032,11 @@ impl AgentBuilder {
         // session recomputes it from the policy it is rebuilt with.
         let policy_base_filter_changed = visibility_state.policy_base_filter != policy_base_filter;
         visibility_state.policy_base_filter = policy_base_filter;
+        // The grant gate is this build's too, and the generated owner holds
+        // it: a restored projection's gate fields are the previous build's.
+        // The gate is installed below, every gated name closed.
+        visibility_state.tool_grant_gated_names.clear();
+        visibility_state.tool_grant_open_names.clear();
 
         let visibility_state_requires_restore = visibility_state
             != SessionToolVisibilityState::default()
@@ -1007,6 +1049,18 @@ impl AgentBuilder {
         {
             return Err(AgentBuildPolicyError::ToolVisibilityRestore {
                 message: err.to_string(),
+            });
+        }
+        // Install this build's grant gate: every gated name and every tool
+        // of a gated server starts closed until a boundary admits a live
+        // grant. A runtime-backed build always replaces the gate, so a
+        // rebuild without one clears the last build's. An owner without gate
+        // authority refuses a gate that records anything.
+        if (runtime_tool_visibility_owner_required || !tool_grant_install.is_empty())
+            && let Err(err) = agent.tool_scope.replace_tool_grant_gate(tool_grant_install)
+        {
+            return Err(AgentBuildPolicyError::ToolVisibilityRestore {
+                message: format!("failed to install the tool grant gate: {err}"),
             });
         }
         // Runtime-backed persistence must always materialize the generated
@@ -1175,6 +1229,18 @@ impl AgentBuilder {
         self
     }
 
+    /// Install the build's scoped tool grant gate.
+    ///
+    /// The gated names start closed: the generated visibility owner hides
+    /// them until a model-request boundary finds a live grant that opens
+    /// them. Like the policy filter, the gate is this build's, recomputed on
+    /// every build, a resume included. The factory installs the same gate on
+    /// the outermost dispatch gate, which adjudicates every gated call.
+    pub fn with_tool_grant_gate(mut self, gate: crate::tool_grant::ToolGrantGate) -> Self {
+        self.tool_grant_gate = Some(gate);
+        self
+    }
+
     /// Carry initial inherited visibility into the generated visibility owner.
     ///
     /// The value is validated and merged during build after the tool catalogs
@@ -1227,6 +1293,18 @@ impl AgentBuilder {
     /// registry captured by the construction pipeline.
     pub fn with_effective_model_registry(mut self, registry: Arc<crate::ModelRegistry>) -> Self {
         self.effective_model_registry = Some(registry);
+        self
+    }
+
+    /// How the model this agent runs carries an operator-instruction entry,
+    /// as its backend serves it: the factory resolves it from
+    /// `ModelRegistry::instruction_lowering_for_identity`. Without it the
+    /// agent derives the lowering from its active model profile.
+    pub fn with_operator_instruction_lowering(
+        mut self,
+        lowering: crate::InstructionLowering,
+    ) -> Self {
+        self.operator_instruction_lowering = Some(lowering);
         self
     }
 
@@ -1948,6 +2026,154 @@ mod tests {
             &agent.session().messages()[2],
             Message::System(message) if message.content == "Updated system prompt"
         ));
+    }
+
+    /// A resume whose explicit prompt is exactly the newest prompt row the
+    /// model reads appends nothing: the transcript stays as it was.
+    #[tokio::test]
+    async fn test_builder_resume_with_the_same_explicit_prompt_appends_nothing() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        let before = existing_session.messages().to_vec();
+
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("Original system prompt")
+            .build_standalone(client, tools, store)
+            .await;
+
+        assert_eq!(
+            agent.session().messages(),
+            before.as_slice(),
+            "a resume with the newest prompt appends nothing"
+        );
+    }
+
+    /// An earlier prompt sent again after a change is a change again: it is
+    /// appended after the prompt that replaced it.
+    #[tokio::test]
+    async fn a_resume_with_an_earlier_prompt_after_a_change_appends_it() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("First system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session.append_system_message("Second system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Again".to_string())));
+
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("First system prompt")
+            .build_standalone(client, tools, store)
+            .await;
+
+        let messages = agent.session().messages();
+        assert_eq!(messages.len(), 5, "the earlier prompt is appended again");
+        assert!(matches!(
+            &messages[4],
+            Message::System(message) if message.content == "First system prompt"
+        ));
+    }
+
+    /// The comparison reads only the newest row the model reads as a prompt:
+    /// a later System row with an append identity is context, not a prompt,
+    /// so a resume with the prompt before it appends nothing.
+    #[tokio::test]
+    async fn a_resume_compares_with_the_newest_prompt_row_only() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session
+            .append_system_message_idempotent(
+                "Appended context",
+                Some("example".to_string()),
+                Some("context-1".to_string()),
+                crate::types::message_timestamp_now(),
+            )
+            .unwrap();
+        let before = existing_session.messages().to_vec();
+
+        let agent = AgentBuilder::new()
+            .resume_session(existing_session)
+            .system_prompt("Original system prompt")
+            .build_standalone(client, tools, store)
+            .await;
+
+        assert_eq!(
+            agent.session().messages(),
+            before.as_slice(),
+            "the appended context row is not a prompt row"
+        );
+    }
+
+    /// A keyed system-prompt slot's current version is a prompt row: a resume
+    /// whose explicit prompt is exactly that version appends nothing. The
+    /// slot's superseded version is not the newest prompt row, so a resume
+    /// with it appends it.
+    #[tokio::test]
+    async fn explicit_resume_prompt_equal_to_the_current_keyed_version_appends_nothing() {
+        let update = |expected_version: Option<u64>,
+                      target_message_index: Option<usize>,
+                      content: &str| crate::SystemPromptUpdateRequest {
+            key: crate::types::SystemPromptKey::new("primary").unwrap(),
+            expected_version: expected_version
+                .map(|version| crate::types::SystemPromptVersion::new(version).unwrap()),
+            target_message_index,
+            content: content.to_string(),
+            actor: Some("host-test".to_string()),
+            expected_parent_revision: None,
+        };
+        let mut existing_session = Session::new();
+        existing_session.append_system_message("Original system prompt".to_string());
+        existing_session
+            .update_system_prompt(update(None, Some(0), "Prompt version one"))
+            .expect("the head prompt is adopted in place");
+        existing_session.push(Message::User(UserMessage::text("Hello".to_string())));
+        existing_session
+            .update_system_prompt(update(Some(1), None, "Prompt version two"))
+            .expect("a later version commits");
+        let before = existing_session.messages().to_vec();
+
+        for (prompt, appends) in [("Prompt version two", false), ("Prompt version one", true)] {
+            let agent = AgentBuilder::new()
+                .resume_session(existing_session.clone())
+                .system_prompt(prompt)
+                .build_standalone(
+                    Arc::new(MockClient),
+                    Arc::new(MockTools),
+                    Arc::new(MockStore),
+                )
+                .await;
+            let messages = agent.session().messages();
+            if appends {
+                assert_eq!(
+                    messages.len(),
+                    before.len() + 1,
+                    "a superseded version is not the newest prompt row: it is appended"
+                );
+                assert!(matches!(
+                    messages.last(),
+                    Some(Message::System(system)) if system.content == prompt
+                ));
+            } else {
+                assert_eq!(
+                    messages,
+                    before.as_slice(),
+                    "the current keyed version appends nothing"
+                );
+            }
+        }
     }
 
     /// Regression test: Resumed sessions without explicit system_prompt should keep their original

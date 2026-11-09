@@ -30,6 +30,10 @@ fn host_surface_options(
         live_webrtc_enabled,
         // Only the stock governed stdio pipe delivers consent notices.
         consent_enabled: false,
+        // Only a stdio connection with an operator delivers decision
+        // notices: when a decision its operator acts for opens, and when
+        // its client lists decisions.
+        decision_notices_enabled: false,
     };
     let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
         "meerkat-rpc",

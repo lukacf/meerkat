@@ -119,7 +119,7 @@ fn process_cpu_time() -> Duration {
 /// durable commits are legitimate work; a mob that NEVER quiesces fails here
 /// — which is exactly the defect class this gate exists to catch.
 async fn wait_for_quiesce(what: &str) {
-    let quiesce_deadline = Instant::now() + Duration::from_secs(240);
+    let quiesce_deadline = Instant::now() + Duration::from_mins(4);
     loop {
         let probe_start = process_cpu_time();
         sleep(Duration::from_secs(2)).await;
@@ -140,6 +140,7 @@ fn idle_profile(peer_description: &str) -> Profile {
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -205,7 +206,7 @@ fn runtime_store_size_bytes(path: &Path) -> u64 {
 }
 
 async fn wait_for_requests(capture: &CaptureClient, at_least: usize, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while capture.count() < at_least {
         assert!(
             Instant::now() < deadline,
@@ -290,7 +291,7 @@ async fn e2e_smoke_mob_idle_burn_gate() {
         .await
         .expect("spawn worker 2");
 
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while active_member_count(&handle).await < MEMBER_IDS.len() {
         assert!(
             Instant::now() < deadline,
@@ -349,7 +350,7 @@ async fn e2e_smoke_mob_idle_burn_gate() {
     // The regression class under test is store-read/digest loops, so the
     // large document must actually be durable in the store-owned runtime
     // authority before the measured window opens.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let persisted_bytes = loop {
         let bytes = runtime_store_size_bytes(&runtime_db_path);
         if bytes >= MIN_PERSISTED_BYTES {

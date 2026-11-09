@@ -32,9 +32,13 @@ pub struct PendingContinuationResolution {
 /// typed [`ObservedSessionTailKind`]. This is a structural encoding only — it
 /// makes no admission decision. The machine decides the disposition from this
 /// observation.
+///
+/// An operator-instruction entry row is not part of the tail: a run start
+/// appends it after the pending tail the run continues from, so the tail is
+/// the last row before any trailing entry rows.
 #[must_use]
 pub fn observe_session_tail(messages: &[Message]) -> ObservedSessionTailKind {
-    match messages.last() {
+    match last_non_entry_message(messages) {
         None => ObservedSessionTailKind::Empty,
         Some(Message::System(_)) => ObservedSessionTailKind::System,
         Some(Message::SystemNotice(_)) => ObservedSessionTailKind::SystemNotice,
@@ -42,6 +46,13 @@ pub fn observe_session_tail(messages: &[Message]) -> ObservedSessionTailKind {
         Some(Message::BlockAssistant(_)) => ObservedSessionTailKind::BlockAssistant,
         Some(Message::ToolResults { .. }) => ObservedSessionTailKind::ToolResults,
     }
+}
+
+/// The last message that is not an operator-instruction entry row.
+pub(crate) fn last_non_entry_message(messages: &[Message]) -> Option<&Message> {
+    messages.iter().rev().find(
+        |message| !matches!(message, Message::System(system) if system.instruction_entry.is_some()),
+    )
 }
 
 /// Drive the canonical session-document authority's `ResolvePendingContinuation`

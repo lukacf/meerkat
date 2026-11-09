@@ -1,0 +1,35 @@
+{
+  "name": "obvious-match",
+  "manifest": [
+    {
+      "id": "mem-001",
+      "kind": "Procedure",
+      "title": "Meta release publishes PyPI and npm in lockstep",
+      "description": "Matters whenever a meta release or version bump is being prepared: the Rust release must publish meerkat-meta to PyPI and @rkat/meta-sdk to npm at the same version in the same pass.",
+      "age_days": 40,
+      "rank": 2
+    },
+    {
+      "id": "mem-002",
+      "kind": "Preference",
+      "title": "Operator prefers terse summaries",
+      "description": "Matters when writing status updates or summaries for the operator: keep them short and factual.",
+      "age_days": 90,
+      "rank": 8
+    },
+    {
+      "id": "mem-003",
+      "kind": "Fact",
+      "title": "Console timeline uses SSE for live events",
+      "description": "Matters when debugging console live-update behavior or event delivery latency.",
+      "age_days": 60,
+      "rank": null
+    }
+  ],
+  "turn_text": "Prep the v0.8.0 release: bump versions and publish the packages.",
+  "expected": {
+    "must_select": ["mem-001"],
+    "must_not_select": ["mem-003"]
+  },
+  "notes": "Baseline sanity case: one record is directly about the requested action; any reasonable selector must pick it and skip the unrelated fact."
+}

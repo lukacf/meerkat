@@ -1,0 +1,66 @@
+[package]
+name = "toolkit-mobkit"
+version = "0.9.11"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+
+[features]
+default = []
+test-support = ["native-host"]
+native-host = ["dep:meerkat", "dep:meerkat-mcp", "dep:meerkat-mobkit", "dep:meerkat-mob", "dep:meerkat-mob-mcp", "dep:meerkat-runtime", "dep:meerkat-authorization", "dep:nix", "dep:axum", "dep:futures"]
+
+[dependencies]
+axum = { version = "0.8", optional = true }
+async-trait.workspace = true
+thiserror.workspace = true
+# Native prerequisite bindings belong to the explicit candidate workspace.
+meerkat = { workspace = true, optional = true, features = ["session-store", "local-authorization"] }
+meerkat-mcp = { workspace = true, optional = true }
+meerkat-mobkit = { workspace = true, optional = true }
+meerkat-mob = { workspace = true, optional = true }
+meerkat-mob-mcp = { workspace = true, optional = true }
+meerkat-runtime = { workspace = true, optional = true, features = ["local-authorization"] }
+meerkat-authorization = { workspace = true, optional = true }
+meerkat-authorization-contracts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+meerkat-core.workspace = true
+meerkat-workgraph.workspace = true
+meerkat-toolkit.workspace = true
+toolkit-catalog.workspace = true
+toolkit-package.workspace = true
+toolkit-store.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+futures = { workspace = true, optional = true }
+nix = { version = "0.29", features = ["fs", "socket"], optional = true }
+
+[dev-dependencies]
+# Exact prepared-call context for the native workflow failure controls.
+meerkat-core = { workspace = true, features = ["test-support"] }
+# Existing native actor gate for the isolated queued-admission race fixture.
+meerkat-mob = { workspace = true, features = ["test-support"] }
+# The actual SQLite runtime owner's one-shot committed-acknowledgement loss.
+meerkat-runtime = { workspace = true, features = ["test-support"] }
+meerkat-tools.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
+meerkat-llm-core.workspace = true

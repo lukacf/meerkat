@@ -687,7 +687,7 @@ const RETAINED_SPAWN_CLEANUP_BACKOFF: [Duration; 5] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
     Duration::from_secs(15),
-    Duration::from_secs(60),
+    Duration::from_mins(1),
 ];
 
 fn retained_spawn_cleanup_backoff(attempts: u32) -> Duration {
@@ -2346,6 +2346,9 @@ impl MobActor {
                 fork_job: state.fork_job.clone(),
                 fork_source: state.fork_source.clone(),
                 fork_overlay: state.fork_overlay,
+                definition_wiring: state.definition_wiring,
+                approval_branch: state.approval_branch.clone(),
+                dispatch_admission_lineage: state.dispatch_admission.lineage,
             });
         }
         {
@@ -2357,11 +2360,15 @@ impl MobActor {
                 state.fork_overlay,
                 &self.definition.id,
             );
-            self.per_spawn_external_tools.write().await.retain(
+            let mut retained = self.per_spawn_external_tools.write().await;
+            retained.retain(
                 &state.identity,
                 state.per_spawn_external_tools.take(),
                 origin,
             );
+            // Whether the member's build runs under a tool dispatch
+            // admission: what a fork of it observes of its lineage.
+            retained.retain_dispatch_admission(&state.identity, state.dispatch_admission.present);
         }
 
         // Row #314: record the machine-owned external-member rebind capability
@@ -2414,12 +2421,21 @@ impl MobActor {
     async fn plan_spawn_wiring(&mut self, state: &mut SpawnActivateState) {
         let profile_name = state.profile_name.clone();
         let agent_identity = state.agent_identity.clone();
-        state.planned_wiring_targets =
-            if state.identity_fenced_member || agent_identity.is_flow_member_namespace() {
-                Vec::new()
-            } else {
-                Box::pin(self.spawn_wiring_targets(&profile_name, &agent_identity)).await
-            };
+        // A member exempt from the definition's wiring rules, as MobMachine
+        // recorded it with its membership commit, takes no edge they declare.
+        let definition_wiring_exempt = self
+            .dsl_authority
+            .state()
+            .member_definition_wiring_exempt
+            .contains(&state.dsl_identity);
+        state.planned_wiring_targets = if state.identity_fenced_member
+            || agent_identity.is_flow_member_namespace()
+            || definition_wiring_exempt
+        {
+            Vec::new()
+        } else {
+            Box::pin(self.spawn_wiring_targets(&profile_name, &agent_identity)).await
+        };
         if state.auto_wire_parent
             && let Some(parent_target) = self
                 .resolve_auto_wire_parent_target(
@@ -2430,6 +2446,26 @@ impl MobActor {
             && !state.planned_wiring_targets.contains(&parent_target)
         {
             state.planned_wiring_targets.push(parent_target);
+        }
+        // The member's owned edges in force whose other end is seated
+        // (0.9.11, MobMachine's verdict on each): the spawn realizes them as
+        // a seat does, whatever the definition declares and whether or not
+        // the member is exempt from its rules. A worker that takes the name
+        // of an owned edge's unlisted end is no identity entry: MobMachine
+        // holds that edge out of force, and the spawn wires nothing for it.
+        match self.owned_pairs_to_realize(std::slice::from_ref(&agent_identity)) {
+            Ok(pairs) => {
+                for (_, peer) in pairs {
+                    if !state.planned_wiring_targets.contains(&peer) {
+                        state.planned_wiring_targets.push(peer);
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(
+                agent_identity = %agent_identity,
+                %error,
+                "the spawn's owned edges were not planned: MobMachine decided no realization"
+            ),
         }
         if let Some(plan) = state.restore_wiring.as_ref() {
             state
@@ -2806,6 +2842,7 @@ impl MobActor {
                 )),
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: state.prompt.clone(),
             typed_turn_appends: Vec::new(),
@@ -2958,6 +2995,8 @@ impl MobActor {
                     llm_identity_applied_tx: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                     content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+                    // Mob-internal kickoff has no original requester.
+                    requester: None,
                     operation_id: Some(operation_id.clone()),
                     placed_completion_obligation: None,
                     placed_completion_context: None,

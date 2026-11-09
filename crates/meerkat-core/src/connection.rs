@@ -618,14 +618,63 @@ impl BackendProfile {
     /// Whether requests through this backend can carry an ordered System
     /// message after the leading system prefix, as the provider matrix
     /// declares it ([`OpenAiBackendKind::admits_mid_conversation_system_messages`]).
-    /// A backend of another provider, or a backend kind this version does not
-    /// know, leaves the model's own capability standing.
+    /// A backend of another provider leaves the model's own capability
+    /// standing. An OpenAI backend kind this version does not know fails
+    /// closed, as a binding the config does not resolve does: it may be a
+    /// backend whose wire carries no System row after the leading prefix.
     pub fn admits_mid_conversation_system_messages(&self) -> bool {
         match self.provider {
             Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
-                .is_none_or(OpenAiBackendKind::admits_mid_conversation_system_messages),
+                .is_some_and(OpenAiBackendKind::admits_mid_conversation_system_messages),
             _ => true,
         }
+    }
+
+    /// Whether requests through this backend can carry more than one System
+    /// message in the leading system prefix, as the provider matrix declares
+    /// it ([`OpenAiBackendKind::admits_additional_leading_system_messages`]).
+    /// A backend of another provider carries them. An OpenAI backend kind
+    /// this version does not know fails closed, as a binding the config does
+    /// not resolve does: it may be a backend whose wire carries only the
+    /// prompt's row.
+    pub fn admits_additional_leading_system_messages(&self) -> bool {
+        match self.provider {
+            Provider::OpenAI => OpenAiBackendKind::parse(&self.backend_kind)
+                .is_some_and(OpenAiBackendKind::admits_additional_leading_system_messages),
+            _ => true,
+        }
+    }
+}
+
+/// Whether the wire of a `provider` model served through `auth_binding`
+/// carries more than one System message in the leading system prefix
+/// ([`BackendProfile::admits_additional_leading_system_messages`]), as
+/// `config` resolves that binding to its backend.
+///
+/// No binding, or the synthetic env-var default, is the provider's API-key
+/// backend: a build or a model change names every configured binding it
+/// resolves on the identity. A named binding that `config` does not resolve
+/// has an unknown backend: it carries them only when every backend kind of
+/// `provider` does.
+pub(crate) fn binding_admits_additional_leading_system_messages(
+    config: &Config,
+    provider: Provider,
+    auth_binding: Option<&AuthBindingRef>,
+) -> bool {
+    let Some(auth_binding) = auth_binding else {
+        return true;
+    };
+    if auth_binding.is_env_default() {
+        return true;
+    }
+    match resolve_explicit_auth_binding_target(config, auth_binding) {
+        Ok(target) => target.backend.admits_additional_leading_system_messages(),
+        Err(_) => match provider {
+            Provider::OpenAI => OpenAiBackendKind::ALL
+                .iter()
+                .all(|kind| kind.admits_additional_leading_system_messages()),
+            _ => true,
+        },
     }
 }
 
@@ -1195,6 +1244,50 @@ fn collect_provider_candidates_on_chain(
     Ok(out)
 }
 
+/// Resolve an EXPLICIT binding id along `head`'s chain: the configured
+/// binding ([`resolve_configured_binding_on_chain`]), or, when the chain
+/// defines no such binding, a zero-config GitHub Copilot token route
+/// ([`RealmConnectionSet::copilot_token_default`]). Every other refusal of
+/// the configured lookup (an invalid realm, a provider mismatch) stands.
+fn resolve_explicit_binding_on_chain(
+    config: &Config,
+    expected_provider: Option<Provider>,
+    head: &RealmId,
+    binding: &BindingId,
+    profile: Option<&ProfileId>,
+    head_required: bool,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    let configured = resolve_configured_binding_on_chain(
+        config,
+        expected_provider,
+        head,
+        binding,
+        profile,
+        head_required,
+    );
+    let undefined = matches!(
+        &configured,
+        Err(ConnectionTargetError::UnknownRealm(_)
+            | ConnectionTargetError::BindingInvalid {
+                source: ProviderBindingError::UnknownBinding(_),
+                ..
+            })
+    );
+    if undefined
+        && let Some(realm) =
+            RealmConnectionSet::copilot_token_default(config, head, binding.as_str())
+    {
+        return materialize_connection_target(
+            realm,
+            expected_provider,
+            binding.clone(),
+            profile.cloned(),
+            BindingOrigin::Configured,
+        );
+    }
+    configured
+}
+
 /// Resolve an EXPLICIT binding id along `head`'s chain, returning the
 /// owner-stamped target for the first chain member (child-first) that defines
 /// it. A binding may be inherited: the head names the consuming realm, but the
@@ -1205,7 +1298,7 @@ fn collect_provider_candidates_on_chain(
 /// member declares the binding, fail closed with `BindingInvalid`/UnknownBinding
 /// attributed to the head realm. A provider mismatch on the explicitly named
 /// binding propagates as `ProviderMismatch` (explicit requests are strict).
-fn resolve_explicit_binding_on_chain(
+fn resolve_configured_binding_on_chain(
     config: &Config,
     expected_provider: Option<Provider>,
     head: &RealmId,
@@ -1526,17 +1619,27 @@ pub fn resolve_credential_account_binding_for_provider(
     provider: Provider,
     account: &CredentialAccountRef,
 ) -> Result<Option<ResolvedConnectionTarget>, ConnectionTargetError> {
-    let section = config
+    // A realm that is present is loaded first, so a section that does not
+    // load is reported, as the explicit binding path reports it: only an
+    // absent realm, or one that configures no Copilot route, falls back to
+    // the zero-config GitHub Copilot routes.
+    let configured = config
         .realm
         .get(account.realm.as_str())
-        .ok_or_else(|| ConnectionTargetError::UnknownRealm(account.realm.to_string()))?;
-    let realm =
-        RealmConnectionSet::from_config(account.realm.as_str(), section).map_err(|source| {
-            ConnectionTargetError::RealmConfigInvalid {
-                realm: account.realm.to_string(),
-                source,
-            }
-        })?;
+        .map(|section| {
+            RealmConnectionSet::from_config(account.realm.as_str(), section).map_err(|source| {
+                ConnectionTargetError::RealmConfigInvalid {
+                    realm: account.realm.to_string(),
+                    source,
+                }
+            })
+        })
+        .transpose()?;
+    let realm = match RealmConnectionSet::copilot_token_default_for_account(config, account) {
+        Some(zero_config) => zero_config,
+        None => configured
+            .ok_or_else(|| ConnectionTargetError::UnknownRealm(account.realm.to_string()))?,
+    };
     let mut matching = Vec::new();
     for (binding_id, binding) in &realm.bindings {
         if binding.credential_account.as_ref() != Some(&account.account) {
@@ -1713,6 +1816,12 @@ struct AccountCredentialContract {
     source: CredentialSourceSpec,
 }
 
+/// The credential contract a route brings to a shared credential account.
+///
+/// Both GitHub Copilot methods (device sign-in and operator token) are the
+/// one issuer `GitHubCopilot`, so the three provider routes can share one
+/// account; the persisted mode still tells the two apart, so device and token
+/// routes on one account disagree and are refused.
 fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialContract> {
     let (auth_method, persisted_mode, github_copilot) = match auth.provider {
         Provider::OpenAI => {
@@ -1720,7 +1829,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == OpenAiAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    OpenAiAuthMethod::GitHubCopilotOauth | OpenAiAuthMethod::GitHubCopilotToken
+                ),
             )
         }
         Provider::Anthropic => {
@@ -1728,7 +1840,11 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == AnthropicAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    AnthropicAuthMethod::GitHubCopilotOauth
+                        | AnthropicAuthMethod::GitHubCopilotToken
+                ),
             )
         }
         Provider::Gemini => {
@@ -1736,7 +1852,10 @@ fn account_credential_contract(auth: &AuthProfile) -> Option<AccountCredentialCo
             (
                 method.as_str(),
                 method.persisted_auth_mode()?,
-                method == GoogleAuthMethod::GitHubCopilotOauth,
+                matches!(
+                    method,
+                    GoogleAuthMethod::GitHubCopilotOauth | GoogleAuthMethod::GitHubCopilotToken
+                ),
             )
         }
         Provider::SelfHosted => {
@@ -1764,6 +1883,11 @@ impl RealmConnectionSet {
     /// section. Normalizes provider strings into the typed
     /// [`Provider`] enum and verifies that every binding references
     /// existing backend and auth profiles whose providers agree.
+    ///
+    /// A GitHub Copilot account the section configures once
+    /// (`[copilot]`, [`CopilotAccountConfig`]) is lowered first into its
+    /// routes' backend, auth and binding tables, which are then validated
+    /// as explicit ones are.
     pub fn from_config(
         realm_id: &str,
         section: &RealmConfigSection,
@@ -1773,6 +1897,14 @@ impl RealmConnectionSet {
                 realm: realm_id.to_string(),
                 source,
             })?;
+        let lowered;
+        let section = match section.copilot.as_ref() {
+            Some(account) => {
+                lowered = section.with_copilot_account_routes(account)?;
+                &lowered
+            }
+            None => section,
+        };
         let mut backends: BTreeMap<String, BackendProfile> = BTreeMap::new();
         for (id, cfg) in &section.backend {
             let provider = Provider::parse_strict(&cfg.provider)
@@ -1970,6 +2102,75 @@ impl RealmConnectionSet {
         }
     }
 
+    /// The zero-config GitHub Copilot token routes, for an explicit reference
+    /// to `binding` in `realm`: `Some` when `realm` is `global`, `binding` is
+    /// one of the three reserved Copilot routes (`copilot_openai`,
+    /// `copilot_anthropic`, `copilot_gemini`), and `config`'s `global` realm
+    /// configures no Copilot route (none of those ids, no `copilot` backend,
+    /// no binding on the `github_copilot` account, no `[copilot]` account).
+    /// Any configured Copilot route wins: then this is `None`.
+    ///
+    /// The routes are those of a `global` Copilot account configured once
+    /// over the default source ([`CopilotAccountConfig`]): each
+    /// authenticates with `auth_method = "github_copilot_token"`, reads the
+    /// GitHub token from `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then
+    /// `GITHUB_TOKEN`, as GitHub Copilot CLI does, and shares the `global`
+    /// `github_copilot` credential account; they are the routes
+    /// `rkat auth login copilot --non-interactive --from-env` writes, without
+    /// the Gemini route's default model. Nothing selects them by default:
+    /// only a request that names one of them resolves them.
+    #[must_use]
+    pub fn copilot_token_default(config: &Config, realm: &RealmId, binding: &str) -> Option<Self> {
+        let reserved = copilot_token_default_routes()
+            .iter()
+            .any(|(route, ..)| *route == binding);
+        if !realm.is_global() || !reserved {
+            return None;
+        }
+        Self::copilot_token_default_for_global(config)
+    }
+
+    /// The zero-config GitHub Copilot token routes for a provider switch on
+    /// `account`: `Some` when it is the `global` `github_copilot` account and
+    /// `config`'s `global` realm configures no Copilot route.
+    fn copilot_token_default_for_account(
+        config: &Config,
+        account: &CredentialAccountRef,
+    ) -> Option<Self> {
+        if !account.realm.is_global() || account.account.as_str() != COPILOT_TOKEN_DEFAULT_ACCOUNT {
+            return None;
+        }
+        Self::copilot_token_default_for_global(config)
+    }
+
+    fn copilot_token_default_for_global(config: &Config) -> Option<Self> {
+        if config
+            .realm
+            .get(GLOBAL_REALM_SLUG)
+            .is_some_and(configures_copilot_route)
+        {
+            return None;
+        }
+        Self::synthesize_copilot_token_default()
+    }
+
+    /// The zero-config GitHub Copilot routes: the lowering of a `global`
+    /// Copilot account over the default source, through the one owner of
+    /// the routes' shape ([`copilot_account_routes`]). The lowering of that
+    /// fixed account cannot be refused; were it refused, there would be no
+    /// zero-config routes.
+    fn synthesize_copilot_token_default() -> Option<Self> {
+        let [env, fallback @ ..] = COPILOT_TOKEN_DEFAULT_ENV;
+        let section = RealmConfigSection {
+            copilot: Some(CopilotAccountConfig::new(CredentialSourceSpec::Env {
+                env: env.to_string(),
+                fallback: fallback.iter().map(|name| (*name).to_string()).collect(),
+            })),
+            ..RealmConfigSection::default()
+        };
+        Self::from_config(GLOBAL_REALM_SLUG, &section).ok()
+    }
+
     /// Resolve a binding by id. Returns the binding plus its referenced
     /// backend and auth profiles.
     pub fn lookup_binding(
@@ -2133,6 +2334,23 @@ pub enum ProviderBindingError {
     /// A backend profile declared an empty/blank self-hosted `server`.
     #[error("backend '{backend}' declares an empty self-hosted server id")]
     EmptySelfHostedServerId { backend: String },
+    /// A realm section configures its GitHub Copilot account once
+    /// (`[realm.<id>.copilot]`) and also declares one of that account's
+    /// routes in an explicit table: `route` is a `copilot_openai`,
+    /// `copilot_anthropic` or `copilot_gemini` backend, auth profile or
+    /// binding, or another binding on the account's `github_copilot`
+    /// credential account. The account is configured one way.
+    #[error(
+        "realm configures its GitHub Copilot account in [copilot] and route '{route}' in an explicit table; configure the account one way"
+    )]
+    CopilotAccountRouteConflict { route: Box<str> },
+    /// `[realm.<id>.copilot]` names a credential source the account does not
+    /// read: its routes read the GitHub token from an `env` or an
+    /// `external_resolver` source.
+    #[error(
+        "[copilot] cannot read the GitHub token from a '{source_kind}' source; use an env or external_resolver source (a stored token, the device sign-in and a credential command use explicit Copilot routes)"
+    )]
+    CopilotAccountSourceUnsupported { source_kind: Box<str> },
 }
 
 // ---------------------------------------------------------------------
@@ -2169,6 +2387,82 @@ pub struct RealmConfigSection {
     /// defining an id wins. Never holds a client secret.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub connector_client: BTreeMap<String, ConnectorClientConfig>,
+    /// The realm's GitHub Copilot account, configured once
+    /// (`[realm.<id>.copilot]`): [`RealmConnectionSet::from_config`] lowers
+    /// it into the account's Copilot routes. See [`CopilotAccountConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot: Option<CopilotAccountConfig>,
+}
+
+/// A GitHub Copilot account configured once for a realm
+/// (`[realm.<id>.copilot]`): where every route of the account reads the
+/// GitHub token, and the routes' client identity.
+///
+/// [`RealmConnectionSet::from_config`] lowers it into the realm's three
+/// Copilot routes, `copilot_openai`, `copilot_anthropic` and
+/// `copilot_gemini`, on the realm's `github_copilot` credential account,
+/// each authenticating with `auth_method = "github_copilot_token"`: the
+/// routes a token login writes as explicit backend, auth and binding tables,
+/// and the zero-config routes of `global`. Which route serves a model is the
+/// protocol the account's model list gives the model, not a choice made
+/// here.
+///
+/// The token never sits in config: `source` is an `env` or an
+/// `external_resolver` source. A stored token, the device sign-in and a
+/// credential command use the explicit tables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CopilotAccountConfig {
+    /// Where the account's routes read the GitHub token.
+    pub source: CredentialSourceSpec,
+    /// The routes' backend options: the Copilot client identity headers
+    /// (`integration_id`, `editor_version`, ...), as on a `copilot` backend.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub options: serde_json::Value,
+}
+
+impl CopilotAccountConfig {
+    /// An account whose routes read the GitHub token from `source`, with the
+    /// default client identity.
+    #[must_use]
+    pub fn new(source: CredentialSourceSpec) -> Self {
+        Self {
+            source,
+            options: serde_json::Value::Null,
+        }
+    }
+
+    /// The same account, its routes sending the client identity `options`.
+    #[must_use]
+    pub fn with_options(mut self, options: serde_json::Value) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Refuse a source the account's routes do not read. They read the
+    /// GitHub token from an `env` or an `external_resolver` source: a secret
+    /// in config, a stored token (stored by the token login, which writes
+    /// explicit routes), a credential command (administered by the host in
+    /// explicit auth tables) and the sources a Copilot route cannot read are
+    /// refused.
+    fn refuse_unread_source(&self) -> Result<(), ProviderBindingError> {
+        match &self.source {
+            CredentialSourceSpec::Env { .. } | CredentialSourceSpec::ExternalResolver { .. } => {
+                Ok(())
+            }
+            CredentialSourceSpec::InlineSecret { .. }
+            | CredentialSourceSpec::ManagedStore
+            | CredentialSourceSpec::PlatformDefault
+            | CredentialSourceSpec::Command { .. }
+            | CredentialSourceSpec::FileDescriptor { .. } => {
+                Err(ProviderBindingError::CopilotAccountSourceUnsupported {
+                    source_kind: self.source.kind_label().into(),
+                })
+            }
+        }
+    }
 }
 
 /// How a connector OAuth client authenticates to its token endpoint.
@@ -2216,6 +2510,51 @@ fn default_true() -> bool {
 }
 
 impl RealmConfigSection {
+    /// This section with the routes of its Copilot account (`[copilot]`,
+    /// `account`) added as explicit tables: the one lowering of the account,
+    /// whose tables [`RealmConnectionSet::from_config`] then validates like
+    /// any other. The account is configured one way: a table of this section
+    /// that declares one of the account's routes, or another binding on the
+    /// account's `github_copilot` credential account, is refused, and so is
+    /// a source the routes do not read.
+    fn with_copilot_account_routes(
+        &self,
+        account: &CopilotAccountConfig,
+    ) -> Result<Self, ProviderBindingError> {
+        account.refuse_unread_source()?;
+        let routes = copilot_account_routes(account);
+        if let Some(route) = routes.iter().find(|route| {
+            self.backend.contains_key(route.id)
+                || self.auth.contains_key(route.id)
+                || self.binding.contains_key(route.id)
+        }) {
+            return Err(ProviderBindingError::CopilotAccountRouteConflict {
+                route: route.id.into(),
+            });
+        }
+        if let Some(binding) = self.binding.iter().find_map(|(id, binding)| {
+            binding
+                .credential_account
+                .as_ref()
+                .is_some_and(|credential_account| {
+                    credential_account.as_str() == COPILOT_TOKEN_DEFAULT_ACCOUNT
+                })
+                .then_some(id)
+        }) {
+            return Err(ProviderBindingError::CopilotAccountRouteConflict {
+                route: binding.as_str().into(),
+            });
+        }
+        let mut lowered = self.clone();
+        lowered.copilot = None;
+        for route in routes {
+            lowered.backend.insert(route.id.to_string(), route.backend);
+            lowered.auth.insert(route.id.to_string(), route.auth);
+            lowered.binding.insert(route.id.to_string(), route.binding);
+        }
+        Ok(lowered)
+    }
+
     /// Programmatic constructor for a realm populated from per-provider
     /// inline api keys. Used by surfaces (notably the WASM browser
     /// runtime) that receive credentials as plain strings at bootstrap
@@ -2310,8 +2649,119 @@ impl RealmConfigSection {
             default_binding,
             parent: None,
             connector_client: BTreeMap::new(),
+            copilot: None,
         }
     }
+}
+
+/// The credential account the Copilot routes of a realm share: the
+/// `github_copilot` account of the realm that configures them, as every
+/// configured Copilot route of `rkat auth login copilot`, every
+/// `[realm.<id>.copilot]` account and the zero-config routes (on `global`)
+/// do.
+const COPILOT_TOKEN_DEFAULT_ACCOUNT: &str = "github_copilot";
+
+/// Where a zero-config GitHub Copilot route reads its GitHub token, in GitHub
+/// Copilot CLI's order; each variable is read after its `RKAT_` form, as for
+/// every env source.
+const COPILOT_TOKEN_DEFAULT_ENV: [&str; 3] = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"];
+
+/// The reserved GitHub Copilot routes of a realm, as token routes: binding
+/// id (also its backend and auth profile id), provider, backend kind and the
+/// operator-token auth method.
+fn copilot_token_default_routes() -> [(&'static str, Provider, &'static str, &'static str); 3] {
+    [
+        (
+            "copilot_openai",
+            Provider::OpenAI,
+            OpenAiBackendKind::Copilot.as_str(),
+            OpenAiAuthMethod::GitHubCopilotToken.as_str(),
+        ),
+        (
+            "copilot_anthropic",
+            Provider::Anthropic,
+            AnthropicBackendKind::Copilot.as_str(),
+            AnthropicAuthMethod::GitHubCopilotToken.as_str(),
+        ),
+        (
+            "copilot_gemini",
+            Provider::Gemini,
+            GoogleBackendKind::Copilot.as_str(),
+            GoogleAuthMethod::GitHubCopilotToken.as_str(),
+        ),
+    ]
+}
+
+/// One route of a Copilot account, as the explicit tables that declare it.
+struct CopilotAccountRoute {
+    /// The route's binding id, also its backend and auth profile id.
+    id: &'static str,
+    backend: BackendProfileConfig,
+    auth: AuthProfileConfig,
+    binding: ProviderBindingConfig,
+}
+
+/// The single owner of the shape of a Copilot account's routes: the three
+/// reserved routes ([`copilot_token_default_routes`]) on the realm's
+/// `github_copilot` credential account, in token mode over the account's
+/// source, with the account's backend options, no default model and no
+/// default marker. `[realm.<id>.copilot]` and the zero-config routes both
+/// lower through it.
+fn copilot_account_routes(account: &CopilotAccountConfig) -> [CopilotAccountRoute; 3] {
+    let account_id = CredentialAccountId::from_known_valid(COPILOT_TOKEN_DEFAULT_ACCOUNT);
+    copilot_token_default_routes().map(|(id, provider, backend_kind, auth_method)| {
+        CopilotAccountRoute {
+            id,
+            backend: BackendProfileConfig {
+                provider: provider.as_str().to_string(),
+                backend_kind: backend_kind.to_string(),
+                base_url: None,
+                options: account.options.clone(),
+                server: None,
+            },
+            auth: AuthProfileConfig {
+                provider: provider.as_str().to_string(),
+                auth_method: auth_method.to_string(),
+                source: account.source.clone(),
+                constraints: AuthConstraints::default(),
+                metadata_defaults: AuthMetadataDefaults::default(),
+            },
+            binding: ProviderBindingConfig {
+                backend_profile: id.to_string(),
+                auth_profile: id.to_string(),
+                credential_account: Some(account_id.clone()),
+                default_model: None,
+                policy: BindingPolicy::default(),
+                provider_default: false,
+            },
+        }
+    })
+}
+
+/// Whether a realm section configures a GitHub Copilot route: one of the
+/// reserved Copilot route ids (as a backend, auth profile or binding), a
+/// `copilot` backend, a binding on the `github_copilot` account, or a
+/// Copilot account configured once (`[copilot]`). Such a realm turns the
+/// zero-config Copilot routes off.
+fn configures_copilot_route(section: &RealmConfigSection) -> bool {
+    let routes = copilot_token_default_routes();
+    let reserved_id = routes.iter().any(|(id, ..)| {
+        section.backend.contains_key(*id)
+            || section.auth.contains_key(*id)
+            || section.binding.contains_key(*id)
+    });
+    let copilot_backend = section.backend.values().any(|backend| {
+        routes
+            .iter()
+            .any(|(.., backend_kind, _)| backend.backend_kind == *backend_kind)
+    });
+    let copilot_account = section.binding.values().any(|binding| {
+        binding
+            .credential_account
+            .as_ref()
+            .is_some_and(|account| account.as_str() == COPILOT_TOKEN_DEFAULT_ACCOUNT)
+    });
+    reserved_id || copilot_backend || copilot_account || section.copilot.is_some()
 }
 
 fn env_default_spec<F>(provider: Provider, env_lookup: F) -> EnvDefaultSpec
@@ -2502,8 +2952,11 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    /// The ChatGPT backend carries no System row after the leading prefix,
+    /// and an OpenAI backend kind this version does not know fails closed: it
+    /// may be such a backend.
     #[test]
-    fn only_a_chatgpt_backend_profile_refuses_mid_conversation_system_messages() {
+    fn a_chatgpt_or_unknown_openai_backend_profile_refuses_mid_conversation_system_messages() {
         let backend = |provider, backend_kind: &str| BackendProfile {
             id: "backend".to_string(),
             provider,
@@ -2512,20 +2965,102 @@ mod tests {
             options: serde_json::Value::Null,
             server: None,
         };
-        assert!(
-            !backend(Provider::OpenAI, "chatgpt_backend").admits_mid_conversation_system_messages()
-        );
+        for backend_kind in ["chatgpt_backend", "a_backend_this_version_does_not_know"] {
+            assert!(
+                !backend(Provider::OpenAI, backend_kind).admits_mid_conversation_system_messages(),
+                "{backend_kind}"
+            );
+        }
         for (provider, backend_kind) in [
             (Provider::OpenAI, "openai_api"),
             (Provider::OpenAI, "azure_openai"),
             (Provider::OpenAI, "copilot"),
-            (Provider::OpenAI, "a_backend_this_version_does_not_know"),
             (Provider::Anthropic, "anthropic_api"),
             (Provider::Gemini, "google_genai"),
         ] {
             assert!(
                 backend(provider, backend_kind).admits_mid_conversation_system_messages(),
                 "{backend_kind}"
+            );
+        }
+    }
+
+    /// The ChatGPT backend carries only the prompt's leading System row, and
+    /// an OpenAI backend kind this version does not know fails closed: it may
+    /// be such a backend.
+    #[test]
+    fn a_chatgpt_or_unknown_openai_backend_profile_refuses_additional_leading_system_messages() {
+        let backend = |provider, backend_kind: &str| BackendProfile {
+            id: "backend".to_string(),
+            provider,
+            backend_kind: backend_kind.to_string(),
+            base_url: None,
+            options: serde_json::Value::Null,
+            server: None,
+        };
+        for backend_kind in ["chatgpt_backend", "a_backend_this_version_does_not_know"] {
+            assert!(
+                !backend(Provider::OpenAI, backend_kind)
+                    .admits_additional_leading_system_messages(),
+                "{backend_kind}"
+            );
+        }
+        for (provider, backend_kind) in [
+            (Provider::OpenAI, "openai_api"),
+            (Provider::OpenAI, "azure_openai"),
+            (Provider::OpenAI, "copilot"),
+            (Provider::Anthropic, "anthropic_api"),
+            (Provider::Gemini, "google_genai"),
+        ] {
+            assert!(
+                backend(provider, backend_kind).admits_additional_leading_system_messages(),
+                "{backend_kind}"
+            );
+        }
+    }
+
+    /// A named OpenAI binding whose backend kind this version does not know
+    /// fails closed, as one the config does not resolve: neither is known to
+    /// carry a second leading System row.
+    #[test]
+    fn an_unknown_or_unresolvable_openai_binding_admits_no_additional_leading_system_row() {
+        let config = config_with_realms(
+            r#"
+[prod]
+default_binding = "primary"
+
+[prod.backend.openai_unknown]
+provider = "openai"
+backend_kind = "a_backend_this_version_does_not_know"
+
+[prod.auth.openai_oauth]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "platform_default" }
+
+[prod.binding.primary]
+backend_profile = "openai_unknown"
+auth_profile = "openai_oauth"
+"#,
+        );
+        let binding = |realm: &str| AuthBindingRef {
+            realm: RealmId::parse(realm).unwrap(),
+            binding: BindingId::parse("primary").unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        assert!(
+            resolve_explicit_auth_binding_target(&config, &binding("prod")).is_ok(),
+            "the binding resolves"
+        );
+        for realm in ["prod", "missing"] {
+            assert!(
+                !binding_admits_additional_leading_system_messages(
+                    &config,
+                    Provider::OpenAI,
+                    Some(&binding(realm)),
+                ),
+                "{realm}"
             );
         }
     }
@@ -3868,6 +4403,122 @@ credential_account = "shared"
         ));
     }
 
+    /// The three GitHub Copilot routes of an operator token (one per provider
+    /// family) share one credential account, as the device routes do.
+    #[test]
+    fn credential_account_shares_copilot_token_routes_across_providers() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_gemini]
+provider = "gemini"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.auth.copilot_gemini]
+provider = "gemini"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN", fallback = ["GH_TOKEN", "GITHUB_TOKEN"] }
+
+[realm.global.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_gemini]
+backend_profile = "copilot_gemini"
+auth_profile = "copilot_gemini"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+
+        let realm = RealmConnectionSet::from_config("global", &config.realm["global"])
+            .expect("the three token routes share the github_copilot account");
+        let account = CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").unwrap(),
+        };
+        for route in ["copilot_openai", "copilot_anthropic", "copilot_gemini"] {
+            let auth_binding = AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse(route).unwrap(),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            };
+            assert_eq!(
+                realm.bindings[route].credential_identity(&auth_binding),
+                AuthCredentialIdentity::Account(account.clone()),
+                "{route}"
+            );
+        }
+    }
+
+    /// One credential account holds one GitHub Copilot mode at a time: a
+    /// device route and an operator-token route on the same account are
+    /// refused at config load.
+    #[test]
+    fn credential_account_refuses_copilot_device_and_token_routes_together() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.backend.copilot_openai]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_openai]
+provider = "openai"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_token"
+source = { kind = "managed_store" }
+
+[realm.global.binding.copilot_openai]
+backend_profile = "copilot_openai"
+auth_profile = "copilot_openai"
+credential_account = "github_copilot"
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RealmConnectionSet::from_config("global", &config.realm["global"]),
+            Err(ProviderBindingError::CredentialAccountContractMismatch { .. })
+        ));
+    }
+
     #[test]
     fn credential_account_rejects_incompatible_sources() {
         let config: Config = toml::from_str(
@@ -4061,5 +4712,612 @@ credential_account = "github_copilot"
             resolve_credential_account_binding_for_provider(&config, Provider::OpenAI, &account),
             Err(ConnectionTargetError::AmbiguousCredentialAccountBindings { .. })
         ));
+    }
+
+    fn copilot_ref(binding: &str) -> AuthBindingRef {
+        AuthBindingRef {
+            realm: RealmId::global(),
+            binding: BindingId::parse(binding).unwrap(),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        }
+    }
+
+    fn copilot_account() -> CredentialAccountRef {
+        CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").unwrap(),
+        }
+    }
+
+    const COPILOT_DEVICE_ANTHROPIC_ROUTE: &str = r#"
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+"#;
+
+    /// Zero-config: with no Copilot route configured, each reserved
+    /// `global:copilot_*` route resolves in token mode from
+    /// `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, on the
+    /// shared account, its provider read from the route; also next to an
+    /// unrelated `global` binding.
+    #[test]
+    fn zero_config_copilot_routes_resolve_in_token_mode() {
+        let with_api_key: Config = toml::from_str(
+            r#"
+[realm.global.backend.anthropic_api]
+provider = "anthropic"
+backend_kind = "anthropic_api"
+
+[realm.global.auth.anthropic_api]
+provider = "anthropic"
+auth_method = "api_key"
+source = { kind = "env", env = "ANTHROPIC_API_KEY" }
+
+[realm.global.binding.anthropic_api]
+backend_profile = "anthropic_api"
+auth_profile = "anthropic_api"
+"#,
+        )
+        .unwrap();
+        for config in [Config::default(), with_api_key] {
+            for (binding, provider) in [
+                ("copilot_openai", Provider::OpenAI),
+                ("copilot_anthropic", Provider::Anthropic),
+                ("copilot_gemini", Provider::Gemini),
+            ] {
+                let reference = copilot_ref(binding);
+                let target = resolve_auth_binding_or_default_for_provider(
+                    &config,
+                    provider,
+                    Some(&reference),
+                    None,
+                    false,
+                )
+                .expect("a zero-config Copilot route");
+                assert_eq!(target.auth_binding, reference);
+                assert_eq!(target.backend.provider, provider);
+                assert_eq!(target.backend.backend_kind, "copilot");
+                assert_eq!(target.auth_profile.auth_method, "github_copilot_token");
+                assert_eq!(
+                    target.auth_profile.source,
+                    CredentialSourceSpec::Env {
+                        env: "COPILOT_GITHUB_TOKEN".to_string(),
+                        fallback: vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()],
+                    }
+                );
+                assert_eq!(
+                    target.credential_identity,
+                    AuthCredentialIdentity::Account(copilot_account())
+                );
+                let inferred = resolve_explicit_auth_binding_target(&config, &reference)
+                    .expect("the route names its provider");
+                assert_eq!(inferred.backend.provider, provider);
+            }
+        }
+    }
+
+    /// Zero-config: any configured Copilot route in `global` turns the
+    /// zero-config routes off. A configured device route resolves as
+    /// configured and the other reserved ids stay unknown, also to a provider
+    /// switch on the account; a custom `copilot` backend does the same.
+    #[test]
+    fn configured_copilot_routes_turn_zero_config_off() {
+        let device: Config = toml::from_str(COPILOT_DEVICE_ANTHROPIC_ROUTE).unwrap();
+        let target = resolve_auth_binding_or_default_for_provider(
+            &device,
+            Provider::Anthropic,
+            Some(&copilot_ref("copilot_anthropic")),
+            None,
+            false,
+        )
+        .expect("the configured device route");
+        assert_eq!(target.auth_profile.auth_method, "github_copilot_oauth");
+        assert!(matches!(
+            resolve_auth_binding_or_default_for_provider(
+                &device,
+                Provider::OpenAI,
+                Some(&copilot_ref("copilot_openai")),
+                None,
+                false,
+            ),
+            Err(ConnectionTargetError::BindingInvalid {
+                source: ProviderBindingError::UnknownBinding(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            resolve_credential_account_binding_for_provider(
+                &device,
+                Provider::OpenAI,
+                &copilot_account()
+            ),
+            Ok(None)
+        ));
+
+        let custom: Config = toml::from_str(
+            r#"
+[realm.global.backend.my_copilot]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.auth.my_copilot]
+provider = "openai"
+auth_method = "github_copilot_token"
+source = { kind = "env", env = "MY_COPILOT_TOKEN" }
+
+[realm.global.binding.my_copilot]
+backend_profile = "my_copilot"
+auth_profile = "my_copilot"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_auth_binding_or_default_for_provider(
+                &custom,
+                Provider::OpenAI,
+                Some(&copilot_ref("copilot_openai")),
+                None,
+                false,
+            ),
+            Err(ConnectionTargetError::BindingInvalid {
+                source: ProviderBindingError::UnknownBinding(_),
+                ..
+            })
+        ));
+    }
+
+    /// Zero-config: the routes answer only an explicit reference to a
+    /// reserved route of `global`. Another binding id, another realm, another
+    /// account and default selection keep their refusals and env default.
+    #[test]
+    fn zero_config_copilot_routes_answer_only_explicit_global_references() {
+        let config = Config::default();
+        assert!(matches!(
+            resolve_auth_binding_or_default_for_provider(
+                &config,
+                Provider::OpenAI,
+                Some(&copilot_ref("copilot")),
+                None,
+                false,
+            ),
+            Err(ConnectionTargetError::UnknownRealm(_))
+        ));
+        let team = AuthBindingRef {
+            realm: RealmId::parse("team").unwrap(),
+            ..copilot_ref("copilot_openai")
+        };
+        assert!(matches!(
+            resolve_auth_binding_or_default_for_provider(
+                &config,
+                Provider::OpenAI,
+                Some(&team),
+                None,
+                false,
+            ),
+            Err(ConnectionTargetError::UnknownRealm(_))
+        ));
+        assert!(matches!(
+            resolve_auth_binding_or_default_for_provider(
+                &config,
+                Provider::OpenAI,
+                None,
+                None,
+                false
+            ),
+            Err(ConnectionTargetError::MissingRealm)
+        ));
+        let fallback = resolve_auth_binding_or_default_for_provider(
+            &config,
+            Provider::Anthropic,
+            None,
+            None,
+            true,
+        )
+        .expect("the env default");
+        assert!(fallback.auth_binding.is_env_default());
+        let other_account = CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("other").unwrap(),
+        };
+        assert!(matches!(
+            resolve_credential_account_binding_for_provider(
+                &config,
+                Provider::OpenAI,
+                &other_account
+            ),
+            Err(ConnectionTargetError::UnknownRealm(_))
+        ));
+    }
+
+    /// Zero-config: a provider switch on the shared account finds the
+    /// zero-config route of the new provider.
+    #[test]
+    fn zero_config_copilot_routes_follow_a_provider_switch() {
+        let target = resolve_credential_account_binding_for_provider(
+            &Config::default(),
+            Provider::OpenAI,
+            &copilot_account(),
+        )
+        .expect("the account resolves")
+        .expect("the zero-config OpenAI route");
+        assert_eq!(target.auth_binding, copilot_ref("copilot_openai"));
+        assert_eq!(target.auth_profile.auth_method, "github_copilot_token");
+    }
+
+    /// Zero-config: a `global` realm that does not load is reported, never
+    /// replaced by the zero-config routes, for an explicit reference and for
+    /// a provider switch on the shared account alike.
+    #[test]
+    fn zero_config_copilot_routes_do_not_mask_an_invalid_global_realm() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.global.binding.broken]
+backend_profile = "missing"
+auth_profile = "missing"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_auth_binding_or_default_for_provider(
+                &config,
+                Provider::OpenAI,
+                Some(&copilot_ref("copilot_openai")),
+                None,
+                false,
+            ),
+            Err(ConnectionTargetError::RealmConfigInvalid { .. })
+        ));
+        assert!(matches!(
+            resolve_credential_account_binding_for_provider(
+                &config,
+                Provider::OpenAI,
+                &copilot_account(),
+            ),
+            Err(ConnectionTargetError::RealmConfigInvalid { .. })
+        ));
+    }
+
+    /// A GitHub Copilot account configured once, in `[realm.global.copilot]`.
+    const COPILOT_ACCOUNT: &str = r#"
+[realm.global.copilot]
+source = { kind = "env", env = "MY_COPILOT_TOKEN", fallback = ["GH_TOKEN"] }
+options = { integration_id = "enterprise-approved" }
+"#;
+
+    fn copilot_account_source() -> CredentialSourceSpec {
+        CredentialSourceSpec::Env {
+            env: "MY_COPILOT_TOKEN".to_string(),
+            fallback: vec!["GH_TOKEN".to_string()],
+        }
+    }
+
+    /// `[realm.<id>.copilot]` configures the Copilot account once: the realm
+    /// gets the account's three routes on its `github_copilot` credential
+    /// account, each in token mode over the one source with the one set of
+    /// backend options, and no default binding or default model. A provider
+    /// switch on the account finds each of them.
+    #[test]
+    fn a_copilot_account_section_lowers_into_the_three_account_routes() {
+        let config: Config = toml::from_str(COPILOT_ACCOUNT).unwrap();
+        let section = config.realm.get("global").expect("the global section");
+        assert_eq!(
+            section.copilot,
+            Some(
+                CopilotAccountConfig::new(copilot_account_source())
+                    .with_options(serde_json::json!({"integration_id": "enterprise-approved"}))
+            )
+        );
+        let realm =
+            RealmConnectionSet::from_config("global", section).expect("the account section loads");
+        assert_eq!(realm.bindings.len(), 3, "the account's three routes");
+        assert_eq!(realm.default_binding, None);
+        for (binding, provider) in [
+            ("copilot_openai", Provider::OpenAI),
+            ("copilot_anthropic", Provider::Anthropic),
+            ("copilot_gemini", Provider::Gemini),
+        ] {
+            let target = resolve_explicit_auth_binding_target(&config, &copilot_ref(binding))
+                .expect("an account route");
+            assert_eq!(target.auth_binding, copilot_ref(binding));
+            assert_eq!(target.backend.provider, provider);
+            assert_eq!(target.backend.backend_kind, "copilot");
+            assert_eq!(
+                target.backend.options,
+                serde_json::json!({"integration_id": "enterprise-approved"})
+            );
+            assert_eq!(target.auth_profile.provider, provider);
+            assert_eq!(target.auth_profile.auth_method, "github_copilot_token");
+            assert_eq!(target.auth_profile.source, copilot_account_source());
+            assert_eq!(target.binding.default_model, None);
+            assert!(!target.binding.provider_default);
+            assert_eq!(
+                target.credential_identity,
+                AuthCredentialIdentity::Account(copilot_account())
+            );
+            let switched = resolve_credential_account_binding_for_provider(
+                &config,
+                provider,
+                &copilot_account(),
+            )
+            .expect("the account resolves")
+            .expect("the account's route for the provider");
+            assert_eq!(switched.auth_binding, copilot_ref(binding));
+        }
+    }
+
+    /// The account belongs to the realm whose section configures it: a
+    /// child realm's account is that realm's `github_copilot` account, and
+    /// its routes are the child's.
+    #[test]
+    fn a_copilot_account_section_belongs_to_its_realm() {
+        let config: Config = toml::from_str(
+            r#"
+[realm.team]
+parent = "global"
+
+[realm.team.copilot]
+source = { kind = "external_resolver", handle = "team-copilot-token" }
+"#,
+        )
+        .unwrap();
+        let reference = AuthBindingRef {
+            realm: RealmId::parse("team").unwrap(),
+            ..copilot_ref("copilot_anthropic")
+        };
+        let target =
+            resolve_explicit_auth_binding_target(&config, &reference).expect("the team route");
+        assert_eq!(target.backend.provider, Provider::Anthropic);
+        assert_eq!(
+            target.auth_profile.source,
+            CredentialSourceSpec::ExternalResolver {
+                handle: ExternalResolverId::new("team-copilot-token"),
+            }
+        );
+        assert_eq!(
+            target.credential_identity,
+            AuthCredentialIdentity::Account(CredentialAccountRef {
+                realm: RealmId::parse("team").unwrap(),
+                account: CredentialAccountId::parse("github_copilot").unwrap(),
+            })
+        );
+    }
+
+    /// A `global` realm whose Copilot account is configured once turns the
+    /// zero-config routes off, as any configured Copilot route does: its own
+    /// routes answer, over its own source.
+    #[test]
+    fn a_copilot_account_section_turns_the_zero_config_routes_off() {
+        let config: Config = toml::from_str(COPILOT_ACCOUNT).unwrap();
+        assert!(
+            RealmConnectionSet::copilot_token_default(
+                &config,
+                &RealmId::global(),
+                "copilot_openai"
+            )
+            .is_none(),
+            "the configured account turns the zero-config routes off"
+        );
+        let target = resolve_auth_binding_or_default_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some(&copilot_ref("copilot_openai")),
+            None,
+            false,
+        )
+        .expect("the configured account route");
+        assert_eq!(target.auth_profile.source, copilot_account_source());
+    }
+
+    /// The zero-config routes are the lowering of a default Copilot account,
+    /// pinned by value: the three token routes on the `global`
+    /// `github_copilot` account, reading `COPILOT_GITHUB_TOKEN`, then
+    /// `GH_TOKEN`, then `GITHUB_TOKEN`, with no backend options, no default
+    /// model, no default marker and no default binding. A section over the
+    /// same source lowers into the same set.
+    #[test]
+    fn zero_config_copilot_routes_are_the_default_account_lowering() {
+        let source = CredentialSourceSpec::Env {
+            env: "COPILOT_GITHUB_TOKEN".to_string(),
+            fallback: vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()],
+        };
+        let account = CredentialAccountId::parse("github_copilot").unwrap();
+        let mut expected = RealmConnectionSet {
+            realm_id: RealmId::global(),
+            backends: BTreeMap::new(),
+            auth_profiles: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            default_binding: None,
+        };
+        for (id, provider) in [
+            ("copilot_openai", Provider::OpenAI),
+            ("copilot_anthropic", Provider::Anthropic),
+            ("copilot_gemini", Provider::Gemini),
+        ] {
+            expected.backends.insert(
+                id.to_string(),
+                BackendProfile {
+                    id: id.to_string(),
+                    provider,
+                    backend_kind: "copilot".to_string(),
+                    base_url: None,
+                    options: serde_json::Value::Null,
+                    server: None,
+                },
+            );
+            expected.auth_profiles.insert(
+                id.to_string(),
+                AuthProfile {
+                    id: id.to_string(),
+                    provider,
+                    auth_method: "github_copilot_token".to_string(),
+                    source: source.clone(),
+                    constraints: AuthConstraints::default(),
+                    metadata_defaults: AuthMetadataDefaults::default(),
+                },
+            );
+            expected.bindings.insert(
+                id.to_string(),
+                ProviderBinding {
+                    id: id.to_string(),
+                    backend_profile: id.to_string(),
+                    auth_profile: id.to_string(),
+                    credential_account: Some(account.clone()),
+                    default_model: None,
+                    policy: BindingPolicy::default(),
+                    provider_default: false,
+                },
+            );
+        }
+
+        let zero_config = RealmConnectionSet::copilot_token_default(
+            &Config::default(),
+            &RealmId::global(),
+            "copilot_openai",
+        )
+        .expect("the zero-config routes");
+        assert_eq!(zero_config, expected, "the zero-config routes, by value");
+        let section = RealmConfigSection {
+            copilot: Some(CopilotAccountConfig::new(source)),
+            ..Default::default()
+        };
+        assert_eq!(
+            RealmConnectionSet::from_config("global", &section),
+            Ok(expected),
+            "a section over the same source lowers into the same set"
+        );
+    }
+
+    /// The account is configured one way: the section next to an explicit
+    /// table of one of its routes, or next to another binding on its
+    /// `github_copilot` account, is refused. A route on another account
+    /// stands beside it.
+    #[test]
+    fn a_copilot_account_section_conflicts_with_explicit_tables_of_its_routes() {
+        let explicit_route: Config = toml::from_str(&format!(
+            "{COPILOT_ACCOUNT}{COPILOT_DEVICE_ANTHROPIC_ROUTE}"
+        ))
+        .unwrap();
+        assert!(matches!(
+            RealmConnectionSet::from_config(
+                "global",
+                explicit_route.realm.get("global").expect("the global section")
+            ),
+            Err(ProviderBindingError::CopilotAccountRouteConflict { route })
+                if &*route == "copilot_anthropic"
+        ));
+
+        let account_route = |account: &str| -> Config {
+            toml::from_str(&format!(
+                r#"{COPILOT_ACCOUNT}
+[realm.global.backend.mine]
+provider = "openai"
+backend_kind = "copilot"
+
+[realm.global.auth.mine]
+provider = "openai"
+auth_method = "github_copilot_token"
+source = {{ kind = "env", env = "MY_COPILOT_TOKEN", fallback = ["GH_TOKEN"] }}
+
+[realm.global.binding.mine]
+backend_profile = "mine"
+auth_profile = "mine"
+credential_account = "{account}"
+"#
+            ))
+            .unwrap()
+        };
+        let same_account = account_route("github_copilot");
+        assert!(matches!(
+            RealmConnectionSet::from_config(
+                "global",
+                same_account.realm.get("global").expect("the global section")
+            ),
+            Err(ProviderBindingError::CopilotAccountRouteConflict { route })
+                if &*route == "mine"
+        ));
+        let other_account = account_route("github_copilot_ci");
+        let realm = RealmConnectionSet::from_config(
+            "global",
+            other_account
+                .realm
+                .get("global")
+                .expect("the global section"),
+        )
+        .expect("a route on another account stands beside the section");
+        assert_eq!(realm.bindings.len(), 4);
+    }
+
+    /// The account's routes read the GitHub token from an `env` or an
+    /// `external_resolver` source. A secret in config, a stored token, a
+    /// credential command and the sources the Copilot routes cannot read are
+    /// refused when the section loads.
+    #[test]
+    fn a_copilot_account_section_reads_only_external_sources() {
+        for (source, kind) in [
+            (
+                CredentialSourceSpec::InlineSecret {
+                    secret: "not-a-token".to_string(),
+                },
+                "inline_secret",
+            ),
+            (CredentialSourceSpec::ManagedStore, "managed_store"),
+            (
+                CredentialSourceSpec::Command {
+                    program: PathBuf::from("/usr/local/bin/mint-copilot-token"),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                    timeout_ms: 30_000,
+                    refresh_interval_ms: Some(3_000_000),
+                },
+                "command",
+            ),
+            (CredentialSourceSpec::PlatformDefault, "platform_default"),
+            (
+                CredentialSourceSpec::FileDescriptor {
+                    fd: 3,
+                    scope_override: None,
+                },
+                "file_descriptor",
+            ),
+        ] {
+            let section = RealmConfigSection {
+                copilot: Some(CopilotAccountConfig::new(source)),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    RealmConnectionSet::from_config("global", &section),
+                    Err(ProviderBindingError::CopilotAccountSourceUnsupported { source_kind })
+                        if &*source_kind == kind
+                ),
+                "a {kind} source is refused"
+            );
+        }
+        for source in [
+            copilot_account_source(),
+            CredentialSourceSpec::ExternalResolver {
+                handle: ExternalResolverId::new("copilot-token"),
+            },
+        ] {
+            let section = RealmConfigSection {
+                copilot: Some(CopilotAccountConfig::new(source)),
+                ..Default::default()
+            };
+            let realm = RealmConnectionSet::from_config("global", &section)
+                .expect("an external source loads");
+            assert_eq!(realm.bindings.len(), 3);
+        }
     }
 }

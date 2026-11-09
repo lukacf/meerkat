@@ -1,0 +1,1985 @@
+#!/usr/bin/env python3
+"""Memory calibration harness runner — tests/memory-evals/ (arch doc §11).
+
+Modes:
+
+  --check (default)          Deterministic validation of every calibration
+                             profile and fixture: schema shape, prompt-bundle
+                             resolution, unique fixture names, expected ids
+                             present in their manifests. This is what
+                             `make ci` gates on in harness v0.
+  --stage distiller --mode mock
+                             Run the trivial deterministic mock distiller
+                             (extracts nothing — the doctrine's preferred
+                             output) against the distiller fixtures: noop
+                             fixtures and the deterministic quarantine
+                             verdicts score for real; extraction misses are
+                             informational and never fail the run.
+  --stage distiller --mode live
+                             Drive the real Distiller through the
+                             `distiller-eval` binary; score noop /
+                             must_contain / must_not_contain over the
+                             proposed ops plus the deterministic
+                             write-gate quarantine verdict (§8.4/§10.1).
+                             Same auth-SKIP semantics as the selector.
+  --stage steward --mode mock
+                             Run each steward fixture's scripted reply
+                             through the production parse → sanitize →
+                             staged-validator path (`steward-eval --mock`):
+                             §10.2 lattice law (tier ceilings, laundering
+                             rejects) gates for real; judgment expectations
+                             score deterministically against the script.
+  --stage steward --mode live
+                             Drive the real Steward consolidate phase over
+                             each fixture; score ops, proposal verdicts,
+                             quarantine verdicts, and contradictions plus
+                             the deterministic validator law. Same auth-SKIP
+                             semantics as the other stages.
+
+Exit codes: 0 clean, 1 validation/scorecard violations, 2 configuration
+error.
+"""
+
+import argparse
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    import tomllib as _tomllib
+except ModuleNotFoundError:  # Python 3.9/3.10 (tomllib was added in 3.11).
+    _tomllib = None
+
+
+def _eval_env():
+    """Env for eval-bin builds: CARGO_INCREMENTAL=0 dodges the rustc 1.94.1
+    lib-build ICE (evaluate_obligation panic) that fires when repo-cargo
+    builds the *_eval binaries under incremental compilation. Matches the
+    guard the browser-e2e harness already applies."""
+    import os
+    env = dict(os.environ)
+    env["CARGO_INCREMENTAL"] = "0"
+    return env
+
+
+class ProfileTomlDecodeError(ValueError):
+    """A calibration profile could not be decoded as supported TOML."""
+
+
+def _profile_toml_error(line_number, message):
+    raise ProfileTomlDecodeError(f"line {line_number}: {message}")
+
+
+def _strip_toml_comment(line):
+    """Strip a TOML comment without treating `#` inside a string as syntax."""
+    quote = None
+    escaped = False
+    for index, char in enumerate(line):
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif quote == "'":
+            if char == quote:
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+        elif char == "#":
+            return line[:index]
+    return line
+
+
+_TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+_TOML_DECIMAL_INTEGER = re.compile(r"^[+-]?(?:0|[1-9](?:_?[0-9])*)$")
+_TOML_FLOAT = re.compile(
+    r"^[+-]?(?:0|[1-9](?:_?[0-9])*)"
+    r"(?:\.[0-9](?:_?[0-9])*(?:[eE][+-]?[0-9](?:_?[0-9])*)?"
+    r"|[eE][+-]?[0-9](?:_?[0-9])*)$"
+)
+
+
+def _decode_profile_toml_scalar(raw, line_number):
+    if not raw:
+        _profile_toml_error(line_number, "missing value")
+    if raw.startswith('"'):
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _profile_toml_error(line_number, f"invalid string: {exc.msg}")
+        if not isinstance(value, str):
+            _profile_toml_error(line_number, "invalid string")
+        return value
+    if raw.startswith("'"):
+        if len(raw) < 2 or not raw.endswith("'"):
+            _profile_toml_error(line_number, "unterminated literal string")
+        if "'" in raw[1:-1]:
+            _profile_toml_error(line_number, "invalid literal string")
+        return raw[1:-1]
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    if _TOML_DECIMAL_INTEGER.fullmatch(raw):
+        return int(raw.replace("_", ""))
+    if _TOML_FLOAT.fullmatch(raw):
+        return float(raw.replace("_", ""))
+    _profile_toml_error(
+        line_number,
+        "unsupported value; profile values must be strings, booleans, or numbers",
+    )
+
+
+def _parse_profile_toml_fallback(text):
+    """Parse the deliberately small calibration-profile TOML contract.
+
+    The checked-in contract is top-level scalar metadata plus a scalar
+    `[params]` table. Keeping the fallback that narrow makes Python 3.9/3.10
+    support dependency-free without pretending to implement general TOML.
+    """
+    document = {}
+    current_table = document
+    params_declared = False
+
+    for line_number, source_line in enumerate(text.splitlines(), 1):
+        line = _strip_toml_comment(source_line).strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            if line != "[params]":
+                _profile_toml_error(line_number, "only the `[params]` table is supported")
+            if params_declared or "params" in document:
+                _profile_toml_error(line_number, "duplicate table `params`")
+            current_table = {}
+            document["params"] = current_table
+            params_declared = True
+            continue
+
+        key, separator, raw_value = line.partition("=")
+        if not separator:
+            _profile_toml_error(line_number, "expected a key/value assignment")
+        key = key.strip()
+        raw_value = raw_value.strip()
+        if not _TOML_BARE_KEY.fullmatch(key):
+            _profile_toml_error(line_number, "keys must be bare keys")
+        if key in current_table:
+            _profile_toml_error(line_number, f"duplicate key `{key}`")
+        current_table[key] = _decode_profile_toml_scalar(raw_value, line_number)
+
+    return document
+
+
+def parse_profile_toml(text, force_fallback=False):
+    """Decode a calibration profile with stdlib tomllib or the 3.9 fallback."""
+    if _tomllib is not None and not force_fallback:
+        try:
+            return _tomllib.loads(text)
+        except _tomllib.TOMLDecodeError as exc:
+            raise ProfileTomlDecodeError(str(exc)) from exc
+    return _parse_profile_toml_fallback(text)
+
+
+def load_profile(path):
+    return parse_profile_toml(path.read_text())
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+EVALS_DIR = REPO_ROOT / "tests" / "memory-evals"
+PROFILES_DIR = EVALS_DIR / "profiles"
+SELECTOR_FIXTURES_DIR = EVALS_DIR / "fixtures" / "selector"
+DISTILLER_FIXTURES_DIR = EVALS_DIR / "fixtures" / "distiller"
+STEWARD_FIXTURES_DIR = EVALS_DIR / "fixtures" / "steward"
+HYGIENIST_FIXTURES_DIR = EVALS_DIR / "fixtures" / "hygienist"
+INVARIANT_FIXTURES_DIR = EVALS_DIR / "fixtures" / "invariants"
+
+KNOWN_STAGES = ("selector", "distiller", "steward", "hygienist")
+RUNNABLE_STAGES = ("distiller", "steward", "hygienist")
+MEMORY_KINDS = (
+    "Preference",
+    "Fact",
+    "Gotcha",
+    "Procedure",
+    "Relationship",
+    "OpenLoop",
+    "Reference",
+)
+KNOWN_INVARIANTS = (
+    "poisoned_write_quarantined",
+    "forged_envelope_defanged",
+    "supersede_cycle_rejected",
+    "staged_tier_ceiling_rejected",
+    "transitive_laundering_rejected",
+)
+RECORD_META_KEYS = ("id", "kind", "title", "description", "age_days", "rank")
+
+# Staged-validator invariants mirror the Rust wire shapes exactly
+# (crates/meerkat-meta/src/memory/records.rs + staged.rs serde): snake_case kinds
+# and tiers, internally-tagged scope/status/author/op enums. Each invariant
+# pins the StagedBatchError variant the validator must produce.
+STAGED_INVARIANT_ERRORS = {
+    "supersede_cycle_rejected": "supersede_cycle",
+    "staged_tier_ceiling_rejected": "tier_not_staged_assignable",
+    "transitive_laundering_rejected": "transitive_taint_ceiling",
+}
+STAGED_KINDS = (
+    "preference",
+    "fact",
+    "gotcha",
+    "procedure",
+    "relationship",
+    "open_loop",
+    "reference",
+)
+TRUST_TIERS = ("untrusted", "agent_observed", "agent_verified", "application", "operator")
+RECORD_STATUSES = ("active", "superseded", "quarantined", "tombstoned")
+SCOPE_KINDS = ("identity", "mob", "operator", "realm")
+AUTHOR_KINDS = ("operator", "application", "agent", "steward", "distiller")
+STAGED_OP_KINDS = ("create", "supersede", "tombstone", "retier", "set_rank")
+# Byte budgets from the record model (arch doc §7.1).
+TITLE_MAX_BYTES = 200
+DESCRIPTION_MAX_BYTES = 400
+# Placeholders the coordinator renders into a selector prompt bundle.
+SELECTOR_PROMPT_PLACEHOLDERS = ("{{manifest}}", "{{turn_text}}", "{{suppression_list}}")
+# Placeholders the distiller engine renders into its prompt bundle (§8.4).
+DISTILLER_PROMPT_PLACEHOLDERS = (
+    "{{existing_manifest}}",
+    "{{recent_tombstones}}",
+    "{{transcript}}",
+)
+# Placeholders the hygienist engine renders into its prompt bundle (§8.6).
+HYGIENIST_PROMPT_PLACEHOLDERS = ("{{transcript}}", "{{protected_ranges}}")
+HYGIENE_ROLES = (
+    "user",
+    "assistant",
+    "assistant_tool_call",
+    "tool_results",
+    "system",
+    "system_notice",
+)
+HYGIENE_OPS = ("prune_tool_results", "collapse")
+# Transcript roles the distiller fixture format admits (matches the engine's
+# message projection in memory/distiller.rs).
+DISTILLER_TRANSCRIPT_ROLES = ("user", "assistant", "system notice", "tool results")
+# The steward bundle is a single file split on `<!-- phase:NAME -->` markers
+# (memory/steward.rs); each phase must carry its placeholders.
+STEWARD_PROMPT_PHASES = {
+    "gather": ("{{overview}}", "{{signals}}", "{{request_budget}}"),
+    "usage_audit": ("{{usage_sample}}", "{{evidence}}"),
+    "consolidate": (
+        "{{overview}}",
+        "{{signals}}",
+        "{{gathered}}",
+        "{{usage_verdicts}}",
+        "{{mob_context}}",
+    ),
+    "harvest": ("{{identity}}", "{{mob_context}}", "{{records}}"),
+}
+STEWARD_VERDICTS = ("accept", "reject", "hold", "promote_pending_gate")
+STEWARD_QUARANTINE_VERDICTS = ("release", "hold", "tombstone", "promote_pending_gate")
+
+# Mock selector: a record matches when any title word of at least this length
+# appears verbatim in the turn text. Crude on purpose — it exists to exercise
+# the scorecard, not to select well.
+MOCK_MIN_TOKEN_LEN = 4
+
+# Live mode: runs per fixture with independently shuffled manifests; the §11
+# label-free invariant requires identical selections across all of them.
+LIVE_RUNS_PER_FIXTURE = 3
+# selector-eval exit code that means "live requested but no auth resolvable"
+# — the harness treats it as SKIP-with-notice, not failure.
+EXIT_NO_AUTH = 3
+# Command used to invoke selector-eval; override with the
+# MEMORY_EVALS_SELECTOR_EVAL environment variable (whitespace-split), e.g.
+# a prebuilt binary path in CI.
+DEFAULT_SELECTOR_EVAL_CMD = (
+    str(REPO_ROOT / "scripts" / "repo-cargo"),
+    "run",
+    "--quiet",
+    "--bin",
+    "selector-eval",
+    "--",
+)
+
+
+def fail_config(message):
+    print(f"memory-evals: configuration error: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def rel(path):
+    return path.relative_to(REPO_ROOT)
+
+
+def load_json(path, violations):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        violations.append(f"{rel(path)}: not valid JSON: {exc}")
+        return None
+
+
+def check_string(data, key, where, violations, required=True):
+    value = data.get(key)
+    if value is None:
+        if required:
+            violations.append(f"{where}: missing required key `{key}`")
+        return None
+    if not isinstance(value, str) or not value.strip():
+        violations.append(f"{where}: `{key}` must be a non-empty string")
+        return None
+    return value
+
+
+# ── profiles ──────────────────────────────────────────────────
+
+
+def validate_profile(path, violations):
+    where = str(rel(path))
+    try:
+        profile = load_profile(path)
+    except (OSError, ProfileTomlDecodeError) as exc:
+        violations.append(f"{where}: not valid TOML: {exc}")
+        return
+
+    stage = check_string(profile, "stage", where, violations)
+    if stage is not None and stage not in KNOWN_STAGES:
+        violations.append(f"{where}: unknown stage `{stage}` (known: {', '.join(KNOWN_STAGES)})")
+    check_string(profile, "version", where, violations)
+    check_string(profile, "model", where, violations)
+    if not isinstance(profile.get("params"), dict):
+        violations.append(f"{where}: missing or non-table `params`")
+
+    bundle_rel = check_string(profile, "prompt_bundle", where, violations)
+    if bundle_rel is None:
+        return
+    bundle = EVALS_DIR / bundle_rel
+    if not bundle.is_file():
+        violations.append(
+            f"{where}: prompt_bundle `{bundle_rel}` does not resolve "
+            f"(expected file at {rel(bundle)})"
+        )
+        return
+    stage_placeholders = {
+        "selector": SELECTOR_PROMPT_PLACEHOLDERS,
+        "distiller": DISTILLER_PROMPT_PLACEHOLDERS,
+        "hygienist": HYGIENIST_PROMPT_PLACEHOLDERS,
+    }
+    if stage in stage_placeholders:
+        text = bundle.read_text()
+        for placeholder in stage_placeholders[stage]:
+            if placeholder not in text:
+                violations.append(
+                    f"{rel(bundle)}: {stage} prompt bundle missing "
+                    f"placeholder `{placeholder}`"
+                )
+    if stage == "steward":
+        text = bundle.read_text()
+        for phase, placeholders in STEWARD_PROMPT_PHASES.items():
+            marker = f"<!-- phase:{phase} -->"
+            start = text.find(marker)
+            if start < 0:
+                violations.append(
+                    f"{rel(bundle)}: steward prompt bundle missing phase marker `{marker}`"
+                )
+                continue
+            rest = text[start + len(marker):]
+            end = rest.find("<!-- phase:")
+            section = rest if end < 0 else rest[:end]
+            for placeholder in placeholders:
+                if placeholder not in section:
+                    violations.append(
+                        f"{rel(bundle)}: steward phase `{phase}` missing "
+                        f"placeholder `{placeholder}`"
+                    )
+
+
+# ── selector fixtures ─────────────────────────────────────────
+
+
+def validate_record_meta(record, where, violations):
+    """Validate one RecordMeta manifest entry; return its id (or None)."""
+    if not isinstance(record, dict):
+        violations.append(f"{where}: manifest entry must be an object")
+        return None
+    missing = [key for key in RECORD_META_KEYS if key not in record]
+    unknown = [key for key in record if key not in RECORD_META_KEYS]
+    if missing:
+        violations.append(f"{where}: missing RecordMeta key(s): {', '.join(missing)}")
+    if unknown:
+        violations.append(f"{where}: unknown RecordMeta key(s): {', '.join(unknown)}")
+    if missing or unknown:
+        return record.get("id") if isinstance(record.get("id"), str) else None
+
+    record_id = check_string(record, "id", where, violations)
+    kind = check_string(record, "kind", where, violations)
+    if kind is not None and kind not in MEMORY_KINDS:
+        violations.append(f"{where}: unknown kind `{kind}` (known: {', '.join(MEMORY_KINDS)})")
+    title = check_string(record, "title", where, violations)
+    if title is not None and len(title.encode()) > TITLE_MAX_BYTES:
+        violations.append(f"{where}: title exceeds {TITLE_MAX_BYTES} bytes (§7.1)")
+    description = check_string(record, "description", where, violations)
+    if description is not None and len(description.encode()) > DESCRIPTION_MAX_BYTES:
+        violations.append(f"{where}: description exceeds {DESCRIPTION_MAX_BYTES} bytes (§7.1)")
+    age = record["age_days"]
+    if not isinstance(age, (int, float)) or isinstance(age, bool) or age < 0:
+        violations.append(f"{where}: age_days must be a non-negative number")
+    rank = record["rank"]
+    if rank is not None and (not isinstance(rank, int) or isinstance(rank, bool) or rank < 0):
+        violations.append(f"{where}: rank must be a non-negative integer or null")
+    return record_id
+
+
+def validate_selector_fixture(path, violations):
+    where = str(rel(path))
+    fixture = load_json(path, violations)
+    if fixture is None:
+        return None
+    if not isinstance(fixture, dict):
+        violations.append(f"{where}: fixture must be a JSON object")
+        return None
+
+    allowed = {"name", "manifest", "turn_text", "suppressed_ids", "expected", "notes"}
+    unknown = [key for key in fixture if key not in allowed]
+    if unknown:
+        violations.append(f"{where}: unknown key(s): {', '.join(unknown)}")
+
+    name = check_string(fixture, "name", where, violations)
+    check_string(fixture, "turn_text", where, violations)
+    check_string(fixture, "notes", where, violations)
+
+    manifest = fixture.get("manifest")
+    manifest_ids = []
+    if not isinstance(manifest, list) or not manifest:
+        violations.append(f"{where}: `manifest` must be a non-empty array")
+    else:
+        for index, record in enumerate(manifest):
+            record_id = validate_record_meta(record, f"{where}: manifest[{index}]", violations)
+            if record_id is not None:
+                if record_id in manifest_ids:
+                    violations.append(f"{where}: duplicate manifest id `{record_id}`")
+                manifest_ids.append(record_id)
+
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict):
+        violations.append(f"{where}: missing or non-object `expected`")
+    else:
+        for key in ("must_select", "must_not_select"):
+            ids = expected.get(key)
+            if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+                violations.append(f"{where}: expected.{key} must be an array of id strings")
+                continue
+            for record_id in ids:
+                if record_id not in manifest_ids:
+                    violations.append(
+                        f"{where}: expected.{key} id `{record_id}` "
+                        "not present in the fixture's manifest"
+                    )
+        if isinstance(expected.get("must_select"), list) and isinstance(
+            expected.get("must_not_select"), list
+        ):
+            overlap = set(expected["must_select"]) & set(expected["must_not_select"])
+            if overlap:
+                violations.append(
+                    f"{where}: id(s) in both must_select and must_not_select: "
+                    f"{', '.join(sorted(overlap))}"
+                )
+
+    suppressed = fixture.get("suppressed_ids", [])
+    if not isinstance(suppressed, list) or not all(isinstance(i, str) for i in suppressed):
+        violations.append(f"{where}: suppressed_ids must be an array of id strings")
+    else:
+        for record_id in suppressed:
+            if record_id not in manifest_ids:
+                violations.append(
+                    f"{where}: suppressed_ids id `{record_id}` "
+                    "not present in the fixture's manifest"
+                )
+
+    return name
+
+
+# ── distiller fixtures ────────────────────────────────────────
+
+
+def validate_distiller_fixture(path, violations):
+    where = str(rel(path))
+    fixture = load_json(path, violations)
+    if fixture is None:
+        return None
+    if not isinstance(fixture, dict):
+        violations.append(f"{where}: fixture must be a JSON object")
+        return None
+
+    allowed = {
+        "name",
+        "transcript",
+        "existing_manifest",
+        "tombstones",
+        "taint",
+        "expected",
+        "notes",
+    }
+    unknown = [key for key in fixture if key not in allowed]
+    if unknown:
+        violations.append(f"{where}: unknown key(s): {', '.join(unknown)}")
+
+    name = check_string(fixture, "name", where, violations)
+    check_string(fixture, "notes", where, violations)
+
+    transcript = fixture.get("transcript")
+    if not isinstance(transcript, list) or not transcript:
+        violations.append(f"{where}: `transcript` must be a non-empty array")
+    else:
+        for index, message in enumerate(transcript):
+            message_where = f"{where}: transcript[{index}]"
+            if not isinstance(message, dict):
+                violations.append(f"{message_where}: must be an object")
+                continue
+            unknown = [key for key in message if key not in ("role", "text")]
+            if unknown:
+                violations.append(f"{message_where}: unknown key(s): {', '.join(unknown)}")
+            role = check_string(message, "role", message_where, violations)
+            if role is not None and role not in DISTILLER_TRANSCRIPT_ROLES:
+                violations.append(
+                    f"{message_where}: unknown role `{role}` "
+                    f"(known: {', '.join(DISTILLER_TRANSCRIPT_ROLES)})"
+                )
+            check_string(message, "text", message_where, violations)
+
+    manifest = fixture.get("existing_manifest", [])
+    manifest_ids = []
+    if not isinstance(manifest, list):
+        violations.append(f"{where}: `existing_manifest` must be an array")
+    else:
+        for index, record in enumerate(manifest):
+            record_id = validate_record_meta(
+                record, f"{where}: existing_manifest[{index}]", violations
+            )
+            if record_id is not None:
+                if record_id in manifest_ids:
+                    violations.append(f"{where}: duplicate manifest id `{record_id}`")
+                manifest_ids.append(record_id)
+
+    tombstones = fixture.get("tombstones", [])
+    if not isinstance(tombstones, list):
+        violations.append(f"{where}: `tombstones` must be an array")
+    else:
+        for index, tombstone in enumerate(tombstones):
+            tombstone_where = f"{where}: tombstones[{index}]"
+            if not isinstance(tombstone, dict):
+                violations.append(f"{tombstone_where}: must be an object")
+                continue
+            unknown = [key for key in tombstone if key not in ("title", "kind")]
+            if unknown:
+                violations.append(f"{tombstone_where}: unknown key(s): {', '.join(unknown)}")
+            check_string(tombstone, "title", tombstone_where, violations)
+            kind = check_string(tombstone, "kind", tombstone_where, violations)
+            if kind is not None and kind not in MEMORY_KINDS:
+                violations.append(
+                    f"{tombstone_where}: unknown kind `{kind}` (known: {', '.join(MEMORY_KINDS)})"
+                )
+
+    taint = fixture.get("taint", {})
+    session_tainted = False
+    if not isinstance(taint, dict):
+        violations.append(f"{where}: `taint` must be an object")
+        taint = {}
+    else:
+        unknown = [key for key in taint if key not in ("session_tainted", "source")]
+        if unknown:
+            violations.append(f"{where}: taint unknown key(s): {', '.join(unknown)}")
+        session_tainted = taint.get("session_tainted", False)
+        if not isinstance(session_tainted, bool):
+            violations.append(f"{where}: taint.session_tainted must be a boolean")
+            session_tainted = False
+
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict):
+        violations.append(f"{where}: missing or non-object `expected`")
+        return name
+    unknown = [key for key in expected if key not in ("noop", "proposals", "quarantined")]
+    if unknown:
+        violations.append(f"{where}: expected unknown key(s): {', '.join(unknown)}")
+    noop = expected.get("noop", False)
+    proposals = expected.get("proposals")
+    if noop is not False and noop is not True:
+        violations.append(f"{where}: expected.noop must be a boolean")
+    if noop and proposals is not None:
+        violations.append(f"{where}: expected.noop and expected.proposals are exclusive")
+    if not noop:
+        if not isinstance(proposals, dict):
+            violations.append(
+                f"{where}: expected needs either noop=true or a `proposals` object"
+            )
+            proposals = {}
+        unknown = [
+            key for key in proposals if key not in ("must_contain", "must_not_contain")
+        ]
+        if unknown:
+            violations.append(f"{where}: proposals unknown key(s): {', '.join(unknown)}")
+        for key in ("must_contain", "must_not_contain"):
+            needles = proposals.get(key, [])
+            if not isinstance(needles, list) or not all(
+                isinstance(n, str) and n for n in needles
+            ):
+                violations.append(
+                    f"{where}: expected.proposals.{key} must be an array of "
+                    "non-empty strings"
+                )
+    quarantined = expected.get("quarantined")
+    if quarantined is not None:
+        if not isinstance(quarantined, bool):
+            violations.append(f"{where}: expected.quarantined must be a boolean")
+        elif quarantined and not session_tainted:
+            violations.append(
+                f"{where}: expected.quarantined=true requires taint.session_tainted=true "
+                "(the gate verdict is deterministic over the fixture's taint context)"
+            )
+
+    return name
+
+
+# ── invariant fixtures ────────────────────────────────────────
+
+
+def validate_steward_fixture(path, violations):
+    """Steward consolidate-phase fixture (§8.5): records + proposals in,
+    scripted_reply through the production parse/sanitize/validate path."""
+    where = str(rel(path))
+    fixture = load_json(path, violations)
+    if fixture is None:
+        return None
+    if not isinstance(fixture, dict):
+        violations.append(f"{where}: fixture must be a JSON object")
+        return None
+    known = (
+        "name",
+        "records",
+        "proposals",
+        "mob_context",
+        "operator_routing",
+        "scripted_reply",
+        "expected",
+        "notes",
+    )
+    unknown = [key for key in fixture if key not in known]
+    if unknown:
+        violations.append(f"{where}: unknown fixture key(s): {', '.join(unknown)}")
+    name = check_string(fixture, "name", where, violations)
+    check_string(fixture, "notes", where, violations)
+
+    record_ids = set()
+    records = fixture.get("records", [])
+    if not isinstance(records, list):
+        violations.append(f"{where}: `records` must be an array")
+        records = []
+    for index, record in enumerate(records):
+        r_where = f"{where}: records[{index}]"
+        if not isinstance(record, dict):
+            violations.append(f"{r_where}: must be an object")
+            continue
+        for key in ("id", "kind", "title", "body", "scope_kind", "scope_key"):
+            check_string(record, key, r_where, violations)
+        kind = record.get("kind")
+        if isinstance(kind, str) and kind not in MEMORY_KINDS:
+            violations.append(
+                f"{r_where}: unknown kind `{kind}` (known: {', '.join(MEMORY_KINDS)})"
+            )
+        trust = record.get("trust", "agent_observed")
+        if trust not in TRUST_TIERS:
+            violations.append(f"{r_where}: unknown trust `{trust}`")
+        status = record.get("status", "active")
+        if status not in RECORD_STATUSES:
+            violations.append(f"{r_where}: unknown status `{status}`")
+        scope_kind = record.get("scope_kind")
+        if isinstance(scope_kind, str) and scope_kind not in ("identity", "mob"):
+            violations.append(f"{r_where}: scope_kind must be identity|mob")
+        if isinstance(record.get("id"), str):
+            record_ids.add(record["id"])
+
+    proposal_ids = set()
+    proposals = fixture.get("proposals", [])
+    if not isinstance(proposals, list):
+        violations.append(f"{where}: `proposals` must be an array")
+        proposals = []
+    for index, proposal in enumerate(proposals):
+        p_where = f"{where}: proposals[{index}]"
+        if not isinstance(proposal, dict):
+            violations.append(f"{p_where}: must be an object")
+            continue
+        for key in ("proposal_id", "scope_kind", "scope_key", "title", "body"):
+            check_string(proposal, key, p_where, violations)
+        if isinstance(proposal.get("proposal_id"), str):
+            proposal_ids.add(proposal["proposal_id"])
+
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict):
+        violations.append(f"{where}: missing or non-object `expected`")
+        return name
+    for proposal_id, verdict in expected.get("proposal_verdicts", {}).items():
+        if proposal_id not in proposal_ids:
+            violations.append(
+                f"{where}: expected.proposal_verdicts references unknown "
+                f"proposal `{proposal_id}`"
+            )
+        if verdict not in STEWARD_VERDICTS:
+            violations.append(f"{where}: unknown proposal verdict `{verdict}`")
+    for record_id in expected.get("quarantine_verdict_forbidden", {}):
+        if record_id not in record_ids:
+            violations.append(
+                f"{where}: expected.quarantine_verdict_forbidden references "
+                f"unknown record `{record_id}`"
+            )
+    if "validator" in expected and "validator_rejects" in expected:
+        violations.append(
+            f"{where}: expected.validator and expected.validator_rejects are exclusive"
+        )
+    if "validator" not in expected and "validator_rejects" not in expected:
+        violations.append(
+            f"{where}: expected must pin the validator outcome "
+            f"(`validator` or `validator_rejects`)"
+        )
+    return name
+
+
+def validate_hygienist_fixture(path, violations):
+    """Validate one hygienist fixture (§8.6): transcript roles, span
+    references, ordering context, scripted revision ops, and a pinned
+    validator expectation."""
+    where = str(rel(path))
+    fixture = load_json(path, violations)
+    if fixture is None:
+        return None
+    if not isinstance(fixture, dict):
+        violations.append(f"{where}: fixture must be a JSON object")
+        return None
+    known = (
+        "name",
+        "transcript",
+        "span_references",
+        "distilled_cursor",
+        "sequenced_after_harvest",
+        "scripted_reply",
+        "expected",
+        "notes",
+    )
+    unknown = [key for key in fixture if key not in known]
+    if unknown:
+        violations.append(f"{where}: unknown fixture key(s): {', '.join(unknown)}")
+    name = check_string(fixture, "name", where, violations)
+
+    transcript = fixture.get("transcript")
+    if not isinstance(transcript, list) or not transcript:
+        violations.append(f"{where}: transcript must be a non-empty array")
+        transcript = []
+    for index, message in enumerate(transcript):
+        mwhere = f"{where}: transcript[{index}]"
+        if not isinstance(message, dict):
+            violations.append(f"{mwhere}: must be an object")
+            continue
+        role = message.get("role")
+        if role not in HYGIENE_ROLES:
+            violations.append(
+                f"{mwhere}: unknown role `{role}` (known: {', '.join(HYGIENE_ROLES)})"
+            )
+        if not isinstance(message.get("text", ""), str):
+            violations.append(f"{mwhere}: text must be a string")
+
+    for index, span in enumerate(fixture.get("span_references", [])):
+        swhere = f"{where}: span_references[{index}]"
+        if not isinstance(span, dict):
+            violations.append(f"{swhere}: must be an object")
+            continue
+        check_string(span, "record_id", swhere, violations)
+        if not isinstance(span.get("quarantined", False), bool):
+            violations.append(f"{swhere}: quarantined must be a boolean")
+        span_range = span.get("range")
+        if span_range is not None and (
+            not isinstance(span_range, list)
+            or len(span_range) != 2
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in span_range)
+            or span_range[0] > span_range[1]
+        ):
+            violations.append(f"{swhere}: range must be null or [start, end] with start <= end")
+
+    cursor = fixture.get("distilled_cursor")
+    if cursor is not None and (not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0):
+        violations.append(f"{where}: distilled_cursor must be a non-negative integer")
+    if not isinstance(fixture.get("sequenced_after_harvest", False), bool):
+        violations.append(f"{where}: sequenced_after_harvest must be a boolean")
+
+    reply = fixture.get("scripted_reply")
+    if not isinstance(reply, dict) or not isinstance(reply.get("ops"), list):
+        violations.append(f"{where}: scripted_reply must be an object with an `ops` array")
+        reply = {"ops": []}
+    for index, op in enumerate(reply.get("ops", [])):
+        owhere = f"{where}: scripted_reply.ops[{index}]"
+        if not isinstance(op, dict):
+            violations.append(f"{owhere}: must be an object")
+            continue
+        kind = op.get("op")
+        if kind not in HYGIENE_OPS:
+            violations.append(f"{owhere}: unknown op `{kind}` (known: {', '.join(HYGIENE_OPS)})")
+        op_range = op.get("range")
+        if (
+            not isinstance(op_range, list)
+            or len(op_range) != 2
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in op_range)
+        ):
+            violations.append(f"{owhere}: range must be [start, end)")
+        elif transcript and op_range[1] > len(transcript) and "blocked" not in str(
+            fixture.get("expected", {}).get("validator", "")
+        ):
+            violations.append(
+                f"{owhere}: range end {op_range[1]} exceeds transcript length "
+                f"{len(transcript)} on an expected-ok fixture"
+            )
+        if kind == "collapse" and not isinstance(op.get("replacement"), str):
+            violations.append(f"{owhere}: collapse op must carry a string `replacement`")
+
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict):
+        violations.append(f"{where}: missing `expected` object")
+        return name
+    validator = expected.get("validator")
+    if not isinstance(validator, str) or not (
+        validator == "ok" or validator.startswith("blocked:")
+    ):
+        violations.append(
+            f"{where}: expected.validator must be 'ok' or 'blocked: <reason>'"
+        )
+    ops_expected = expected.get("ops", {})
+    if not isinstance(ops_expected, dict) or any(
+        kind not in HYGIENE_OPS or not isinstance(count, int) or isinstance(count, bool)
+        for kind, count in ops_expected.items()
+    ):
+        violations.append(f"{where}: expected.ops must map known op kinds to counts")
+    live = expected.get("live", {})
+    if not isinstance(live, dict):
+        violations.append(f"{where}: expected.live must be an object")
+        live = {}
+    for key in ("must_not_touch", "may_prune"):
+        indices = live.get(key, [])
+        if not isinstance(indices, list) or any(
+            not isinstance(v, int) or isinstance(v, bool) or v < 0 or v >= max(len(transcript), 1)
+            for v in indices
+        ):
+            violations.append(
+                f"{where}: expected.live.{key} must list valid transcript indices"
+            )
+    return name
+
+
+def validate_invariant_fixture(path, violations):
+    where = str(rel(path))
+    fixture = load_json(path, violations)
+    if fixture is None:
+        return None
+    if not isinstance(fixture, dict):
+        violations.append(f"{where}: fixture must be a JSON object")
+        return None
+
+    name = check_string(fixture, "name", where, violations)
+    invariant = check_string(fixture, "invariant", where, violations)
+    check_string(fixture, "stage", where, violations)
+    check_string(fixture, "notes", where, violations)
+    expected = fixture.get("expected")
+    if not isinstance(expected, dict):
+        violations.append(f"{where}: missing or non-object `expected`")
+        expected = {}
+
+    if invariant is None:
+        return name
+    if invariant not in KNOWN_INVARIANTS:
+        violations.append(
+            f"{where}: unknown invariant `{invariant}` (known: {', '.join(KNOWN_INVARIANTS)})"
+        )
+        return name
+
+    if invariant == "poisoned_write_quarantined":
+        record = fixture.get("record")
+        if not isinstance(record, dict):
+            violations.append(f"{where}: poisoned-write fixture needs a `record` object")
+        else:
+            for key in ("kind", "title", "description", "body"):
+                check_string(record, key, f"{where}: record", violations)
+            kind = record.get("kind")
+            if isinstance(kind, str) and kind not in MEMORY_KINDS:
+                violations.append(f"{where}: record.kind `{kind}` is not a MemoryKind")
+        context = fixture.get("context")
+        if not isinstance(context, dict) or not isinstance(
+            context.get("session_tainted"), bool
+        ):
+            violations.append(
+                f"{where}: poisoned-write fixture needs `context.session_tainted` (bool)"
+            )
+        check_string(expected, "trust_tier", f"{where}: expected", violations)
+        check_string(expected, "status", f"{where}: expected", violations)
+
+    if invariant == "forged_envelope_defanged":
+        turn_text = check_string(fixture, "turn_text", where, violations)
+        markers = expected.get("defanged_markers")
+        if not isinstance(markers, list) or not markers or not all(
+            isinstance(m, str) and m for m in markers
+        ):
+            violations.append(
+                f"{where}: expected.defanged_markers must be a non-empty array of strings"
+            )
+            markers = []
+        if turn_text is not None:
+            for marker in markers:
+                if marker not in turn_text:
+                    violations.append(
+                        f"{where}: defanged marker `{marker}` does not appear in turn_text "
+                        "(the fixture must actually carry the forgery)"
+                    )
+        if expected.get("delivered_verbatim") is not False:
+            violations.append(f"{where}: expected.delivered_verbatim must be false")
+
+    if invariant in STAGED_INVARIANT_ERRORS:
+        validate_staged_invariant(fixture, invariant, expected, where, violations)
+
+    return name
+
+
+def check_tagged_enum(value, tag, known, where, violations):
+    """Validate an internally-tagged serde enum mirror (`{"<tag>": variant}`).
+    Returns the variant name (or None)."""
+    if not isinstance(value, dict) or not isinstance(value.get(tag), str):
+        violations.append(f"{where}: must be an object with a `{tag}` variant tag")
+        return None
+    variant = value[tag]
+    if variant not in known:
+        violations.append(f"{where}: unknown {tag} `{variant}` (known: {', '.join(known)})")
+        return None
+    return variant
+
+
+def check_staged_payload(record, where, violations):
+    """NewMemoryRecord mirror: snake_case kind, non-empty title/body,
+    description present but allowed empty (records.rs field caps)."""
+    if not isinstance(record, dict):
+        violations.append(f"{where}: must be a NewMemoryRecord object")
+        return
+    kind = check_string(record, "kind", where, violations)
+    if kind is not None and kind not in STAGED_KINDS:
+        violations.append(
+            f"{where}: unknown kind `{kind}` (staged payloads use snake_case: "
+            f"{', '.join(STAGED_KINDS)})"
+        )
+    check_string(record, "title", where, violations)
+    check_string(record, "body", where, violations)
+    if not isinstance(record.get("description"), str):
+        violations.append(f"{where}: `description` must be a string (may be empty)")
+
+
+def validate_staged_invariant(fixture, invariant, expected, where, violations):
+    """Staged-validator invariant fixtures: pre-existing `store` state plus a
+    `StagedMutationBatch` the deterministic validator must reject. DATA for
+    the validator's own Rust tests (memory/staged.rs) — --check keeps the
+    wire shapes and referential integrity honest."""
+    known_ids = set()
+    store = fixture.get("store")
+    if not isinstance(store, list):
+        violations.append(f"{where}: staged fixture needs a `store` array (may be empty)")
+        store = []
+    for index, entry in enumerate(store):
+        entry_where = f"{where}: store[{index}]"
+        if not isinstance(entry, dict):
+            violations.append(f"{entry_where}: must be a record-view object")
+            continue
+        record_id = check_string(entry, "id", entry_where, violations)
+        if record_id is not None:
+            if record_id in known_ids:
+                violations.append(f"{entry_where}: duplicate store id `{record_id}`")
+            known_ids.add(record_id)
+        check_tagged_enum(entry.get("scope"), "scope", SCOPE_KINDS, f"{entry_where}.scope", violations)
+        tier = entry.get("trust")
+        if tier not in TRUST_TIERS:
+            violations.append(f"{entry_where}: trust must be one of {', '.join(TRUST_TIERS)}")
+        check_tagged_enum(
+            entry.get("status"), "status", RECORD_STATUSES, f"{entry_where}.status", violations
+        )
+
+    batch = fixture.get("batch")
+    ops = []
+    if not isinstance(batch, dict):
+        violations.append(f"{where}: staged fixture needs a `batch` object")
+    else:
+        check_string(batch, "realm", f"{where}: batch", violations)
+        check_tagged_enum(
+            batch.get("author"), "author", AUTHOR_KINDS, f"{where}: batch.author", violations
+        )
+        ops = batch.get("ops")
+        if not isinstance(ops, list) or not ops:
+            violations.append(f"{where}: batch.ops must be a non-empty array")
+            ops = []
+
+    for index, op in enumerate(ops):
+        op_where = f"{where}: batch.ops[{index}]"
+        op_kind = check_tagged_enum(op, "op", STAGED_OP_KINDS, op_where, violations)
+        if op_kind is None:
+            continue
+        # Referential integrity: every id an op reads must exist in the store
+        # or be created with an explicit id earlier in the batch.
+        reads = list(op.get("derived_from") or [])
+        if op_kind == "supersede":
+            reads.append(op.get("prior"))
+        if op_kind in ("tombstone", "retier", "set_rank"):
+            reads.append(op.get("id"))
+        for read_id in reads:
+            if not isinstance(read_id, str) or not read_id:
+                violations.append(f"{op_where}: referenced record ids must be strings")
+            elif read_id not in known_ids:
+                violations.append(
+                    f"{op_where}: references `{read_id}`, which is neither in the "
+                    "store nor created earlier in the batch"
+                )
+        if op_kind in ("create", "supersede"):
+            check_staged_payload(op.get("record"), f"{op_where}.record", violations)
+            if isinstance(op.get("id"), str) and op["id"]:
+                known_ids.add(op["id"])
+        if op_kind in ("create", "supersede", "retier"):
+            if op.get("trust") not in TRUST_TIERS:
+                violations.append(f"{op_where}: trust must be one of {', '.join(TRUST_TIERS)}")
+        if op_kind == "create":
+            check_tagged_enum(
+                op.get("scope"), "scope", SCOPE_KINDS, f"{op_where}.scope", violations
+            )
+
+    pinned_error = STAGED_INVARIANT_ERRORS[invariant]
+    if expected.get("verdict") != "reject":
+        violations.append(f"{where}: expected.verdict must be \"reject\"")
+    if expected.get("error") != pinned_error:
+        violations.append(
+            f"{where}: expected.error must be `{pinned_error}` for invariant `{invariant}`"
+        )
+    op_index = expected.get("op_index")
+    if not isinstance(op_index, int) or isinstance(op_index, bool) or not (
+        0 <= op_index < max(len(ops), 1)
+    ):
+        violations.append(f"{where}: expected.op_index must index into batch.ops")
+
+    # Cheap structural honesty checks: the fixture must actually carry the
+    # shape its invariant claims to exercise.
+    op_kinds = [op.get("op") for op in ops if isinstance(op, dict)]
+    if invariant == "supersede_cycle_rejected" and "supersede" not in op_kinds:
+        violations.append(f"{where}: supersede-cycle fixture carries no supersede op")
+    if invariant == "staged_tier_ceiling_rejected" and not any(
+        isinstance(op, dict)
+        and op.get("op") == "retier"
+        and op.get("trust") in ("operator", "application")
+        for op in ops
+    ):
+        violations.append(
+            f"{where}: tier-ceiling fixture needs a retier op to operator/application tier"
+        )
+    if invariant == "transitive_laundering_rejected":
+        tainted_store = any(
+            isinstance(entry, dict)
+            and (
+                entry.get("trust") == "untrusted"
+                or (isinstance(entry.get("status"), dict)
+                    and entry["status"].get("status") == "quarantined")
+            )
+            for entry in store
+        )
+        if not tainted_store:
+            violations.append(
+                f"{where}: laundering fixture needs an untrusted/quarantined store record"
+            )
+        if not any(
+            isinstance(op, dict)
+            and op.get("op") == "retier"
+            and op.get("trust") in ("agent_verified", "application", "operator")
+            for op in ops
+        ):
+            violations.append(
+                f"{where}: laundering fixture needs a retier op above agent_observed"
+            )
+
+
+# ── check mode ────────────────────────────────────────────────
+
+
+def run_check(quiet=False):
+    for directory in (
+        PROFILES_DIR,
+        SELECTOR_FIXTURES_DIR,
+        DISTILLER_FIXTURES_DIR,
+        STEWARD_FIXTURES_DIR,
+        HYGIENIST_FIXTURES_DIR,
+        INVARIANT_FIXTURES_DIR,
+    ):
+        if not directory.is_dir():
+            fail_config(f"missing directory {rel(directory)}")
+
+    violations = []
+    profiles = sorted(PROFILES_DIR.glob("*.toml"))
+    selector_fixtures = sorted(SELECTOR_FIXTURES_DIR.glob("*.json"))
+    distiller_fixtures = sorted(DISTILLER_FIXTURES_DIR.glob("*.json"))
+    steward_fixtures = sorted(STEWARD_FIXTURES_DIR.glob("*.json"))
+    hygienist_fixtures = sorted(HYGIENIST_FIXTURES_DIR.glob("*.json"))
+    invariant_fixtures = sorted(INVARIANT_FIXTURES_DIR.glob("*.json"))
+    if not profiles:
+        violations.append(f"{rel(PROFILES_DIR)}: no calibration profiles found")
+    if not selector_fixtures:
+        violations.append(f"{rel(SELECTOR_FIXTURES_DIR)}: no selector fixtures found")
+    if not distiller_fixtures:
+        violations.append(f"{rel(DISTILLER_FIXTURES_DIR)}: no distiller fixtures found")
+    if not steward_fixtures:
+        violations.append(f"{rel(STEWARD_FIXTURES_DIR)}: no steward fixtures found")
+    if not hygienist_fixtures:
+        violations.append(f"{rel(HYGIENIST_FIXTURES_DIR)}: no hygienist fixtures found")
+    if not invariant_fixtures:
+        violations.append(f"{rel(INVARIANT_FIXTURES_DIR)}: no invariant fixtures found")
+
+    for path in profiles:
+        validate_profile(path, violations)
+
+    seen_names = {}
+    for path, validator in (
+        [(p, validate_selector_fixture) for p in selector_fixtures]
+        + [(p, validate_distiller_fixture) for p in distiller_fixtures]
+        + [(p, validate_steward_fixture) for p in steward_fixtures]
+        + [(p, validate_hygienist_fixture) for p in hygienist_fixtures]
+        + [(p, validate_invariant_fixture) for p in invariant_fixtures]
+    ):
+        name = validator(path, violations)
+        if name is None:
+            continue
+        if name in seen_names:
+            violations.append(
+                f"{rel(path)}: fixture name `{name}` already used by {seen_names[name]}"
+            )
+        else:
+            seen_names[name] = str(rel(path))
+
+    if violations:
+        print("memory-evals --check: FAILED\n", file=sys.stderr)
+        for violation in violations:
+            print(f"  {violation}", file=sys.stderr)
+        sys.exit(1)
+    if not quiet:
+        print(
+            "memory-evals --check: OK "
+            f"({len(profiles)} profile(s), {len(selector_fixtures)} selector fixture(s), "
+            f"{len(distiller_fixtures)} distiller fixture(s), "
+            f"{len(steward_fixtures)} steward fixture(s), "
+            f"{len(hygienist_fixtures)} hygienist fixture(s), "
+            f"{len(invariant_fixtures)} invariant fixture(s))"
+        )
+
+
+# ── mock selector ─────────────────────────────────────────────
+
+
+def tokenize(text):
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= MOCK_MIN_TOKEN_LEN
+    }
+
+
+def mock_select(fixture):
+    turn_tokens = tokenize(fixture["turn_text"])
+    suppressed = set(fixture.get("suppressed_ids", []))
+    return {
+        record["id"]
+        for record in fixture["manifest"]
+        if record["id"] not in suppressed and tokenize(record["title"]) & turn_tokens
+    }
+
+
+def run_selector_mock():
+    run_check(quiet=True)
+
+    print("memory-evals: MOCK selector scorecard")
+    print("  selector = exact title-word overlap (deterministic stand-in)")
+    print("  MOCK misses exercise the plumbing only and NEVER fail this run;")
+    print("  live scoring arrives with the real Selector (P1.3).\n")
+
+    total_must, total_hit, total_forbidden, total_violated = 0, 0, 0, 0
+    for path in sorted(SELECTOR_FIXTURES_DIR.glob("*.json")):
+        fixture = json.loads(path.read_text())
+        selected = mock_select(fixture)
+        must = set(fixture["expected"]["must_select"])
+        must_not = set(fixture["expected"]["must_not_select"])
+        hits = must & selected
+        misses = must - selected
+        violated = must_not & selected
+        total_must += len(must)
+        total_hit += len(hits)
+        total_forbidden += len(must_not)
+        total_violated += len(violated)
+
+        status = "ok" if not misses and not violated else "MOCK-MISS"
+        print(f"  [{status:9}] {fixture['name']}")
+        print(f"              selected: {sorted(selected) or '[]'}")
+        if misses:
+            print(f"              missed must_select: {sorted(misses)}")
+        if violated:
+            print(f"              selected must_not_select: {sorted(violated)}")
+
+    print(
+        f"\n  totals: must_select hit {total_hit}/{total_must}; "
+        f"must_not_select violated {total_violated}/{total_forbidden}"
+    )
+    print("  MOCK run complete (informational only, always exit 0).")
+
+
+# ── live selector (P1.3) ─────────────────────────────────────
+
+
+def selector_eval_cmd():
+    override = os.environ.get("MEMORY_EVALS_SELECTOR_EVAL")
+    if override:
+        return tuple(override.split())
+    return DEFAULT_SELECTOR_EVAL_CMD
+
+
+def selector_profile_path():
+    """The selector-stage calibration profile the live run scores against."""
+    for path in sorted(PROFILES_DIR.glob("*.toml")):
+        try:
+            profile = load_profile(path)
+        except (OSError, ProfileTomlDecodeError):
+            continue
+        if profile.get("stage") == "selector":
+            return path
+    fail_config("no selector-stage profile in tests/memory-evals/profiles/")
+
+
+def invoke_selector_eval(payload, mock):
+    """One selector-eval invocation. Returns (exit_code, parsed_or_None,
+    stderr_text)."""
+    cmd = list(selector_eval_cmd())
+    if mock:
+        cmd.append("--mock")
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=REPO_ROOT,
+            env=_eval_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail_config(f"cannot run selector-eval ({' '.join(cmd)}): {exc}")
+    if proc.returncode != 0:
+        return proc.returncode, None, proc.stderr
+    try:
+        return 0, json.loads(proc.stdout.strip().splitlines()[-1]), proc.stderr
+    except (json.JSONDecodeError, IndexError) as exc:
+        fail_config(f"selector-eval produced unparseable output: {exc}\n{proc.stdout}")
+
+
+def run_selector_live():
+    run_check(quiet=True)
+    profile_path = selector_profile_path()
+    fixtures = sorted(SELECTOR_FIXTURES_DIR.glob("*.json"))
+
+    if os.environ.get("MEMORY_EVALS_FORCE_MOCK") == "1":
+        # Deterministic plumbing lane for tests: never attempts a live call
+        # (a dev machine with resolvable auth would otherwise burn real
+        # model calls inside a test run).
+        live = False
+        print("memory-evals: LIVE selector forced to --mock (MEMORY_EVALS_FORCE_MOCK=1)\n")
+    else:
+        # Auth probe: one tiny live call decides live-vs-SKIP for the run.
+        probe = {
+            "manifest": [
+                {
+                    "id": "probe-1",
+                    "kind": "Fact",
+                    "title": "auth probe",
+                    "description": "",
+                    "age_days": 0,
+                    "rank": None,
+                }
+            ],
+            "turn_text": "auth probe",
+            "profile_path": str(profile_path),
+        }
+        code, _, stderr = invoke_selector_eval(probe, mock=False)
+        live = code == 0
+        if code == EXIT_NO_AUTH:
+            print("memory-evals: LIVE selector SKIPPED — no resolvable provider auth")
+            print("  (selector-eval exit 3; running the --mock plumbing path instead;")
+            print("   informational only, never gates)\n")
+        elif code != 0:
+            fail_config(f"selector-eval live probe failed (exit {code}):\n{stderr}")
+
+    label = "LIVE" if live else "MOCK-fallback"
+    print(f"memory-evals: {label} selector scorecard")
+    print(f"  profile: {rel(profile_path)}")
+    print(f"  {LIVE_RUNS_PER_FIXTURE} runs per fixture, manifest shuffled per run;")
+    print("  §11 invariant: identical selected_ids across runs\n")
+
+    regressions = 0
+    for path in fixtures:
+        fixture = json.loads(path.read_text())
+        runs = []
+        for run_index in range(LIVE_RUNS_PER_FIXTURE):
+            manifest = list(fixture["manifest"])
+            random.Random(f"{fixture['name']}-{run_index}").shuffle(manifest)
+            payload = {
+                "manifest": manifest,
+                "turn_text": fixture["turn_text"],
+                "suppressed_ids": fixture.get("suppressed_ids", []),
+                "profile_path": str(profile_path),
+            }
+            code, result, stderr = invoke_selector_eval(payload, mock=not live)
+            if code == EXIT_NO_AUTH and live:
+                fail_config("provider auth disappeared mid-run; rerun the harness")
+            if code != 0:
+                fail_config(f"selector-eval failed on {fixture['name']} (exit {code}):\n{stderr}")
+            runs.append(sorted(result["selected_ids"]))
+
+        selected = set(runs[0])
+        must = set(fixture["expected"]["must_select"])
+        must_not = set(fixture["expected"]["must_not_select"])
+        misses = must - selected
+        violated = must_not & selected
+        unstable = any(run != runs[0] for run in runs[1:])
+        failed = bool(misses or violated or unstable)
+        regressions += failed
+
+        status = ("FAIL" if live else "MOCK-MISS") if failed else "ok"
+        print(f"  [{status:9}] {fixture['name']}")
+        print(f"              selected: {runs[0] or '[]'}")
+        if misses:
+            print(f"              missed must_select: {sorted(misses)}")
+        if violated:
+            print(f"              selected must_not_select: {sorted(violated)}")
+        if unstable:
+            print(f"              UNSTABLE under shuffle: {runs}")
+
+    print(f"\n  totals: {regressions} fixture(s) failing of {len(fixtures)}")
+    if live and regressions:
+        print("  LIVE run FAILED — scorecard regression (§11).", file=sys.stderr)
+        sys.exit(1)
+    if live:
+        print("  LIVE run clean.")
+    else:
+        print("  MOCK-fallback run complete (informational only, exit 0).")
+
+
+# ── distiller (§8.4) ─────────────────────────────────────────
+
+DEFAULT_DISTILLER_EVAL_CMD = (
+    str(REPO_ROOT / "scripts" / "repo-cargo"),
+    "run",
+    "--quiet",
+    "--bin",
+    "distiller-eval",
+    "--",
+)
+
+
+def distiller_eval_cmd():
+    override = os.environ.get("MEMORY_EVALS_DISTILLER_EVAL")
+    if override:
+        return tuple(override.split())
+    return DEFAULT_DISTILLER_EVAL_CMD
+
+
+def distiller_profile_path():
+    for path in sorted(PROFILES_DIR.glob("*.toml")):
+        try:
+            profile = load_profile(path)
+        except (OSError, ProfileTomlDecodeError):
+            continue
+        if profile.get("stage") == "distiller":
+            return path
+    fail_config("no distiller-stage profile in tests/memory-evals/profiles/")
+
+
+def invoke_distiller_eval(payload, mock):
+    """One distiller-eval invocation. Returns (exit_code, parsed_or_None,
+    stderr_text)."""
+    cmd = list(distiller_eval_cmd())
+    if mock:
+        cmd.append("--mock")
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=REPO_ROOT,
+            env=_eval_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail_config(f"cannot run distiller-eval ({' '.join(cmd)}): {exc}")
+    if proc.returncode != 0:
+        return proc.returncode, None, proc.stderr
+    try:
+        return 0, json.loads(proc.stdout.strip().splitlines()[-1]), proc.stderr
+    except (json.JSONDecodeError, IndexError) as exc:
+        fail_config(f"distiller-eval produced unparseable output: {exc}\n{proc.stdout}")
+
+
+def score_distiller_fixture(fixture, result):
+    """Score one distiller-eval result. Returns (extraction_misses,
+    hard_failures) — extraction misses are LLM-judgment gaps (informational
+    in mock), hard failures are deterministic-verdict mismatches."""
+    expected = fixture["expected"]
+    ops = result["ops"]
+    op_text = " ".join(f"{op['title']} {op['body']}" for op in ops).lower()
+    misses, hard = [], []
+    if expected.get("noop"):
+        if ops:
+            misses.append(f"expected noop, got {len(ops)} op(s)")
+    else:
+        proposals = expected.get("proposals", {})
+        for needle in proposals.get("must_contain", []):
+            if needle.lower() not in op_text:
+                misses.append(f"missing must_contain `{needle}`")
+        for needle in proposals.get("must_not_contain", []):
+            if needle.lower() in op_text:
+                misses.append(f"contains must_not_contain `{needle}`")
+    if "quarantined" in expected and result.get("quarantined") != expected["quarantined"]:
+        # The gate verdict is deterministic (§10.1); a mismatch is a real
+        # failure in any mode.
+        hard.append(
+            f"quarantined verdict {result.get('quarantined')} != "
+            f"expected {expected['quarantined']}"
+        )
+    return misses, hard
+
+
+def distiller_payload(fixture):
+    return {
+        "transcript": fixture["transcript"],
+        "existing_manifest": fixture.get("existing_manifest", []),
+        "tombstones": fixture.get("tombstones", []),
+        "taint": fixture.get("taint", {"session_tainted": False}),
+        "profile_path": str(distiller_profile_path()),
+    }
+
+
+def run_distiller(live_requested):
+    run_check(quiet=True)
+    fixtures = sorted(DISTILLER_FIXTURES_DIR.glob("*.json"))
+
+    live = False
+    if live_requested and os.environ.get("MEMORY_EVALS_FORCE_MOCK") == "1":
+        print("memory-evals: LIVE distiller forced to --mock (MEMORY_EVALS_FORCE_MOCK=1)\n")
+    elif live_requested:
+        probe = {
+            "transcript": [{"role": "user", "text": "auth probe"}],
+            "existing_manifest": [],
+            "tombstones": [],
+            "profile_path": str(distiller_profile_path()),
+        }
+        code, _, stderr = invoke_distiller_eval(probe, mock=False)
+        live = code == 0
+        if code == EXIT_NO_AUTH:
+            print("memory-evals: LIVE distiller SKIPPED — no resolvable provider auth")
+            print("  (distiller-eval exit 3; running the --mock plumbing path instead;")
+            print("   extraction scoring informational only; quarantine verdicts still gate)\n")
+        elif code != 0:
+            fail_config(f"distiller-eval live probe failed (exit {code}):\n{stderr}")
+
+    label = "LIVE" if live else ("MOCK-fallback" if live_requested else "MOCK")
+    print(f"memory-evals: {label} distiller scorecard")
+    print(f"  profile: {rel(distiller_profile_path())}")
+    if not live:
+        print("  mock distiller extracts nothing (the doctrine's preferred output);")
+        print("  extraction misses are informational; deterministic quarantine")
+        print("  verdicts gate in every mode.\n")
+    else:
+        print("  §8.4 doctrine scorecard: noop / must_contain / must_not_contain +")
+        print("  deterministic quarantine verdicts\n")
+
+    extraction_regressions = 0
+    hard_failures = 0
+    for path in fixtures:
+        fixture = json.loads(path.read_text())
+        code, result, stderr = invoke_distiller_eval(distiller_payload(fixture), mock=not live)
+        if code == EXIT_NO_AUTH and live:
+            fail_config("provider auth disappeared mid-run; rerun the harness")
+        if code != 0:
+            fail_config(f"distiller-eval failed on {fixture['name']} (exit {code}):\n{stderr}")
+        misses, hard = score_distiller_fixture(fixture, result)
+        extraction_regressions += bool(misses)
+        hard_failures += bool(hard)
+        if hard:
+            status = "FAIL"
+        elif misses:
+            status = "FAIL" if live else "MOCK-MISS"
+        else:
+            status = "ok"
+        print(f"  [{status:9}] {fixture['name']}")
+        print(f"              ops: {len(result['ops'])}, quarantined: {result['quarantined']}")
+        for miss in misses:
+            print(f"              {miss}")
+        for failure in hard:
+            print(f"              {failure}")
+
+    print(
+        f"\n  totals: {extraction_regressions} extraction miss(es), "
+        f"{hard_failures} deterministic failure(s) of {len(fixtures)} fixture(s)"
+    )
+    if hard_failures:
+        print("  run FAILED — deterministic quarantine verdict mismatch.", file=sys.stderr)
+        sys.exit(1)
+    if live and extraction_regressions:
+        print("  LIVE run FAILED — scorecard regression (§11).", file=sys.stderr)
+        sys.exit(1)
+    if live:
+        print("  LIVE run clean.")
+    else:
+        print("  MOCK run complete (extraction scoring informational, exit 0).")
+
+
+# ── steward (§8.5) ───────────────────────────────────────────
+
+DEFAULT_STEWARD_EVAL_CMD = (
+    str(REPO_ROOT / "scripts" / "repo-cargo"),
+    "run",
+    "--quiet",
+    "--bin",
+    "steward-eval",
+    "--",
+)
+
+
+def steward_eval_cmd():
+    override = os.environ.get("MEMORY_EVALS_STEWARD_EVAL")
+    if override:
+        return tuple(override.split())
+    return DEFAULT_STEWARD_EVAL_CMD
+
+
+def steward_profile_path():
+    for path in sorted(PROFILES_DIR.glob("*.toml")):
+        try:
+            profile = load_profile(path)
+        except (OSError, ProfileTomlDecodeError):
+            continue
+        if profile.get("stage") == "steward":
+            return path
+    fail_config("no steward-stage profile in tests/memory-evals/profiles/")
+
+
+def invoke_steward_eval(payload, mock):
+    cmd = list(steward_eval_cmd())
+    if mock:
+        cmd.append("--mock")
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=REPO_ROOT,
+            env=_eval_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail_config(f"cannot run steward-eval ({' '.join(cmd)}): {exc}")
+    if proc.returncode != 0:
+        return proc.returncode, None, proc.stderr
+    try:
+        return 0, json.loads(proc.stdout.strip().splitlines()[-1]), proc.stderr
+    except (json.JSONDecodeError, IndexError) as exc:
+        fail_config(f"steward-eval produced unparseable output: {exc}\n{proc.stdout}")
+
+
+def steward_payload(fixture, mock):
+    payload = {
+        "records": fixture.get("records", []),
+        "proposals": fixture.get("proposals", []),
+        "mob_context": fixture.get("mob_context"),
+        "profile_path": str(steward_profile_path()),
+    }
+    if mock:
+        payload["scripted_reply"] = fixture.get("scripted_reply")
+    return payload
+
+
+def score_steward_fixture(fixture, result, live):
+    """Score one steward-eval result. Returns (judgment_misses,
+    hard_failures) — hard failures are deterministic staged-validator law
+    (§10.2) and gate in every mode; judgment misses gate only live."""
+    expected = fixture["expected"]
+    misses, hard = [], []
+    validator = result.get("validator", "")
+    if "validator_rejects" in expected:
+        needle = expected["validator_rejects"].lower()
+        if not validator.startswith("rejected"):
+            hard.append(f"validator accepted the op group (`{validator}`); expected a reject")
+        elif needle not in validator.lower():
+            hard.append(f"validator rejected for the wrong reason: `{validator}` (expected `{needle}`)")
+    elif "validator" in expected:
+        pin = expected["validator"]
+        if pin == "ok":
+            if not validator.startswith("ok"):
+                hard.append(f"validator rejected: `{validator}`")
+        elif validator != pin:
+            hard.append(f"validator `{validator}` != expected `{pin}`")
+    # Op-shape expectations (deterministic in scripted/mock mode).
+    op_counts = {}
+    for op in result.get("ops", []):
+        op_counts[op["op"]] = op_counts.get(op["op"], 0) + 1
+    for op_kind, count in expected.get("ops", {}).items():
+        got = op_counts.get(op_kind, 0)
+        if got != count:
+            (hard if not live else misses).append(
+                f"expected {count} `{op_kind}` op(s), got {got}"
+            )
+    for proposal_id, verdict in expected.get("proposal_verdicts", {}).items():
+        got = result.get("proposal_verdicts", {}).get(proposal_id)
+        if got != verdict:
+            (hard if not live else misses).append(
+                f"proposal `{proposal_id}`: verdict `{got}` != expected `{verdict}`"
+            )
+    if "contradictions" in expected:
+        operational = sum(
+            1 for finding in result.get("contradictions", []) if finding.get("operational")
+        )
+        want = expected["contradictions"].get("operational", 0)
+        if operational != want:
+            (hard if not live else misses).append(
+                f"expected {want} operational contradiction(s), got {operational}"
+            )
+    # Forbidden quarantine verdicts: in scripted mode the reply IS the
+    # attack, so the forbidden verdict being present is expected input —
+    # the validator gate above is what must hold. Live mode gates on the
+    # judgment itself.
+    if live:
+        allowed = expected.get("live", {}).get("quarantine_verdicts_allowed", {})
+        for record_id, verdicts in allowed.items():
+            got = result.get("quarantine_verdicts", {}).get(record_id)
+            if got is not None and got not in verdicts:
+                misses.append(
+                    f"quarantine `{record_id}`: verdict `{got}` not in allowed {verdicts}"
+                )
+    return misses, hard
+
+
+def run_steward(live_requested):
+    run_check(quiet=True)
+    fixtures = sorted(STEWARD_FIXTURES_DIR.glob("*.json"))
+
+    live = False
+    if live_requested and os.environ.get("MEMORY_EVALS_FORCE_MOCK") == "1":
+        print("memory-evals: LIVE steward forced to --mock (MEMORY_EVALS_FORCE_MOCK=1)\n")
+    elif live_requested:
+        probe = {
+            "records": [],
+            "proposals": [],
+            "profile_path": str(steward_profile_path()),
+        }
+        code, _, stderr = invoke_steward_eval(probe, mock=False)
+        live = code == 0
+        if code == EXIT_NO_AUTH:
+            print("memory-evals: LIVE steward SKIPPED — no resolvable provider auth")
+            print("  (steward-eval exit 3; running the scripted --mock path instead;")
+            print("   judgment scoring informational only; validator law still gates)\n")
+        elif code != 0:
+            fail_config(f"steward-eval live probe failed (exit {code}):\n{stderr}")
+
+    label = "LIVE" if live else ("MOCK-fallback" if live_requested else "MOCK")
+    print(f"memory-evals: {label} steward scorecard")
+    print(f"  profile: {rel(steward_profile_path())}")
+    if not live:
+        print("  scripted replies exercise the production parse → sanitize →")
+        print("  staged-validator path; §10.2 lattice law gates in every mode.\n")
+    else:
+        print("  §8.5 doctrine scorecard: merges, contradiction resolution,")
+        print("  promotion rulings, quarantine verdicts + validator law\n")
+
+    judgment_misses_total = 0
+    hard_failures = 0
+    for path in fixtures:
+        fixture = json.loads(path.read_text())
+        code, result, stderr = invoke_steward_eval(
+            steward_payload(fixture, mock=not live), mock=not live
+        )
+        if code == EXIT_NO_AUTH and live:
+            fail_config("provider auth disappeared mid-run; rerun the harness")
+        if code != 0:
+            fail_config(f"steward-eval failed on {fixture['name']} (exit {code}):\n{stderr}")
+        misses, hard = score_steward_fixture(fixture, result, live)
+        judgment_misses_total += bool(misses)
+        hard_failures += bool(hard)
+        if hard:
+            status = "FAIL"
+        elif misses:
+            status = "FAIL" if live else "MOCK-MISS"
+        else:
+            status = "ok"
+        print(f"  [{status:9}] {fixture['name']}")
+        print(
+            f"              ops: {len(result.get('ops', []))}, "
+            f"validator: {result.get('validator')}"
+        )
+        for miss in misses:
+            print(f"              {miss}")
+        for failure in hard:
+            print(f"              {failure}")
+
+    print(
+        f"\n  totals: {judgment_misses_total} judgment miss(es), "
+        f"{hard_failures} deterministic failure(s) of {len(fixtures)} fixture(s)"
+    )
+    if hard_failures:
+        print("  run FAILED — deterministic validator/verdict mismatch.", file=sys.stderr)
+        sys.exit(1)
+    if live and judgment_misses_total:
+        print("  LIVE run FAILED — scorecard regression (§11).", file=sys.stderr)
+        sys.exit(1)
+    if live:
+        print("  LIVE run clean.")
+    else:
+        print("  MOCK run complete (judgment scoring informational, exit 0).")
+
+
+# ── hygienist (§8.6) ─────────────────────────────────────────
+
+DEFAULT_HYGIENIST_EVAL_CMD = (
+    str(REPO_ROOT / "scripts" / "repo-cargo"),
+    "run",
+    "--quiet",
+    "--bin",
+    "hygienist-eval",
+    "--",
+)
+
+
+def hygienist_eval_cmd():
+    override = os.environ.get("MEMORY_EVALS_HYGIENIST_EVAL")
+    if override:
+        return tuple(override.split())
+    return DEFAULT_HYGIENIST_EVAL_CMD
+
+
+def hygienist_profile_path():
+    for path in sorted(PROFILES_DIR.glob("*.toml")):
+        try:
+            profile = load_profile(path)
+        except (OSError, ProfileTomlDecodeError):
+            continue
+        if profile.get("stage") == "hygienist":
+            return path
+    fail_config("no hygienist-stage profile in tests/memory-evals/profiles/")
+
+
+def invoke_hygienist_eval(payload, mock):
+    cmd = list(hygienist_eval_cmd())
+    if mock:
+        cmd.append("--mock")
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=REPO_ROOT,
+            env=_eval_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail_config(f"cannot run hygienist-eval ({' '.join(cmd)}): {exc}")
+    if proc.returncode != 0:
+        return proc.returncode, None, proc.stderr
+    try:
+        return 0, json.loads(proc.stdout.strip()), proc.stderr
+    except json.JSONDecodeError as exc:
+        fail_config(f"hygienist-eval produced unparseable output: {exc}\n{proc.stdout}")
+
+
+def hygienist_payload(fixture, mock):
+    payload = {
+        "transcript": fixture.get("transcript", []),
+        "span_references": fixture.get("span_references", []),
+        "sequenced_after_harvest": fixture.get("sequenced_after_harvest", False),
+        "profile_path": str(hygienist_profile_path()),
+    }
+    if fixture.get("distilled_cursor") is not None:
+        payload["distilled_cursor"] = fixture["distilled_cursor"]
+    if mock:
+        payload["scripted_reply"] = fixture.get("scripted_reply")
+    return payload
+
+
+def score_hygienist_fixture(fixture, result, live):
+    """Score one hygienist-eval result. Returns (judgment_misses,
+    hard_failures) — the §8.6 validator verdict (quarantine hard-block,
+    role law, §8.4 ordering) is deterministic law and gates in every mode;
+    op shapes gate mock (scripted), judgment gates live."""
+    expected = fixture["expected"]
+    misses, hard = [], []
+    validator = result.get("validator", "")
+    pin = expected.get("validator", "ok")
+    if pin == "ok":
+        # Live models may legitimately propose nothing or different ops; the
+        # validator must accept whatever they proposed.
+        if not validator.startswith("ok"):
+            hard.append(f"validator blocked: `{validator}`")
+    elif live:
+        # Blocked expectations are attack/ordering fixtures: whatever the
+        # model proposes, ops touching the pinned spans must block. A live
+        # model that proposes NOTHING trivially satisfies the safety
+        # property, so only a wrong acceptance is a failure.
+        if result.get("ops") and not validator.startswith("blocked"):
+            hard.append(
+                f"validator accepted ops on a blocked fixture (`{validator}`)"
+            )
+    elif validator != pin:
+        hard.append(f"validator `{validator}` != expected `{pin}`")
+    op_counts = {}
+    for op in result.get("ops", []):
+        op_counts[op["op"]] = op_counts.get(op["op"], 0) + 1
+    for op_kind, count in expected.get("ops", {}).items():
+        got = op_counts.get(op_kind, 0)
+        if got != count:
+            (misses if live else hard).append(
+                f"expected {count} `{op_kind}` op(s), got {got}"
+            )
+    if live:
+        for index in expected.get("live", {}).get("must_not_touch", []):
+            for op in result.get("ops", []):
+                start, end = op["range"]
+                if start <= index < end:
+                    misses.append(
+                        f"op `{op['op']}` [{start}, {end}) touches protected message [{index}]"
+                    )
+    return misses, hard
+
+
+def run_hygienist(live_requested):
+    run_check(quiet=True)
+    fixtures = sorted(HYGIENIST_FIXTURES_DIR.glob("*.json"))
+
+    live = False
+    if live_requested and os.environ.get("MEMORY_EVALS_FORCE_MOCK") == "1":
+        print("memory-evals: LIVE hygienist forced to --mock (MEMORY_EVALS_FORCE_MOCK=1)\n")
+    elif live_requested:
+        probe = {
+            "transcript": [{"role": "user", "text": "auth probe"}],
+            "sequenced_after_harvest": True,
+            "profile_path": str(hygienist_profile_path()),
+        }
+        code, _, stderr = invoke_hygienist_eval(probe, mock=False)
+        live = code == 0
+        if code == EXIT_NO_AUTH:
+            print("memory-evals: LIVE hygienist SKIPPED — no resolvable provider auth")
+            print("  (hygienist-eval exit 3; running the scripted --mock path instead;")
+            print("   judgment scoring informational only; §8.6 validator law still gates)\n")
+        elif code != 0:
+            fail_config(f"hygienist-eval live probe failed (exit {code}):\n{stderr}")
+
+    label = "LIVE" if live else ("MOCK-fallback" if live_requested else "MOCK")
+    print(f"memory-evals: {label} hygienist scorecard")
+    print(f"  profile: {rel(hygienist_profile_path())}")
+    if not live:
+        print("  scripted replies exercise the production parse → §8.6 validator →")
+        print("  replacement-construction path; quarantine hard-blocks, role law,")
+        print("  and the §8.4 ordering invariant gate in every mode.\n")
+    else:
+        print("  §8.6 doctrine scorecard: dead-tool pruning, scaffolding collapse,")
+        print("  decision preservation + validator law\n")
+
+    judgment_misses_total = 0
+    hard_failures = 0
+    for path in fixtures:
+        fixture = json.loads(path.read_text())
+        code, result, stderr = invoke_hygienist_eval(
+            hygienist_payload(fixture, mock=not live), mock=not live
+        )
+        if code == EXIT_NO_AUTH and live:
+            fail_config("provider auth disappeared mid-run; rerun the harness")
+        if code != 0:
+            fail_config(f"hygienist-eval failed on {fixture['name']} (exit {code}):\n{stderr}")
+        misses, hard = score_hygienist_fixture(fixture, result, live)
+        judgment_misses_total += bool(misses)
+        hard_failures += bool(hard)
+        if hard:
+            status = "FAIL"
+        elif misses:
+            status = "FAIL" if live else "MOCK-MISS"
+        else:
+            status = "ok"
+        print(f"  [{status:9}] {fixture['name']}")
+        print(
+            f"              ops: {len(result.get('ops', []))}, "
+            f"validator: {result.get('validator')}"
+        )
+        for miss in misses:
+            print(f"              {miss}")
+        for failure in hard:
+            print(f"              {failure}")
+
+    print(
+        f"\n  totals: {judgment_misses_total} judgment miss(es), "
+        f"{hard_failures} deterministic failure(s) of {len(fixtures)} fixture(s)"
+    )
+    if hard_failures:
+        print("  run FAILED — deterministic §8.6 validator mismatch.", file=sys.stderr)
+        sys.exit(1)
+    if live and judgment_misses_total:
+        print("  LIVE run FAILED — scorecard regression (§11).", file=sys.stderr)
+        sys.exit(1)
+    if live:
+        print("  LIVE run clean.")
+    else:
+        print("  MOCK run complete (judgment scoring informational, exit 0).")
+
+
+# ── entry point ───────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="memory-evals",
+        description="Memory calibration harness (tests/memory-evals/, arch doc §11).",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate profiles and fixtures (default when no mode is given)",
+    )
+    parser.add_argument("--stage", choices=RUNNABLE_STAGES, help="judgment stage to run")
+    parser.add_argument(
+        "--mode", choices=("mock", "live"), help="run the stage against its fixtures"
+    )
+    args = parser.parse_args()
+
+    if args.mode and not args.stage:
+        parser.error("--mode requires --stage")
+    if args.stage == "distiller":
+        if args.mode in ("mock", "live"):
+            run_distiller(live_requested=args.mode == "live")
+            return
+    if args.stage == "steward":
+        if args.mode in ("mock", "live"):
+            run_steward(live_requested=args.mode == "live")
+            return
+    if args.stage == "hygienist":
+        if args.mode in ("mock", "live"):
+            run_hygienist(live_requested=args.mode == "live")
+            return
+    if args.mode == "live":
+        run_selector_live()
+        return
+    if args.mode == "mock":
+        run_selector_mock()
+        return
+    run_check()
+
+
+if __name__ == "__main__":
+    main()

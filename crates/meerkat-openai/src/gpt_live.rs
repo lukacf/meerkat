@@ -871,7 +871,7 @@ impl GptLiveBrokerSessionState {
         turn: GptLiveTurnRef,
         transcript: String,
     ) {
-        debug_assert!(pending.turn == turn);
+        debug_assert_eq!(pending.turn, turn);
         self.queued_observations
             .push_back(GptLiveBrokerObservation::ClientDelegationFinal {
                 delegation: pending.delegation,

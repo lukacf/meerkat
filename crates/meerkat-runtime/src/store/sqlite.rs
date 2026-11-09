@@ -648,18 +648,11 @@ CREATE TABLE IF NOT EXISTS runtime_direct_member_high_waters (
         })
     }
 
-    struct PreFloorNoopWake;
-
-    impl std::task::Wake for PreFloorNoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn accept_pre_0_8_10_input_immediately(
         driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
         input: crate::input::Input,
     ) -> Result<crate::accept::AcceptOutcome, String> {
-        let waker = std::task::Waker::from(Arc::new(PreFloorNoopWake));
-        let mut context = std::task::Context::from_waker(&waker);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         let mut future = Box::pin(crate::traits::RuntimeDriver::accept_input(driver, input));
         match std::future::Future::poll(future.as_mut(), &mut context) {
             std::task::Poll::Ready(result) => result.map_err(|error| error.to_string()),
@@ -3084,6 +3077,69 @@ CREATE TABLE runtime_service_call_audit (
             retired_objects: &[],
         };
 
+    /// Scoped tool grants: one row per grant (its descriptor and its
+    /// generated `ToolGrantLifecycleMachine` state), filed under its
+    /// subject's key, and each subject's append-only audit log.
+    const CREATE_RUNTIME_TOOL_GRANTS_SCHEMA_SQL: &str = r"
+CREATE TABLE runtime_tool_grants (
+    grant_id TEXT PRIMARY KEY NOT NULL,
+    subject_key TEXT NOT NULL,
+    record_json BLOB NOT NULL
+);
+CREATE INDEX idx_runtime_tool_grants_subject ON runtime_tool_grants (subject_key);
+CREATE TABLE runtime_tool_grant_audit (
+    subject_key TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (subject_key, sequence)
+)";
+
+    fn migration_0001_runtime_tool_grants(
+        tx: &rusqlite::Transaction<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute_batch(CREATE_RUNTIME_TOOL_GRANTS_SCHEMA_SQL)
+    }
+
+    /// The scoped tool grants' own schema domain, beside
+    /// [`RUNTIME_STORE_DOMAIN`] in the runtime store's file.
+    ///
+    /// Like [`RUNTIME_SERVICE_CALL_AUDIT_DOMAIN`], it is NOT applied by
+    /// [`open_runtime_connection`]: the first write of a grant or audit row
+    /// (a refused call's audit row is one) provisions it
+    /// ([`open_runtime_tool_grants_write_connection`]), so only a file where
+    /// such a row was written carries the domain row and its tables. A binary
+    /// that does not know the domain leaves it alone as a foreign co-tenant:
+    /// the runtime store's own domain is unchanged, and such a binary still
+    /// opens the file.
+    pub const RUNTIME_TOOL_GRANTS_DOMAIN: meerkat_sqlite::SchemaDomain =
+        meerkat_sqlite::SchemaDomain {
+            name: "runtime-tool-grants",
+            migrations: &[meerkat_sqlite::Migration {
+                version: 1,
+                name: "tool-grants",
+                apply: migration_0001_runtime_tool_grants,
+            }],
+            initialize_current: migration_0001_runtime_tool_grants,
+            allowed_existing_versions: &[1],
+            bridge_recoverable_versions: &[],
+            released_predecessors: &[],
+            owned_objects: &[
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_tool_grants",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Index,
+                    name: "idx_runtime_tool_grants_subject",
+                },
+                meerkat_sqlite::SchemaObject {
+                    kind: meerkat_sqlite::SchemaObjectKind::Table,
+                    name: "runtime_tool_grant_audit",
+                },
+            ],
+            retired_objects: &[],
+        };
+
     #[cfg(test)]
     mod schema_floor_tests {
         use super::*;
@@ -5464,6 +5520,103 @@ CREATE TABLE runtime_service_call_audit (
             conn,
             _guard: guard,
         })
+    }
+
+    /// Scoped tool grant read connection: `None` when the store's file or
+    /// the grant domain is absent, since a store where no grant was written
+    /// holds no rows. It never creates the store or provisions the domain.
+    fn open_runtime_tool_grants_read_connection(
+        path: &Path,
+    ) -> Result<Option<RuntimeConn>, RuntimeStoreError> {
+        if runtime_database_absent(path) {
+            meerkat_sqlite::OperationGuard::admit_missing_database(path)
+                .map_err(map_shared_sqlite_error)?;
+            return Ok(None);
+        }
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let conn = match meerkat_sqlite::open_with(
+            path,
+            meerkat_sqlite::ConnectionProfile::Primary { create: false },
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[&RUNTIME_TOOL_GRANTS_DOMAIN],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        ) {
+            Ok(conn) => conn,
+            // Removed between the check and the open: still no rows.
+            Err(_) if runtime_database_absent(path) => return Ok(None),
+            Err(error) => return Err(map_shared_sqlite_error(error)),
+        };
+        let version = meerkat_sqlite::preflight_domain_version(&conn, &RUNTIME_TOOL_GRANTS_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        Ok(version.map(|_| RuntimeConn {
+            conn,
+            _guard: guard,
+        }))
+    }
+
+    /// Scoped tool grant write connection: provisions the grant domain on
+    /// first use. This is the ONLY place the `runtime-tool-grants` ledger
+    /// row is stamped: writing a grant marks the file, opening a realm or
+    /// reading grants does not.
+    fn open_runtime_tool_grants_write_connection(
+        path: &Path,
+    ) -> Result<RuntimeConn, RuntimeStoreError> {
+        let guard =
+            meerkat_sqlite::OperationGuard::for_database(path).map_err(map_shared_sqlite_error)?;
+        let mut conn = meerkat_sqlite::open_with(
+            path,
+            meerkat_sqlite::ConnectionProfile::PRIMARY,
+            meerkat_sqlite::OpenOptions {
+                schema_preflight: &[&RUNTIME_TOOL_GRANTS_DOMAIN],
+                ..meerkat_sqlite::OpenOptions::default()
+            },
+        )
+        .map_err(map_shared_sqlite_error)?;
+        meerkat_sqlite::apply_domain_migrations(&mut conn, &RUNTIME_TOOL_GRANTS_DOMAIN)
+            .map_err(map_shared_sqlite_error)?;
+        Ok(RuntimeConn {
+            conn,
+            _guard: guard,
+        })
+    }
+
+    /// Append `audit_rows` to `subject_key`'s scoped tool grant audit log
+    /// inside `tx`, after every row the subject holds.
+    fn append_tool_grant_audit_rows(
+        tx: &Transaction<'_>,
+        subject_key: &str,
+        audit_rows: &[Vec<u8>],
+    ) -> Result<(), RuntimeStoreError> {
+        if audit_rows.is_empty() {
+            return Ok(());
+        }
+        // The subject's next sequence, read in the write's own transaction:
+        // rows follow every row the subject holds, whichever call or process
+        // appended them.
+        let next: i64 = tx
+            .query_row(
+                r"
+                SELECT COALESCE(MAX(sequence) + 1, 0)
+                  FROM runtime_tool_grant_audit
+                 WHERE subject_key = ?1
+                ",
+                params![subject_key],
+                |row| row.get(0),
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        for (sequence, record_json) in (next..).zip(audit_rows) {
+            tx.execute(
+                r"
+                INSERT INTO runtime_tool_grant_audit (subject_key, sequence, record_json)
+                VALUES (?1, ?2, ?3)
+                ",
+                params![subject_key, sequence, record_json],
+            )
+            .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+        }
+        Ok(())
     }
 
     #[track_caller]
@@ -11205,6 +11358,24 @@ ORDER BY runtime_id";
     fn list_runtimes_with_recovery_work_in(
         conn: &Connection,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
+        runtimes_with_recovery_work_in(conn, None)
+    }
+
+    /// Whether `runtime_id` holds recovery work: the scan's one statement and
+    /// predicate, filtered to that runtime. A runtime with no row holds none.
+    fn runtime_holds_recovery_work_in(
+        conn: &Connection,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        Ok(!runtimes_with_recovery_work_in(conn, Some(runtime_id.0.as_str()))?.is_empty())
+    }
+
+    /// The runtimes with recovery work (`list_runtimes_with_recovery_work_in`):
+    /// every runtime, or only `only` when it is given.
+    fn runtimes_with_recovery_work_in(
+        conn: &Connection,
+        only: Option<&str>,
+    ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
         let query = format!(
             r"
             WITH candidates(runtime_id) AS (
@@ -11253,6 +11424,7 @@ ORDER BY runtime_id";
                 ON catalog.runtime_id = candidates.runtime_id
             LEFT JOIN runtime_ops_lifecycle AS ops
                 ON ops.runtime_id = candidates.runtime_id
+            WHERE ?1 IS NULL OR candidates.runtime_id = ?1
             ORDER BY candidates.runtime_id
             "
         );
@@ -11260,7 +11432,7 @@ ORDER BY runtime_id";
             .prepare(&query)
             .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([only], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     BootFactsV1 {
@@ -16545,6 +16717,215 @@ ORDER BY runtime_id";
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
+        async fn load_tool_grant(
+            &self,
+            grant_id: &str,
+        ) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let grant_id = grant_id.to_string();
+            spawn_blocking_holding_claim(move || {
+                let Some(conn) = open_runtime_tool_grants_read_connection(&path)? else {
+                    return Ok(None);
+                };
+                conn.query_row(
+                    r"
+                    SELECT record_json
+                      FROM runtime_tool_grants
+                     WHERE grant_id = ?1
+                    ",
+                    params![grant_id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|error| RuntimeStoreError::ReadFailed(error.to_string()))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn list_tool_grants(
+            &self,
+            subject_key: &str,
+        ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let subject_key = subject_key.to_string();
+            spawn_blocking_holding_claim(move || {
+                let Some(conn) = open_runtime_tool_grants_read_connection(&path)? else {
+                    return Ok(Vec::new());
+                };
+                let read_failed =
+                    |error: rusqlite::Error| RuntimeStoreError::ReadFailed(error.to_string());
+                let mut statement = conn
+                    .prepare(
+                        r"
+                        SELECT grant_id, record_json
+                          FROM runtime_tool_grants
+                         WHERE subject_key = ?1
+                         ORDER BY grant_id
+                        ",
+                    )
+                    .map_err(read_failed)?;
+                let rows = statement
+                    .query_map(params![subject_key], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(read_failed)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(read_failed)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn put_tool_grant_if_absent(
+            &self,
+            grant_id: &str,
+            subject_key: &str,
+            record_json: &[u8],
+            audit_rows: &[Vec<u8>],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let grant_id = grant_id.to_string();
+            let subject_key = subject_key.to_string();
+            let record_json = record_json.to_vec();
+            let audit_rows = audit_rows.to_vec();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_tool_grants_write_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let inserted = tx
+                    .execute(
+                        r"
+                        INSERT INTO runtime_tool_grants (grant_id, subject_key, record_json)
+                        VALUES (?1, ?2, ?3)
+                        ON CONFLICT (grant_id) DO NOTHING
+                        ",
+                        params![grant_id, subject_key, record_json],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if inserted == 0 {
+                    return Ok(false);
+                }
+                append_tool_grant_audit_rows(&tx, &subject_key, &audit_rows)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn compare_and_put_tool_grant(
+            &self,
+            grant_id: &str,
+            subject_key: &str,
+            expected_json: &[u8],
+            next_json: &[u8],
+            audit_rows: &[Vec<u8>],
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let grant_id = grant_id.to_string();
+            let subject_key = subject_key.to_string();
+            let expected_json = expected_json.to_vec();
+            let next_json = next_json.to_vec();
+            let audit_rows = audit_rows.to_vec();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_tool_grants_write_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                let swapped = tx
+                    .execute(
+                        r"
+                        UPDATE runtime_tool_grants
+                           SET record_json = ?4
+                         WHERE grant_id = ?1 AND subject_key = ?2 AND record_json = ?3
+                        ",
+                        params![grant_id, subject_key, expected_json, next_json],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                if swapped == 0 {
+                    return Ok(false);
+                }
+                append_tool_grant_audit_rows(&tx, &subject_key, &audit_rows)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(true)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn append_tool_grant_audit(
+            &self,
+            subject_key: &str,
+            audit_rows: &[Vec<u8>],
+        ) -> Result<(), RuntimeStoreError> {
+            if audit_rows.is_empty() {
+                return Ok(());
+            }
+            let path = self.path.clone();
+            let subject_key = subject_key.to_string();
+            let audit_rows = audit_rows.to_vec();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_tool_grants_write_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                append_tool_grant_audit_rows(&tx, &subject_key, &audit_rows)?;
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        async fn read_tool_grant_audit(
+            &self,
+            subject_key: &str,
+            after: Option<u64>,
+            limit: usize,
+        ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+            let path = self.path.clone();
+            let subject_key = subject_key.to_string();
+            // The first sequence to read; a cursor past every representable
+            // sequence reads nothing.
+            let Ok(first) = i64::try_from(after.map_or(0, |after| after.saturating_add(1))) else {
+                return Ok(Vec::new());
+            };
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            spawn_blocking_holding_claim(move || {
+                let Some(conn) = open_runtime_tool_grants_read_connection(&path)? else {
+                    return Ok(Vec::new());
+                };
+                let read_failed =
+                    |error: rusqlite::Error| RuntimeStoreError::ReadFailed(error.to_string());
+                let mut statement = conn
+                    .prepare(
+                        r"
+                        SELECT sequence, record_json
+                          FROM runtime_tool_grant_audit
+                         WHERE subject_key = ?1 AND sequence >= ?2
+                         ORDER BY sequence
+                         LIMIT ?3
+                        ",
+                    )
+                    .map_err(read_failed)?;
+                let rows = statement
+                    .query_map(params![subject_key, first, limit], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(read_failed)?;
+                let mut records = Vec::new();
+                for row in rows {
+                    let (sequence, record_json) = row.map_err(read_failed)?;
+                    let sequence = u64::try_from(sequence).map_err(|_| {
+                        RuntimeStoreError::ReadFailed(format!(
+                            "tool grant audit row has the negative sequence {sequence}"
+                        ))
+                    })?;
+                    records.push((sequence, record_json));
+                }
+                Ok(records)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
         async fn load_runtime_delivery_authority(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -16828,6 +17209,22 @@ ORDER BY runtime_id";
             spawn_blocking_holding_claim(move || {
                 let conn = open_runtime_connection(&path)?;
                 list_runtimes_with_recovery_work_in(&conn)
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
+        }
+
+        /// The scan's statement filtered to one runtime, on its own
+        /// connection.
+        async fn runtime_holds_recovery_work(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            spawn_blocking_holding_claim(move || {
+                let conn = open_runtime_connection(&path)?;
+                runtime_holds_recovery_work_in(&conn, &runtime_id)
             })
             .await
             .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
@@ -21190,6 +21587,23 @@ ORDER BY runtime_id";
             scan_contract::assert_lists_exactly(&reopened, &fixture).await;
         }
 
+        /// The per-runtime read answers each runtime as the scan lists it,
+        /// from the durable rows: a reopened store answers the same. RED
+        /// before: no per-runtime read.
+        #[tokio::test]
+        async fn boot_obligation_scan_sqlite_store_answers_each_runtime_as_the_scan() {
+            use crate::store::recovery_obligation::scan_contract;
+
+            let tempdir = tempfile::TempDir::new().unwrap();
+            let path = tempdir.path().join("runtime.sqlite3");
+            let store = SqliteRuntimeStore::new(path.clone()).unwrap();
+            let fixture = scan_contract::seed(&store).await;
+            scan_contract::assert_answers_each_runtime(&store, &fixture).await;
+            drop(store);
+            let reopened = SqliteRuntimeStore::new(path).unwrap();
+            scan_contract::assert_answers_each_runtime(&reopened, &fixture).await;
+        }
+
         /// A runtime retired as 0.9.x retires one (the machine retires it,
         /// its unregister keeps the ops lifecycle snapshot, and its session
         /// body is never rewritten) is archived by its lifecycle record, so
@@ -21459,6 +21873,7 @@ ORDER BY runtime_id";
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     reason: "released active steer".to_string(),
                     continuation_kind: crate::input::ContinuationKind::Ordinary,
@@ -21497,6 +21912,7 @@ ORDER BY runtime_id";
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     reason: "released instruction continuation".to_string(),
                     continuation_kind: crate::input::ContinuationKind::WorkgraphAttention,
@@ -27859,7 +28275,7 @@ ORDER BY runtime_id";
         #[tokio::test]
         async fn head_canonical_v3_provisional_chain_preserves_old_authority_until_successor_write()
         {
-            assert_eq!(meerkat_core::SESSION_VERSION, 4);
+            assert_eq!(meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION, 4);
             assert_head_canonical_provisional_chain(true).await;
         }
 
@@ -28013,8 +28429,14 @@ ORDER BY runtime_id";
                     source.physical_head_cas_token(),
                     committed.committed_head_token()
                 );
-                assert_eq!(source.committed_session().version(), 4);
-                assert_eq!(source.physical_session().version(), 4);
+                assert_eq!(
+                    source.committed_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
+                assert_eq!(
+                    source.physical_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
                 assert_eq!(source.provisional_authority(), Some(&provisional));
                 assert!(!source.provisional_target_applied());
             }
@@ -28035,8 +28457,14 @@ ORDER BY runtime_id";
                     source.runtime_authority().head_canonical(),
                     Some(&committed)
                 );
-                assert_eq!(source.committed_session().version(), 4);
-                assert_eq!(source.physical_session().version(), 4);
+                assert_eq!(
+                    source.committed_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
+                assert_eq!(
+                    source.physical_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
                 assert_eq!(source.physical_head().version, 3);
                 assert!(
                     source.physical_head().message_count > committed.boundary_head().message_count
@@ -28101,7 +28529,8 @@ ORDER BY runtime_id";
                 PreparedHeadCanonicalMutation::prepare(&resumed, Some(observed_head)).unwrap();
             assert_eq!(
                 second_tail.successor_head().version,
-                meerkat_core::SESSION_VERSION
+                meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION,
+                "a successor of a document without instruction facts keeps the baseline envelope"
             );
             let second_candidate = resumed.clone();
             let second_prepared = PreparedHeadCanonicalProvisionalTail::prepare(
@@ -28154,7 +28583,7 @@ ORDER BY runtime_id";
             );
             assert_eq!(
                 source.physical_head().version,
-                meerkat_core::SESSION_VERSION
+                meerkat_core::SESSION_ENVELOPE_BASELINE_VERSION
             );
             assert_eq!(
                 source.physical_head_cas_token(),
@@ -28708,6 +29137,7 @@ ORDER BY runtime_id";
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
+                instruction_snapshot: None,
             };
             session
                 .add_compaction_projection_intent(intent.clone())
@@ -28741,6 +29171,7 @@ ORDER BY runtime_id";
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
+                instruction_snapshot: None,
             }
         }
 

@@ -1,0 +1,40 @@
+---
+title: "Author a service connector"
+description: "Expose explicit operations and service events with bounded results, account isolation and honest outcomes."
+icon: "plug"
+---
+
+A service connector lets an agent read or act on an external resource. Keep the provider operations usable independently from agent registration so applications can adopt and test them through their own policy owners.
+
+<Steps>
+  <Step title="Choose the operation surface">
+    Name concrete operations such as read a history page, fetch one event or send exact MIME bytes. Define argument schemas, resource selectors, result limits and read/write/domain-effect classification. Avoid an unrestricted meta-tool that hides the real operation inside arbitrary commands.
+  </Step>
+  <Step title="Borrow a selected account binding">
+    Accept a host-owned authenticated client or explicit transport context. Keep credentials out of model-visible data and metadata. A second account uses a separately selected binding. Account verification and call-time grants remain explicit host work.
+  </Step>
+  <Step title="Declare enforceable restrictions">
+    Use provider scoping, trusted argument transformation or validated filtering before data reaches the model, artifacts or logs. Include snippets, counts and pagination metadata in the boundary. If an operation cannot preserve a promised restriction, make it unavailable under that grant.
+  </Step>
+  <Step title="Preserve provider semantics">
+    Retain exact IDs, timestamps, cursors and relevant unknown fields. Keep one-page operations explicit. A higher-level collector needs caller-selected bounds, budgets and visible gaps; it cannot turn a short page into a completeness claim.
+  </Step>
+  <Step title="Make failure and cleanup meaningful">
+    Separate local refusal from an entered external write. After uncertain entry, preserve an unknown outcome and let the business effect owner reconcile. A timeout, HTTP error or cancellation is not proof of no effect or permission to retry.
+  </Step>
+  <Step title="Package and validate the export">
+    Add exact source/provenance, strategy prerequisites, components, host contracts and operation declarations. Validate the selection independently of execution. Then prove actual host binding and scoped provider behavior before changing readiness claims.
+  </Step>
+</Steps>
+
+## Service events
+
+Declare the consumer, event identity, deduplication key, ordering scope, cursor/replay contract, retention assumptions, backpressure and loss behavior. Durable events need a durable boundary before acknowledgment. Best-effort events need an explicit loss/recovery policy.
+
+On reconnect, report whether the source resumed, replayed, skipped a known gap or requires a fresh snapshot. A health check must distinguish transport connectivity from consumer lag and unrecoverable loss. A callback URL alone does not supply these contracts.
+
+## Test the boundaries
+
+Use protocol peers and failure injection for redirects, rate limits, malformed/oversized results, cancellation during cleanup, two accounts, stale grants and uncertain writes. Test the actual installed artifact separately from source. Use scoped live account evidence for provider semantics that a fixture cannot establish.
+
+The current [Python](/sdks/python-connectors) and [TypeScript](/sdks/typescript-connectors) connectors demonstrate this shape. [Package reference](/reference/packages) documents the inert description layer.

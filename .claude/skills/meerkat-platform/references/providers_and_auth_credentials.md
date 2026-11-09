@@ -94,7 +94,7 @@ Supported `backend_kind` / `auth_method` pairs:
 | anthropic | `bedrock` | `bedrock_bearer`, `bedrock_aws_sigv4`, `external_authorizer` |
 | anthropic | `vertex` | `vertex_google_auth`, `external_authorizer` |
 | anthropic | `foundry` | `foundry_api_key`, `foundry_azure_ad`, `external_authorizer` |
-| anthropic, openai, gemini | `copilot` | `github_copilot_oauth` |
+| anthropic, openai, gemini | `copilot` | `github_copilot_oauth`, `github_copilot_token` |
 | openai | `openai_api` | `api_key`, `static_bearer`, `external_authorizer` |
 | openai | `chatgpt_backend` | `managed_chatgpt_oauth`, `external_chatgpt_tokens` |
 | openai | `azure_openai` | `azure_api_key` |
@@ -151,6 +151,17 @@ default_model = "my-deployment"     # the Azure deployment name
   list is checked first: `Copilot account does not expose <endpoint> for
   <provider> model '<model>'` lists the ids the account offers. The
   integration is provisional (it uses an observed GitHub client contract).
+- Device sign-in (0.9.9): a temporary failure of the Copilot token exchange
+  (a network failure or timeout, HTTP 408, 429 or 5xx, a GitHub API rate
+  limit) does not fail turns while the current token is still valid; the
+  exchange is tried again after its `Retry-After` (or 30 s), and once no
+  valid token is left a turn fails with a retryable error the agent loop
+  retries. A token Copilot rejects with a 401 is replaced on its next use. A
+  session restore, a wake, or a build with a set output budget succeeds
+  during such an outage; any other build fails as `source_unavailable`, a
+  kind that clears on its own (a mob member whose first wake meets it stays
+  dormant and the next delivery wakes it). An exchange 401, or a 403 that
+  asks for an account action, still needs a new sign-in.
 - `bedrock_aws_sigv4`, `vertex_google_auth` and `foundry_azure_ad` are
   compiled only with the `meerkat-anthropic` features `bedrock`, `vertex` and
   `foundry`, and `adc` / `compute_adc` only with `meerkat-gemini/adc`; the
@@ -193,6 +204,18 @@ default_model = "my-deployment"     # the Azure deployment name
 - OAuth tokens refresh automatically, starting 60 seconds before expiry
   (lock files in `credentials/refresh-locks` serialize refresh across
   processes). A permanent failure leaves `reauth_required`: log in again.
+  The resolve that ran a failed refresh answers AuthMachine's verdict:
+  `source_unavailable` for a transient failure and `user_reauth_required`
+  for a permanent one. A refresh that fails on the host's own side where
+  the provider refused nothing (for example the token endpoint answers with
+  a redirect, which credential requests never follow, or with a token whose
+  expiry is out of range) is transient too: `source_unavailable` until the
+  host's configuration or the endpoint's answer changes.
+  `source_unavailable`, `credential_store_unavailable`
+  and `credential_access_pending` clear on their own
+  (`AuthErrorKind::clears_on_its_own`): a mob member whose first wake meets
+  one stays dormant (`resume_gate_unavailable`, retryable) and a later
+  delivery wakes it.
 
 ## rkat auth commands
 
@@ -255,6 +278,101 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   callback fails as a callback parse error. Nothing is saved in each case.
 - `--backend` and `--method` are ignored in interactive mode.
 - Copilot needs the `copilot` feature (in default builds).
+- `rkat auth login copilot --non-interactive` uses a GitHub token instead of
+  the device code (`github_copilot_token`, as GitHub Copilot CLI uses
+  `COPILOT_GITHUB_TOKEN`). `--from-env` writes the three routes reading
+  `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN` and stores
+  nothing; without it the token from `--secret` or stdin is checked, then
+  stored under `global:account:github_copilot` with the login, when GitHub
+  names one, as its account id. The token is the Copilot API bearer; the
+  login, plan and API host come from GitHub's `copilot_internal/user` when
+  that lookup answers the token (for a 403 or 404 see below). A classic
+  `ghp_` token is refused, and a token GitHub refuses moves the account to
+  `reauth_required`; a refusal of an
+  earlier token that a newer one already replaced fails only that request
+  (and requests waiting on the same lookup) as `stale_credential` and leaves
+  the newer token valid. When the lookup answers a token 403 or 404 (it may
+  not answer a fine-grained token), the route uses it unnamed (no login or
+  plan) on `https://api.githubcopilot.com` once the account's model list
+  loads there; a failed listing fails the request (`source_unavailable` for
+  a rate limit, a 408, 502, 503 or 504, a network failure or a timeout,
+  else `refresh_failed`). For a
+  user token, a 401 or 403 from the model listing is Copilot refusing the
+  token (`refresh_failed`, the lease untouched; after an unanswered lookup
+  the same token is asked about again after a minute); only the identity
+  lookup's own 401 marks a token revoked, and a later listing's 401 runs the
+  lookup again. A GitHub App installation token's listing 401 refuses it.
+  The routes of one account read the token from one credential source: a
+  route over another source is refused. Token routes send
+  `Copilot-Integration-Id: copilot-developer-cli` (the device sign-in's
+  routes `vscode-chat`, which Copilot refuses for a personal access token)
+  unless the backend options set `integration_id`; the lookup sends none. A
+  GitHub rate limit (a 429, or a 403 with `Retry-After`, a spent primary
+  limit or a message naming the secondary rate limit) pauses the account's
+  lookup for GitHub's stated time, at least a minute; a 5xx or network
+  failure pauses nothing. Both fail the request as `source_unavailable`,
+  which clears on its own. A command source with `refresh_interval_ms`
+  reports that lifetime as the token's expiry, so a session built within it
+  reuses the token without running the command again. A token a provider,
+  proxy or gateway echoes back verbatim is redacted from errors and logs (the
+  last four bearers the account signed with; a truncated or re-encoded echo
+  is not caught), and the header values the route signs requests with are
+  marked sensitive. The routes hold one method at a time: each login refuses
+  routes set up for the other. A Rust host checks a token without storing it
+  with `meerkat_copilot::verify_operator_token(token, &config)`, `config`
+  being `CopilotBackendConfig::from_token_options` of the routes' options,
+  which answers its `CopilotAccountIdentity` (`login`, `plan`, `api_base`,
+  `installation`, `looked_up`). The route is tested only against local
+  stand-ins for GitHub and the Copilot API; its live check with a
+  fine-grained token has not run yet (the auth guide lists what is not yet
+  observed live).
+- Zero-config: while `[realm.global]` configures no Copilot route, a request
+  that names `global:copilot_openai`, `global:copilot_anthropic` or
+  `global:copilot_gemini` resolves it in token mode from the same variables
+  without any config (no default model on the Gemini route); default
+  selection never picks it, and any configured Copilot route turns it off.
+- Configured once: `[realm.<realm>.copilot]` states the account's token
+  `source` once (an `env` or `external_resolver` source only, such as
+  `{ kind = "env", env = "COPILOT_GITHUB_TOKEN" }`; optional `options`, the
+  client identity headers). The realm then has `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` in token mode on its
+  `github_copilot` account, as if their nine tables were written out (no
+  default model; zero-config is this lowering of the default source). A
+  session on one carries the account as its credential identity
+  (`[realm.team.copilot]` is `team:account:github_copilot`) and runs with
+  provider-native tools off. Naming any route of the account serves a
+  catalog model on the account's route of its provider (also naming a
+  provider keeps the strict check); with no other binding of a provider in
+  the realm, a request naming no binding runs that provider's catalog
+  models on the account, before an API key variable. Refused when the
+  realm loads: the section next to a table that declares one of its routes
+  or another binding on its account, and any other source (a secret in
+  config, a stored token, a credential command; those and the device
+  sign-in use the explicit tables). Both `rkat auth login copilot` forms
+  refuse a `[realm.global]` that has the section. `rkat auth realms`,
+  `realm/list` and `GET /realms` count explicit tables only.
+- Account models: a model with no catalog row and no `[models.<id>]` entry
+  runs when the request names a route of a Copilot account:
+  `rkat run --auth-binding global:copilot_openai --model <id> "..."`. The
+  account's model list defines it: the endpoints it lists for the model
+  choose the protocol, never the vendor (`/v1/messages` is the Anthropic
+  Messages wire, otherwise `/responses`, first, or `/chat/completions` the
+  OpenAI wire), the session runs on the account's route of that protocol
+  whichever route it named, and the list gives its context window, prompt
+  and output limits and image input; nothing is stored, so a resume asks
+  again. A `[models.<id>]` entry keeps owning its model. Refused before any
+  model request (`account model refused`), no other route or credential
+  tried: a model the account does not offer or its policy disables (the
+  ids it offers follow), one offered on no endpoint Meerkat speaks, or one
+  whose model list is not available (discovery failed; retry once it
+  loads); explicit tables without the account's route of that protocol
+  refuse it too. A request naming no binding cannot reach such a model:
+  "cannot infer provider from model", or with a provider, after its
+  credential resolves,
+  `model '<provider>:<id>' is absent from the effective model registry`
+  (or the resolution's own error). A live model switch or fallback target
+  to such a model, and any live reconfigure of a session running one, need
+  a `[models.<id>]` entry.
 
 Scripted API-key storage (the binding must exist first):
 

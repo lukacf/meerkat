@@ -8,7 +8,18 @@
 //! auto-wires to it, which a spawn of it is not; and the members of every
 //! profile a `role_wiring` rule pairs with its own). An identity that was
 //! seated already, or that a spawn embodied, is wired by nothing here: it
-//! holds the edges it holds.
+//! holds the edges it holds. A member exempt from the definition's wiring
+//! rules (MobMachine's `member_definition_wiring_exempt`, recorded by its
+//! seat or rotation input in that input's own transition) is neither wired
+//! when it is seated nor a target of another member's seat or rotation.
+//!
+//! A seat also realizes its member's owned edges (0.9.11, MobMachine's
+//! `identity_edge_owners`) whose other end is seated, each one MobMachine
+//! holds in force (`AdmitOwnedEdgeRealization`: both its ends are identity
+//! entries): an edge an identity's change declared, which an archive or an
+//! unlisting left unrealized, or whose other end was unseated when it was
+//! declared. These are no definition wiring: they are realized for an exempt
+//! member too, and whatever the definition declares.
 //!
 //! The edges are staged on the seat step's own prepared authority, after its
 //! seats, so the members seated in one chunk see each other: their lifecycle
@@ -151,7 +162,17 @@ impl MobActor {
         effects: &mut Vec<mob_dsl::MobMachineEffect>,
         journal: &mut Vec<NewMobEvent>,
     ) -> Result<StagedDeclaredEdges, MobError> {
-        if seated.is_empty() || !Self::definition_declares_wiring(&self.definition) {
+        if seated.is_empty() {
+            return Ok(StagedDeclaredEdges::none());
+        }
+        let members = seated
+            .iter()
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        let declares_wiring = Self::definition_declares_wiring(&self.definition);
+        let owned_candidates =
+            crate::runtime::owned_edges::owned_edge_candidates(authority.state(), &members);
+        if !declares_wiring && owned_candidates.is_empty() {
             return Ok(StagedDeclaredEdges::none());
         }
         if authority.state().lifecycle_phase != mob_dsl::MobPhase::Running {
@@ -161,11 +182,37 @@ impl MobActor {
             );
             return Ok(StagedDeclaredEdges::none());
         }
-        let members = seated
+        let mut pairs = if declares_wiring {
+            self.seated_declared_pairs(authority.state(), &members)
+        } else {
+            Vec::new()
+        };
+        // The owned edges in force of the seated members whose other end is
+        // seated too (MobMachine's verdict on each, on the step's prepared
+        // authority): the seat realizes them, whatever the definition
+        // declares and whether or not a member is exempt from its wiring
+        // rules. An owned edge one of whose ends is no identity entry stays
+        // unrealized: a worker under that end's name is no end of it.
+        let declared: BTreeSet<mob_dsl::WiringEdge> = pairs
             .iter()
-            .map(|(identity, _)| identity.clone())
-            .collect::<Vec<_>>();
-        let pairs = self.seated_declared_pairs(authority.state(), &members);
+            .map(|(local, peer)| {
+                mob_dsl::WiringEdge::new(
+                    mob_dsl::AgentIdentity::from_domain(local),
+                    mob_dsl::AgentIdentity::from_domain(peer),
+                )
+            })
+            .collect();
+        for (local, peer) in
+            super::owned_edges::owned_pairs_in_force(authority, owned_candidates, effects)?
+        {
+            let edge = mob_dsl::WiringEdge::new(
+                mob_dsl::AgentIdentity::from_domain(&local),
+                mob_dsl::AgentIdentity::from_domain(&peer),
+            );
+            if !declared.contains(&edge) {
+                pairs.push((local, peer));
+            }
+        }
         if pairs.is_empty() {
             return Ok(StagedDeclaredEdges::none());
         }
@@ -318,7 +365,9 @@ impl MobActor {
     /// for an orchestrator member (`declared_wiring_targets` over the active
     /// members of each profile the rule reads). An edge `state` holds already
     /// is left out, as is a seated member that is not active (a Broken one,
-    /// say).
+    /// say). A member exempt from the definition's wiring rules
+    /// (`member_definition_wiring_exempt`, which each exempt seat's own input
+    /// records, before this read) has no targets and is no target.
     fn seated_declared_pairs(
         &self,
         state: &mob_dsl::MobMachineState,
@@ -339,14 +388,17 @@ impl MobActor {
             wired_profiles.insert(rule.a.as_str());
             wired_profiles.insert(rule.b.as_str());
         }
+        let exempt = &state.member_definition_wiring_exempt;
         // An orchestrator member auto-wires to the members of every other
         // profile, so a step that seats one indexes every active member.
         let seats_an_orchestrator = orchestrator_profile.is_some_and(|orchestrator| {
             seated.iter().any(|member| {
-                state
-                    .member_profile_names
-                    .get(&mob_dsl::AgentIdentity::from_domain(member))
-                    .is_some_and(|profile| profile.as_str() == orchestrator)
+                let dsl_member = mob_dsl::AgentIdentity::from_domain(member);
+                !exempt.contains(&dsl_member)
+                    && state
+                        .member_profile_names
+                        .get(&dsl_member)
+                        .is_some_and(|profile| profile.as_str() == orchestrator)
             })
         });
         let is_active = |identity: &mob_dsl::AgentIdentity| {
@@ -354,9 +406,11 @@ impl MobActor {
                 &state.member_lifecycle_for_identity(identity),
             )
         };
+        // The members the rules may wire to: active, and not exempt.
         let mut active: BTreeMap<&str, Vec<AgentIdentity>> = BTreeMap::new();
         for (identity, profile) in &state.member_profile_names {
             if (seats_an_orchestrator || wired_profiles.contains(profile.as_str()))
+                && !exempt.contains(identity)
                 && is_active(identity)
             {
                 active
@@ -369,7 +423,7 @@ impl MobActor {
         let mut paired = BTreeSet::new();
         for member in seated {
             let dsl_member = mob_dsl::AgentIdentity::from_domain(member);
-            if !is_active(&dsl_member) {
+            if !is_active(&dsl_member) || exempt.contains(&dsl_member) {
                 continue;
             }
             let Some(profile) = state.member_profile_names.get(&dsl_member) else {

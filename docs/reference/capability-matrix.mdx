@@ -173,27 +173,27 @@ v1 (recorded v2 hardening).
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add facade-local predicate-schedule helper re-exports. The schedule service
 # and WorkGraph substrate are already linked.
-meerkat = { version = "=0.9.8", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Broad native facade with WebSocket live support
-meerkat = { version = "=0.9.8", features = [
+meerkat = { version = "=0.9.11", features = [
   "all-providers", "openai-realtime", "session-store", "session-compaction",
   "memory-store-session", "comms", "mcp", "skills", "schedule", "live",
   "atif", # 0.8.23+
 ] }
 
 # WebRTC is separate and still needs `rkat-rpc --live-webrtc` at runtime
-meerkat = { version = "=0.9.8", features = ["openai-realtime", "live-webrtc"] }
+meerkat = { version = "=0.9.11", features = ["openai-realtime", "live-webrtc"] }
 ```
 
 ## Runtime capabilities
@@ -302,12 +302,29 @@ not treat an agent's ability to call a model-visible tool as an operator API.
 | Live audio | Placed mob-member WebSocket controls | No | Session `live/*` and the member `mob/member_live_*` family support WebSocket/WebRTC; the member's own live host serves the transport or refuses it | No |
 | Multi-host mobs | Admin and observation | Observation only | Admin and observation | Placement plus observation only |
 | Temporary councils | No | No | No | No |
+| Scoped tool grants | No | No | `tool_grants/*`, and `grant_gated_tools` on `session/create` (sessions only) | No |
 | Provider credential management | Yes | Yes | Yes | No |
 
 Shared wire types do not grant exposure. In particular, durable member role
 migration is absent from every public CLI, REST, JSON-RPC, MCP, and generated
 SDK spawn request even though the private remote-host bridge shares schema
 types with public artifacts.
+
+Scoped tool grants are a Rust API and a JSON-RPC family: a build marks tool
+names, built-in families and MCP servers grant-gated (`grant_gated_tools` on
+`SessionBuildOptions`, `AgentBuildConfig` or `session/create`), and
+`MeerkatMachine::grant_tool`,
+`revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` manage the
+grants that open them, as `tool_grants/grant`, `tool_grants/revoke`,
+`tool_grants/list` and `tool_grants/audit` do for sessions and mob member
+identities over JSON-RPC;
+`MeerkatMachine::request_tool_grant` and `tool_grants/request` ask for a grant
+a person approves through a durable decision
+(the Python and TypeScript SDKs wrap them; the stock governed stdio pipe
+serves neither the methods nor the create field). See
+[Scoped tool grants](/concepts/tools#scoped-tool-grants). Grants persist with
+the runtime store; with the in-memory store, as on Web/WASM, they last only for
+the process.
 
 Temporary councils are exposed only as the `council` tool in
 `AgentMobToolSurface`, beside `delegate` and `fork_off`. Its authority is the
@@ -403,7 +420,9 @@ merge or delimiter-join distinct canonical System rows.
 
 A session's resolved `supports_mid_conversation_system_messages` capability is
 the model's catalog row as the session's backend serves it: through the private
-ChatGPT backend it is `false`, whatever the row says. Instruction activation
+ChatGPT backend it is `false`, whatever the row says, and since 0.9.9 so it is
+through an OpenAI backend kind this version does not know, as for a binding the
+config does not resolve. Instruction activation
 refuses on it with `UnsupportedCurrentLowering` before anything is appended. A
 model change or binding clear is planned with the binding the session's client
 resolution selects, so one that would put recorded activations on such a

@@ -1,15 +1,18 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
-//! Declared TLC payload domains for unsigned input fields: validation refuses
-//! every declaration that would not be explored as written.
+//! Declared TLC payload domains for input fields: validation refuses every
+//! declaration that would not be explored as written.
 
 use std::collections::BTreeSet;
 
-use meerkat_machine_schema::catalog::dsl::dsl_workgraph_lifecycle_machine;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_durable_decision_machine, dsl_workgraph_lifecycle_machine,
+};
 use meerkat_machine_schema::identity::{FieldId, InputVariantId};
 use meerkat_machine_schema::{
     FieldDisclosure, FieldSchema, InputFieldDomain, InputFieldDomainError, InputFieldDomainKind,
-    MachineSchema, MachineSchemaError, TLC_MAX_UNSIGNED_INPUT_SAMPLE, TriggerMatch, TypeRef,
+    MachineSchema, MachineSchemaError, TLC_MAX_UNSIGNED_INPUT_SAMPLE, TlcValue, TriggerMatch,
+    TypeRef,
 };
 
 fn input(name: &str) -> InputVariantId {
@@ -43,6 +46,127 @@ fn refusal(schema: &MachineSchema) -> InputFieldDomainError {
 
 fn values(values: &[u64]) -> InputFieldDomainKind {
     InputFieldDomainKind::AdditionalValues(values.iter().copied().collect::<BTreeSet<_>>())
+}
+
+fn ci_values(values: &[u64]) -> InputFieldDomainKind {
+    InputFieldDomainKind::CiValues(values.iter().copied().collect::<BTreeSet<_>>())
+}
+
+/// DurableDecisionMachine with one more `CiSamples` declaration.
+fn decision_with(input_name: &str, field_name: &str, samples: Vec<TlcValue>) -> MachineSchema {
+    let mut schema = dsl_durable_decision_machine();
+    schema.input_field_domains.push(InputFieldDomain {
+        input: input(input_name),
+        field: field(field_name),
+        domain: InputFieldDomainKind::CiSamples(samples),
+    });
+    schema
+}
+
+fn key(value: &str) -> TlcValue {
+    TlcValue::String(value.to_owned())
+}
+
+fn some_key(value: &str) -> TlcValue {
+    TlcValue::Some(Box::new(key(value)))
+}
+
+#[test]
+fn durable_decision_samples_one_carried_presentation_in_ci() {
+    let schema = dsl_durable_decision_machine();
+    schema
+        .validate()
+        .expect("the shipped declarations are valid");
+    let declared = [
+        ("carried_audience", vec![some_key("alpha")]),
+        ("carried_digest", vec![some_key("alpha")]),
+        ("carried_complete", vec![TlcValue::Bool(false)]),
+        ("carried_link_served_digest", vec![some_key("alpha")]),
+    ];
+    for (field_name, samples) in &declared {
+        assert_eq!(
+            schema.input_field_domain("Decide", field_name),
+            Some(&InputFieldDomainKind::CiSamples(samples.clone())),
+            "Decide.{field_name}"
+        );
+    }
+    assert_eq!(
+        schema.input_field_domains.len(),
+        declared.len(),
+        "no other input field of the machine declares a domain"
+    );
+}
+
+#[test]
+fn ci_samples_take_values_of_the_field_type_whatever_it_is() {
+    for (input_name, field_name, samples) in [
+        ("Present", "audience", vec![key("alpha"), key("beta")]),
+        (
+            "Present",
+            "link_served_digest",
+            vec![TlcValue::None, some_key("beta")],
+        ),
+        ("Present", "complete", vec![TlcValue::Bool(true)]),
+        ("Review", "verdict", vec![key("Escalate")]),
+        ("Present", "presented_at_ms", vec![TlcValue::U64(1)]),
+    ] {
+        decision_with(input_name, field_name, samples)
+            .validate()
+            .unwrap_or_else(|error| panic!("{input_name}.{field_name} takes its samples: {error}"));
+    }
+}
+
+#[test]
+fn ci_samples_refuse_a_value_of_another_type_and_an_empty_list() {
+    let too_big = TLC_MAX_UNSIGNED_INPUT_SAMPLE + 1;
+    for (input_name, field_name, samples, reason) in [
+        // A bare key where the field holds an Option of one.
+        (
+            "Present",
+            "link_served_digest",
+            vec![TlcValue::None, key("alpha")],
+            InputFieldDomainError::SampleTypeMismatch { index: 1 },
+        ),
+        // An Option where the field holds a bare key.
+        (
+            "Present",
+            "audience",
+            vec![some_key("alpha")],
+            InputFieldDomainError::SampleTypeMismatch { index: 0 },
+        ),
+        (
+            "Present",
+            "complete",
+            vec![TlcValue::Bool(true), TlcValue::U64(0)],
+            InputFieldDomainError::SampleTypeMismatch { index: 1 },
+        ),
+        // A verdict the vocabulary does not have.
+        (
+            "Review",
+            "verdict",
+            vec![key("Maybe")],
+            InputFieldDomainError::SampleTypeMismatch { index: 0 },
+        ),
+        // An integer a TLC model cannot hold.
+        (
+            "Present",
+            "presented_at_ms",
+            vec![TlcValue::U64(too_big)],
+            InputFieldDomainError::SampleTypeMismatch { index: 0 },
+        ),
+        (
+            "Present",
+            "complete",
+            Vec::new(),
+            InputFieldDomainError::EmptyValues,
+        ),
+    ] {
+        assert_eq!(
+            refusal(&decision_with(input_name, field_name, samples)),
+            reason,
+            "{input_name}.{field_name}"
+        );
+    }
 }
 
 #[test]
@@ -81,6 +205,64 @@ fn additional_values_extend_a_bound_unsigned_field() {
     schema
         .validate()
         .expect("a bound u64 field takes additional values");
+}
+
+#[test]
+fn ci_values_take_a_nonempty_in_range_set_for_a_bound_unsigned_field() {
+    with_declaration("CreateOpen", "unresolved_blocker_count", ci_values(&[0]))
+        .validate()
+        .expect("a bound u64 field takes CI values");
+    assert_eq!(
+        refusal(&with_declaration(
+            "CreateOpen",
+            "unresolved_blocker_count",
+            ci_values(&[])
+        )),
+        InputFieldDomainError::EmptyValues
+    );
+    let too_big = TLC_MAX_UNSIGNED_INPUT_SAMPLE + 1;
+    assert_eq!(
+        refusal(&with_declaration(
+            "CreateOpen",
+            "unresolved_blocker_count",
+            ci_values(&[0, too_big])
+        )),
+        InputFieldDomainError::ValueOutOfRange { value: too_big }
+    );
+}
+
+#[test]
+fn session_document_declares_its_ci_samples_on_bound_unsigned_fields() {
+    let schema = meerkat_machine_schema::catalog::dsl::dsl_session_document_machine();
+    schema
+        .validate()
+        .expect("the shipped declarations are valid");
+    let declared: [(&str, &str, &[u64]); 7] = [
+        ("ClassifyDurableTail", "dangling_tool_use_count", &[0]),
+        ("ClassifyDurableTail", "orphan_tool_result_count", &[0]),
+        ("RecoverSessionInstructionState", "target_generation", &[2]),
+        ("RecoverSessionInstructionState", "entry_sequence", &[0]),
+        ("RecoverSessionInstructionEffective", "generation", &[0]),
+        (
+            "RecoverSessionInstructionEffective",
+            "last_entry_sequence",
+            &[0, 1],
+        ),
+        ("SetSessionInstruction", "body_bytes", &[1]),
+    ];
+    for (variant, field_name, samples) in declared {
+        assert_eq!(
+            schema.input_field_domain(variant, field_name),
+            Some(&ci_values(samples)),
+            "{variant}.{field_name}"
+        );
+    }
+    assert_eq!(
+        schema.input_field_domains.len(),
+        declared.len(),
+        "no other input field of the machine declares a domain"
+    );
+    assert_eq!(schema.ci_step_limit, Some(5), "the CI step bound");
 }
 
 #[test]

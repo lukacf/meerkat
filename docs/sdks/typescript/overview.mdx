@@ -99,11 +99,14 @@ service APIs. For agents that run in the browser itself, use the
 | `jobsGet/jobsList/jobsCancel/jobsProgress/jobsResult/jobsArtifacts/jobsRetry/jobsHealth/jobsSubscribe/jobsUnsubscribe` | Detached job control and observation |
 | `monitorsStart/metaJobHeartbeat/metaJobProgress/metaJobCheckpoint/metaJobComplete/metaJobFail/metaJobCancelAck` | Monitor creation and authority-checked Meta worker updates |
 | `requestApproval/listApprovals/getApproval/decideApproval` | Approval record lifecycle; persists when the RPC bundle exposes a store path |
+| `grantTool/revokeToolGrant/listToolGrants/toolGrantAudit` | Scoped tool grants of a session created with `grantGatedTools` |
+| `listDecisions/getDecision/decisionRendering/presentDecision/withdrawDecision` | Durable decisions of a 0.9.11 or newer server whose persistence keeps them (an older server's `-32601` names the method); no SDK method decides one |
 | `listArtifacts/getArtifact/downloadArtifact` | Artifact metadata and payload access |
 | `latestEventCursor/listEventsSince/eventSnapshot` | Cursor replay and snapshots when host event projection is enabled |
 | `createMob(options?)` | Create a mob, return a `Mob` |
 | `createDeferredSession(prompt, options?)` | Create a session without running the first turn; returns a `DeferredSession` |
 | `listMobs()` | List mobs |
+| `listQuarantinedMobs()` / `mobRestoreRetry(mobId)` | List the persisted mobs whose stores did not restore; re-attempt one's restore after a repair |
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
@@ -303,6 +306,7 @@ sidecars remain complete. The server rejects zero.
 | `mob.grantScopes(...)` / `mob.revokeScopes(...)` / `mob.grants()` | Manage trusted operator control grants |
 | `mob.memberHistory(...)` / `mob.hardCancel(...)` | Read remote/local history or perform an immediate hard cancel |
 | `mob.stopMemberRun(agentIdentity, runId, reason)` | Stop one exact member run and terminalize its contributors |
+| `mob.compactMember(agentIdentity)` | Ask a live member's next compaction check to compact, without a respawn |
 | `mob.memberLiveOpen/status/control/close(...)` | Control a live channel on a local or remote member |
 
 Multi-host placement and host/grant mutation are trusted JSON-RPC operator
@@ -444,6 +448,7 @@ interface SessionOptions {
   enableMob?: boolean;
   enableWebSearch?: boolean;
   toolFilter?: WireToolFilter;
+  grantGatedTools?: { families?: string[]; tools?: string[] };
   keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
@@ -469,6 +474,16 @@ The turn options also carry `maxTokens`, `outputSchema`, and
 `structuredOutputRetries`, but the server refuses them on a turn with
 `INVALID_PARAMS`: they are build settings, so set them on `createSession(...)`
 or `createDeferredSession(...)`.
+
+`grantGatedTools` gates built-in tool families and tool names: the session
+mounts them hidden and refuses their calls until `grantTool(sessionId, { family
+}, { durationMs })` or `grantTool(sessionId, { tool }, { expiresAtMs })` opens
+them; see [scoped tool grants](/api/rpc#scoped-tool-grants). `grantTool`
+rejects with `INVALID_ARGS`, before sending, a target that names both or
+neither of `tool` and `family`, and a window that names both or neither of
+`durationMs` and `expiresAtMs`. The client sends a gate only to a server whose
+contract is 0.9.9 or later, and otherwise throws `CapabilityUnavailableError`:
+an older server would build the session with the gated tools ungated.
 
 ---
 
@@ -604,6 +619,23 @@ run, including durable steers that joined it. `receipt.outcome` is `stopped`
 (with `contributors`), `not_current` (the run is no longer current; nothing
 was touched), or `not_stoppable`. `mob.stopMemberRun(agentIdentity, runId,
 reason)` does the same for one mob member.
+
+### compact()
+
+```typescript
+async compact(): Promise<CompactSessionResult>
+```
+
+Sends `session/compact`. It asks the live session's next compaction check to
+compact, without a rebuild and without changing any compaction threshold:
+the check before its next model request compacts. `outcome` is `requested`,
+or `already_requested` when a request no check consumed yet was already
+recorded. A check that consumes the request and has nothing to compact
+(before the session's first model request, or with nothing to fold)
+publishes the `requested_compaction_skipped` event with its `reason` instead
+of `compaction_started`. A session with no live runtime is refused, never
+woken. `mob.compactMember(agentIdentity)` does the same for one live mob
+member, without a respawn.
 
 ### archive()
 

@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "maintainer": "meerkat-toolkit",
+  "reviewed_at_unix_ms": 1790828499454,
+  "sources": [
+    {
+      "id": "gmail-mcp",
+      "url": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      "observed_sha256": "2e93fef80c81b17fa9eff8c0232d894596f12e26157eeafe0b442e6cf5e84e81",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "gmail-preview",
+      "url": "https://developers.google.com/workspace/preview",
+      "observed_sha256": "eeeb9525e90d4f2dfeadd9c1e1860e5af8b578c4ced8602b8ce81149115dfd45",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "gmail-security",
+      "url": "https://developers.google.com/workspace/guides/configure-mcp-security",
+      "observed_sha256": "16bc6e53da942d3c45d31c86b955efc9ca9ce020cd831d56d26761ca830b69ca",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "gmail-quickstart",
+      "url": "https://developers.google.com/workspace/gmail/api/quickstart/python",
+      "observed_sha256": "407f943124fa42c730dd710cf038b8351725069e43f7f45e4e506df955245b2a",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "gmail-list",
+      "url": "https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list",
+      "observed_sha256": "0dcced42220ba661c158b7ca6f05698f6a7af599e4109c39bdee39d3c18e37bc",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "gmail-get",
+      "url": "https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/get",
+      "observed_sha256": "9ef30a31b80e59d460fb92ef5b56d4dab2687d694771bd9b9442071b141c9e03",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    },
+    {
+      "id": "gmail-send",
+      "url": "https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send",
+      "observed_sha256": "75832a61ec7ecb555215ff746d5f7136344a8f641c20ebc1fe063b8d2486d5bf",
+      "upstream": {
+        "kind": "documentation_observation"
+      },
+      "license": "Google documentation: CC BY 4.0 prose, Apache-2.0 samples, subject to page exceptions; service terms separate. No implementation copied."
+    }
+  ],
+  "recipes": [
+    {
+      "strategy": "hosted-mcp-preview",
+      "export": "gmail-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "account",
+          "instruction": "Confirm the selected Google account and Developer Preview membership. The preview program terms prohibit public applications using preview features before general availability."
+        },
+        {
+          "kind": "developer_registration",
+          "instruction": "Select a Google Cloud project; enable gmail.googleapis.com and gmailmcp.googleapis.com. Configure consent, audience/test users and host-appropriate OAuth client credentials with the actual host redirect URI, not a copied example redirect."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "The guide lists gmail.readonly and gmail.compose scopes. The credential owner must verify the selected account, consent and required scopes, retain secrets and handle refresh/revoke; this bundle contains no credentials."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Confirm the project service-enablement permissions and any Workspace administrator restrictions on the selected OAuth app and scopes."
+        },
+        {
+          "kind": "host_deployment",
+          "instruction": "Meet Google's documented prompt/response screening requirement using Model Armor or the host's documented alternative accepted by users. Do not enable a service, grant permissions or transmit content to another processor implicitly."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "Bind the concrete connection, current schema, operation limits, policy and lifecycle in an ActivationManifest. Require owner-authenticated account and role readiness receipts before usable tools are reported."
+        }
+      ],
+      "plan": {
+        "kind": "remote_mcp",
+        "server": "gmail-hosted-preview",
+        "publisher": "google",
+        "documented_api_version": "v1",
+        "read_only": false,
+        "read_only_evidence": null
+      }
+    },
+    {
+      "strategy": "toolkit-rest",
+      "export": "gmail-api-setup.service",
+      "role": "service_connector",
+      "prerequisites": [
+        {
+          "kind": "artifact_preparation",
+          "instruction": "Select and verify repository source or a retained local wheel/npm tarball as described in SUPPORT.md. Python requires 3.11+ and HTTPX 0.28.x; TypeScript uses the documented Node 22+ Fetch profile. Neither artifact is claimed to be publicly released."
+        },
+        {
+          "kind": "developer_registration",
+          "instruction": "Enable Gmail API in the selected project; configure consent/audience, any required verification and a suitable OAuth client for the actual host. The quickstart is setup guidance, not the production credential owner."
+        },
+        {
+          "kind": "account",
+          "instruction": "Select the mailbox and a corresponding authorized credential. The explicit account path, including me, does not itself establish credential ownership or delegated access."
+        },
+        {
+          "kind": "client_authentication",
+          "instruction": "The host supplies the authenticated client with the selected API base, account and minimal operation scopes. Read/query and send permissions differ; gmail.metadata cannot authorize a query. No ambient credential lookup, scope expansion or authentication replay is supplied."
+        },
+        {
+          "kind": "administrator",
+          "instruction": "Resolve applicable organization app/access restrictions for that mailbox and requested scopes before use."
+        },
+        {
+          "kind": "application_binding",
+          "instruction": "The host composes the operation library into the existing service export and enforces requester/resource policy, approval of complete MIME and recipients, bounded paging, cancellation, revoke and uncertain-write reconciliation. Keep secrets outside model context."
+        }
+      ],
+      "plan": {
+        "kind": "guidance_only",
+        "blockers": [
+          "A host adapter must bind the selected local SDK artifact, account, operations, schemas and lifecycle to the existing service-connector export. The operation libraries are not an activated agent tool surface.",
+          "The host must supply its own authenticated client, OAuth registration and credential lifecycle, scoped authorization and any send approval/reconciliation. This recipe supplies none of those owners.",
+          "Only repository source and recorded local build artifacts are available here; no public PyPI/npm release or live Gmail conformance is established."
+        ]
+      }
+    }
+  ]
+}

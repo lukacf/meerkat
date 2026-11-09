@@ -72,6 +72,10 @@ fn every_mint_guard_reads_the_minted_generation() {
             "CommitMemberRotationLiveKickoffStopped",
             "CommitMemberRotationRetiredKickoffRunning",
             "CommitMemberRotationRetiredKickoffStopped",
+            "CommitMemberRotationSameSessionRunning",
+            "CommitMemberRotationSameSessionStopped",
+            "CommitMemberRotationSameSessionKickoffRunning",
+            "CommitMemberRotationSameSessionKickoffStopped",
         ],
         "the mint sites changed: pin each new one here"
     );

@@ -1,0 +1,25 @@
+{
+  "name": "reference-wrapper",
+  "models": "stock console behind a host wrapper",
+  "consoleRoutes": {
+    "/console": "meta-reference-console",
+    "/console/assets/console-app.js": "meta-reference-console",
+    "/console/rpc": "meta-reference-console",
+    "/console/timeline": "meta-reference-console",
+    "/console/timeline/stream": "meta-reference-console",
+    "/blobs/{blob_id}": "meta-reference-console"
+  },
+  "hostRoutes": {
+    "/host/status": {
+      "provenance": "host-adapter",
+      "consumedByMetaHeadless": false
+    }
+  },
+  "wrapperPolicy": {
+    "rewritesConsoleJavaScript": false,
+    "patchesProtocolResponses": false,
+    "synthesizesTimelineFrames": false,
+    "widensCors": false,
+    "changesCsrfPosture": false
+  }
+}

@@ -43,7 +43,9 @@ use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
-use meerkat_llm_core::provider_runtime::runtime::{CredentialReadiness, ProviderRuntime};
+use meerkat_llm_core::provider_runtime::runtime::{
+    AccountModelLookup, CredentialReadiness, ProviderRuntime,
+};
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
 use crate::client::AzureOpenAiWireConfig;
@@ -72,6 +74,22 @@ fn openai_oauth_refresh_error(
     } else {
         format!("{error}{authmachine_failure}")
     };
+    // AuthMachine's verdict on a refresh failure, when it issued one: a
+    // failure that clears on its own is a credential source that cannot
+    // answer now, one that needs a new sign-in a reauthorization. The
+    // verdict is read, never derived from the provider's answer here.
+    if let oauth::OpenAiOAuthError::Refresh(refresh) = &error
+        && let Some(verdict) = refresh.refresh_failure_disposition()
+    {
+        return ProviderAuthError::Auth(match verdict {
+            meerkat_core::auth::RefreshFailureDisposition::Transient => {
+                AuthError::SourceUnavailable { reason: detail }
+            }
+            meerkat_core::auth::RefreshFailureDisposition::ReauthRequired => {
+                AuthError::UserReauthRequired
+            }
+        });
+    }
     if authmachine_failure.is_empty() {
         match error {
             oauth::OpenAiOAuthError::InteractiveLoginRequired
@@ -265,8 +283,10 @@ impl ManagedChatGptAuthorizer {
         cached: &ManagedChatGptCredential,
         current: &meerkat_core::handles::AuthLeaseSnapshot,
     ) -> bool {
+        // The cached record's marker names the publication with the marker
+        // generation the lease records for it.
         current.credential_present
-            && cached.publication.generation == Some(current.generation)
+            && cached.publication.generation == Some(current.marker_generation())
             && Some(cached.publication.expires_at) == current.expires_at
             && cached.publication.credential_published_at_millis
                 == current.credential_published_at_millis
@@ -331,10 +351,10 @@ impl ManagedChatGptAuthorizer {
                 loaded.release_prelock_lifecycle_guard();
                 let env = self.env.clone();
                 let binding = self.binding.clone();
-                let prepare: oauth::TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: oauth::TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         meerkat_auth_core::resolver::prepare_existing_managed_store_oauth_refresh_under_lock(
-                            &env, &binding, loaded, locked, mode,
+                            fence, &env, &binding, loaded, locked, mode,
                         ).await.map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                     })
                 });
@@ -618,7 +638,8 @@ impl meerkat_copilot::CopilotChatCompletionsClientFactory
             )
             .with_image_input_support(supports_image_input)
             .with_authorizer(authorizer)
-            .with_provider(provider),
+            .with_provider(provider)
+            .with_copilot_chat_stream(),
         ))
     }
 }
@@ -669,7 +690,8 @@ pub(crate) fn copilot_openai_route_client(
             .with_image_input_support(target.supports_image_input)
             .with_authorizer(authorizer)
             .with_provider(Provider::OpenAI)
-            .with_openai_backend(OpenAiBackendKind::Copilot),
+            .with_openai_backend(OpenAiBackendKind::Copilot)
+            .with_copilot_chat_stream(),
         )),
         meerkat_copilot::CopilotEndpoint::Messages | meerkat_copilot::CopilotEndpoint::Unknown => {
             Err(ProviderClientError::ClientInit(
@@ -775,9 +797,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         Provider::OpenAI
     }
 
-    /// API-key and static-bearer credentials are observed read-only through
-    /// the same source table [`resolve_simple_secret`] resolves. OAuth,
-    /// Copilot, and external-authorizer credentials are resolved at open.
+    /// API-key and static-bearer credentials, and the operator GitHub token of
+    /// a Copilot route, are observed read-only through the same source table
+    /// [`resolve_simple_secret`] resolves, without a network request. OAuth,
+    /// the Copilot device sign-in, and external-authorizer credentials are
+    /// resolved at open.
     async fn observe_credential_readiness(
         &self,
         binding: &ValidatedBinding,
@@ -792,7 +816,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             NormalizedAuthMethod::OpenAi(
                 OpenAiAuthMethod::ApiKey
                 | OpenAiAuthMethod::AzureApiKey
-                | OpenAiAuthMethod::StaticBearer,
+                | OpenAiAuthMethod::StaticBearer
+                | OpenAiAuthMethod::GitHubCopilotToken,
             ) => Ok(
                 observe_simple_secret_readiness(&binding.auth_profile().source, env, binding).await,
             ),
@@ -801,6 +826,23 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 ProviderBindingError::ProviderMismatch,
             )),
         }
+    }
+
+    /// A GitHub Copilot route's account states the models it serves: the
+    /// account's model list answers for a model the model registry does not
+    /// define. No other backend states an account model list.
+    fn account_model(&self, connection: &ResolvedConnection, model: &str) -> AccountModelLookup {
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        if matches!(
+            connection.backend,
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::Copilot)
+        ) && let Some(copilot) = self.copilot.as_ref()
+        {
+            return copilot.account_model(connection, model);
+        }
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        let _ = (connection, model);
+        AccountModelLookup::NotReported
     }
 
     async fn resolve_binding(
@@ -848,7 +890,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             OpenAiAuthMethod::ExternalAuthorizer => {
                 resolve_external_authorizer(&binding.auth_profile().source, env, binding).await?
             }
-            OpenAiAuthMethod::GitHubCopilotOauth => {
+            // Both Copilot methods resolve through the shared Copilot runtime,
+            // which owns the device sign-in and the operator-token modes.
+            OpenAiAuthMethod::GitHubCopilotOauth | OpenAiAuthMethod::GitHubCopilotToken => {
                 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
                 {
                     let runtime = self.copilot.as_ref().ok_or_else(|| {
@@ -934,9 +978,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     let prepare_env = env.clone();
                                     let prepare_binding = binding.clone();
                                     let prepare: oauth::TokenPrepareFn = Box::new(
-                                        move |locked_baseline, mode| {
+                                        move |fence, locked_baseline, mode| {
                                             Box::pin(async move {
                                                 prepare_managed_store_oauth_refresh_under_lock(
+                                                    fence,
                                                     &prepare_env,
                                                     &prepare_binding,
                                                     managed,
@@ -1283,6 +1328,68 @@ mod tests {
         assert_eq!(OpenAiProviderRuntime.provider_id(), Provider::OpenAI);
     }
 
+    /// T16: the operator GitHub token of a Copilot route reports readiness
+    /// from its source, with no network request: missing without any of its
+    /// variables, ready with one.
+    #[tokio::test]
+    async fn github_copilot_token_readiness_reads_its_source() {
+        let binding = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding(),
+            &backend("copilot"),
+            &AuthProfile {
+                source: meerkat_core::CredentialSourceSpec::Env {
+                    env: "COPILOT_GITHUB_TOKEN".into(),
+                    fallback: vec!["GH_TOKEN".into(), "GITHUB_TOKEN".into()],
+                },
+                ..auth("github_copilot_token")
+            },
+            &BindingPolicy::default(),
+        )
+        .expect("a valid Copilot token route");
+
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &ResolverEnvironment::testing())
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Missing
+        );
+        let present = ResolverEnvironment::testing()
+            .with_env_lookup(|name| (name == "GH_TOKEN").then(|| "github_pat_ready".to_string()));
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &present)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Ready
+        );
+
+        // A blank variable is no token, and it hides none: readiness agrees
+        // with the resolver, which skips it for this method.
+        let blank_only = ResolverEnvironment::testing()
+            .with_env_lookup(|name| (name == "COPILOT_GITHUB_TOKEN").then(|| "  ".to_string()));
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &blank_only)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Missing
+        );
+        let blank_then_present =
+            ResolverEnvironment::testing().with_env_lookup(|name| match name {
+                "COPILOT_GITHUB_TOKEN" => Some(String::new()),
+                "GITHUB_TOKEN" => Some("github_pat_ready".to_string()),
+                _ => None,
+            });
+        assert_eq!(
+            OpenAiProviderRuntime
+                .observe_credential_readiness(&binding, &blank_then_present)
+                .await
+                .expect("readiness"),
+            CredentialReadiness::Ready
+        );
+    }
+
     #[test]
     fn chatgpt_backend_base_url_resolves_default_and_explicit_values() {
         // Missing / blank → the canonical default.
@@ -1532,7 +1639,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         ([("content-type", "text/event-stream")], payload)
     }
 
@@ -1591,7 +1698,7 @@ mod tests {
                 "requires_scoped_override": false,
                 "provider_plan": {
                     "tool_name": "image_generation",
-                    "model": "gpt-image-2",
+                    "model": "gpt-image-2.6-sunburst",
                     "output": {
                         "size": "square1024",
                         "quality": "low",
@@ -2128,6 +2235,239 @@ mod tests {
 
         handle.abort();
         Ok(())
+    }
+
+    /// A stand-in GitHub Copilot Chat Completions endpoint that answers every
+    /// request with `data` as its SSE `data:` lines, in order.
+    #[cfg(feature = "copilot")]
+    async fn spawn_copilot_chat_stub(data: &[&str]) -> (String, tokio::task::JoinHandle<()>) {
+        async fn respond(State(payload): State<String>) -> impl IntoResponse {
+            ([("content-type", "text/event-stream")], payload)
+        }
+        let payload = data.iter().fold(String::new(), |mut payload, line| {
+            payload.push_str("data: ");
+            payload.push_str(line);
+            payload.push_str("\n\n");
+            payload
+        });
+        let app = Router::new()
+            .route("/chat/completions", post(respond))
+            .with_state(payload);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, server)
+    }
+
+    /// The two GitHub Copilot Chat Completions clients the runtimes build, on
+    /// `api_base`: an OpenAI model's route and a Gemini model's route.
+    #[cfg(feature = "copilot")]
+    fn copilot_chat_clients(api_base: &str) -> [(&'static str, Arc<dyn LlmClient>); 2] {
+        use meerkat_copilot::CopilotChatCompletionsClientFactory as _;
+        let authorizer: Arc<dyn meerkat_core::HttpAuthorizer> = Arc::new(TestAuthorizer);
+        let openai = copilot_openai_route_client(
+            meerkat_copilot::CopilotEndpoint::ChatCompletions,
+            api_base.to_string(),
+            Arc::clone(&authorizer),
+            &CopilotOpenAiRouteTarget {
+                model: "gpt-test".to_string(),
+                supports_temperature: true,
+                supports_image_input: true,
+                supports_image_tool_results: true,
+            },
+        )
+        .expect("the OpenAI model's chat route builds");
+        let gemini = OpenAiCopilotChatCompletionsClientFactory
+            .build(meerkat_copilot::CopilotChatCompletionsClientSpec::new(
+                Provider::Gemini,
+                "gemini-test".to_string(),
+                api_base.to_string(),
+                authorizer,
+                true,
+                true,
+                true,
+                true,
+            ))
+            .expect("the Gemini model's chat route builds");
+        [("OpenAI model", openai), ("Gemini model", gemini)]
+    }
+
+    /// The events of one request on `client`.
+    #[cfg(feature = "copilot")]
+    async fn copilot_chat_events(
+        client: &Arc<dyn LlmClient>,
+    ) -> Vec<Result<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>> {
+        use futures::StreamExt as _;
+        let request = meerkat_llm_core::LlmRequest::new(
+            "gpt-test",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        client.stream(&request).collect().await
+    }
+
+    /// `events` end with the retryable incomplete-response error and complete
+    /// no tool call.
+    #[cfg(feature = "copilot")]
+    fn assert_incomplete(
+        events: &[Result<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>],
+        case: &str,
+    ) {
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                Ok(meerkat_llm_core::LlmEvent::ToolCallComplete { .. })
+            )),
+            "{case}: no tool call completes"
+        );
+        let Some(Ok(meerkat_llm_core::LlmEvent::Done {
+            outcome: meerkat_llm_core::LlmDoneOutcome::Error { error },
+        })) = events.last()
+        else {
+            panic!(
+                "{case}: the stream ends with an error, not {:?}",
+                events.last()
+            );
+        };
+        assert!(
+            matches!(error, meerkat_llm_core::LlmError::IncompleteResponse { .. })
+                && error.is_retryable(),
+            "{case}: a retryable incomplete response, not {error:?}"
+        );
+    }
+
+    #[cfg(feature = "copilot")]
+    const COPILOT_CHAT_TEXT: &str = r#"{"choices":[{"index":0,"delta":{"content":"Partial"}}]}"#;
+    #[cfg(feature = "copilot")]
+    const COPILOT_CHAT_CALL: &str = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}"#;
+
+    /// On GitHub Copilot's Chat Completions routes a stream that names no
+    /// finish reason is an incomplete response the agent tries again, never a
+    /// completed turn: cut at the end of the body, or closed by `[DONE]`,
+    /// after text or a tool call. A finish reason completes the turn with or
+    /// without `[DONE]`.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn copilot_chat_stream_without_a_finish_reason_is_incomplete() {
+        let stop = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        for (case, data) in [
+            ("text cut at the end of the body", vec![COPILOT_CHAT_TEXT]),
+            ("text closed by [DONE]", vec![COPILOT_CHAT_TEXT, "[DONE]"]),
+            (
+                "a tool call closed by [DONE]",
+                vec![COPILOT_CHAT_CALL, "[DONE]"],
+            ),
+        ] {
+            let (base, server) = spawn_copilot_chat_stub(&data).await;
+            for (route, client) in copilot_chat_clients(&base) {
+                let events = copilot_chat_events(&client).await;
+                assert_incomplete(&events, &format!("{route}, {case}"));
+            }
+            server.abort();
+        }
+
+        let (base, server) = spawn_copilot_chat_stub(&[COPILOT_CHAT_TEXT, stop]).await;
+        for (route, client) in copilot_chat_clients(&base) {
+            let events = copilot_chat_events(&client).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Ok(meerkat_llm_core::LlmEvent::Done {
+                        outcome: meerkat_llm_core::LlmDoneOutcome::Success { .. }
+                    }))
+                ),
+                "{route}: a finish reason completes the turn without [DONE]: {:?}",
+                events.last()
+            );
+        }
+        server.abort();
+    }
+
+    /// On GitHub Copilot's Chat Completions routes only the first choice is
+    /// read: a stream that carries another choice, before or after the first
+    /// one's finish reason, is refused as an incomplete response, neither
+    /// merged into the answer nor dropped from it.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn copilot_chat_stream_refuses_another_choice() {
+        let second =
+            r#"{"choices":[{"index":1,"delta":{"content":"Alternative"},"finish_reason":"stop"}]}"#;
+        let stop = r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+        for (case, data) in [
+            (
+                "another choice before the finish reason",
+                [COPILOT_CHAT_TEXT, second, stop, "[DONE]"],
+            ),
+            (
+                "another choice after the finish reason",
+                [COPILOT_CHAT_TEXT, stop, second, "[DONE]"],
+            ),
+        ] {
+            let (base, server) = spawn_copilot_chat_stub(&data).await;
+            for (route, client) in copilot_chat_clients(&base) {
+                let events = copilot_chat_events(&client).await;
+                assert_incomplete(&events, &format!("{route}, {case}"));
+            }
+            server.abort();
+        }
+    }
+
+    /// A refusal the model streams on a Copilot Chat Completions route ends
+    /// the turn as a refusal at `[DONE]`, with no finish reason: it is the
+    /// response's own ending, not an incomplete stream.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn copilot_chat_stream_refusal_without_a_finish_reason_is_a_refusal() {
+        let refusal = r#"{"choices":[{"index":0,"delta":{"refusal":"I can't help with that."}}]}"#;
+        let (base, server) = spawn_copilot_chat_stub(&[refusal, "[DONE]"]).await;
+        for (route, client) in copilot_chat_clients(&base) {
+            let events = copilot_chat_events(&client).await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Ok(meerkat_llm_core::LlmEvent::Done {
+                        outcome: meerkat_llm_core::LlmDoneOutcome::Success {
+                            stop_reason: meerkat_core::StopReason::Refusal,
+                            ..
+                        }
+                    }))
+                ),
+                "{route}: the refusal ends the turn: {:?}",
+                events.last()
+            );
+        }
+        server.abort();
+    }
+
+    /// Copilot's chat stream discipline stays on its own routes: a plain
+    /// compatible Chat Completions client still completes a stream that
+    /// ends at `[DONE]` without a finish reason.
+    #[cfg(feature = "copilot")]
+    #[tokio::test]
+    async fn a_plain_compatible_chat_stream_without_a_finish_reason_completes() {
+        let (base, server) = spawn_copilot_chat_stub(&[COPILOT_CHAT_TEXT, "[DONE]"]).await;
+        let client: Arc<dyn LlmClient> = Arc::new(crate::OpenAiCompatibleClient::new(
+            crate::client_compatible::OpenAiCompatibleMode::ChatCompletions,
+            "gpt-test".to_string(),
+            base,
+            None,
+            true,
+            false,
+            false,
+        ));
+        let events = copilot_chat_events(&client).await;
+        server.abort();
+        assert!(
+            matches!(
+                events.last(),
+                Some(Ok(meerkat_llm_core::LlmEvent::Done {
+                    outcome: meerkat_llm_core::LlmDoneOutcome::Success { .. }
+                }))
+            ),
+            "{:?}",
+            events.last()
+        );
     }
 }
 

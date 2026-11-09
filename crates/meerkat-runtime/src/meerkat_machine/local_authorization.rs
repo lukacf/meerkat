@@ -69,6 +69,24 @@ pub type NativeRetainedResumeCheck = dyn Fn(
     + Send
     + Sync;
 
+/// Host-installed owner of a kept governed input's controller (an input
+/// admitted with an authority association of its own, kept across a stop or
+/// a restart, whose client did not survive the store). It re-attests the
+/// original through the custody that admitted it, decides the invocation
+/// again through its existing owners, and returns the usable controller
+/// client it supplies itself for the association's stored selection; the
+/// stored selection is data, never a client. It must not fabricate a
+/// replacement original. Verdicts are typed exactly as
+/// [`NativeWorkAuthorizationHost::authenticate_kept_original`] documents.
+pub type NativeKeptOriginalCheck = dyn Fn(
+        &LogicalRuntimeId,
+        &Input,
+        &InputAuthorityAssociation,
+    )
+        -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    + Send
+    + Sync;
+
 /// Host-installed provider of the configured MCP attachment authority for
 /// each session registration, and, for a per-agent host, of the agent
 /// selection conjunct of its MCP attachment controls.
@@ -146,6 +164,12 @@ pub struct NativeGrantWorkConfiguration {
     /// Owner of governed retained-work resume. Without it, this composition
     /// admits no retained resume (`UnsupportedScope`).
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    /// Owner of a kept governed input's controller. Without it, every kept
+    /// governed input whose controller client did not survive the store ends
+    /// as a refused resume (`UnsupportedScope`).
+    /// [`super::ScopedGrantComposition::with_retained_resume`] installs it
+    /// with the retained-resume owner.
+    pub kept_original: Option<Arc<NativeKeptOriginalCheck>>,
     /// Every governed input must name the session document's bound scoped
     /// destination (see `NativeWorkAuthorizationHost::requires_scoped_destination`).
     pub require_scoped_destination: bool,
@@ -194,6 +218,32 @@ impl MeerkatMachine {
     ) -> Result<Self, RuntimeDriverError> {
         self.install_native_work_authorization(|machine| local_grant_host(configuration, machine))
     }
+
+    /// Record `grants` as the grant owner this machine's realm open
+    /// restored, so the realm's terminal close
+    /// ([`MeerkatMachine::release_realm_custody`]) ends its custody. The
+    /// realm composition installs the grant owner of the configuration it
+    /// installed, once, before any session is registered. A grant owner a
+    /// host supplied is never installed here: that host's own close ends its
+    /// custody.
+    ///
+    /// # Errors
+    /// Unavailable when it is installed already or a session is registered.
+    pub fn install_realm_grant_custody(
+        &self,
+        grants: Arc<LocalGrantAuthority>,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self
+            .sessions
+            .try_read()
+            .map_err(|_| crate::input_authority::unavailable())?;
+        if !sessions.is_empty() {
+            return Err(crate::input_authority::unavailable());
+        }
+        self.realm_grant_custody
+            .set(grants)
+            .map_err(|_| crate::input_authority::unavailable())
+    }
 }
 
 impl super::StagedMeerkatMachine {
@@ -225,6 +275,7 @@ pub(super) fn local_grant_host(
     Arc::new(NativeGrantWorkAuthorizationHost {
         ingress: configuration.ingress,
         retained_resume: configuration.retained_resume,
+        kept_original: configuration.kept_original,
         require_scoped_destination: configuration.require_scoped_destination,
         configured_mcp_attachment: configuration.configured_mcp_attachment,
         policy,
@@ -238,6 +289,7 @@ pub(super) fn local_grant_host(
 struct NativeGrantWorkAuthorizationHost {
     ingress: Arc<NativeIngressCheck>,
     retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    kept_original: Option<Arc<NativeKeptOriginalCheck>>,
     require_scoped_destination: bool,
     configured_mcp_attachment: Option<Arc<dyn ConfiguredMcpAttachmentProvider>>,
     policy: Arc<GrantBackedWorkPolicy>,
@@ -483,6 +535,59 @@ impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
                 .validate_controller_admission(original.association(), &facts)
                 .map_err(RetainedResumeError::from)?;
         }
+        Ok(client)
+    }
+
+    fn authenticate_kept_original(
+        &self,
+        runtime: &LogicalRuntimeId,
+        input: &Input,
+        association: &InputAuthorityAssociation,
+    ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    {
+        use crate::retained_work::RetainedResumeError;
+        use crate::traits::ControllerReadinessFailure;
+        let check = self
+            .kept_original
+            .as_ref()
+            .ok_or(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::UnsupportedScope,
+            ))?;
+        let machine = self
+            .machine
+            .upgrade()
+            .ok_or(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::PolicyUnavailable,
+            ))?;
+        machine.require_governed_execution_custody().map_err(|_| {
+            RetainedResumeError::Readiness(ControllerReadinessFailure::PolicyUnavailable)
+        })?;
+        // The stored association must name this runtime and the selection
+        // its controller is reacquired for.
+        let selection = association
+            .candidate()
+            .controller_model
+            .as_ref()
+            .ok_or(RetainedResumeError::Refused(malformed()))?;
+        if association.candidate().target.logical_runtime.as_str() != runtime.to_string() {
+            return Err(RetainedResumeError::Refused(malformed()));
+        }
+        // The installed owner re-attests the original through its custody,
+        // decides the invocation again and supplies the actual client.
+        let client = check(runtime, input, association)?;
+        if client.selection() != selection
+            || client.client().controller_model_selection().as_ref() != Some(client.selection())
+        {
+            return Err(RetainedResumeError::Refused(malformed()));
+        }
+        // Current controller grant, account, model and ceilings, through the
+        // same owner as fresh admission.
+        let facts = client.plain_facts().map_err(|_| {
+            RetainedResumeError::Readiness(ControllerReadinessFailure::FactsUnavailable)
+        })?;
+        self.policy
+            .validate_controller_admission(association, &facts)
+            .map_err(RetainedResumeError::from)?;
         Ok(client)
     }
 
@@ -927,6 +1032,10 @@ impl PreparedOperationAuthorization for NativePreparedAuthorization {
         // became unavailable after entry. Never reauthorize historical outcome.
         self.prepared.observe(binding, observation)
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.prepared.spend_at_entry()
+    }
 }
 
 fn malformed() -> OperationRefused {
@@ -1209,6 +1318,7 @@ mod tests {
         );
         let grant = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new("controller-leaf").expect("id"),
                 executor.clone(),
@@ -1257,6 +1367,7 @@ mod tests {
         (
             NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -1799,6 +1910,7 @@ mod tests {
         candidate.controller_grant_lineage = vec![
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     EvidenceId::new("controller-leaf").expect("id"),
                     candidate.logical_executor.clone(),
@@ -2037,7 +2149,10 @@ mod tests {
             )
             .expect("actual lifecycle-marked credential");
             let store = Arc::new(CredentialClearGateStore::new(false));
-            store.save(&key, &tokens).await.expect("real memory vault");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+                .await
+                .expect("real memory vault");
             let before_bytes = serde_json::to_vec(&store.load(&key).await.expect("vault read"))
                 .expect("encode stored tokens");
             let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(&credential);
@@ -2153,13 +2268,15 @@ mod tests {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
             tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-            self.actual.save(key, tokens).await
+            self.actual.save(fence, key, tokens).await
         }
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             self.clears
@@ -2172,7 +2289,7 @@ mod tests {
                     .expect("test clear gate")
                     .forget();
             }
-            self.actual.clear(key).await
+            self.actual.clear(fence, key).await
         }
         async fn list(
             &self,
@@ -2229,7 +2346,10 @@ mod tests {
             )
             .unwrap();
             let store = Arc::new(CredentialClearGateStore::new(true));
-            store.save(&key, &tokens).await.unwrap();
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+                .await
+                .unwrap();
             let before_bytes = serde_json::to_vec(&store.load(&key).await.unwrap()).unwrap();
             let driver = Arc::clone(&machine.sessions.read().await.get(&session).unwrap().driver);
             let id = prompt.id().clone();
@@ -2345,6 +2465,11 @@ mod tests {
         struct StorageRaceStore {
             actual: Arc<dyn TokenStore>,
             directory: Option<tempfile::TempDir>,
+            /// For a file-backed store: a guard over its file store's
+            /// credential fence, held for the store's life. The in-memory
+            /// coordinator these tests pair it with fences nothing, so the
+            /// race store writes its file store under its own guard.
+            own_fence: Option<Arc<meerkat_core::AdmissionGuard>>,
             gate_save: bool,
             gate_clear: bool,
             fail_save: AtomicBool,
@@ -2362,6 +2487,7 @@ mod tests {
                 Arc::new(Self {
                     actual: Arc::new(EphemeralTokenStore::new()),
                     directory: None,
+                    own_fence: None,
                     gate_save,
                     gate_clear: !gate_save,
                     fail_save: AtomicBool::new(fail_save),
@@ -2377,11 +2503,17 @@ mod tests {
         }
 
         impl StorageRaceStore {
-            fn file_backed(fail_clear: bool) -> Arc<Self> {
+            fn file_backed(fail_clear: bool, realm: &meerkat_core::RealmId) -> Arc<Self> {
                 let directory = tempfile::tempdir().unwrap();
                 let mut store = Self::new(false, false, fail_clear);
                 let unique = Arc::get_mut(&mut store).unwrap();
                 unique.actual = Arc::new(FileTokenStore::new(directory.path()));
+                unique.own_fence = Some(
+                    meerkat_core::AdmissionGuard::try_acquire(vec![
+                        meerkat_core::AdmissionFence::credentials(directory.path(), realm).unwrap(),
+                    ])
+                    .unwrap(),
+                );
                 unique.directory = Some(directory);
                 store
             }
@@ -2406,6 +2538,7 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
@@ -2421,9 +2554,14 @@ mod tests {
                 if self.fail_save.swap(false, Ordering::SeqCst) {
                     return Err(TokenStoreError::Io("injected first save failure".into()));
                 }
-                self.actual.save(key, tokens).await
+                let fence = self.own_fence.as_deref().unwrap_or(fence);
+                self.actual.save(fence, key, tokens).await
             }
-            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+            async fn clear(
+                &self,
+                fence: &meerkat_core::AdmissionGuard,
+                key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
                 self.clears.fetch_add(1, Ordering::SeqCst);
                 if self.gate_clear {
                     self.clear_entered.add_permits(1);
@@ -2438,7 +2576,8 @@ mod tests {
                         "injected clear failure before mutation".into(),
                     ));
                 }
-                self.actual.clear(key).await
+                let fence = self.own_fence.as_deref().unwrap_or(fence);
+                self.actual.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
                 self.actual.list().await
@@ -2766,7 +2905,7 @@ mod tests {
                 let key = TokenKey::from_credential_identity(&credential);
                 let lease_key = LeaseKey::from_credential_identity(&credential);
                 let handle = machine.generated_auth_lease_handle();
-                let store = StorageRaceStore::file_backed(fail_clear);
+                let store = StorageRaceStore::file_backed(fail_clear, key.realm());
                 let persistence = ProviderAuthPersistence::new(
                     store.clone(),
                     Arc::new(InMemoryCoordinator::new()),
@@ -2965,6 +3104,9 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     mod scoped_retained_resume;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod peer_requester;
 
     // Exercise the actual ordinary constructor without wrapping a bundle or
     // replacing its runtime owner.
@@ -3241,5 +3383,9 @@ impl PreparedOperationAuthorization for NativeControlDecision {
         observation: OperationObservation,
     ) -> Result<(), OperationObservationError> {
         self.inner.observe(binding, observation)
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
     }
 }

@@ -329,6 +329,9 @@ fn assert_workgraph_snapshot(
             .is_some_and(|seq| seq >= 5),
         "expected seeded event high-water mark in {snapshot}"
     );
+    // Both seeded items match `include_terminal`, and none is cut.
+    assert_eq!(snapshot["total_items"], json!(2), "{snapshot}");
+    assert_eq!(snapshot["truncated"], json!(false), "{snapshot}");
     Ok(())
 }
 
@@ -600,6 +603,58 @@ async fn workgraph_sqlite_shared_realm_observability_roundtrip()
     let cli_snapshot: Value = serde_json::from_str(&cli_stdout)?;
     assert_workgraph_snapshot(&cli_snapshot, realm_id, &seeded)?;
 
+    // `list --json` and `ready --json` print the page: the rows, then
+    // total_items and truncated. The completed blocker was updated last, so
+    // a one-item list keeps it.
+    let cli_list_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "workgraph",
+        "list",
+        "--include-terminal",
+        "--limit",
+        "1",
+        "--json",
+    ];
+    let cli_list_output = run_binary(&rkat, &project_dir, &cli_list_args).await?;
+    let cli_list_stdout =
+        output_ok_or_err(cli_list_output, "rkat", &cli_list_args).map_err(std::io::Error::other)?;
+    let cli_list: Value = serde_json::from_str(&cli_list_stdout)?;
+    assert_eq!(
+        cli_list["items"].as_array().map(Vec::len),
+        Some(1),
+        "{cli_list}"
+    );
+    assert_eq!(
+        cli_list["items"][0]["id"].as_str(),
+        Some(seeded.completed_id.as_str()),
+        "{cli_list}"
+    );
+    assert_eq!(cli_list["total_items"], json!(2), "{cli_list}");
+    assert_eq!(cli_list["truncated"], json!(true), "{cli_list}");
+    let cli_ready_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "workgraph",
+        "ready",
+        "--json",
+    ];
+    let cli_ready_output = run_binary(&rkat, &project_dir, &cli_ready_args).await?;
+    let cli_ready_stdout = output_ok_or_err(cli_ready_output, "rkat", &cli_ready_args)
+        .map_err(std::io::Error::other)?;
+    let cli_ready: Value = serde_json::from_str(&cli_ready_stdout)?;
+    assert_eq!(
+        cli_ready["items"][0]["id"].as_str(),
+        Some(seeded.ready_id.as_str()),
+        "{cli_ready}"
+    );
+    assert_eq!(cli_ready["total_items"], json!(1), "{cli_ready}");
+    assert_eq!(cli_ready["truncated"], json!(false), "{cli_ready}");
+
     let mut rpc = spawn_rpc(
         &rkat_rpc,
         &project_dir,
@@ -637,6 +692,28 @@ async fn workgraph_sqlite_shared_realm_observability_roundtrip()
     )
     .await?;
     assert_workgraph_snapshot(&rpc_snapshot, realm_id, &seeded)?;
+    // workgraph/list and workgraph/ready carry the page fields too.
+    let rpc_list = rpc_call(
+        &mut rpc,
+        3,
+        "workgraph/list",
+        json!({
+            "include_terminal": true,
+            "limit": 1,
+        }),
+        20,
+    )
+    .await?;
+    assert_eq!(
+        rpc_list["items"][0]["id"].as_str(),
+        Some(seeded.completed_id.as_str()),
+        "{rpc_list}"
+    );
+    assert_eq!(rpc_list["total_items"], json!(2), "{rpc_list}");
+    assert_eq!(rpc_list["truncated"], json!(true), "{rpc_list}");
+    let rpc_ready = rpc_call(&mut rpc, 4, "workgraph/ready", json!({}), 20).await?;
+    assert_eq!(rpc_ready["total_items"], json!(1), "{rpc_ready}");
+    assert_eq!(rpc_ready["truncated"], json!(false), "{rpc_ready}");
 
     let port = allocate_port();
     write_rest_config(&state_root, realm_id, port).await?;
@@ -666,6 +743,21 @@ async fn workgraph_sqlite_shared_realm_observability_roundtrip()
     assert!(rest_response.status().is_success());
     let rest_snapshot: Value = rest_response.json().await?;
     assert_workgraph_snapshot(&rest_snapshot, realm_id, &seeded)?;
+    let rest_items_response = client
+        .get(format!(
+            "http://127.0.0.1:{port}/workgraph/items?include_terminal=true&limit=1"
+        ))
+        .send()
+        .await?;
+    assert!(rest_items_response.status().is_success());
+    let rest_items: Value = rest_items_response.json().await?;
+    assert_eq!(
+        rest_items["items"][0]["id"].as_str(),
+        Some(seeded.completed_id.as_str()),
+        "{rest_items}"
+    );
+    assert_eq!(rest_items["total_items"], json!(2), "{rest_items}");
+    assert_eq!(rest_items["truncated"], json!(true), "{rest_items}");
 
     shutdown_child(rest).await?;
     shutdown_rpc(rpc).await?;

@@ -123,6 +123,7 @@ fn approved_owing_row(
             )
             .expect("approver"),
             assurance: ApprovalAssurance::PersonAuthenticated,
+            authentication_scope_digest: None,
         }),
         origin: Some(ApprovalConsentOrigin {
             retained_work: origin.clone(),
@@ -620,7 +621,7 @@ async fn wait_for_pass(
 /// Let the clock run far past any plausible poll interval and let every
 /// woken task run; a looping owner would complete passes here.
 async fn idle_for_an_hour() {
-    tokio::time::advance(Duration::from_secs(3600)).await;
+    tokio::time::advance(Duration::from_hours(1)).await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
@@ -2130,7 +2131,7 @@ async fn a_requeue_stop_keeps_an_approved_consents_notice_and_its_consent() {
             .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
                 &registration,
                 meerkat_runtime::UnregisterQueuedInputs::Requeue {
-                    max_age: Duration::from_secs(600),
+                    max_age: Duration::from_mins(10),
                 },
             )
             .await

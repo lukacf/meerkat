@@ -953,7 +953,7 @@ mod tests {
     fn binding_time_horizon_is_the_one_closest_to_exhaustion() {
         let budget = Budget::new(BudgetLimits {
             max_tokens: None,
-            max_duration: Some(Duration::from_secs(3600)),
+            max_duration: Some(Duration::from_hours(1)),
             max_turn_duration: Some(Duration::from_secs(10)),
             max_tool_calls: None,
         });
@@ -979,7 +979,7 @@ mod tests {
         let pool = BudgetPool::new(
             BudgetLimits::default()
                 .with_max_tokens(1000)
-                .with_max_duration(Duration::from_secs(60)),
+                .with_max_duration(Duration::from_mins(1)),
         );
 
         let allocated = pool
@@ -988,12 +988,12 @@ mod tests {
         assert_eq!(allocated.max_turn_duration, None);
 
         let capped = pool
-            .reserve(&BudgetLimits::default().with_max_turn_duration(Duration::from_secs(600)))
+            .reserve(&BudgetLimits::default().with_max_turn_duration(Duration::from_mins(10)))
             .expect("reserve succeeds");
         assert!(
             capped
                 .max_turn_duration
-                .is_some_and(|turn| turn <= Duration::from_secs(60)),
+                .is_some_and(|turn| turn <= Duration::from_mins(1)),
             "a branch turn ceiling cannot exceed what the pool has left"
         );
     }

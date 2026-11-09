@@ -1,0 +1,166 @@
+[
+  {
+    "sha": "feff5a1db5fbae23242c15efa4e64f71c9750af0",
+    "node_id": "C_kwDOAjQHdtoAKGZlZmY1YTFkYjVmYmFlMjMyNDJjMTVlZmE0ZTY0ZjcxYzk3NTBhZjA",
+    "commit": {
+      "author": {
+        "name": "Domenic Denicola",
+        "email": "d@domenic.me",
+        "date": "2021-09-19T17:21:30Z"
+      },
+      "committer": {
+        "name": "Domenic Denicola",
+        "email": "d@domenic.me",
+        "date": "2021-10-03T23:01:52Z"
+      },
+      "message": "Remove license year",
+      "tree": {
+        "sha": "3db011f0c42ea6ba5025c1bf8afa5b0ecdcac86e",
+        "url": "https://api.github.com/repos/jsdom/tr46/git/trees/3db011f0c42ea6ba5025c1bf8afa5b0ecdcac86e"
+      },
+      "url": "https://api.github.com/repos/jsdom/tr46/git/commits/feff5a1db5fbae23242c15efa4e64f71c9750af0",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/jsdom/tr46/commits/feff5a1db5fbae23242c15efa4e64f71c9750af0",
+    "html_url": "https://github.com/jsdom/tr46/commit/feff5a1db5fbae23242c15efa4e64f71c9750af0",
+    "comments_url": "https://api.github.com/repos/jsdom/tr46/commits/feff5a1db5fbae23242c15efa4e64f71c9750af0/comments",
+    "author": {
+      "login": "domenic",
+      "id": 617481,
+      "node_id": "MDQ6VXNlcjYxNzQ4MQ==",
+      "avatar_url": "https://avatars.githubusercontent.com/u/617481?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/domenic",
+      "html_url": "https://github.com/domenic",
+      "followers_url": "https://api.github.com/users/domenic/followers",
+      "following_url": "https://api.github.com/users/domenic/following{/other_user}",
+      "gists_url": "https://api.github.com/users/domenic/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/domenic/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/domenic/subscriptions",
+      "organizations_url": "https://api.github.com/users/domenic/orgs",
+      "repos_url": "https://api.github.com/users/domenic/repos",
+      "events_url": "https://api.github.com/users/domenic/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/domenic/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "domenic",
+      "id": 617481,
+      "node_id": "MDQ6VXNlcjYxNzQ4MQ==",
+      "avatar_url": "https://avatars.githubusercontent.com/u/617481?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/domenic",
+      "html_url": "https://github.com/domenic",
+      "followers_url": "https://api.github.com/users/domenic/followers",
+      "following_url": "https://api.github.com/users/domenic/following{/other_user}",
+      "gists_url": "https://api.github.com/users/domenic/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/domenic/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/domenic/subscriptions",
+      "organizations_url": "https://api.github.com/users/domenic/orgs",
+      "repos_url": "https://api.github.com/users/domenic/repos",
+      "events_url": "https://api.github.com/users/domenic/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/domenic/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "cad352fe92f5fbd726f438f3bd154550da7efba7",
+        "url": "https://api.github.com/repos/jsdom/tr46/commits/cad352fe92f5fbd726f438f3bd154550da7efba7",
+        "html_url": "https://github.com/jsdom/tr46/commit/cad352fe92f5fbd726f438f3bd154550da7efba7"
+      }
+    ]
+  },
+  {
+    "sha": "3a6f29721e7063b9ffd421e461a54beae6170001",
+    "node_id": "MDY6Q29tbWl0MzY5NjQyMTQ6M2E2ZjI5NzIxZTcwNjNiOWZmZDQyMWU0NjFhNTRiZWFlNjE3MDAwMQ==",
+    "commit": {
+      "author": {
+        "name": "Sebastian Mayr",
+        "email": "sebmaster16@gmail.com",
+        "date": "2016-08-02T20:48:20Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2016-08-02T20:48:20Z"
+      },
+      "message": "Add MIT license\n\nFixes #4.",
+      "tree": {
+        "sha": "8fd3089743b3401643611efce88105a92303456a",
+        "url": "https://api.github.com/repos/jsdom/tr46/git/trees/8fd3089743b3401643611efce88105a92303456a"
+      },
+      "url": "https://api.github.com/repos/jsdom/tr46/git/commits/3a6f29721e7063b9ffd421e461a54beae6170001",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/jsdom/tr46/commits/3a6f29721e7063b9ffd421e461a54beae6170001",
+    "html_url": "https://github.com/jsdom/tr46/commit/3a6f29721e7063b9ffd421e461a54beae6170001",
+    "comments_url": "https://api.github.com/repos/jsdom/tr46/commits/3a6f29721e7063b9ffd421e461a54beae6170001/comments",
+    "author": {
+      "login": "Sebmaster",
+      "id": 347870,
+      "node_id": "MDQ6VXNlcjM0Nzg3MA==",
+      "avatar_url": "https://avatars.githubusercontent.com/u/347870?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/Sebmaster",
+      "html_url": "https://github.com/Sebmaster",
+      "followers_url": "https://api.github.com/users/Sebmaster/followers",
+      "following_url": "https://api.github.com/users/Sebmaster/following{/other_user}",
+      "gists_url": "https://api.github.com/users/Sebmaster/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/Sebmaster/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/Sebmaster/subscriptions",
+      "organizations_url": "https://api.github.com/users/Sebmaster/orgs",
+      "repos_url": "https://api.github.com/users/Sebmaster/repos",
+      "events_url": "https://api.github.com/users/Sebmaster/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/Sebmaster/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "a8009f9ce80ff5dbe71dd71e203afe4e4c878d28",
+        "url": "https://api.github.com/repos/jsdom/tr46/commits/a8009f9ce80ff5dbe71dd71e203afe4e4c878d28",
+        "html_url": "https://github.com/jsdom/tr46/commit/a8009f9ce80ff5dbe71dd71e203afe4e4c878d28"
+      }
+    ]
+  }
+]

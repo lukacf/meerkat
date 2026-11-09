@@ -159,6 +159,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             model: model.clone(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -184,6 +185,7 @@ fn joke_mob_definition(model: String) -> MobDefinition {
             model_fallback: None,
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -359,7 +361,7 @@ async fn send_and_wait(
         .expect("member session id");
     let prompt = prompt.into();
     eprintln!("[mob resume smoke] send turn to {member_id}");
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(Duration::from_mins(3), async {
         handle
             .member(&identity)
             .await
@@ -602,7 +604,7 @@ async fn e2e_smoke_mob_partial_resume_collaborative_joke() {
         service_2.as_ref(),
         &lead_sid,
         &["W1B_TOKEN:", "laser goose"],
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     )
     .await
     .is_none()

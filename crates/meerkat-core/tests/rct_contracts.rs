@@ -123,6 +123,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             spawn_tool_access_policy: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             active_skills: None,
+            grant_gated: Default::default(),
         },
         keep_alive: true,
         comms_name: Some("agent-a".to_string()),
@@ -222,6 +223,23 @@ async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> 
                 guard.max_tokens = Some(max_tokens as u32);
             }
             Ok(guard.clone())
+        }
+
+        // In memory: no document, so no admission fence.
+        async fn set_held(
+            &self,
+            _admission: &meerkat_core::AdmissionGuard,
+            config: Config,
+        ) -> Result<(), meerkat_core::config::ConfigError> {
+            self.set(config).await
+        }
+
+        async fn patch_held(
+            &self,
+            _admission: &meerkat_core::AdmissionGuard,
+            delta: ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            self.patch(delta).await
         }
     }
 

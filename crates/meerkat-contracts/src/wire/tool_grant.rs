@@ -1,0 +1,828 @@
+//! Scoped tool grant wire contracts: the `tool_grants/*` JSON-RPC methods.
+//!
+//! A build marks tool families and names grant-gated; a scoped tool grant
+//! opens, for a bounded time, the gated names its target covers for its
+//! subject. A grant may also be scoped to the run its subject session is
+//! running when it is issued: it then ends with that run. The grant
+//! lifecycle (issuance, expiry, revocation, the end of its run, use
+//! admission) is owned by the runtime's `ToolGrantLifecycleMachine`; these
+//! types are its surface projection. Tagged enums use `kind`. A request's
+//! subject, target and scope are closed: a kind or a field this version does
+//! not know is refused. Every vocabulary a result carries (subject, target,
+//! scope, status, issuer, audit event, expiry driver, refusal kind) has a
+//! forward-compatible `unknown` variant that the server never sends.
+
+use serde::{Deserialize, Serialize};
+
+/// A scoped tool grant gate: the built-in tool families, the tool names and
+/// the MCP servers a build mounts hidden and refuses at dispatch until a live
+/// grant opens them. A session's build takes it on `session/create`
+/// (`grant_gated_tools`); a mob profile declares its members'
+/// (`tools.grant_gated`). A field this version does not know is refused,
+/// never ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireGrantGatedTools {
+    /// Built-in tool families, such as `shell`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub families: Vec<String>,
+    /// Tool names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// MCP server names: every tool such a server provides is gated, from
+    /// the moment it appears. A gated server need not be configured: it may
+    /// be attached later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    /// Gate every MCP server the build does not configure itself: one an
+    /// installation provides, at the build or later, and one attached later
+    /// by any path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfigured_mcp_servers: bool,
+}
+
+impl WireGrantGatedTools {
+    /// Whether nothing is gated: an empty gate is omitted where it rides.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.families.is_empty()
+            && self.tools.is_empty()
+            && self.mcp_servers.is_empty()
+            && !self.unconfigured_mcp_servers
+    }
+}
+
+impl From<WireGrantGatedTools> for meerkat_core::tool_grant::GrantGatedTools {
+    fn from(wire: WireGrantGatedTools) -> Self {
+        let mut gate = Self::default();
+        gate.families.extend(wire.families);
+        for tool in wire.tools {
+            gate.tools.insert(tool);
+        }
+        gate.mcp_servers.extend(wire.mcp_servers);
+        gate.unconfigured_mcp_servers = wire.unconfigured_mcp_servers;
+        gate
+    }
+}
+
+impl From<&meerkat_core::tool_grant::GrantGatedTools> for WireGrantGatedTools {
+    fn from(gate: &meerkat_core::tool_grant::GrantGatedTools) -> Self {
+        let mut tools: Vec<String> = gate.tools.iter().map(ToString::to_string).collect();
+        tools.sort();
+        Self {
+            families: gate.families.iter().cloned().collect(),
+            tools,
+            mcp_servers: gate.mcp_servers.iter().cloned().collect(),
+            unconfigured_mcp_servers: gate.unconfigured_mcp_servers,
+        }
+    }
+}
+
+/// The subject a request names: whose grants it writes or reads. Closed: a
+/// kind or a field this version does not know is refused, never ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantSubjectRequest {
+    /// One session's grants.
+    Session { session_id: String },
+    /// One mob member identity's grants, in the mob's running incarnation.
+    /// A server that runs no mobs refuses it.
+    Identity { mob_id: String, identity: String },
+}
+
+/// The target a grant request names: one tool name, a built-in tool family,
+/// whose names the server takes at grant time, or an MCP server. Closed: a
+/// kind or a field this version does not know is refused, never ignored, so
+/// a request is never read as wider than it asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantTargetRequest {
+    /// One tool name.
+    Tool { name: String },
+    /// A built-in tool family.
+    Family { family: String },
+    /// An MCP server: every tool it provides when a call or a boundary
+    /// adjudicates the grant, or, with `tools`, only those of its tools
+    /// named there (a non-empty list, which only narrows).
+    McpServer {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+    },
+}
+
+/// How long a grant request asks a grant to last beyond its window. Closed: a
+/// kind or a field this version does not know is refused, never read as a
+/// window. The kinds are empty structs, so a field is refused as unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolGrantScopeRequest {
+    /// The grant lasts for its window.
+    Window {},
+    /// The grant also ends with the run its subject is running when it is
+    /// issued: a session's own, or the run of the session a member
+    /// identity's member holds. A subject that runs none is refused with the
+    /// typed request refusal `run_not_active`.
+    CurrentRun {},
+}
+
+/// Whose grant a record names: a session, or (in a later version) a mob
+/// member's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantSubject {
+    /// One session's grants.
+    Session { session_id: String },
+    /// One mob member identity's grants.
+    Identity { mob_id: String, identity: String },
+    /// Forward compatibility: a subject kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a grant record opens: one tool name, a built-in tool family with
+/// the names the server took for it at grant time, or an MCP server's tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantTarget {
+    /// One tool name.
+    Tool { name: String },
+    /// A built-in tool family, and the names it opened.
+    Family {
+        family: String,
+        #[serde(default)]
+        names: Vec<String>,
+    },
+    /// An MCP server: every tool it provides, or only those of its tools
+    /// named in `tools`.
+    McpServer {
+        server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+    },
+    /// Forward compatibility: a target kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Who issued a grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantIssuer {
+    /// An operator, through a host surface. `decision_ref` is the host's
+    /// reference to the decision it made before issuing, when it gave one:
+    /// attribution only.
+    Operator {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_ref: Option<String>,
+    },
+    /// An approval decision.
+    Approval { approval_id: String },
+    /// Forward compatibility: an issuer kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How long a grant lasts beyond its window: for its window only, or also
+/// only as long as one run of its subject session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantScope {
+    /// The grant lasts for its window. A server that names no scope issued a
+    /// window grant.
+    #[default]
+    Window,
+    /// The grant admits uses of this run only, and ends when it ends.
+    CurrentRun { run_id: String },
+    /// Forward compatibility: a scope kind this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A grant's status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireToolGrantStatus {
+    /// Issued, and not yet observed at or after its deadline.
+    Active,
+    /// Observed at or after its deadline. Terminal.
+    Expired,
+    /// Revoked before its deadline. Terminal.
+    Revoked,
+    /// Requested through an approval, not yet decided.
+    Requested,
+    /// Requested through an approval and declined. Terminal.
+    Declined,
+    /// Ended with the run it was scoped to, before its deadline. Terminal.
+    /// A client older than this status reads it as `unknown`.
+    RunEnded,
+    /// Forward compatibility: a status this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One scoped tool grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolGrant {
+    pub grant_id: String,
+    pub subject: WireToolGrantSubject,
+    pub target: WireToolGrantTarget,
+    pub issuer: WireToolGrantIssuer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub status: WireToolGrantStatus,
+    /// The host clock reading the grant was issued at, in UNIX ms.
+    pub issued_at_ms: u64,
+    /// The grant's fixed deadline, in UNIX ms.
+    pub expires_at_ms: u64,
+    /// The host clock reading the grant was observed to end at, in UNIX ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<u64>,
+    /// Its window only, or also its run. Absent from an older server: a
+    /// window grant.
+    #[serde(default)]
+    pub scope: WireToolGrantScope,
+}
+
+/// A stored grant row the server cannot read (written by a newer version,
+/// or damaged). It opens nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireUnreadableToolGrant {
+    pub grant_id: String,
+    pub detail: String,
+}
+
+/// `tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
+/// `duration_ms` bounds the grant, at most the host's maximum lifetime. A
+/// `current_run` scope also ends it with the run its session is running
+/// when it is issued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GrantToolParams {
+    pub subject: ToolGrantSubjectRequest,
+    pub target: ToolGrantTargetRequest,
+    /// The grant's absolute deadline, in UNIX ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    /// The grant's lifetime from the server's clock, in ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Its window only (the default), or also the subject session's current
+    /// run. Absent, it names no scope, so an older server still takes a
+    /// window grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ToolGrantScopeRequest>,
+    /// The host's opaque reference to the decision it made before issuing
+    /// (for example a person's approval in its own records): non-empty, at
+    /// most 1024 bytes, no control character. Recorded in the grant's issuer
+    /// as attribution; nothing resolves or trusts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_ref: Option<String>,
+}
+
+/// `tool_grants/grant` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GrantToolResult {
+    pub grant: WireToolGrant,
+    /// For an identity grant: whether it applies to the member's running
+    /// build now. Advisory: the grant is issued either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies: Option<WireToolGrantApplies>,
+}
+
+/// Whether an identity grant applies to the member's running build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireToolGrantApplies {
+    /// The identity's live member build runs a gate that covers the target
+    /// (for a gated MCP server the member's profile configures, the build
+    /// holds the server too).
+    Now,
+    /// The target is not mounted: the live build ignored it, or, with no
+    /// live build, the next build cannot mount it.
+    NotMounted,
+    /// The member's next build applies it: the member is not live here, its
+    /// live build predates the gate that covers the target, or the target is
+    /// a gated MCP server the member's profile configures that the live
+    /// build left unattached.
+    AtNextBuild,
+    /// Forward compatibility: a value this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The entries of a build's tool grant gate as `tool_grants/list` shows
+/// them: built-in tool families, tool names, MCP servers and the
+/// unconfigured-servers mode. Advisory, so tolerant: a field this version
+/// does not know is ignored, never refused, and a newer server's gate never
+/// fails the result it rides on. (A gate a request names is the closed
+/// [`WireGrantGatedTools`].)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolGrantGateEntries {
+    /// Built-in tool families, such as `shell`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub families: Vec<String>,
+    /// Tool names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// MCP server names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<String>,
+    /// Whether every MCP server the build does not configure itself is
+    /// gated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfigured_mcp_servers: bool,
+}
+
+impl From<&meerkat_core::tool_grant::GrantGatedTools> for WireToolGrantGateEntries {
+    fn from(gate: &meerkat_core::tool_grant::GrantGatedTools) -> Self {
+        let mut tools: Vec<String> = gate.tools.iter().map(ToString::to_string).collect();
+        tools.sort();
+        Self {
+            families: gate.families.iter().cloned().collect(),
+            tools,
+            mcp_servers: gate.mcp_servers.iter().cloned().collect(),
+            unconfigured_mcp_servers: gate.unconfigured_mcp_servers,
+        }
+    }
+}
+
+/// A build's tool grant gate: what it gates, and the role entries it
+/// ignores as not mounted (never gated, never open).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolGrantGateView {
+    #[serde(default)]
+    pub gated: WireToolGrantGateEntries,
+    #[serde(default)]
+    pub not_mounted: WireToolGrantGateEntries,
+}
+
+/// A mob member identity's tool grant gate, as `tool_grants/list` answers
+/// it: what its live build runs, and what its next build resolves.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMemberToolGrantGate {
+    /// What the identity's live member build gates now (its gated names
+    /// under `tools`, with its gated servers and the unconfigured-servers
+    /// mode) and the names it ignored as not mounted; `null` when no build
+    /// of the member is live on this server.
+    pub running: Option<WireToolGrantGateView>,
+    /// The gate the member's next build resolves: its own gate joined with
+    /// its role's current gate.
+    pub next_build: WireToolGrantGateView,
+}
+
+/// `tool_grants/request` parameters: ask for a grant a person approves
+/// through a durable decision of kind `tool_grant.issue`. `duration_ms`
+/// bounds the grant from its issuance, at most the host's maximum lifetime;
+/// a `current_run` scope also scopes it to the run its session is running
+/// when it is asked. Closed, as `tool_grants/grant`'s parameters: a request
+/// names no approver (the host's policy does).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RequestToolGrantParams {
+    pub subject: ToolGrantSubjectRequest,
+    pub target: ToolGrantTargetRequest,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ToolGrantScopeRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `tool_grants/request` result: the request as a list shows it (status
+/// `requested`, the id its grant gets when it is issued, the approval as its
+/// issuer) and the decision that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RequestToolGrantResult {
+    pub grant: WireToolGrant,
+    pub decision: crate::wire::WireDecision,
+}
+
+/// `tool_grants/revoke` parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RevokeToolGrantParams {
+    pub grant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `tool_grants/revoke` result. A revoke is idempotent: `changed` says
+/// whether this revoke ended the grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RevokeToolGrantResult {
+    pub grant: WireToolGrant,
+    pub changed: bool,
+}
+
+/// `tool_grants/list` parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ListToolGrantsParams {
+    pub subject: ToolGrantSubjectRequest,
+    /// List ended (expired or revoked) grants too.
+    #[serde(default)]
+    pub include_ended: bool,
+}
+
+/// `tool_grants/list` result. Due grants are settled as expired first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ListToolGrantsResult {
+    pub grants: Vec<WireToolGrant>,
+    /// Rows of the subject the server cannot read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<WireUnreadableToolGrant>,
+    /// For an identity subject: the member's gate, running and next build.
+    /// Advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<WireMemberToolGrantGate>,
+}
+
+/// `tool_grants/audit` parameters: a page of the subject's audit log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolGrantAuditParams {
+    pub subject: ToolGrantSubjectRequest,
+    /// Rows after this sequence; the log's start when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<u64>,
+    /// At most this many rows; the server's default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Which driver observed a grant's expiry or the end of its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireToolGrantExpiryDriver {
+    Timer,
+    Boundary,
+    Dispatch,
+    Read,
+    Revoke,
+    /// The session runtime, at the end of the grant's run.
+    Run,
+    /// Durable-tail recovery, closing the run a stopped process left open.
+    Recovery,
+    /// A build reading which gated MCP servers a live grant covers.
+    Build,
+    /// Forward compatibility: a driver this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a gated call was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireToolGrantRefusalKind {
+    Required,
+    Expired,
+    Revoked,
+    Unavailable,
+    /// Forward compatibility: a refusal kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One audit event of a subject's grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireToolGrantAuditEvent {
+    Granted {
+        grant_id: String,
+        target: WireToolGrantTarget,
+        issuer: WireToolGrantIssuer,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        expires_at_ms: u64,
+        /// Its window only, or also its run. Absent from an older server: a
+        /// window grant.
+        #[serde(default)]
+        scope: WireToolGrantScope,
+    },
+    Expired {
+        grant_id: String,
+        expires_at_ms: u64,
+        observed_at_ms: u64,
+        driver: WireToolGrantExpiryDriver,
+    },
+    Revoked {
+        grant_id: String,
+        observed_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    Refused {
+        tool: String,
+        reason: WireToolGrantRefusalKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_id: Option<String>,
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
+    /// A run-scoped grant ended with its run, before its deadline. A client
+    /// older than this event reads it as `unknown`.
+    RunEnded {
+        grant_id: String,
+        /// The run the grant was scoped to.
+        run_id: String,
+        observed_at_ms: u64,
+        driver: WireToolGrantExpiryDriver,
+    },
+    /// Forward compatibility: an event kind this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One audit row: its place in the subject's log, when it was recorded, and
+/// its event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolGrantAuditRow {
+    pub sequence: u64,
+    /// The host clock reading the row was recorded at, in UNIX ms.
+    pub at_ms: u64,
+    pub event: WireToolGrantAuditEvent,
+}
+
+/// An audit row of the page the server cannot read (written by a newer
+/// version, or damaged): its place in the subject's log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireUnreadableToolGrantAuditRow {
+    pub sequence: u64,
+    pub detail: String,
+}
+
+/// `tool_grants/audit` result. `next_sequence` is the `after_sequence` of
+/// the next page while more rows may follow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ToolGrantAuditResult {
+    pub rows: Vec<WireToolGrantAuditRow>,
+    /// Rows of the page the server cannot read; the rest of the page is
+    /// served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<WireUnreadableToolGrantAuditRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_sequence: Option<u64>,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn request_params_are_closed_and_bound_by_a_duration() {
+        let subject = json!({"kind": "session", "session_id": "session-1"});
+        let target = json!({"kind": "family", "family": "shell"});
+        let params: RequestToolGrantParams = serde_json::from_value(json!({
+            "subject": subject,
+            "target": target,
+            "duration_ms": 600_000,
+            "scope": {"kind": "current_run"},
+            "reason": "rotate the logs",
+        }))
+        .unwrap();
+        assert_eq!(params.duration_ms, 600_000);
+        assert_eq!(params.scope, Some(ToolGrantScopeRequest::CurrentRun {}));
+        assert_eq!(params.reason.as_deref(), Some("rotate the logs"));
+        assert_eq!(
+            serde_json::to_value(RequestToolGrantParams {
+                scope: None,
+                reason: None,
+                ..params
+            })
+            .unwrap(),
+            json!({"subject": subject, "target": target, "duration_ms": 600_000}),
+            "an unset scope and reason are not sent"
+        );
+        for refused in [
+            // The host's policy names the approver; a request never does.
+            json!({"subject": subject, "target": target, "duration_ms": 1, "approver_id": "operator"}),
+            // A request is bounded by its duration from issuance only.
+            json!({"subject": subject, "target": target, "expires_at_ms": 1}),
+            json!({"subject": subject, "target": target}),
+        ] {
+            assert!(
+                serde_json::from_value::<RequestToolGrantParams>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn grant_params_tag_their_subject_and_target_and_refuse_unknown_fields() {
+        let params = GrantToolParams {
+            subject: ToolGrantSubjectRequest::Session {
+                session_id: "session-1".to_string(),
+            },
+            target: ToolGrantTargetRequest::Family {
+                family: "shell".to_string(),
+            },
+            expires_at_ms: None,
+            duration_ms: Some(60_000),
+            reason: None,
+            scope: None,
+            decision_ref: None,
+        };
+        let value = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "subject": {"kind": "session", "session_id": "session-1"},
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 60_000,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<GrantToolParams>(value).unwrap(),
+            params
+        );
+        assert!(
+            serde_json::from_value::<GrantToolParams>(json!({
+                "subject": {"kind": "session", "session_id": "session-1"},
+                "target": {"kind": "tool", "name": "shell"},
+                "duration_ms": 1,
+                "scope": "current_run",
+            }))
+            .is_err()
+        );
+        let current_run: GrantToolParams = serde_json::from_value(json!({
+            "subject": {"kind": "session", "session_id": "session-1"},
+            "target": {"kind": "tool", "name": "shell"},
+            "duration_ms": 1,
+            "scope": {"kind": "current_run"},
+        }))
+        .unwrap();
+        assert_eq!(
+            current_run.scope,
+            Some(ToolGrantScopeRequest::CurrentRun {})
+        );
+        for refused in [
+            json!({"kind": "current_run", "run_id": "run-1"}),
+            json!({"kind": "turn"}),
+        ] {
+            assert!(
+                serde_json::from_value::<GrantToolParams>(json!({
+                    "subject": {"kind": "session", "session_id": "session-1"},
+                    "target": {"kind": "tool", "name": "shell"},
+                    "duration_ms": 1,
+                    "scope": refused,
+                }))
+                .is_err(),
+                "a scope this version does not know is refused"
+            );
+        }
+    }
+
+    /// An operator grant may name the decision its host made before
+    /// issuing it; the issuer on a record carries it back.
+    #[test]
+    fn grant_params_and_operator_issuers_carry_a_decision_ref() {
+        let value = json!({
+            "subject": {"kind": "identity", "mob_id": "mob-1", "identity": "worker-1"},
+            "target": {"kind": "family", "family": "shell"},
+            "duration_ms": 60_000,
+            "decision_ref": "approval-7",
+        });
+        let params: GrantToolParams =
+            serde_json::from_value(value.clone()).expect("a decision_ref is a known field");
+        assert_eq!(serde_json::to_value(&params).unwrap(), value);
+
+        let issuer = json!({"kind": "operator", "caller": "ops", "decision_ref": "approval-7"});
+        let decoded: WireToolGrantIssuer = serde_json::from_value(issuer.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            issuer,
+            "the issuer keeps its decision_ref"
+        );
+    }
+
+    #[test]
+    fn unknown_result_kinds_decode_as_unknown() {
+        let grant: WireToolGrant = serde_json::from_value(json!({
+            "grant_id": "g1",
+            "subject": {"kind": "session", "session_id": "session-1"},
+            "target": {"kind": "tool", "name": "deploy"},
+            "issuer": {"kind": "delegated", "by": "someone"},
+            "status": "suspended",
+            "issued_at_ms": 1,
+            "expires_at_ms": 2,
+        }))
+        .unwrap();
+        assert_eq!(grant.status, WireToolGrantStatus::Unknown);
+        assert_eq!(grant.issuer, WireToolGrantIssuer::Unknown);
+
+        let grant: WireToolGrant = serde_json::from_value(json!({
+            "grant_id": "g2",
+            "subject": {"kind": "workspace", "workspace_id": "w1"},
+            "target": {"kind": "server", "server": "deploy-tools"},
+            "issuer": {"kind": "operator"},
+            "status": "active",
+            "issued_at_ms": 1,
+            "expires_at_ms": 2,
+        }))
+        .unwrap();
+        assert_eq!(grant.subject, WireToolGrantSubject::Unknown);
+        assert_eq!(grant.target, WireToolGrantTarget::Unknown);
+
+        let row: WireToolGrantAuditRow = serde_json::from_value(json!({
+            "sequence": 4,
+            "at_ms": 9,
+            "event": {"kind": "activated", "grant_id": "g1"},
+        }))
+        .unwrap();
+        assert_eq!(row.event, WireToolGrantAuditEvent::Unknown);
+
+        let expired: WireToolGrantAuditEvent = serde_json::from_value(json!({
+            "kind": "expired",
+            "grant_id": "g1",
+            "expires_at_ms": 2,
+            "observed_at_ms": 3,
+            "driver": "watchdog",
+        }))
+        .unwrap();
+        assert!(matches!(
+            expired,
+            WireToolGrantAuditEvent::Expired {
+                driver: WireToolGrantExpiryDriver::Unknown,
+                ..
+            }
+        ));
+    }
+
+    /// The advisory `gate` of a `tool_grants/list` result is tolerant: a
+    /// field this version does not know, in the gate or in its entries, is
+    /// ignored, so a newer server's gate never fails the result it rides on.
+    #[test]
+    fn a_list_result_reads_a_gate_whose_entries_carry_fields_it_does_not_know() {
+        let listed: ListToolGrantsResult = serde_json::from_value(json!({
+            "grants": [],
+            "gate": {
+                "running": {
+                    "gated": {
+                        "tools": ["shell"],
+                        "mcp_servers": ["tickets"],
+                        "attached_mcp_servers": ["tickets"],
+                    },
+                    "not_mounted": {"families": ["memory"], "since_revision": 3},
+                    "opened": ["shell"],
+                },
+                "next_build": {"gated": {"tools": ["shell"], "quota": 2}},
+            },
+        }))
+        .expect("a gate field this version does not know is ignored");
+        let gate = listed.gate.expect("the gate reads");
+        let running = gate.running.expect("the running gate reads");
+        assert_eq!(running.gated.tools, vec!["shell".to_string()]);
+        assert_eq!(running.gated.mcp_servers, vec!["tickets".to_string()]);
+        assert_eq!(running.not_mounted.families, vec!["memory".to_string()]);
+        assert_eq!(gate.next_build.gated.tools, vec!["shell".to_string()]);
+    }
+}

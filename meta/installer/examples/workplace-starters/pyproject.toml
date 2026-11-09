@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-workplace-starters-example"
+version = "1.0.0"
+description = "Fictional workplace starting examples for a Forge host"
+requires-python = ">=3.11"
+
+[project.entry-points."meerkat_forge.organizations.v1"]
+workplace = "workplace_starters:organization"
+
+[tool.setuptools]
+py-modules = ["workplace_starters"]

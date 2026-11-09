@@ -1,0 +1,115 @@
+[package]
+name = "meerkat-connect"
+version = "0.9.11"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Meerkat Connect's standalone terminal and reusable native setup conversation"
+publish = false
+
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
+[[bin]]
+name = "toolkit_gateway"
+path = "src/bin/toolkit_gateway.rs"
+required-features = ["console"]
+doc = false
+
+[features]
+default = []
+console = ["dep:meerkat-mobkit", "dep:meerkat-mob", "dep:axum"]
+
+[dependencies]
+meerkat-authorization = { workspace = true }
+axum = { version = "0.8", optional = true }
+meerkat-authorization-contracts = { workspace = true }
+meerkat-mob = { workspace = true, optional = true }
+meerkat-mobkit = { workspace = true, optional = true }
+meerkat = { workspace = true, default-features = true, features = ["local-authorization", "session-store", "mcp", "skills", "native-keyring"] }
+meerkat-core = { workspace = true }
+meerkat-mcp = { workspace = true }
+meerkat-runtime = { workspace = true, default-features = true }
+meerkat-session = { workspace = true, default-features = true }
+meerkat-store = { workspace = true, default-features = true, features = ["sqlite", "jsonl"] }
+meerkat-models = { workspace = true }
+meerkat-llm-core = { workspace = true }
+meerkat-auth-core = { workspace = true, default-features = true }
+meerkat-openai = { workspace = true }
+meerkat-anthropic = { workspace = true, features = ["oauth"] }
+meerkat-gemini = { workspace = true, features = ["oauth"] }
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+toolkit-package = { path = "../toolkit-package", default-features = false }
+meerkat-toolkit = { path = "../meerkat-toolkit" }
+nix = { version = "=0.31.3", features = ["signal", "process", "term", "poll", "fs", "dir", "user"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+async-trait.workspace = true
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "cookies"] }
+cookie = "=0.18.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.5", features = ["net", "fs"] }
+dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }
+
+[target.'cfg(unix)'.dependencies]
+toolkit-mobkit = { path = "../toolkit-mobkit", features = ["native-host"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Read-only recovery observation for the real Driver late-adoption child control.
+toolkit-mobkit = { path = "../toolkit-mobkit", features = ["test-support"] }
+
+[dev-dependencies]
+# Canonical definitions for mandatory mob comms in the fresh SDK fixture.
+meerkat-comms = { workspace = true }
+# Native definitions for the fresh SDK host's expected surface, not a capture.
+meerkat-tools = { workspace = true }
+# Exact read-only backend evidence in the SDK fixture, never a second Toolkit owner.
+rusqlite.workspace = true
+toolkit-store = { path = "../toolkit-store" }
+meerkat-workgraph = { workspace = true }
+# Native fault controls are available only to this crate's tests.
+meerkat = { workspace = true, default-features = true, features = ["test-support"] }
+meerkat-client = { workspace = true, default-features = true }
+meerkat-mob = { workspace = true }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+hmac = "0.12"
+base64 = "0.22"
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+
+[[test]]
+name = "mobkit_setup_member"
+required-features = ["console"]
+
+# Explicit acceptance-only trusted host. Never installed as the product CLI.
+[[example]]
+name = "private_service_probe_host"
+path = "tests/support/private_service_probe_host.rs"
+test = false
+
+# Acceptance-only result-dependent native collection host. Never product-installed.
+[[example]]
+name = "private_service_collection_host"
+path = "tests/support/private_service_collection_host.rs"
+test = false

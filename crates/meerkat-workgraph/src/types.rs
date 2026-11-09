@@ -681,8 +681,12 @@ impl WorkEvidenceKind {
     }
 }
 
+/// A typed pointer to evidence for a work item. Evidence is append-only:
+/// nothing edits or removes a ref, and a later ref can withdraw earlier ones
+/// by listing their ids in `withdraws`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct WorkEvidenceRef {
     /// Opaque provenance/display label for the evidence. It is parsed into the
     /// typed confirmation classification at the ingress boundary only; no
@@ -710,9 +714,62 @@ pub struct WorkEvidenceRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub execution_binding_id: Option<WorkExecutionBindingId>,
+    /// Ids of earlier evidence refs on the same item that this ref withdraws.
+    /// A ref is withdrawn when a later ref on the item lists its id; nothing
+    /// is edited or removed. A withdrawal names only earlier refs, never its
+    /// own id or another withdrawal; confirmation and execution evidence can
+    /// neither be withdrawn nor withdraw. Omitted when empty, so a ref without
+    /// withdrawals keeps its encoding.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub withdraws: BTreeSet<String>,
 }
 
 impl WorkEvidenceRef {
+    /// Generic evidence of `kind` with `id`: no label, summary or
+    /// withdrawals, and no confirmation or execution provenance.
+    ///
+    /// The struct is `#[non_exhaustive]`, so code outside this crate builds a
+    /// ref here and sets the rest with the `with_*` builders or the public
+    /// fields. Generic evidence paths refuse confirmation and execution
+    /// provenance; only the trusted goal-confirm and execution-bridge
+    /// producers set them. [`WorkItem::is_evidence_withdrawn`] reads
+    /// withdrawals.
+    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+            label: None,
+            summary: None,
+            confirmation_kind: None,
+            confirming_owner_key: None,
+            execution_binding_id: None,
+            withdraws: BTreeSet::new(),
+        }
+    }
+
+    /// Set the human label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Set the short explanation.
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+
+    /// Set the ids of earlier evidence on the same item that this ref
+    /// withdraws (see [`WorkEvidenceRef::withdraws`]).
+    pub fn with_withdraws<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.withdraws = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// The effective typed confirmation classification carried by this evidence,
     /// considering BOTH carriers: the typed [`WorkEvidenceRef::confirmation_kind`]
     /// field (authoritative when set) and the reserved confirmation literals that
@@ -1240,6 +1297,25 @@ impl<'de> Deserialize<'de> for WorkItem {
     }
 }
 
+impl WorkItem {
+    /// Whether the evidence ref at `index` in [`WorkItem::evidence_refs`] is
+    /// withdrawn: a later ref on this item lists its id in
+    /// [`WorkEvidenceRef::withdraws`]. The read is positional. A withdrawal
+    /// covers every earlier ref with the id, and a ref added after it with
+    /// the same id is not withdrawn, so adding evidence again reinstates it.
+    /// A withdrawn ref stays in `evidence_refs`. `false` for an index past the
+    /// end.
+    pub fn is_evidence_withdrawn(&self, index: usize) -> bool {
+        let Some(evidence) = self.evidence_refs.get(index) else {
+            return false;
+        };
+        self.evidence_refs
+            .iter()
+            .skip(index + 1)
+            .any(|later| later.withdraws.contains(&evidence.id))
+    }
+}
+
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for WorkItem {
     // NOTE (K21): this manual schema inlines the composite field shapes
@@ -1470,6 +1546,11 @@ impl schemars::JsonSchema for WorkItem {
                             },
                             "execution_binding_id": {
                                 "type": ["string", "null"]
+                            },
+                            "withdraws": {
+                                "type": "array",
+                                "uniqueItems": true,
+                                "items": { "type": "string" }
                             }
                         }
                     }
@@ -2160,6 +2241,24 @@ pub struct BreakGlassAttentionReassignRequest {
     pub reason: String,
 }
 
+/// Break-glass release of a work item's claim (host-plane only, never on the
+/// agent tool surface or any wire catalog): an operator hands back a claim
+/// it does not own, such as one whose owner is gone or one with no lease to
+/// end. It carries mandatory attribution and is audit-logged in the
+/// workgraph event stream with the claim it released.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakGlassReleaseWorkItemRequest {
+    pub id: WorkItemId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<WorkNamespace>,
+    pub expected_revision: u64,
+    /// Authenticated principal performing the break-glass release. Recorded
+    /// in the audit event; must identify a human/host operator, not an agent.
+    pub principal: String,
+}
+
 /// Prune request for TERMINAL (superseded/stopped) attention bindings. The
 /// event stream keeps the full audit history; pruning removes only the
 /// binding rows, which otherwise grow monotonically with reassignment churn.
@@ -2286,6 +2385,11 @@ pub struct WorkItemFilter {
     pub include_terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Continue a walk: the `next_cursor` the previous page of this read
+    /// returned. The page holds the rows after the cursor's position, in the
+    /// same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2314,6 +2418,11 @@ pub struct ReadyWorkFilter {
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Continue a walk: the `next_cursor` the previous page of this read
+    /// returned. The page holds the rows after the cursor's position, in the
+    /// same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2333,6 +2442,11 @@ pub struct WorkGraphSnapshotFilter {
     pub include_terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Continue a walk: the `next_cursor` the previous page of this read
+    /// returned. The page holds the rows after the cursor's position, in the
+    /// same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Parameters identifying a single WorkGraph item by id within an optional
@@ -2362,18 +2476,88 @@ pub struct WorkGraphSnapshot {
     #[serde(default)]
     pub attention: Vec<WorkAttentionBinding>,
     pub ready_item_ids: Vec<WorkItemId>,
+    /// Items that matched the filter in this snapshot, before the cursor and
+    /// `limit` cut them. Absent only from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
+    /// Matching items exist after the last item returned. Absent only from a
+    /// server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Pass back as `cursor` for the next page. Present exactly when
+    /// `truncated` is true, except on a `limit: 0` page, which returns only
+    /// the totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The event ledger's high-water mark when the walk began: the first
+    /// page's own `event_high_water_mark`, then carried by the cursor. Absent
+    /// when the ledger had no event then, and from a server that predates the
+    /// field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_event_seq: Option<i64>,
+    /// The ledger has moved past `anchor_event_seq`: an item can have
+    /// changed or appeared since the walk began, and a later page can miss
+    /// it. `events` with `after_seq` set to `anchor_event_seq` names every
+    /// such item. Absent only from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since_anchor: Option<bool>,
 }
 
+/// One page of work items: `list` (most recently updated first) or `ready`
+/// (priority, then creation time, then id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphItemsResponse {
     pub items: Vec<WorkItem>,
+    /// Items that matched the filter at this read (for `ready`, the ready
+    /// items), before the cursor and `limit` cut them. Absent only from a
+    /// server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
+    /// Matching items exist after the last item returned. Absent only from a
+    /// server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Pass back as `cursor` for the next page. Present exactly when
+    /// `truncated` is true, except on a `limit: 0` page, which returns only
+    /// the totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The event ledger's high-water mark when the walk began: read before
+    /// the first page's rows, then carried by the cursor. Absent when the
+    /// ledger had no event then, and from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_event_seq: Option<i64>,
+    /// The ledger has moved past `anchor_event_seq`: an item can have
+    /// changed or appeared since the walk began, and a later page can miss
+    /// it. `events` with `after_seq` set to `anchor_event_seq` names every
+    /// such item. Absent only from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since_anchor: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphEventsResponse {
     pub events: Vec<WorkGraphEvent>,
+    /// Matching events exist after the last event returned. Absent only from
+    /// a server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Pass back as `after_seq` for the next page: the `seq` of the last
+    /// event returned. Present exactly when `truncated` is true, except on a
+    /// `limit: 0` page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_seq: Option<i64>,
+    /// The ledger's highest sequence in the namespace at this read, internal
+    /// execution events included, so it can pass the last public event.
+    /// Absent when the ledger is empty, and from a server that predates the
+    /// field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_high_water_mark: Option<i64>,
 }
 
 #[cfg(test)]
@@ -2429,5 +2613,107 @@ mod tests {
             err.to_string().contains("machine_state"),
             "fail-closed error must cite the missing machine_state authority, got: {err}"
         );
+    }
+
+    #[test]
+    fn evidence_ref_constructor_sets_no_provenance_and_keeps_the_encoding() {
+        let evidence = WorkEvidenceRef::new("finding", "e1");
+        assert!(evidence.label.is_none() && evidence.summary.is_none());
+        assert!(evidence.confirmation_kind.is_none());
+        assert!(evidence.confirming_owner_key.is_none());
+        assert!(evidence.execution_binding_id.is_none());
+        assert!(evidence.withdraws.is_empty());
+        assert_eq!(
+            serde_json::to_value(&evidence).expect("serialize evidence"),
+            serde_json::json!({ "kind": "finding", "id": "e1" }),
+            "a ref that withdraws nothing encodes as before the field existed"
+        );
+
+        let withdrawing = WorkEvidenceRef::new("finding", "e3")
+            .with_label("correction")
+            .with_summary("replaces two readings")
+            .with_withdraws(["e2", "e1", "e2"]);
+        assert_eq!(
+            serde_json::to_value(&withdrawing).expect("serialize evidence"),
+            serde_json::json!({
+                "kind": "finding",
+                "id": "e3",
+                "label": "correction",
+                "summary": "replaces two readings",
+                "withdraws": ["e1", "e2"]
+            })
+        );
+    }
+
+    fn item_with_evidence(evidence_refs: Vec<WorkEvidenceRef>) -> WorkItem {
+        WorkGraphMachine::create_item(
+            CreateWorkItemRequest {
+                title: "withdrawal reads".to_string(),
+                evidence_refs,
+                ..Default::default()
+            },
+            "realm".to_string(),
+            WorkNamespace::default(),
+            Utc::now(),
+        )
+        .expect("machine create_item")
+        .0
+    }
+
+    #[test]
+    fn evidence_withdrawal_reads_by_position() {
+        let finding = |id: &str| WorkEvidenceRef::new("finding", id);
+        let withdrawal = |id: &str| WorkEvidenceRef::new("finding", id).with_withdraws(["e1"]);
+        let withdrawn = |item: &WorkItem| -> Vec<bool> {
+            (0..=item.evidence_refs.len())
+                .map(|index| item.is_evidence_withdrawn(index))
+                .collect()
+        };
+
+        // A withdrawal covers every earlier ref with the id and no later one:
+        // adding the id again reinstates it. The index past the end reads
+        // false.
+        let item = item_with_evidence(vec![
+            finding("e1"),
+            finding("e1"),
+            withdrawal("w1"),
+            finding("e1"),
+        ]);
+        assert_eq!(withdrawn(&item), [true, true, false, false, false]);
+
+        // Two withdrawals of one id: the ref reads withdrawn, and neither
+        // withdrawal does.
+        let item = item_with_evidence(vec![finding("e1"), withdrawal("w1"), withdrawal("w2")]);
+        assert_eq!(withdrawn(&item), [true, false, false, false]);
+    }
+
+    /// Guard: the hand-written `WorkItem` schema inlines the evidence shape,
+    /// and the SDK generator reuses the derived `WorkEvidenceRef` type for it
+    /// only while the two agree (otherwise it mints a `WorkItem*` twin). The
+    /// inline properties are the derived ones, and `withdraws` has the
+    /// derived shape.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn manual_work_item_schema_inlines_the_derived_evidence_shape() {
+        let derived =
+            serde_json::to_value(schemars::schema_for!(WorkEvidenceRef)).expect("derived schema");
+        let manual = serde_json::to_value(schemars::schema_for!(WorkItem)).expect("manual schema");
+        let inline = &manual["properties"]["evidence_refs"]["items"];
+        let property_names = |schema: &serde_json::Value| -> BTreeSet<String> {
+            schema["properties"]
+                .as_object()
+                .expect("schema properties")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(property_names(inline), property_names(&derived));
+
+        let mut derived_withdraws = derived["properties"]["withdraws"].clone();
+        derived_withdraws
+            .as_object_mut()
+            .expect("derived withdraws schema")
+            .remove("description");
+        assert_eq!(inline["properties"]["withdraws"], derived_withdraws);
     }
 }

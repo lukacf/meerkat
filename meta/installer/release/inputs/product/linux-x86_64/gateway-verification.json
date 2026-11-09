@@ -1,0 +1,1241 @@
+{
+  "cases": [
+    {
+      "acquisition": {
+        "ack": {
+          "state": "answer_forwarded"
+        },
+        "admission": {
+          "deduplicated": false,
+          "input_id": "01a1b87e-c9f2-71f5-a065-6bcc2ffde4bd",
+          "session_id": "01a1b87e-bf21-7195-bd39-3164a925ad40",
+          "source_settlement": "fresh_acceptance_promoted",
+          "state": "admitted",
+          "turn_ticket": "86c79f17-eccf-47d2-9e8b-dad7db8d6965"
+        },
+        "authenticated_event": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/authenticated-fixture-event.json",
+          "sha256": "07be29cad2e81e1f81a22e7be4334a7b1524e4543b7e584964db566a9cecc8ba"
+        },
+        "business": {
+          "a_input_history_index": 1,
+          "actual_tool_result": "[{\"by\": \"srean\", \"descendants\": 194, \"id\": 50406563, \"kids\": [50409302, 50406862, 50406763, 50408676, 50407569, 50408559, 50408960, 50406798, 50407784, 50407017, 50406925, 50408131, 50409185, 50406963, 50408843, 50408556, 50408376, 50407553, 50406878, 50407023, 50409018, 50407004, 50406904, 50407652, 50407309, 50406982, 50406885, 50407485, 50407174, 50407846, 50407247, 50406939, 50407497, 50406840, 50407951, 50406581, 50408927, 50406997, 50407124, 50406923], \"score\": 332, \"text\": \"<a href=\\\"https:&#x2F;&#x2F;archive.is&#x2F;AaY5O\\\" rel=\\\"nofollow\\\">https:&#x2F;&#x2F;archive.is&#x2F;AaY5O</a><p><a href=\\\"https:&#x2F;&#x2F;businessexaminer.ca&#x2F;victoria-articles&#x2F;item&#x2F;microsoft-researcher-john-langford-exits-as-ai-frontiers-group-is-declared&#x2F;\\\" rel=\\\"nofollow\\\">https:&#x2F;&#x2F;businessexaminer.ca&#x2F;victoria-articles&#x2F;item&#x2F;microsoft...</a>\", \"time\": 1794074537, \"title\": \"The end of Microsoft Research's AI Frontiers group\", \"type\": \"story\", \"url\": \"https://hunch.net/?p=13764006\", \"username\": \"srean\"}]\n{\"value\":\"[{\\\"by\\\": \\\"srean\\\", \\\"descendants\\\": 194, \\\"id\\\": 50406563, \\\"kids\\\": [50409302, 50406862, 50406763, 50408676, 50407569, 50408559, 50408960, 50406798, 50407784, 50407017, 50406925, 50408131, 50409185, 50406963, 50408843, 50408556, 50408376, 50407553, 50406878, 50407023, 50409018, 50407004, 50406904, 50407652, 50407309, 50406982, 50406885, 50407485, 50407174, 50407846, 50407247, 50406939, 50407497, 50406840, 50407951, 50406581, 50408927, 50406997, 50407124, 50406923], \\\"score\\\": 332, \\\"text\\\": \\\"<a href=\\\\\\\"https:&#x2F;&#x2F;archive.is&#x2F;AaY5O\\\\\\\" rel=\\\\\\\"nofollow\\\\\\\">https:&#x2F;&#x2F;archive.is&#x2F;AaY5O</a><p><a href=\\\\\\\"https:&#x2F;&#x2F;businessexaminer.ca&#x2F;victoria-articles&#x2F;item&#x2F;microsoft-researcher-john-langford-exits-as-ai-frontiers-group-is-declared&#x2F;\\\\\\\" rel=\\\\\\\"nofollow\\\\\\\">https:&#x2F;&#x2F;businessexaminer.ca&#x2F;victoria-articles&#x2F;item&#x2F;microsoft...</a>\\\", \\\"time\\\": 1794074537, \\\"title\\\": \\\"The end of Microsoft Research's AI Frontiers group\\\", \\\"type\\\": \\\"story\\\", \\\"url\\\": \\\"https://hunch.net/?p=13764006\\\", \\\"username\\\": \\\"srean\\\"}]\"}",
+          "answer": "Hacker News story 50406563: The end of Microsoft Research's AI Frontiers group",
+          "b_input_history_index": 6,
+          "matching_result_history_index": 16,
+          "model_request_index": 40,
+          "model_request_sha256": "4802f0f6e45b5f6e3807815fb926bc107a6c2984548203eb556a03a3b0231944",
+          "native_b_admission": "not_observed",
+          "native_b_terminal": "not_observed",
+          "original_catalog": {
+            "helper_catalog_scope_reused": false,
+            "load_call_id": "original-catalog-load",
+            "load_result": {
+              "accepted_names": [
+                "get_top_hackernews_stories"
+              ],
+              "catalog_exact": true,
+              "noop_names": [],
+              "resolutions": [
+                {
+                  "accepted": true,
+                  "name": "get_top_hackernews_stories"
+                }
+              ]
+            },
+            "load_result_history_index": 12,
+            "operation": "get_top_hackernews_stories",
+            "search_call_id": "original-catalog-search",
+            "search_result": {
+              "catalog_exact": true,
+              "results": [
+                {
+                  "currently_callable": false,
+                  "description": "Use this function to get top stories from Hacker News. This Toolkit profile applies the additional input limits shown in the schema.",
+                  "name": "get_top_hackernews_stories",
+                  "visibility_status": "deferred"
+                }
+              ],
+              "total_matches": 1
+            },
+            "search_result_history_index": 10
+          },
+          "story": {
+            "id": 50406563,
+            "title": "The end of Microsoft Research's AI Frontiers group"
+          }
+        },
+        "custody": {
+          "ack": {
+            "state": "answer_forwarded"
+          },
+          "exchange_id": 1,
+          "operation_observation": {
+            "child": {
+              "grant": {
+                "decision": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+                "decision_sha256": "e196ed30b29367ca01a59e502c07b25918bbdfadaa691da841ce2ae6e931aa6f",
+                "route": "fixture-original-route"
+              },
+              "state": "grant_issued"
+            },
+            "custody": "joined",
+            "outcome": "succeeded",
+            "parent_issuance_id": "operator-service-parent-d9ae9e60230f86a9fed4707353058deaaffca594606bfbab962e4d9fd87b6328",
+            "parent_issued": true,
+            "reason": null,
+            "source": {
+              "event_sha256": "b49298bc1cce2a8ddad891c9d884c0870e72a7c8424c63eca62a3d019aa9e889",
+              "original": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+              "route": "fixture-original-route"
+            },
+            "tool_policy": {
+              "candidate": {
+                "digest": "sha256:90a2a946227d25376da740a3a418a3d6ddc7074e91ba7bfd5545c15b6dd180eb",
+                "revision": 2
+              },
+              "native": "accepted",
+              "proposal_sha256": "e99bf9e78f5543c8816aef73b352f16bc8948619bae9fa85fa99b6b854837f5b",
+              "retained_as_current": true
+            }
+          },
+          "proposal": {
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/service-parent-proposal.json",
+            "sha256": "cf0b65bd4759d18cf2c6787b1db7585bc1abc7c15740f499b56d9a7bac1c2e37"
+          },
+          "retirement": "joined",
+          "retirement_observation": {
+            "child": {
+              "grant": {
+                "decision": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+                "decision_sha256": "e196ed30b29367ca01a59e502c07b25918bbdfadaa691da841ce2ae6e931aa6f",
+                "route": "fixture-original-route"
+              },
+              "state": "grant_issued"
+            },
+            "custody": "joined",
+            "outcome": "succeeded",
+            "parent_issuance_id": "operator-service-parent-d9ae9e60230f86a9fed4707353058deaaffca594606bfbab962e4d9fd87b6328",
+            "parent_issued": true,
+            "reason": null,
+            "source": {
+              "event_sha256": "b49298bc1cce2a8ddad891c9d884c0870e72a7c8424c63eca62a3d019aa9e889",
+              "original": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+              "route": "fixture-original-route"
+            },
+            "tool_policy": {
+              "candidate": {
+                "digest": "sha256:90a2a946227d25376da740a3a418a3d6ddc7074e91ba7bfd5545c15b6dd180eb",
+                "revision": 2
+              },
+              "native": "accepted",
+              "proposal_sha256": "e99bf9e78f5543c8816aef73b352f16bc8948619bae9fa85fa99b6b854837f5b",
+              "retained_as_current": true
+            }
+          },
+          "rule_exclusion_still_held": false,
+          "rule_owner_created": true,
+          "rule_releases_after_joined": 1,
+          "transfer": "sdk_owned"
+        },
+        "fresh_original": {
+          "event_sha256": "b49298bc1cce2a8ddad891c9d884c0870e72a7c8424c63eca62a3d019aa9e889",
+          "original": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+          "route": "fixture-original-route"
+        },
+        "helper_result": {
+          "fresh_instruction_retained": true,
+          "grant_issued": true,
+          "ready": false,
+          "state": "authorized"
+        },
+        "native_b": {
+          "input_id": "01a1b87f-b4e0-774a-9f50-1c0a32c75b00",
+          "receipt": {
+            "report": {
+              "attempt_count": 1,
+              "input_id": "01a1b87f-b4e0-774a-9f50-1c0a32c75b00",
+              "outcome": {
+                "completion_type": "completed",
+                "run_usage": {
+                  "cache_creation_tokens": null,
+                  "cache_read_tokens": null,
+                  "input_tokens": 0,
+                  "output_tokens": 0
+                },
+                "session_id": "01a1b87e-bf21-7195-bd39-3164a925ad40",
+                "skill_diagnostics": {
+                  "quarantined": [],
+                  "source_health": {
+                    "failure_streak": 0,
+                    "handshake_failed": false,
+                    "invalid_count": 0,
+                    "invalid_ratio": 0.0,
+                    "state": "healthy",
+                    "total_count": 14
+                  }
+                },
+                "text": "Hacker News story 50406563: The end of Microsoft Research's AI Frontiers group",
+                "tool_calls": 3,
+                "turns": 4,
+                "usage": {
+                  "cache_creation_tokens": null,
+                  "cache_read_tokens": null,
+                  "input_tokens": 0,
+                  "output_tokens": 0
+                }
+              },
+              "owner_input_id": "01a1b87f-b4e0-774a-9f50-1c0a32c75b00",
+              "recipient_input_ids": [
+                "01a1b87f-b4e0-774a-9f50-1c0a32c75b00"
+              ],
+              "run_id": "01a1b87f-b51e-70cb-8dbe-125c77851f38",
+              "scope": {
+                "kind": "run",
+                "run_id": "01a1b87f-b51e-70cb-8dbe-125c77851f38"
+              },
+              "status": "finalized",
+              "terminal": {
+                "outcome_type": "consumed"
+              }
+            },
+            "source": "durable_store"
+          },
+          "session_id": "01a1b87e-bf21-7195-bd39-3164a925ad40",
+          "state": "admitted"
+        },
+        "native_receipt_reads": 2,
+        "observation": {
+          "child": {
+            "grant": {
+              "decision": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+              "decision_sha256": "e196ed30b29367ca01a59e502c07b25918bbdfadaa691da841ce2ae6e931aa6f",
+              "route": "fixture-original-route"
+            },
+            "state": "grant_issued"
+          },
+          "custody": "joined",
+          "outcome": "succeeded",
+          "parent_issuance_id": "operator-service-parent-d9ae9e60230f86a9fed4707353058deaaffca594606bfbab962e4d9fd87b6328",
+          "parent_issued": true,
+          "reason": null,
+          "source": {
+            "event_sha256": "b49298bc1cce2a8ddad891c9d884c0870e72a7c8424c63eca62a3d019aa9e889",
+            "original": "service-input-4da9725e3bcc7c0645d18517c5f6206c5654acc2f3128955f2353cbd76019315",
+            "route": "fixture-original-route"
+          },
+          "tool_policy": {
+            "candidate": {
+              "digest": "sha256:90a2a946227d25376da740a3a418a3d6ddc7074e91ba7bfd5545c15b6dd180eb",
+              "revision": 2
+            },
+            "native": "accepted",
+            "proposal_sha256": "e99bf9e78f5543c8816aef73b352f16bc8948619bae9fa85fa99b6b854837f5b",
+            "retained_as_current": true
+          }
+        },
+        "original": {
+          "event_sha256": "1a8a14ba5a23609c62cfb6b69b6e21d69a8ba0200b7d557429fd3df7828b8c7a",
+          "original": "fixture-event-a6bc41c704284047916d54cd0edb6303",
+          "route": "fixture-original-route"
+        },
+        "original_task_completion": "native_finalized_completed_for_exact_b_input",
+        "proposal": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/service-parent-proposal.json",
+          "sha256": "cf0b65bd4759d18cf2c6787b1db7585bc1abc7c15740f499b56d9a7bac1c2e37"
+        },
+        "rule_releases_after_joined": 1,
+        "schema_evidence": {
+          "byte_convention": "exact_supplied_utf8",
+          "bytes": 2,
+          "hash_algorithm": "sha256",
+          "notice": "This digest identifies the exact supplied text, including whitespace. It does not establish schema provenance, runtime equality, readiness or authority. Retain the evidence source and any host observation's hashing convention; do not replace an existing host convention with this one.",
+          "runtime_observation": "not_established",
+          "schema_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "schema_validation": "not_performed",
+          "schema_version": 1,
+          "scope": "supplied_schema_evidence_only"
+        },
+        "scope": "one actual installed SDK public read with an exact finalized native B result",
+        "service_readiness": "not_independently_observed"
+      },
+      "application_selection": {
+        "activation": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/activation.json",
+          "sha256": "291e03d1ec060206e9c22b020ceab403b59fb5ab45be3798989cb2a6a539e248"
+        },
+        "deployment_root": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment",
+        "local_policy": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/policy-bundle/toolkit-local-policy.json",
+          "sha256": "0c6720214ac4372ff187fb214a2498b3044a3432fc4b4b1cbceab371e507259b"
+        },
+        "policy_manifest": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/policy-bundle/manifest.json",
+          "sha256": "4b2a96abfa5fbdec935c99791829bfe1021dbd812cb2dfefcce1d463f57256d9"
+        }
+      },
+      "callbacks": [
+        {
+          "context": {
+            "mob_definition": {
+              "backend": {
+                "default": "session",
+                "external": null
+              },
+              "event_router": null,
+              "flows": {},
+              "id": "fixture",
+              "image_generation_provider": null,
+              "limits": null,
+              "models": {},
+              "orchestrator": null,
+              "profiles": {
+                "original": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": true,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-original-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "research": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "toolkit-setup-45ac1c5e2bf1d4155cc1d2fa3f192654ec22763836bb5d3b51220a07f5cf57a9": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [
+                      {
+                        "access": {
+                          "allowed_operations": [
+                            "setup_acquire_node",
+                            "setup_acquire_node_prebuilt",
+                            "setup_acquire_python",
+                            "setup_catalog",
+                            "setup_catalog_entry",
+                            "setup_catalog_route",
+                            "setup_check",
+                            "setup_export_recipe",
+                            "setup_guide",
+                            "setup_help",
+                            "setup_inspect_acquired",
+                            "setup_inspect_package",
+                            "setup_inspect_schema",
+                            "setup_install",
+                            "setup_job",
+                            "setup_jobs",
+                            "setup_prepare",
+                            "setup_recipe",
+                            "setup_recipes",
+                            "setup_reconcile",
+                            "setup_recovery_manifest",
+                            "setup_remember_remote",
+                            "setup_retry_prepare",
+                            "setup_search_node",
+                            "setup_selected_check",
+                            "setup_selected_install",
+                            "setup_state",
+                            "setup_stop"
+                          ]
+                        },
+                        "account": "none",
+                        "args": [
+                          "-i",
+                          "PATH=/usr/bin:/bin",
+                          "PYTHONDONTWRITEBYTECODE=1",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/client/runtime/bin/python",
+                          "-I",
+                          "-B",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/distribution/toolkit-library-20261107-connect-3fb4cfbb-linux-x86_64/setup/local_session.py",
+                          "--configuration",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/config/mcp.json",
+                          "--configuration-sha256",
+                          "3897fac9202ddfa5c704d911da3d47d26d1b56f44bfca08f0f6caf0b966634c7",
+                          "--helper-sha256",
+                          "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
+                          "--adapter-sha256",
+                          "44f21f2a01d335f61ddc4bfe88943db4b4c924b2ba3f54cc992b75e845f231cc",
+                          "--backend-sha256",
+                          "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
+                          "--state-root",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/local-session"
+                        ],
+                        "command": "/usr/bin/env",
+                        "env": {},
+                        "name": "toolkit-setup"
+                      }
+                    ],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup_results"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                }
+              },
+              "runtime": {},
+              "skills": {},
+              "spawn_policy": null,
+              "supervisor": null,
+              "topology": null,
+              "wiring": {
+                "auto_wire_orchestrator": false,
+                "role_wiring": []
+              }
+            },
+            "previous_identities": []
+          },
+          "kind": "roster"
+        },
+        {
+          "context": {
+            "mob_definition": {
+              "backend": {
+                "default": "session",
+                "external": null
+              },
+              "event_router": null,
+              "flows": {},
+              "id": "fixture",
+              "image_generation_provider": null,
+              "limits": null,
+              "models": {},
+              "orchestrator": null,
+              "profiles": {
+                "original": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": true,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-original-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "research": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "toolkit-setup-45ac1c5e2bf1d4155cc1d2fa3f192654ec22763836bb5d3b51220a07f5cf57a9": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [
+                      {
+                        "access": {
+                          "allowed_operations": [
+                            "setup_acquire_node",
+                            "setup_acquire_node_prebuilt",
+                            "setup_acquire_python",
+                            "setup_catalog",
+                            "setup_catalog_entry",
+                            "setup_catalog_route",
+                            "setup_check",
+                            "setup_export_recipe",
+                            "setup_guide",
+                            "setup_help",
+                            "setup_inspect_acquired",
+                            "setup_inspect_package",
+                            "setup_inspect_schema",
+                            "setup_install",
+                            "setup_job",
+                            "setup_jobs",
+                            "setup_prepare",
+                            "setup_recipe",
+                            "setup_recipes",
+                            "setup_reconcile",
+                            "setup_recovery_manifest",
+                            "setup_remember_remote",
+                            "setup_retry_prepare",
+                            "setup_search_node",
+                            "setup_selected_check",
+                            "setup_selected_install",
+                            "setup_state",
+                            "setup_stop"
+                          ]
+                        },
+                        "account": "none",
+                        "args": [
+                          "-i",
+                          "PATH=/usr/bin:/bin",
+                          "PYTHONDONTWRITEBYTECODE=1",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/client/runtime/bin/python",
+                          "-I",
+                          "-B",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/distribution/toolkit-library-20261107-connect-3fb4cfbb-linux-x86_64/setup/local_session.py",
+                          "--configuration",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/config/mcp.json",
+                          "--configuration-sha256",
+                          "3897fac9202ddfa5c704d911da3d47d26d1b56f44bfca08f0f6caf0b966634c7",
+                          "--helper-sha256",
+                          "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
+                          "--adapter-sha256",
+                          "44f21f2a01d335f61ddc4bfe88943db4b4c924b2ba3f54cc992b75e845f231cc",
+                          "--backend-sha256",
+                          "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
+                          "--state-root",
+                          "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/local-session"
+                        ],
+                        "command": "/usr/bin/env",
+                        "env": {},
+                        "name": "toolkit-setup"
+                      }
+                    ],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup_results"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                }
+              },
+              "runtime": {},
+              "skills": {},
+              "spawn_policy": null,
+              "supervisor": null,
+              "topology": null,
+              "wiring": {
+                "auto_wire_orchestrator": false,
+                "role_wiring": []
+              }
+            },
+            "previous_identities": []
+          },
+          "kind": "roster"
+        },
+        {
+          "kind": "topology",
+          "target_identities": [
+            "helper",
+            "original"
+          ]
+        }
+      ],
+      "candidate": {
+        "binary": {
+          "sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+          "size": 508941776
+        },
+        "binary_kind": "toolkit_gateway",
+        "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4",
+        "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
+        "source_manifest_sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095",
+        "target": "linux-x86_64"
+      },
+      "case": "installed-product-success",
+      "cleanup_observation": {
+        "observed_descendants_gone": true,
+        "pending_responses_empty": true,
+        "private_reader_created": true,
+        "private_reader_joined": true,
+        "process_observed": true,
+        "process_reaped": true,
+        "public_reader_created": true,
+        "public_reader_joined": true,
+        "transport_process_released": true
+      },
+      "descendant_shutdown_checks": [
+        {
+          "alive": false,
+          "monotonic_ns": 4710597409170639,
+          "pid": 2443467,
+          "process_stat": {
+            "reason": "not_found",
+            "status": "unavailable"
+          }
+        },
+        {
+          "alive": false,
+          "monotonic_ns": 4710597409184500,
+          "pid": 2494855,
+          "process_stat": {
+            "reason": "not_found",
+            "status": "unavailable"
+          }
+        }
+      ],
+      "descendant_snapshots": [
+        {
+          "children": [
+            {
+              "pgid": 2443467,
+              "pid": 2443467,
+              "ppid": 2435392,
+              "process_stat": {
+                "pgid": 2443467,
+                "ppid": 2435392,
+                "session_id": 2434990,
+                "start_ticks": 471053247,
+                "state": "S",
+                "status": "observed"
+              }
+            }
+          ],
+          "main_pid": 2435392,
+          "monotonic_ns": 4710534529908157
+        },
+        {
+          "children": [
+            {
+              "pgid": 2443467,
+              "pid": 2443467,
+              "ppid": 2435392,
+              "process_stat": {
+                "pgid": 2443467,
+                "ppid": 2435392,
+                "session_id": 2434990,
+                "start_ticks": 471053247,
+                "state": "S",
+                "status": "observed"
+              }
+            }
+          ],
+          "main_pid": 2435392,
+          "monotonic_ns": 4710534666498282
+        },
+        {
+          "children": [
+            {
+              "pgid": 2443467,
+              "pid": 2443467,
+              "ppid": 2435392,
+              "process_stat": {
+                "pgid": 2443467,
+                "ppid": 2435392,
+                "session_id": 2434990,
+                "start_ticks": 471053247,
+                "state": "S",
+                "status": "observed"
+              }
+            },
+            {
+              "pgid": 2494855,
+              "pid": 2494855,
+              "ppid": 2435392,
+              "process_stat": {
+                "pgid": 2494855,
+                "ppid": 2435392,
+                "session_id": 2434990,
+                "start_ticks": 471059352,
+                "state": "S",
+                "status": "observed"
+              }
+            }
+          ],
+          "main_pid": 2435392,
+          "monotonic_ns": 4710595730163380
+        }
+      ],
+      "events": {
+        "bytes": 167198,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/events.json",
+        "sha256": "95c1a22ddb22dd715569bd3b77128bc30c83e73e1fc37c9e63575a5a339c6330"
+      },
+      "finalization": {
+        "completed_manifest": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/application-preparation/manifest.json",
+          "sha256": "2e6b5acd1c4d006d69f5ed28da5fb04860754e248188402a28ce40eba3fe6451"
+        },
+        "completed_server": {
+          "access": {
+            "allowed_operations": [
+              "setup_acquire_node",
+              "setup_acquire_node_prebuilt",
+              "setup_acquire_python",
+              "setup_catalog",
+              "setup_catalog_entry",
+              "setup_catalog_route",
+              "setup_check",
+              "setup_export_recipe",
+              "setup_guide",
+              "setup_help",
+              "setup_inspect_acquired",
+              "setup_inspect_package",
+              "setup_inspect_schema",
+              "setup_install",
+              "setup_job",
+              "setup_jobs",
+              "setup_prepare",
+              "setup_recipe",
+              "setup_recipes",
+              "setup_reconcile",
+              "setup_recovery_manifest",
+              "setup_remember_remote",
+              "setup_retry_prepare",
+              "setup_search_node",
+              "setup_selected_check",
+              "setup_selected_install",
+              "setup_state",
+              "setup_stop"
+            ]
+          },
+          "account": "none",
+          "args": [
+            "-i",
+            "PATH=/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/client/runtime/bin/python",
+            "-I",
+            "-B",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/distribution/toolkit-library-20261107-connect-3fb4cfbb-linux-x86_64/setup/local_session.py",
+            "--configuration",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/config/mcp.json",
+            "--configuration-sha256",
+            "3897fac9202ddfa5c704d911da3d47d26d1b56f44bfca08f0f6caf0b966634c7",
+            "--helper-sha256",
+            "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
+            "--adapter-sha256",
+            "44f21f2a01d335f61ddc4bfe88943db4b4c924b2ba3f54cc992b75e845f231cc",
+            "--backend-sha256",
+            "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
+            "--state-root",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepared/local-session"
+          ],
+          "command": "/usr/bin/env",
+          "env": {},
+          "name": "toolkit-setup"
+        },
+        "completed_setup": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/application-preparation/application-setup.json",
+          "sha256": "eb74654cb7c9ae784e5a33fb6540750dec06451ced23c2125a5607863ff0b9a5"
+        },
+        "controller_authority": {
+          "basis": "packaged Driver joins the actual held controller report before issuing this parent",
+          "parent": [
+            {
+              "authority_generation": 1,
+              "authority_incarnation": "b81bfba3-6d1e-41f2-90cf-ce52e2fd5fb2",
+              "authority_namespace": "installed-fixture",
+              "grant_id": "helper-controller-parent",
+              "issued_revision": 1,
+              "root_authority": {
+                "id": "operator",
+                "kind": "service_account",
+                "qualification": {
+                  "kind": "qualified",
+                  "trust_domain_id": "installed-gateway-fixture"
+                }
+              }
+            }
+          ],
+          "request": {
+            "issuance_id": "helper-controller-parent",
+            "target": {
+              "kind": "helper"
+            }
+          }
+        },
+        "prepare-policy": {
+          "argv": [
+            "/srv/connect-0910-rpub/work/gateway-stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+            "--prepare-application-policy",
+            "--policy",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/local-policy-input.json",
+            "--artifacts",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/policy-inputs",
+            "--deployment-root",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment",
+            "--bundle",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/policy-bundle",
+            "--activation-template",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/activation-template.json",
+            "--activation",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/activation.json"
+          ],
+          "exit_code": 0,
+          "pid": 2443668,
+          "stderr": {
+            "bytes": 0,
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/prepare-policy.stderr",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "bytes": 808,
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/prepare-policy.stdout",
+            "sha256": "28eeb736ba64e3e557403e2399b36188c5a034f0b17ab4a599823078e7e3ca77"
+          }
+        },
+        "preparer_handoff": {
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-HLJtUx/prepare.stdout",
+          "sha256": "7fdab2620517dcdb866d2145e13b408f50a6b9c98c6458cb9ee472ffc3a601ee"
+        },
+        "selection": {
+          "activation": {
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/activation.json",
+            "sha256": "291e03d1ec060206e9c22b020ceab403b59fb5ab45be3798989cb2a6a539e248"
+          },
+          "deployment_root": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment",
+          "local_policy": {
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/policy-bundle/toolkit-local-policy.json",
+            "sha256": "0c6720214ac4372ff187fb214a2498b3044a3432fc4b4b1cbceab371e507259b"
+          },
+          "policy_manifest": {
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/deployment/policy-bundle/manifest.json",
+            "sha256": "4b2a96abfa5fbdec935c99791829bfe1021dbd812cb2dfefcce1d463f57256d9"
+          }
+        },
+        "validate-policy": {
+          "argv": [
+            "/srv/connect-0910-rpub/work/gateway-stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+            "--validate-application-policy",
+            "--selection",
+            "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/selection.json"
+          ],
+          "exit_code": 0,
+          "pid": 2443718,
+          "stderr": {
+            "bytes": 0,
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/validate-policy.stderr",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "bytes": 809,
+            "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/finalization/validate-policy.stdout",
+            "sha256": "ccdaee9cdf98c2b7d4a8f298cf41b88faf07b40b1b4586b875349ac1e7febe0b"
+          }
+        }
+      },
+      "forced_cleanup": false,
+      "gateway_stderr": {
+        "bytes": 42298,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/gateway.stderr",
+        "sha256": "e835e0d8708f51f0cd86412bf94b44f68bb6bca9d4a6bc716fb211b37738ae92"
+      },
+      "http_listener_closed": true,
+      "main_gateway_pid": 2435392,
+      "model_catalog": {
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/model-catalog.json",
+        "sha256": "c3bf3eb2f2000367921e2314672ef616d9e9baa7028cc0a037ff4463b9fceb00"
+      },
+      "model_configuration": {
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/meerkat.toml",
+        "sha256": "027f116eb0eb66d383a98457c20919ce1d986ed14b1360daa01704cbccafca9d"
+      },
+      "model_request_count": 41,
+      "model_requests": {
+        "bytes": 4487351,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/model-requests.json",
+        "sha256": "7819dad8d796527e0e25f6611fbab496fc7d2ab86ce3fb82e19b5b656e8e3b4f"
+      },
+      "model_schedule_errors": [],
+      "native_ready": {
+        "contract_version": "0.5.0",
+        "control_listen_address": null,
+        "http_base_url": "http://127.0.0.1:35093",
+        "http_public_base_url": null,
+        "identity_bootstrap": {
+          "complete": true,
+          "counts": {
+            "active": 2,
+            "broken": 0,
+            "dormant": 0,
+            "warming": 0
+          },
+          "identities": {
+            "helper": {
+              "restore": {
+                "stage": "minted"
+              },
+              "state": "active"
+            },
+            "original": {
+              "restore": {
+                "stage": "minted"
+              },
+              "state": "active"
+            }
+          },
+          "mode": {
+            "mode": "eager_materialize"
+          },
+          "ready": true
+        },
+        "init_id": "init-e113bbab-7323-45fa-9469-4f82a74a9dc2",
+        "loaded_modules": [],
+        "member_restore": {
+          "boot_set": "observed"
+        },
+        "outcome": "ready",
+        "runtime_fingerprint": "0f09ed176e8e15eee6ac9b07bd31c6afbfbac88ff2c0cb8087835a6fae38ef8d",
+        "runtime_origin": "prepared_application",
+        "stdio_shutdown_handshake": true,
+        "stdio_shutdown_horizon_ms": 432000
+      },
+      "natural_gateway_reap": true,
+      "observed_children": [
+        {
+          "pgid": 2443467,
+          "pid": 2443467,
+          "ppid": 2435392,
+          "process_stat": {
+            "pgid": 2443467,
+            "ppid": 2435392,
+            "session_id": 2434990,
+            "start_ticks": 471053247,
+            "state": "S",
+            "status": "observed"
+          }
+        },
+        {
+          "pgid": 2494855,
+          "pid": 2494855,
+          "ppid": 2435392,
+          "process_stat": {
+            "pgid": 2494855,
+            "ppid": 2435392,
+            "session_id": 2434990,
+            "start_ticks": 471059352,
+            "state": "S",
+            "status": "observed"
+          }
+        }
+      ],
+      "observed_children_gone": true,
+      "original_business_observation": {
+        "bytes": 8950,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/original-business-observation.json",
+        "sha256": "23d9e335efe5559fbf7a0c0ab626b303693a85e87443f581e07feea3e4d56645"
+      },
+      "preparation_plan": {
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/application-plan.json",
+        "sha256": "07280cf74c89b55a642561a38020823acbfb48ac493afc80d79bc7ee02558018"
+      },
+      "provider_joined": true,
+      "scope": "installed SDK acquisition and one public read with exact native input completion",
+      "scoped_execution_proven": false,
+      "sdk_readers_joined": true,
+      "service_parent_custody": {
+        "bytes": 2277,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-success/service-parent-custody.json",
+        "sha256": "0acf9dd5eefda74bbd75e3085f22bf06de9cad936cd560660e40a3f5c2d74538"
+      },
+      "shutdown_response": {
+        "id": "meta-shutdown-ada45c08-14cf-49cb-adfd-df16653196f3",
+        "jsonrpc": "2.0",
+        "result": {
+          "host_cleanup_completed": true,
+          "runtime_cleanup_completed": true,
+          "shutdown": true
+        }
+      },
+      "status": "passed",
+      "termination": {
+        "escalation": "none",
+        "exit_code": 0,
+        "native_shutdown": "acknowledged",
+        "signal": null,
+        "state": "exited"
+      }
+    },
+    {
+      "candidate": {
+        "binary": {
+          "sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+          "size": 508941776
+        },
+        "binary_kind": "toolkit_gateway",
+        "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4",
+        "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
+        "source_manifest_sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095",
+        "target": "linux-x86_64"
+      },
+      "case": "installed-product-resource-corruption",
+      "cleanup_observation": {
+        "observed_descendants_gone": true,
+        "pending_responses_empty": true,
+        "private_reader_created": true,
+        "private_reader_joined": true,
+        "process_observed": true,
+        "process_reaped": true,
+        "public_reader_created": true,
+        "public_reader_joined": true,
+        "transport_process_released": true
+      },
+      "connect_error": {
+        "message": "gateway startup failed and the stop of its gateway transport failed (see startup_error and cleanup_error)",
+        "type": "GatewayStartupCleanupError"
+      },
+      "descendant_shutdown_checks": [],
+      "events": {
+        "bytes": 6988,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-resource-corruption/events.json",
+        "sha256": "1e82f087c69f7ce8f492c45d1f4f611ca84abdbc42c6817de28abdd5c1392beb"
+      },
+      "finalization": {},
+      "forced_cleanup": false,
+      "gateway_stderr": {
+        "bytes": 135,
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-resource-corruption/gateway.stderr",
+        "sha256": "155683aa42432dfde8aa499130b7cc71811e87e7809180326c36e96825f0ab51"
+      },
+      "model_configuration": {
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-resource-corruption/meerkat.toml",
+        "sha256": "e2412ad5cf482e2d3b3a567f2e0319beae5c3f0427879adf42d0a7dcdca17c44"
+      },
+      "natural_gateway_reap": true,
+      "observed_children": [],
+      "observed_children_gone": true,
+      "preparation_plan": {
+        "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-resource-corruption/application-plan.json",
+        "sha256": "fc9db849a085a5806be35736ff830ccfa64e4b998ffcf49b80c8425f1749d865"
+      },
+      "provider_joined": true,
+      "resource_corruption": {
+        "after": {
+          "bytes": 185,
+          "path": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-resource-corruption/meerkat-connect-linux-x86_64/libexec/meerkat-connect/prepare.py",
+          "sha256": "ec78cbe11d341578a7b8a4355002e79d703847306802cfec56f7c273f31b801f"
+        },
+        "before": {
+          "bytes": 66229,
+          "path": "/srv/connect-0910-rpub/work/gateway-stage/meerkat-connect-linux-x86_64/libexec/meerkat-connect/prepare.py",
+          "sha256": "2786ee87dbbe2680503d2a52307b787e9e6950c2b9a899def38725e34742691b"
+        },
+        "marker": "/srv/connect-0910-rpub/work/gateway-verification/installed-product-resource-corruption/bundled-entry-entered"
+      },
+      "resource_refusal": "Installed Connect resources are unavailable or changed; reinstall the complete product. No setup command was started.",
+      "scope": "installed resource corruption; zero model turns",
+      "scoped_execution_proven": false,
+      "sdk_readers_joined": true,
+      "sentinel_connections": [],
+      "status": "passed",
+      "termination": {
+        "escalation": "none",
+        "exit_code": 1,
+        "native_shutdown": "not_negotiated",
+        "signal": null,
+        "state": "exited"
+      }
+    }
+  ],
+  "execution_claim": "installed SDK acquisition and one public read; success requires exact native input completion; no live authentication or general service support claim",
+  "installed_candidate": {
+    "binary": {
+      "sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+      "size": 508941776
+    },
+    "binary_kind": "toolkit_gateway",
+    "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4",
+    "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
+    "source_manifest_sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095",
+    "target": "linux-x86_64"
+  },
+  "installed_inputs": {
+    "native_build": {
+      "bytes": 1855,
+      "path": "/srv/connect-0910-rpub/work/gateway-stage/build-record.json",
+      "sha256": "07ee4385c49606e49a4c939b43e2ffb880199162c624e4dec016c72f2f7c6548"
+    },
+    "resource_build": {
+      "bytes": 4208,
+      "path": "/srv/connect-0910-rpub/work/gateway-stage/resource-build-record.json",
+      "sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4"
+    },
+    "resource_manifest": {
+      "bytes": 4255520,
+      "path": "/srv/connect-0910-rpub/work/gateway-stage/meerkat-connect-linux-x86_64/libexec/meerkat-connect/resources.json",
+      "sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0"
+    },
+    "source_manifest": {
+      "bytes": 674503,
+      "path": "/srv/connect-0910-rpub/work/source-manifest.json",
+      "sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095"
+    },
+    "staging": {
+      "bytes": 2749,
+      "path": "/srv/connect-0910-rpub/work/gateway-stage/staging.json",
+      "sha256": "0b0b8785dba0a6a29eeea855243f36a39aea411c2a99a70085949efad2970a85"
+    }
+  },
+  "platform": "Linux-7.0.0-1011-gcp-x86_64-with-glibc2.39",
+  "python": "3.11.16 (main, Sep  1 2026, 14:18:37) [Clang 22.1.3 ]",
+  "raw_gateway": null,
+  "raw_gateway_sha256": null,
+  "schema": 1,
+  "script_sha256": "fe69479d219ccb45eae7ae85db398ede24a70b35ecb51c2c3a11049ddedeadc1",
+  "sdk_sources": [
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_toolkit/host_control.py",
+      "sha256": "6d3130cdce9c228ac6047c8edd38ed9741f0e8dbc92d7a76e6a90704a0712c0c"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_toolkit/application_runtime.py",
+      "sha256": "cea30adf279a99a11509c8f8b6ecb9178470b1866323f11626f67f272c73d155"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/__init__.py",
+      "sha256": "b8e45987781cb88f144a92ddb10f519036723624e2f26a5fdccfdaa27f34aaff"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/builder.py",
+      "sha256": "00708bc5911e2a1ae88b3285da87b5ed2d8ffdd734bd37aaf57d42086acc8367"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/runtime.py",
+      "sha256": "231d61d38117a345d1d5f79bdc8e4f26515cc5e3877fdb015205dc7ef0c0bb35"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/_transport.py",
+      "sha256": "3f5d96042880ba8d821d19c110fdcc4006bf8e551e3336bc4c51dacbdcaa3ccf"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/agent_builder.py",
+      "sha256": "cfb206ff8b75799d793177434846940128fa108a4df27a9e2265315f23935b2a"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/identity_first_models.py",
+      "sha256": "9d78f4796626b31efee531a1996c2e74050aa10da953df1ad33af6ed8b358bd4"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/identity_first_providers.py",
+      "sha256": "bc7bc3b7176e691cbdaf90a8636b6b532ac6f7bab31b34889aa811ba6469b3ce"
+    },
+    {
+      "path": "/srv/connect-0910-rpub/work/verifier-venv/lib/python3.11/site-packages/meerkat_meta/types.py",
+      "sha256": "f042247f35199f341137a48a98d855350a217ece454765ebf1e35b5334ed8b2b"
+    }
+  ],
+  "status": "passed",
+  "toolkit_gateway": "/srv/connect-0910-rpub/work/gateway-stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+  "toolkit_gateway_sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853"
+}

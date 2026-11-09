@@ -1888,6 +1888,8 @@ impl MeerkatMachine {
         if let Some(entry) = removed.as_ref() {
             entry.post_commit_hooks.shutdown();
             entry.notify_registration_removed();
+            // The session is no longer served here.
+            self.tool_grant_deadlines.disarm(session_id);
         }
         drop(removed);
         Ok(())

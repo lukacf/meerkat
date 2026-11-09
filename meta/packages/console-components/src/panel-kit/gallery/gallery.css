@@ -1,0 +1,357 @@
+/* The dev-only kit gallery page (console v2 spec B23, K1). Gallery chrome
+   only: the parts it shows use the kit's own classes. */
+
+.kg {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
+  background: var(--_cc-surface-canvas);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: -0.003em;
+  -webkit-font-smoothing: antialiased;
+}
+.kg *,
+.kg *::before,
+.kg *::after { box-sizing: border-box; }
+
+.kg__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px 32px;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 44px 40px 20px;
+}
+.kg__intro { max-width: 640px; }
+.kg__eyebrow {
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.kg__eyebrow::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+  vertical-align: 0;
+}
+.kg__title {
+  margin: 10px 0 8px;
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+  color: var(--_cc-foreground-strong);
+}
+.kg__lede {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--_cc-foreground-muted);
+}
+.kg__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.kg__controls .cc-seg { background: var(--_cc-surface-card); }
+
+.kg__toc {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 10px 34px;
+  background: color-mix(in srgb, var(--_cc-surface-canvas) 92%, transparent);
+  border-bottom: 1px solid var(--_cc-border-soft);
+  backdrop-filter: blur(6px);
+}
+.kg__toc-link {
+  padding: 3px 8px;
+  border-radius: var(--_cc-radius-pill);
+  color: var(--_cc-foreground-muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.kg__toc-link:hover { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.kg__toc-link:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
+
+.kg__main {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 8px 40px 96px;
+}
+.kg__section {
+  padding-top: 36px;
+  scroll-margin-top: 48px;
+}
+.kg__section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.kg__section-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--_cc-foreground);
+}
+.kg__section-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--_cc-foreground-meta);
+}
+.kg__section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.kg-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 14px;
+}
+.kg-row > .kg-specimen { flex: 1 1 280px; }
+.kg-specimen {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+  overflow: hidden;
+}
+.kg-specimen__cap {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 16px 0;
+}
+.kg-specimen__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--_cc-foreground);
+  white-space: nowrap;
+}
+.kg-specimen__note {
+  font-size: 11.5px;
+  color: var(--_cc-foreground-meta);
+}
+.kg-specimen__body { padding: 14px 16px 16px; }
+.kg-specimen__body--bare { padding: 10px 0 0; }
+.kg-specimen__cap + .kg-specimen__body--bare { padding-top: 10px; }
+
+.kg-item {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.kg-item__part {
+  display: flex;
+  align-items: center;
+  min-height: 20px;
+}
+.kg-item__label {
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.kg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 18px 20px;
+}
+.kg-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.kg-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+/* Token swatches. */
+.kg-swatch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.kg-swatch__chip {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--_cc-radius-sm);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--_cc-foreground) 12%, transparent);
+}
+.kg-swatch__text { display: flex; flex-direction: column; min-width: 0; }
+.kg-swatch__name { font-size: 12px; font-weight: 500; }
+.kg-swatch__token {
+  overflow: hidden;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kg-type {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px 16px;
+}
+.kg-type__token {
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.kg-elev {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 20px;
+  padding: 8px;
+  background: var(--_cc-surface-canvas);
+  border-radius: var(--_cc-radius-md);
+}
+.kg-elev__box {
+  height: 76px;
+  padding: 10px 12px;
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+  font-size: 11.5px;
+  color: var(--_cc-foreground-muted);
+}
+.kg-elev__box[data-level="1"] { border: 1px solid var(--_cc-border-soft); }
+.kg-elev__box[data-level="2"] {
+  border: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-overlay);
+  box-shadow: var(--_cc-shadow-md);
+}
+.kg-elev__box[data-level="3"] {
+  border: 1px solid var(--_cc-border-strong);
+  box-shadow: var(--_cc-shadow-lg);
+}
+.kg-space {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+.kg-space__bar {
+  display: block;
+  width: 12px;
+  border-radius: 1px;
+  background: var(--_cc-viz-mid);
+}
+
+/* A pane-sized frame for panel specimens: the panel adapts to it as it
+   would to a MetaDock pane. */
+.kg-pane {
+  display: flex;
+  flex-direction: column;
+  height: var(--kg-pane-h, auto);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+}
+.kg-pane > .cc-panel { height: auto; flex: 1 1 auto; }
+.kg-reveal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px dashed var(--_cc-border-strong);
+  border-radius: var(--_cc-radius-md);
+}
+.kg-reveal-row__text { flex: 1 1 auto; font-size: 12.5px; }
+
+.kg-icon { width: 20px; height: 20px; stroke-width: 1.75; color: var(--_cc-foreground); }
+.kg-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 340px));
+  gap: 14px;
+}
+.kg-conns { display: flex; flex-direction: column; }
+.kg-conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  border-top: 1px solid var(--_cc-border-soft);
+  font-size: 12.5px;
+}
+.kg-conn .cc-agent { flex: none; }
+.kg-conn .cc-agent__name { font-weight: 500; }
+.kg-conn__rel {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--_cc-foreground-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kg-rel-glyph { width: 12px; height: 12px; color: var(--_cc-foreground-meta); }
+.kg-kind-glyph { width: 16px; height: 16px; stroke-width: 1.75; color: var(--_cc-foreground-muted); }
+/* A stand-in for the graph kit's StatusSquare (spec A3.9 item mark). */
+.kg-square { display: block; flex: none; overflow: visible; }
+.kg-square__box { fill: var(--_cc-surface-card); stroke: var(--_cc-viz-mid); stroke-width: 1.5; }
+.kg-square[data-status="live"] .kg-square__box { fill: var(--_cc-viz-live); stroke: var(--_cc-viz-live); }
+.kg-square[data-status="done"] .kg-square__box { fill: var(--_cc-viz-ink); stroke: var(--_cc-viz-ink); }
+.kg-square[data-status="blocked"] .kg-square__box { stroke: var(--_cc-warning); }
+.kg-square__slash { fill: none; stroke: var(--_cc-warning); stroke-width: 1.5; stroke-linecap: round; }
+
+/* A specimen of the revealed state: the hover-revealed controls shown as
+   they are on hover or focus. */
+.kg-force-reveal .cc-reveal { opacity: 1; }
+
+/* Variants side by side, each with its name. */
+.kg-variants {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px 16px;
+}
+.kg-variants__name {
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.kg-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+.kg-pair__label {
+  margin-bottom: 8px;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}

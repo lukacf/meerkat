@@ -4,8 +4,10 @@ mod approval;
 mod artifact;
 mod auth;
 mod comms;
+pub mod compaction_request;
 mod config;
 mod connection;
+mod decision;
 mod error;
 mod event;
 mod help;
@@ -16,6 +18,7 @@ mod live;
 mod mcp_live;
 mod mob;
 mod models;
+mod operator_instruction;
 mod params;
 mod portable_spec;
 mod realtime;
@@ -30,6 +33,7 @@ pub mod skills;
 mod spec_digest;
 mod stream_read;
 pub mod supervisor_bridge;
+mod tool_grant;
 mod usage;
 mod workgraph;
 
@@ -54,6 +58,10 @@ pub use comms::{
     PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
     PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
     ResponseStatus as WireCommsResponseStatus, SendTaintOverride, SenderContentTaint,
+};
+pub use compaction_request::{
+    CompactSessionParams, CompactSessionResult, MobCompactMemberParams, MobCompactMemberResult,
+    WireCompactionRequestOutcome,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::ConfigWriteResult;
@@ -82,6 +90,29 @@ pub use connection::{
     WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
     WireScopeEvidence,
+};
+pub use decision::{
+    DECISION_NOTICE_NOTIFICATION, DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams,
+    DecisionListParams, DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
+    DecisionRenderingParams, DecisionRenderingResult, DecisionResult, DecisionWithdrawParams,
+    WireCanonicalPart, WireDecision, WireDecisionAssurance, WireDecisionEffect,
+    WireDecisionErrorData, WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
+    WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
+    WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
+    WireDecisionTier, WirePresentationAudience, WirePresentationLink, WirePresentationRecord,
+    WireUnreadableDecision,
+};
+pub use operator_instruction::{
+    InstructionSetErrorData, MobInstructionStatusParams, MobInstructionStatusResult,
+    MobInstructionWriteResult, MobRevokeInstructionParams, MobSetInstructionParams,
+    RevokeSessionInstructionParams, SessionInstructionStatusParams, SessionInstructionStatusResult,
+    SessionInstructionWriteResult, SetSessionInstructionParams, WireInstructionBlockReason,
+    WireInstructionEffectiveRead, WireInstructionEffectiveSlot, WireInstructionLowering,
+    WireInstructionPendingReason, WireInstructionRecord, WireInstructionResidency,
+    WireInstructionSlotState, WireInstructionSlotView, WireInstructionTarget,
+    WireInstructionTargetOwner, WireMemberInstructionDelivery, WireMemberInstructionDeliveryState,
+    WireMemberInstructionSlot, WireMemberInstructionStatus, WireMobInstructionDisposition,
+    WireSessionInstructionDisposition, WireSessionInstructionSlot,
 };
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,
@@ -165,10 +196,11 @@ pub use mob::{
     MobEventRouterConfigInput, MobEventsParams, MobEventsResult, MobExternalBackendConfigInput,
     MobFlowCancelParams, MobFlowCancelResult, MobFlowNodeFailurePolicyInput, MobFlowNodeInput,
     MobFlowRunParams, MobFlowRunResult, MobFlowSpecInput, MobFlowStatusParams, MobFlowStatusResult,
-    MobFlowStepInput, MobFlowsResult, MobForceCancelResult, MobForkHelperParams, MobFrameSpecInput,
-    MobFrameStepInput, MobGrantScopesParams, MobGrantScopesResult, MobGrantsResult,
-    MobHardCancelParams, MobHardCancelResult, MobHelperResult, MobHostStatus, MobHostsResult,
-    MobIdParams, MobIngressInteractionParams, MobIngressInteractionResult, MobLifecycleParams,
+    MobFlowStepInput, MobFlowsResult, MobForceCancelResult, MobForkHelperParams,
+    MobForkMemberParams, MobForkMemberResult, MobFrameSpecInput, MobFrameStepInput,
+    MobGrantScopesParams, MobGrantScopesResult, MobGrantsResult, MobHardCancelParams,
+    MobHardCancelResult, MobHelperResult, MobHostStatus, MobHostsResult, MobIdParams,
+    MobIngressInteractionParams, MobIngressInteractionResult, MobLifecycleParams,
     MobLifecycleResult, MobLimitsSpecInput, MobListMembersMatchingParams,
     MobListMembersMatchingResult, MobListResult, MobMemberFilterWire, MobMemberHistoryParams,
     MobMemberHistoryResult, MobMemberListEntryWire, MobMemberLiveChannelParams,
@@ -181,18 +213,18 @@ pub use mob::{
     MobProfileUpdateParams, MobReconcileFailureWire, MobReconcileOptionsWire, MobReconcileParams,
     MobReconcileReportWire, MobReconcileResult, MobRepeatUntilInput,
     MobResolveIdentityConvergenceBlockParams, MobResolveIdentityConvergenceBlockResult,
-    MobRespawnParams, MobRespawnReceipt, MobRespawnResult, MobRetireResult, MobRevokeHostParams,
-    MobRevokeHostResult, MobRevokeScopesParams, MobRevokeScopesResult, MobRoleWiringRuleInput,
-    MobRotateSupervisorResult, MobRouteInstallsResult, MobRunParams, MobRunResult,
-    MobRunResultParams, MobSkillSourceInput, MobSnapshotResult, MobSpawnHelperParams,
+    MobRespawnParams, MobRespawnReceipt, MobRespawnResult, MobRestoreRetryResult, MobRetireResult,
+    MobRevokeHostParams, MobRevokeHostResult, MobRevokeScopesParams, MobRevokeScopesResult,
+    MobRoleWiringRuleInput, MobRotateSupervisorResult, MobRouteInstallsResult, MobRunParams,
+    MobRunResult, MobRunResultParams, MobSkillSourceInput, MobSnapshotResult, MobSpawnHelperParams,
     MobSpawnManyFailedResult, MobSpawnManyFailureCause, MobSpawnManyParams, MobSpawnManyResult,
     MobSpawnManyResultEntry, MobSpawnManyResultPayload, MobSpawnManyResultStatus,
     MobSpawnManySpawnedResult, MobSpawnParams, MobSpawnPolicyInput, MobSpawnReceiptWire,
     MobSpawnResult, MobSpawnSpecParams, MobStatusResult, MobStepOutputFormatInput,
-    MobStreamCloseParams, MobStreamCloseResult, MobStreamOpenParams, MobStreamOpenResult,
-    MobSubmitWorkParams, MobSubmitWorkResult, MobSupervisorSpecInput, MobToolConfigInput,
-    MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams, MobUnwireParams,
-    MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
+    MobStreamCloseParams, MobStreamCloseResult, MobStreamCursor, MobStreamOpenParams,
+    MobStreamOpenResult, MobSubmitWorkParams, MobSubmitWorkResult, MobSupervisorSpecInput,
+    MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams,
+    MobUnwireParams, MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
     MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireParams, MobWireResult,
     MobWiringRulesInput, SupervisorRotationIncompleteDataWire,
     SupervisorRotationIncompleteDetailsWire, SupervisorRotationIncompleteKind,
@@ -214,16 +246,16 @@ pub use mob::{
     WireMemberToolAccessDeclaration, WireMemberToolCommitOutcome, WireMemberToolDeclaration,
     WireMobBackendKind, WireMobDestroyIncompleteData, WireMobDestroyMemberRefusal,
     WireMobDestroyReport, WireMobError, WireMobLifecycleAction, WireMobLifecycleFailure,
-    WireMobLifecycleStatus, WireMobMemberStatus, WireMobProfile, WireMobReconcileStage,
-    WireMobRespawnOutcome, WireMobResumeOverrideField, WireMobRun, WireMobRunAccounting,
-    WireMobRunMemberAccounting, WireMobRunResultEnvelope, WireMobRunStatus,
-    WireMobRunUsageAttribution, WireMobRuntimeMode, WireMobToolConfig, WireMobWireAction,
-    WirePeerConnectivity, WirePeerConnectivitySnapshot, WireProjectionProvenance, WireReachability,
-    WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRouteInstallObligation,
-    WireRuntimeBinding, WireScopeDeniedDetail, WireToolAccessPolicy, WireToolFilter,
-    WireTrustedPeerIdentity, WireTrustedPeerSpec, WireUnreachablePeer,
-    WireWorkExecutionLifecyclePhase, WireWorkGraphFlowExecutionBinding, WireWorkGraphFlowWorkRef,
-    WireWorkOrigin,
+    WireMobLifecycleStatus, WireMobMemberStatus, WireMobProfile, WireMobQuarantineClass,
+    WireMobReconcileStage, WireMobRespawnOutcome, WireMobRestoreRetryOutcome,
+    WireMobResumeOverrideField, WireMobRun, WireMobRunAccounting, WireMobRunMemberAccounting,
+    WireMobRunResultEnvelope, WireMobRunStatus, WireMobRunUsageAttribution, WireMobRuntimeMode,
+    WireMobToolConfig, WireMobWireAction, WirePeerConnectivity, WirePeerConnectivitySnapshot,
+    WireProjectionProvenance, WireQuarantinedMob, WireReachability, WireRenderClass,
+    WireRenderMetadata, WireRenderSalience, WireRouteInstallObligation, WireRuntimeBinding,
+    WireScopeDeniedDetail, WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity,
+    WireTrustedPeerSpec, WireUnreachablePeer, WireWorkExecutionLifecyclePhase,
+    WireWorkGraphFlowExecutionBinding, WireWorkGraphFlowWorkRef, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
@@ -280,11 +312,12 @@ pub use session::{
     RevisionSelector, RewriteSessionTranscriptParams, SessionStreamCloseParams,
     SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult,
     TranscriptRewriteMessage, UpdateSystemPromptParams, WireAssistantBlock, WireContentBlock,
-    WireContentInput, WireImageData, WireInterruptOutcome, WirePromptInput, WireProviderMeta,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
-    WireSessionTranscriptRevision, WireSessionTranscriptRevisionEntry,
-    WireSessionTranscriptRevisionList, WireStopReason, WireSystemMessageIdentity, WireToolResult,
-    WireToolResultContent, WireTranscriptSource, WireVideoData,
+    WireContentInput, WireImageData, WireInstructionEntryIdentity, WireInterruptOutcome,
+    WirePromptInput, WireProviderMeta, WireRetiredInstructionBody, WireSessionHistory,
+    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireSessionTranscriptRevision,
+    WireSessionTranscriptRevisionEntry, WireSessionTranscriptRevisionList, WireStopReason,
+    WireSystemMessageIdentity, WireToolResult, WireToolResultContent, WireTranscriptSource,
+    WireVideoData,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use spec_digest::{SpecDigestError, portable_member_spec_digest};
@@ -324,6 +357,17 @@ pub use supervisor_bridge::{
     decode_bridge_command, supervisor_bridge_current_protocol_version,
     supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
     supervisor_bridge_supported_protocol_versions,
+};
+pub use tool_grant::{
+    GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
+    RequestToolGrantParams, RequestToolGrantResult, RevokeToolGrantParams, RevokeToolGrantResult,
+    ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
+    ToolGrantTargetRequest, WireGrantGatedTools, WireMemberToolGrantGate, WireToolGrant,
+    WireToolGrantApplies, WireToolGrantAuditEvent, WireToolGrantAuditRow,
+    WireToolGrantExpiryDriver, WireToolGrantGateEntries, WireToolGrantGateView,
+    WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantScope, WireToolGrantStatus,
+    WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrant,
+    WireUnreadableToolGrantAuditRow,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

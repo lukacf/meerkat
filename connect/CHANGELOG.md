@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11
+and Connect 0.9.11, released together): GitHub release `connect-v0.9.11`, a
+prerelease that is never the repository's latest.
+
 ### Changed
 
 - Application setup refuses a definition whose profile names

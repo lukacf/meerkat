@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect
+0.9.11, released together) and pins Core `=0.9.11`.
+
+Meta decides durable decisions: the `meta/decisions/*` methods, the
+Console's Approvals panel and the SDKs list, read and decide them as the
+signed-in person, under the access actions `decisions.view`,
+`decisions.decide` and `decisions.admin`.
+
+The console acts as the person signed in to it: `meta/console/whoami` names
+that person, decisions are made as them, and the stock console shows
+approvals read-only to a caller it cannot name as a signed-in person.
+
 ### Breaking
 
 - Tokens minted with an `auth_config` shared secret (`provider: "jwt"`)
@@ -293,6 +305,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust: `StewardProfile::load` now refuses a prompt bundle without an
   `operator_proposals` phase (see Upgrade).
 
+- Behaviour-only (not measured by the gate): a member whose session the
+  host store refuses until its realm is reopened reports
+  `preview_unavailable: "store_refused"` (Core 0.9.11) in
+  `meta/member_status`, `meta/inspect_identity` and the console's
+  per-member progress, where it reported `read_failed`. The Meta SDKs pass
+  the value through, as they pass any reason they do not name.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -399,6 +418,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wherever it grants `agent.send`, and an earlier Meta refuses to load a
   configuration that names it. To roll back, remove `schedule.manage` from
   the rules, or restore the configuration saved before the upgrade.
+- A client other than the stock Console passes `take_over_sender: true`
+  when it updates or resumes a console schedule that another caller sends
+  as; without it the change is refused `-32009` `sender_takeover_required`
+  (see Breaking).
 - A client that writes the access policy over `/console/rpc` without
   `checked_v1` reads `owner_instance` and `revision` from `meta/access/get`
   and sends the edit inside `checked_v1`; the stock Console already does.
@@ -537,6 +560,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   bundle without the phase; a dream whose profile lacks it records that the
   operator proposal call failed, and people's operator proposals stay
   pending.
+
+- Rolling back to 0.9.10: the upgrading guide's "Rolling back to 0.9.10"
+  lists in one place what Meta 0.9.10 does with what Meta 0.9.11 wrote, and
+  what to do before a rollback. Roll Core, Meta and Connect back together.
 
 ### Added
 
@@ -1021,12 +1048,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedules. Under enforced access each agent's experience affordances
   carry `can_manage_schedules`, and the stock Console offers schedule
   changes only where it is true.
-
-- A member whose session the host store refuses until its realm is reopened
-  reports `preview_unavailable: "store_refused"` (Core 0.9.11) in
-  `meta/member_status`, `meta/inspect_identity` and the console's per-member
-  progress, where it reported `read_failed`. The Meta SDKs pass the value
-  through, as they pass any reason they do not name.
 
 - The stock console reads `meta/console/whoami` once per console instance
   and names that caller (`expected_caller_scope`) on every console request,
@@ -1571,9 +1592,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `expected_revision`, the stock Console sends the revision it showed, and
   a change made from an older read is refused with
   `schedule_revision_conflict`. A pause, a delete and a create take no
-  revision and make no takeover: one that names `expected_revision` or
-  `take_over_sender` is refused with `-32602` `unsupported_param` (with
-  `param`). Each write answers the schedule as it left it.
+  revision and make no takeover (see Breaking). Each write answers the
+  schedule as it left it.
 - A Console WorkGraph action acts on the revision its card or row showed,
   never on one read at the click; an action whose card showed none changes
   nothing, says so, and reads the item again.
@@ -1804,12 +1824,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/member_health` never waits for the mob's actor there. Carrying the
   hold in Core's entry read is a tracked follow-up.
 
-- `meta_gateway` does not yet keep its metadata durably, with persistent
-  sessions too: its console audit log, gating state (pending approvals and
-  the gating audit), metadata cursor and identity records live in memory
-  and start empty after a restart. `rpc_gateway` started with a
-  `persistent_state` directory keeps them in that directory's metadata
-  store.
+- `meta_gateway` does not yet keep its metadata durably, even with
+  persistent sessions: its console audit log, gating state (pending
+  approvals and the gating audit), metadata cursor and identity records
+  live in memory and start empty after a restart. `rpc_gateway` started
+  with a `persistent_state` directory keeps them in that directory's
+  metadata store.
 
 - Forge 0.3.1 installs the Meta 0.9.10 runtime. With it, named Console
   accounts, the move to named accounts at an update, the Console's own

@@ -1118,8 +1118,17 @@ jobs:
     # minutes cold, as after a release version bump. A push gets 120 minutes.
     # A pull request that invalidates meerkat-mob's build leaves the products'
     # rows to the push, and its own rows took at most 18m38s cold (pull
-    # request run 42485928170); it gets 60.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
+    # request run 42485928170). One that leaves that build alone still lints
+    # Connect, in Connect's own row or, for a Meta or Core change that reaches
+    # it, in a downstream row, and such a row reaches meerkat-connect after
+    # about 36 minutes. On pull request run 42623540413 Connect's row (lib and
+    # bin targets) took 56 of its 60 minutes; on pull request run 42633674366
+    # a downstream row (every target) was cancelled at 60 while it linted
+    # meerkat-connect, which takes 28 minutes for every target, so that row
+    # needs about 65 minutes. A pull request gets 90: such a row fails the
+    # pull-request execution budget (CI_MAX_EXEC_SECONDS) either way, but a
+    # budget failure is reported while a cancelled row is a failed lane.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1201,7 +1210,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}

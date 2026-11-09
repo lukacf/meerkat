@@ -37,18 +37,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   seconds, after three denials, and nothing harvested their discards. A
   denial is now no attempt: the harvest waits for the budget, asking again
   each time a distiller run ends or the budget's hour's window frees a run,
-  five minutes in all. Only a harvest the budget still did not admit by
-  then, or at once one whose window frees no run within that wait, ends
-  unrun, recorded with the cause `budget_busy`; the session's memory keeps
-  its discards unless the retirement is a delete.
+  15 seconds in all (the bound of one distiller run in a step). The wait
+  holds back the side effects after it on the lifecycle projection's lane,
+  every identity's, which is why it is that short. A harvest the budget did
+  not admit by then, or at once one whose window frees no run within that
+  wait, ends unrun, recorded with the cause `budget_busy`: in a burst, the
+  runs the budget admits within the wait go ahead and the rest end so. The
+  discards stay in the session's memory scope, unless the retirement is a
+  delete, which drops that scope next.
 
 - A retirement's transcript distillation (a reset's, a role move's, an
   unlisting's, a rotation's) waits for a busy agent memory background
   budget the same way. It tried the budget once, and a denial skipped it
-  without a record or a report, so in a wave of retirements most retired
-  sessions were never distilled. One the budget still did not admit within
-  its wait is recorded (`lifecycle_effect_failed`, effect `distillation`,
-  cause `budget_busy`).
+  with no lifecycle effect record and no `lifecycle_effect_failed` event,
+  so in a wave of retirements most retired sessions were never distilled.
+  One the budget still did not admit within its wait is recorded
+  (`lifecycle_effect_failed`, effect `distillation`, cause `budget_busy`).
 
 ## [0.9.11] - 2026-11-09
 

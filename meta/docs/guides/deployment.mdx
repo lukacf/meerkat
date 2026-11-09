@@ -329,18 +329,23 @@ distiller's budget is 12 runs an hour by default (`runtime_options.agent_memory.
 one run at a time. A harvest, or a retirement's transcript distillation,
 that the budget does not admit is no failed attempt: it waits for the
 budget, asking again each time a distiller run ends or the hour's window
-frees a run, five minutes at most, so a burst of such retirements (a
-roster pass that unlists several identities, resets across a mob)
-harvests and distills one session after another. One the budget still
-has not admitted by then, or at once one whose window frees no run within
-those five minutes, does not run: it is recorded with the cause
-`budget_busy` (`lifecycle_effect_failed`, effect `compaction_harvest` or
-`distillation`). The session's memory and transcript keep what they held,
-unless the retirement is a delete, whose scope drop follows. A side
-effect that waits holds back its identity's later side effects, and an
-identity bootstrap that waits for its own steps' side effects, by as long
-as it waits. When many compacted members retire at once, raise the budget
-or space the retirements out.
+frees a run, 15 seconds at most (the bound of one distiller run in a
+step). While it waits, the side effects after it wait too, every
+identity's (a seat's `after_create`, a retirement hook, an exit
+interview), and so does an identity bootstrap that waits for its own
+steps' side effects: a retirement's harvest and its distillation wait in
+turn, up to 30 seconds together. One the budget has not admitted by then,
+or at once one whose window frees no run within those 15 seconds, does
+not run: it is recorded with the cause `budget_busy`
+(`lifecycle_effect_failed`, effect `compaction_harvest` or
+`distillation`). The discards stay in the session's memory scope and the
+transcript in the session store; a delete then drops that memory scope,
+and with it the discards no harvest took. In a burst of such retirements
+(a roster pass that unlists several identities, resets across a mob) the
+runs the budget admits within the wait go ahead and the rest end
+`budget_busy`, since the budget runs one at a time: space the retirements
+out. Raising `runs_per_hour` helps only once a burst has spent the hour's
+runs.
 
 What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)

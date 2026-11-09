@@ -57,7 +57,8 @@
 //! was not attempted: each waits for the budget, asking again each time it
 //! may admit a run, at most [`EFFECT_BUDGET_WAIT`] in all, and one the
 //! budget still did not admit by then ends unrun, recorded with the cause
-//! [`LifecycleEffectFailureCause::BudgetBusy`]. An answer
+//! [`LifecycleEffectFailureCause::BudgetBusy`]. While it waits, the
+//! side effects after it on its lane wait too, every identity's. An answer
 //! the host gives (an error of the hook or of `after_create`) is final. A
 //! side effect that failed is recorded durably
 //! ([`crate::runtime::LifecycleEffectFailure`]) and reported on the error
@@ -271,16 +272,13 @@ const EFFECT_RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 /// The longest a side effect whose run the realm's agent memory background
 /// budget admits (a compaction harvest, a distillation) waits for that
-/// budget, in all. The budget admits one distiller run of a realm at a
-/// time, and a lane runs up to [`EFFECT_CONCURRENCY`] identities' side
-/// effects at once, each retirement owing up to two distiller runs (its
-/// harvest and its distillation): a lane's burst of retirements (resets
-/// across a mob, a roster pass that unlists several identities) queues some
-/// thirty runs, which at the few seconds a run takes are through in a few
-/// minutes. The bound also caps how long a budget that no run frees (a run
-/// that does not end) holds a side effect, and the side effects after it,
-/// back.
-const EFFECT_BUDGET_WAIT: Duration = Duration::from_mins(5);
+/// budget, in all: as long as one run of the distiller's may take within a
+/// step (its pre-rotation bound), so that a run of another retirement's
+/// that holds the budget ends within the wait. The wait holds the
+/// projection's lane, and every identity's side effects after it with it,
+/// so it stays that short: a run the budget did not admit by then is given
+/// up (`budget_busy`), and the lane goes on.
+const EFFECT_BUDGET_WAIT: Duration = crate::memory::distiller::PRE_ROTATION_TIMEOUT;
 
 /// How many runs in a row may fail before the projection reads as stalled.
 const STALLED_AFTER_FAILED_RUNS: u32 = 3;

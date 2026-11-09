@@ -33,19 +33,28 @@ impl TokenStore for HeldTokens {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
         self.file.load(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         if self.held {
             self.release.acquire().await.unwrap().forget();
         }
-        let result = self.file.save(key, tokens).await;
+        let result = self.file.save(fence, key, tokens).await;
         self.settled.fetch_add(1, Ordering::SeqCst);
         result
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         self.clears.fetch_add(1, Ordering::SeqCst);
-        self.file.clear(key).await
+        self.file.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.file.list().await
@@ -498,9 +507,13 @@ async fn private_provider_use_rechecks_after_action_wait() {
                 let held = prompt(&mut prompts, "provider_target").await;
                 // A real native file-store credential arrives after the initial
                 // Missing observation. This makes the actual Use branch reachable.
-                file.save(&key, &PersistedTokens::api_key(KEY))
-                    .await
-                    .unwrap();
+                file.save(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &key,
+                    &PersistedTokens::api_key(KEY),
+                )
+                .await
+                .unwrap();
                 select(held);
                 let held = prompt(&mut prompts, "provider_action").await;
                 assert!(

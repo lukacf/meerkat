@@ -886,7 +886,12 @@ def source_context():
 
 
 def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=None):
-    value = api(repo_endpoint(f"actions/runs/{integer(run_id, 'run ID')}"))
+    """The record of exactly the bound attempt of a workflow run: the
+    attempt's own endpoint, never the run's, which answers its latest
+    attempt. Re-running the run (as a paired release re-runs a red CI run
+    for Connect) changes nothing a stage bound to an earlier attempt reads;
+    a stage that wants the newer attempt binds it."""
+    value = api(repo_endpoint(f"actions/runs/{integer(run_id, 'run ID')}/attempts/{integer(attempt, 'run attempt')}"))
     expected_path = ".github/workflows/ci.yml" if ci else WORKFLOW
     expected_event = "push" if ci or legacy_tag else "workflow_dispatch"
     expected_branch = legacy_tag if legacy_tag else "main"

@@ -9,7 +9,14 @@ provider, deployment or saved state is touched.
 import asyncio
 import copy
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -19,8 +26,11 @@ from cli_support import DEPLOYMENT_ID, GUIDE_ID, Recording, Terminal, cli
 from launchkit import server
 from launchkit.architect import ArchitectUnavailable
 from launchkit.blueprint import starter_blueprint
+from launchkit.cli import cli_version
 from launchkit.cli.review import review_digest
 from launchkit.projects import DraftConflict
+
+INSTALLER = Path(__file__).resolve().parents[1]
 
 SOURCE_ID, SOURCE_DIGEST, PACKAGE = "1" * 64, "2" * 64, "3" * 64
 ABSENT = "No local deployment has been started for this setup."
@@ -541,6 +551,108 @@ async def test_lost_action_answer_is_recovered_from_its_request_record(forge):
     assert result.code == 0, result.text
     assert forge.deployment.action_request.await_args_list[0].args == (GUIDE_ID, DEPLOYMENT_ID, request)
     forge.deployment.action.assert_awaited_once()
+
+
+async def test_a_lost_plan_acceptance_names_the_commands_that_read_what_happened(forge):
+    forge.current.state = review_state()
+    digest = (await run(forge, "plan", "accept", GUIDE_ID, "--json")).document["digest"]
+    forge.transport.lose.add(("POST", f"/api/guide/{GUIDE_ID}/apply"))
+    result = await run(forge, "plan", "accept", GUIDE_ID, "--approve", digest, "--json")
+    assert (result.code, result.document["error"]["code"]) == (83, "outcome_unknown")
+    assert [item["command"] for item in result.document["next"]] == [
+        f"meta-forge setup show {GUIDE_ID}", f"meta-forge plan accept {GUIDE_ID}"]
+
+
+async def test_a_lost_turn_its_setup_does_not_show_names_the_command_that_reads_it(forge):
+    forge.current.state = guide_state()
+    forge.operations.submit.return_value = (guide_state(version=5), False)
+    forge.transport.lose.add(("POST", f"/api/guide/{GUIDE_ID}/respond"))
+    result = await run(forge, "setup", "send", GUIDE_ID, "--text", "Hello", "--json")
+    assert (result.code, result.document["error"]["code"]) == (83, "outcome_unknown")
+    assert [item["command"] for item in result.document["next"]] == [f"meta-forge setup show {GUIDE_ID} --wait"]
+
+
+class Interrupting(Recording):
+    """Ctrl-C arrives while one request is under way."""
+
+    def __init__(self, app, route):
+        super().__init__(app)
+        self.route = route
+
+    async def handle_async_request(self, request):
+        if (request.method, request.url.path) == self.route:
+            raise KeyboardInterrupt
+        return await super().handle_async_request(request)
+
+
+async def test_ctrl_c_before_anything_is_sent_names_the_setup(forge):
+    transport = Interrupting(server.app, ("GET", f"/api/guide/{GUIDE_ID}"))
+    result = await cli(["setup", "send", GUIDE_ID, "--text", "Hello", "--json"], transport=transport)
+    assert (result.code, result.document["error"]["code"]) == (130, "interrupted")
+    assert [item["command"] for item in result.document["next"]] == [f"meta-forge setup show {GUIDE_ID}"]
+    assert not [route for method, route, _, _ in transport.requests if method == "POST"]
+
+
+def held_forge(posted, release, bodies):
+    """A small Forge server on a free loopback port whose installation action answers only once released."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def answer(self, value, status=200):
+            body = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            if path == "/api/capabilities":
+                return self.answer({"version": cli_version(), "planner": {"available": True},
+                                    "agent_team_runtime": {}})
+            if path == f"/api/guide/{GUIDE_ID}/deployment":
+                return self.answer(receipt())
+            return self.answer({"detail": "Not Found"}, 404)
+
+        def do_POST(self):
+            bodies.append(json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}"))
+            posted.set()
+            release.wait(30)
+            try:
+                self.answer(receipt(status="stopping"))
+            except OSError:
+                pass
+
+    held = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=held.serve_forever, daemon=True).start()
+    return held
+
+
+def test_ctrl_c_while_an_action_is_sent_keeps_its_request_id(tmp_path):
+    """The command runs as ./meta-forge runs it, and gets Ctrl-C while Forge holds its stop action."""
+    posted, release, bodies = threading.Event(), threading.Event(), []
+    held = held_forge(posted, release, bodies)
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-B", "-P", "-m", "launchkit.cli", "--server", f"http://127.0.0.1:{held.server_address[1]}",
+             "installation", "stop", GUIDE_ID, "--json"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(INSTALLER), "HOME": str(tmp_path)})
+        assert posted.wait(30), "the stop action never arrived"
+        process.send_signal(signal.SIGINT)
+        out, err = process.communicate(timeout=30)
+    finally:
+        release.set()
+        held.shutdown()
+    document = json.loads(out)
+    assert (process.returncode, document["error"]["code"]) == (130, "interrupted"), err
+    (body,) = bodies
+    assert document["request"] == body["action_request_id"]
+    assert document["next"][0]["command"] == (
+        f"meta-forge installation request {GUIDE_ID} {body['action_request_id']} --wait")
 
 
 async def test_log_open_settings_and_export(forge, tmp_path):

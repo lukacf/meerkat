@@ -16961,7 +16961,7 @@
         "type": "string"
       },
       "TurnRequestContext": {
-        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. As a\n[`RuntimeTurnMetadata::transient_turn_context`], runtime input persistence\nowns the bytes until the input reaches a terminal state; as a\n[`RuntimeTurnMetadata::request_only_context`] value, it lives only in the\nprocess that admitted the input. The agent only borrows this clone-cheap\nvalue while composing foreground provider requests for that turn.",
         "minLength": 1,
         "type": "string"
       },
@@ -20718,7 +20718,7 @@
         "type": "string"
       },
       "TurnRequestContext": {
-        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. As a\n[`RuntimeTurnMetadata::transient_turn_context`], runtime input persistence\nowns the bytes until the input reaches a terminal state; as a\n[`RuntimeTurnMetadata::request_only_context`] value, it lives only in the\nprocess that admitted the input. The agent only borrows this clone-cheap\nvalue while composing foreground provider requests for that turn.",
         "minLength": 1,
         "type": "string"
       }
@@ -75043,7 +75043,7 @@
         "type": "string"
       },
       "TurnRequestContext": {
-        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. As a\n[`RuntimeTurnMetadata::transient_turn_context`], runtime input persistence\nowns the bytes until the input reaches a terminal state; as a\n[`RuntimeTurnMetadata::request_only_context`] value, it lives only in the\nprocess that admitted the input. The agent only borrows this clone-cheap\nvalue while composing foreground provider requests for that turn.",
         "minLength": 1,
         "type": "string"
       },
@@ -83132,7 +83132,7 @@
         "type": "string"
       },
       "TurnRequestContext": {
-        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. As a\n[`RuntimeTurnMetadata::transient_turn_context`], runtime input persistence\nowns the bytes until the input reaches a terminal state; as a\n[`RuntimeTurnMetadata::request_only_context`] value, it lives only in the\nprocess that admitted the input. The agent only borrows this clone-cheap\nvalue while composing foreground provider requests for that turn.",
         "minLength": 1,
         "type": "string"
       },
@@ -220982,7 +220982,7 @@
         "type": "string"
       },
       "TurnRequestContext": {
-        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
+        "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. As a\n[`RuntimeTurnMetadata::transient_turn_context`], runtime input persistence\nowns the bytes until the input reaches a terminal state; as a\n[`RuntimeTurnMetadata::request_only_context`] value, it lives only in the\nprocess that admitted the input. The agent only borrows this clone-cheap\nvalue while composing foreground provider requests for that turn.",
         "minLength": 1,
         "type": "string"
       },

@@ -6344,6 +6344,13 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/cross_mob/peer_info"
         | "meta/collect_completed"
         | "meta/cancel_flow" => SUBJECT_MEMBER,
+        // The tool grant methods: a grant and its reads name the identity
+        // under `identity`; a revoke names only its grant, whose identity
+        // its handler checks.
+        "meta/tool_grants/grant"
+        | "meta/tool_grants/list"
+        | "meta/tool_grants/audit"
+        | "meta/tool_grants/revoke" => SUBJECT_MEMBER,
         // The voice and live channel methods name the member they speak
         // for.
         method

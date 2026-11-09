@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
 import {
+  EVIDENCE_INPUTS,
   EVIDENCE_VERSION,
   GATE_JOB,
   GATE_LANES,
@@ -92,6 +93,53 @@ for (const [key] of jobs) {
 for (const name of Object.keys(SINGLE_JOBS)) {
   assert.ok([...jobs.keys()].some((key) => nameOf(key) === name), `SINGLE_JOBS names ${name}, which is no ci.yml job`);
 }
+// Each single job's product, pinned: moving a job to another product changes
+// which releases its failure can block, so it changes this list too.
+assert.deepEqual(
+  SINGLE_JOBS,
+  {
+    "Change classification": "core",
+    "Stagger the short rows": "core",
+    "Format + governance": "core",
+    "CI lane classifier selftest": "core",
+    "Path classifier selftest": "core",
+    "Generation ratchets": "core",
+    "Typed governance gates": "core",
+    "Typed governance gates (machine-authority docs)": "core",
+    "Governed JSONL": "core",
+    "MCP confinement positive (Linux)": "core",
+    "wasm32 check": "core",
+    "Python + TypeScript SDK suites": "core",
+    "Example web suites": "core",
+    "WASM timer ownership": "core",
+    "Bazel graph check": "core",
+    "Connect packaging, host adapters, SDK, Console panel and docs": "connect",
+  },
+  "every single job's product",
+);
+{
+  const evidence = recordEvidence({
+    rowProducts: {},
+    jobs: [
+      { name: "Bounded TLC audits (audits-a)", conclusion: "success" },
+      { name: "Published floor (core)", conclusion: "success" },
+      { name: "Published floor (meta)", conclusion: "success" },
+      { name: "Published floor (connect)", conclusion: "success" },
+    ],
+    failedLanes: [],
+    planErrors: 0,
+  });
+  assert.deepEqual(
+    evidence.jobs.map((entry) => [entry.name, entry.product]),
+    [
+      ["Bounded TLC audits (audits-a)", "core"],
+      ["Published floor (core)", "core"],
+      ["Published floor (meta)", "meta"],
+      ["Published floor (connect)", "connect"],
+    ],
+    "a TLC audit part is Core's and a published-floor row its product's",
+  );
+}
 // Every lane the gate's lane check names judges jobs that exist.
 const gateBlock = jobs.get("gate");
 const checked = new Set(
@@ -140,7 +188,8 @@ function attestation({ jobs: list = GREEN, failedLanes = [], planErrors = 0, res
   };
 }
 const fail = (name, conclusion = "failure") => GREEN.map((entry) => (entry.name === name ? { ...entry, conclusion } : entry));
-const verdict = (record, product) => acceptance(record, product);
+// The judged commit changed none of the evidence's inputs (see below).
+const verdict = (record, product) => acceptance(record, product, { changedPaths: ["crates/meerkat-core/src/lib.rs"] });
 const expectRule = (label, record, expected) => {
   for (const [product, accepted] of Object.entries(expected)) {
     const { accepted: actual, reasons } = verdict(record, product);
@@ -258,6 +307,37 @@ assert.match(
   "an accepted run names the failed rows",
 );
 
+// --- The judge ----------------------------------------------------------------
+
+// A run of commit R is judged by R's first parent's copy of this module (the
+// release gates read it with `git show`), as reused CI evidence is: R cannot
+// certify its own red run with an edited job-to-product table. The copy is
+// told what R changed against that parent and refuses when R changed what
+// decides the evidence (this module, the planner's row products, the
+// products file, ci.yml's gate), or when nobody told it.
+{
+  const red = attestation({ jobs: connectRed, failedLanes: ["Main unit tests"] });
+  assert.deepEqual(
+    [...EVIDENCE_INPUTS].sort(),
+    [".github/workflows/ci.yml", "ci/products.json", "scripts/ci-cargo-lanes.mjs", "scripts/ci-product-evidence.mjs", "scripts/ci-products.mjs"],
+    "the inputs that decide a run's product evidence",
+  );
+  assert.equal(acceptance(red, "core", { changedPaths: [] }).accepted, true, "a commit that changed nothing the evidence reads");
+  assert.equal(acceptance(red, "meta", { changedPaths: ["meta/README.md"] }).accepted, true, "a commit that changed other files");
+  for (const options of [undefined, {}, { changedPaths: null }, { changedPaths: "scripts/x.mjs" }]) {
+    const { accepted, reasons } = acceptance(red, "core", options);
+    assert.equal(accepted, false, `unknown changes refuse (${JSON.stringify(options)})`);
+    assert.match(reasons.join(" "), /changes against its first parent are unknown/);
+  }
+  for (const input of EVIDENCE_INPUTS) {
+    for (const product of ["core", "meta"]) {
+      const { accepted, reasons } = acceptance(red, product, { changedPaths: ["crates/meerkat-core/src/lib.rs", input] });
+      assert.equal(accepted, false, `a commit that changes ${input} refuses ${product}`);
+      assert.match(reasons.join(" "), new RegExp(`changes ${input.replaceAll(".", "\\.")}`));
+    }
+  }
+}
+
 // --- The record -------------------------------------------------------------
 
 {
@@ -297,8 +377,9 @@ assert.match(
   assert.equal(of["Published floor (other)"].product, null, "a floor row of no product stays unknown");
   assert.equal(of["Connect packaging, host adapters, SDK, Console panel and docs"].product, "connect");
   assert.deepEqual(of["Unknown job"], job("Unknown job", "pending", null));
-  assert.equal(acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core").accepted, false,
-    "a recorded downstream failure refuses Core");
+  const recorded = acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core", { changedPaths: [] });
+  assert.equal(recorded.accepted, false, "a recorded downstream failure refuses Core");
+  assert.match(recorded.reasons.join(" "), /core depends on job Clippy \(downstream meta\)/, "for that failure");
 }
 
 // --- The artifact reader ---------------------------------------------------

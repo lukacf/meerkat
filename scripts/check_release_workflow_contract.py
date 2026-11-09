@@ -1325,6 +1325,9 @@ function served(scenario, params) {
 
 async function judge(scenario) {
   process.chdir(scenario.dir);
+  // Each scenario's job has a RUNNER_TEMP of its own (the parent's evidence
+  // reader and the release commit's changed paths live there).
+  if (scenario.runner_temp) process.env.RUNNER_TEMP = scenario.runner_temp;
   clock.now = START;
   clock.sleeps = 0;
   let calls = 0;
@@ -1403,8 +1406,16 @@ class _LookupScenario:
     warns: bool = False
     # The exact-tree attestations the runs left: (run id, attempt, record).
     attestations: tuple[tuple[int, int, dict], ...] = ()
-    # Whether the checkout holds the product-scoped evidence reader.
+    # Whether the checkout holds its own copy of the product-scoped evidence
+    # reader, which must never judge (the release commit could edit it).
     reader: bool = True
+    # The copy that judges: the release commit's first parent's, which the
+    # job writes under RUNNER_TEMP ("real": this tree's reader; "refusing": a
+    # copy whose rule refuses every run; None: the parent has no reader).
+    parent_reader: str | None = "real"
+    # The paths the release commit changes against that parent, written next
+    # to it; None when the job could not list them.
+    changed: tuple[str, ...] | None = ()
 
 
 # A failed push run's attestation with product evidence: every job but those
@@ -1534,8 +1545,10 @@ def _lookup_scenarios() -> list[_LookupScenario]:
         ),
     ]
     # A failed run counts for Core only through its attestation's product
-    # evidence, read by the checkout's scripts/ci-product-evidence.mjs: every
-    # failure must sit in a row Core does not depend on.
+    # evidence, judged by the release commit's first parent's copy of
+    # scripts/ci-product-evidence.mjs (never the checkout's own): every
+    # failure must sit in a row Core does not depend on, and the commit must
+    # change nothing that decides the evidence.
     failed = {"conclusion": "failure"}
     connect_red = {"Main unit tests (connect[console])": "connect"}
     scenarios += [
@@ -1545,6 +1558,30 @@ def _lookup_scenarios() -> list[_LookupScenario]:
             ("30", "1"),
             warns=True,
             attestations=((30, 1, _scoped_attestation(connect_red)),),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, judged by the parent's reader, "
+            "which refuses it while the checkout's own would accept it",
+            ((_ci_run(39, "main", **failed),),),
+            None,
+            attestations=((39, 1, _scoped_attestation(connect_red)),),
+            parent_reader="refusing",
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit that changes "
+            "scripts/ci-product-evidence.mjs",
+            ((_ci_run(40, "main", **failed),),),
+            None,
+            attestations=((40, 1, _scoped_attestation(connect_red)),),
+            changed=("crates/meerkat-core/src/lib.rs", "scripts/ci-product-evidence.mjs"),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit whose changes "
+            "against its parent are unknown",
+            ((_ci_run(41, "main", **failed),),),
+            None,
+            attestations=((41, 1, _scoped_attestation(connect_red)),),
+            changed=None,
         ),
         _LookupScenario(
             "a failed push run on main whose failures include a Core row",
@@ -1564,11 +1601,12 @@ def _lookup_scenarios() -> list[_LookupScenario]:
             None,
         ),
         _LookupScenario(
-            "a failed push run on main whose only failure is a Connect row, in a tree without the evidence reader",
+            "a failed push run on main whose only failure is a Connect row, of a release commit whose parent "
+            "has no evidence reader",
             ((_ci_run(34, "main", **failed),),),
             None,
             attestations=((34, 1, _scoped_attestation(connect_red)),),
-            reader=False,
+            parent_reader=None,
         ),
         _LookupScenario(
             "a failed release-projection push run on main whose only failure is a Connect row",
@@ -1636,6 +1674,25 @@ def _run_github_script(step: Step, scenarios: list[dict]) -> list[dict]:
             if scenario.get("reader", True):
                 Path(checkout, "scripts").mkdir()
                 shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, Path(checkout, PRODUCT_EVIDENCE_READER))
+            runner_temp = Path(checkout, "runner-temp")
+            parent = Path(runner_temp, PARENT_EVIDENCE_DIR)
+            parent.mkdir(parents=True)
+            judge = Path(parent, Path(PRODUCT_EVIDENCE_READER).name)
+            if scenario.get("parent_reader", "real") == "real":
+                shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, judge)
+            elif scenario.get("parent_reader") == "refusing":
+                shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, Path(parent, "ci-product-evidence-real.mjs"))
+                judge.write_text(
+                    'export * from "./ci-product-evidence-real.mjs";\n'
+                    "export function acceptance() {\n"
+                    '  return { accepted: false, reasons: ["this copy refuses every run"] };\n'
+                    "}\n",
+                    encoding="utf-8",
+                )
+            if scenario.get("changed", ()) is not None:
+                Path(parent, PARENT_EVIDENCE_CHANGES).write_text(
+                    "".join(f"{path}\n" for path in scenario.get("changed", ())), encoding="utf-8"
+                )
             artifacts = []
             for number, (run_id, attempt, record) in enumerate(scenario.get("attestations", ()), start=1):
                 archive = io.BytesIO()
@@ -1651,7 +1708,13 @@ def _run_github_script(step: Step, scenarios: list[dict]) -> list[dict]:
                     }
                 )
             plan.append(
-                {"dir": str(checkout), "filtered": scenario["filtered"], "timeline": scenario["timeline"], "artifacts": artifacts}
+                {
+                    "dir": str(checkout),
+                    "runner_temp": str(runner_temp),
+                    "filtered": scenario["filtered"],
+                    "timeline": scenario["timeline"],
+                    "artifacts": artifacts,
+                }
             )
         Path(root, "scenarios.json").write_text(json.dumps(plan), encoding="utf-8")
         results = Path(root, "results.json")
@@ -1684,9 +1747,11 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
     version's release branch or a near miss of this one, another commit, a
     pull request, a dispatch or a failed run. A failed run counts only when
     its exact-tree attestation's product evidence shows every failure in rows
-    Core does not depend on, judged by the checkout's
-    scripts/ci-product-evidence.mjs (never a cancelled run, a release
-    projection, a run without that evidence, or a tree without the reader).
+    Core does not depend on, judged by the release commit's first parent's
+    copy of scripts/ci-product-evidence.mjs with the commit's changed paths
+    (never the checkout's own copy, a cancelled run, a release projection, a
+    run without that evidence, a parent without the reader, or a commit that
+    changes what decides the evidence or whose changes are unknown).
     The step runs under node as actions/github-script v7 runs it, against a
     stub of the runs and artifacts APIs and a fake clock: once with the API
     applying its own filters, and once with an API that ignores them, where
@@ -1712,6 +1777,8 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
                 "filtered": filtered,
                 "attestations": scenario.attestations,
                 "reader": scenario.reader,
+                "parent_reader": scenario.parent_reader,
+                "changed": scenario.changed,
             }
             for scenario, filtered in cases
         ],
@@ -2136,6 +2203,11 @@ PRODUCTS_FILE = "ci/products.json"
 # Judges a failed CI run's product evidence; require_ci_green's lookup reads
 # it from the release checkout.
 PRODUCT_EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
+# Where a release job writes the release commit's first parent's copy of that
+# reader, which judges a failed CI run, and the commit's changed paths
+# against that parent (under RUNNER_TEMP).
+PARENT_EVIDENCE_DIR = "ci-evidence-parent"
+PARENT_EVIDENCE_CHANGES = "changed-paths.txt"
 PREBUILD_BACKEND_REFUSAL = "A release prebuild builds with the backend its tag run selects"
 PROVENANCE_VERIFIER = "scripts/verify-release-asset-provenance"
 BINARY_BUILD_JOBS = (

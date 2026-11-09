@@ -353,6 +353,33 @@ async def test_server_text_reaches_the_terminal_with_escapes_shown(forge):
     assert raw_controls(log.stdout) == [] and "\\x1b[2K\\rall good" in log.stdout
 
 
+async def test_keys_typed_before_the_question_never_answer_it(forge):
+    """At a real terminal: "y" typed before the review appeared is discarded; the person's answer after the
+    question is what counts (here "n", typed again and again until the command reads it)."""
+    import pty
+    forge.current.state = review_state()
+    controller, terminal = pty.openpty()
+    stop = threading.Event()
+
+    def person():
+        while not stop.wait(0.2):
+            os.write(controller, b"n\n")
+
+    os.write(controller, b"y\n")
+    typing = threading.Thread(target=person, daemon=True)
+    try:
+        with os.fdopen(terminal, "r", closefd=False) as stdin:
+            typing.start()
+            result = await cli(["plan", "accept", GUIDE_ID], transport=forge.transport, stdin=stdin, terminal=True)
+    finally:
+        stop.set()
+        typing.join(5)
+        os.close(controller)
+        os.close(terminal)
+    assert result.code == 84 and "Not approved" in result.stderr, result.text
+    forge.guide.apply.assert_not_awaited()
+
+
 async def test_plan_accept_refusals(forge):
     forge.current.state = guide_state()
     result = await run(forge, "plan", "accept", GUIDE_ID, "--json")

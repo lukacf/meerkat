@@ -369,6 +369,61 @@ impl Fixture {
         assert_eq!(pending_owners, 0);
     }
 
+    async fn stored_row(&self, input_id: &InputId) -> crate::input_state::StoredInputState {
+        self.store
+            .load_input_state(&self.runtime_id, input_id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Write the first input's stored row as another writer does. Returns
+    /// the bytes written.
+    fn replace_first_stored_row(&self, row: &crate::input_state::StoredInputState) -> Vec<u8> {
+        let bytes = serde_json::to_vec(row).unwrap();
+        rusqlite::Connection::open(self.store.path())
+            .unwrap()
+            .execute(
+                "UPDATE runtime_input_states SET state_json=?3 WHERE runtime_id=?1 AND input_id=?2",
+                rusqlite::params![
+                    self.runtime_id.to_string(),
+                    self.inputs[0].to_string(),
+                    &bytes
+                ],
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// Teardown's recovery of the run refuses the first stored row the other
+    /// writer left as `written`, writes neither row, and keeps the carrier.
+    async fn assert_teardown_refuses_changed_first_row(&self, written: &[u8]) {
+        let second = self.raw_row(&self.inputs[1]);
+        let recovery = RuntimeLoopRecoveryContext {
+            authority_binding: RuntimeLoopAuthorityBinding::detached_for_test(),
+            completions: Some(Arc::new(crate::tokio::sync::Mutex::new(
+                crate::completion::CompletionRegistry::new(),
+            ))),
+        };
+        let error = recover_committed_runtime_projections_before_teardown(
+            &self.driver,
+            &mut NoExecution,
+            &self.carrier,
+            &recovery,
+        )
+        .await
+        .expect_err("a stored row that differs beyond the live audit suffix stays stale");
+        assert!(
+            error
+                .to_string()
+                .contains("terminal completion finalization lost the exact durable CAS"),
+            "{error}"
+        );
+        assert_eq!(written, self.raw_row(&self.inputs[0]).as_slice());
+        assert_eq!(second, self.raw_row(&self.inputs[1]));
+        assert!(self.carrier.pending_nondirected_run_terminal().is_some());
+    }
+
     fn raw_row(&self, input_id: &InputId) -> Vec<u8> {
         rusqlite::Connection::open(self.store.path())
             .unwrap()
@@ -1183,6 +1238,43 @@ async fn live_cancelled_finalization_commits_a_late_audit_observation_and_runs_o
     fixture.assert_cancelled_finalized(&observed).await;
     let next = Fixture::accept_independent_inputs(&fixture.driver).await;
     Fixture::start_run(&fixture.driver, next.len()).await;
+}
+
+/// Expecting each row as it was last written accepts only the live audit
+/// suffix: with an observation waiting on the live row, the finalization
+/// still refuses a stored row another writer changed, and leaves that row as
+/// the writer left it.
+#[tokio::test]
+async fn late_audit_observation_does_not_excuse_a_changed_stored_row() {
+    let fixture = Fixture::cancelled_run().await;
+    fixture.stage_refusal_after_terminal_write().await;
+    let mut changed = fixture.stored_row(&fixture.inputs[0]).await;
+    changed.state.updated_at += chrono::Duration::seconds(1);
+    let written = fixture.replace_first_stored_row(&changed);
+    fixture
+        .assert_teardown_refuses_changed_first_row(&written)
+        .await;
+}
+
+/// The same for a stored audit that is no prefix of the live one: a record
+/// the live row never held stays a difference.
+#[tokio::test]
+async fn late_audit_observation_does_not_excuse_a_divergent_stored_audit() {
+    let fixture = Fixture::cancelled_run().await;
+    fixture.stage_refusal_after_terminal_write().await;
+    let mut divergent = fixture.stored_row(&fixture.inputs[0]).await;
+    let other = crate::input_audit::InputAuthorizationAudit::default();
+    crate::input_audit::tests::stage_refusal_after_row_write(
+        &other,
+        &fixture.inputs[0],
+        &fixture.session_id,
+        &fixture.run_id,
+    );
+    divergent.state.authorization_audit = other;
+    let written = fixture.replace_first_stored_row(&divergent);
+    fixture
+        .assert_teardown_refuses_changed_first_row(&written)
+        .await;
 }
 
 #[tokio::test]

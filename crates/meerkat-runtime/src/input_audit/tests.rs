@@ -188,6 +188,48 @@ fn installing_committed_prefix_preserves_live_sink_suffix_and_refuses_divergence
 }
 
 #[test]
+fn committed_image_is_only_the_stored_prefix_of_the_live_records() {
+    let bytes = |audit: &InputAuthorizationAudit| serde_json::to_vec(audit).unwrap();
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let stored = live.freeze_for_persistence().unwrap();
+    sink.append(event(&sink)).unwrap();
+    // The live records ran ahead of the stored ones by a suffix: the image is
+    // the stored prefix, and the live buffer keeps the suffix.
+    let image = live.committed_image(&stored).unwrap();
+    assert_eq!(bytes(&image), bytes(&stored));
+    assert_eq!(count(&live), 2);
+    // The image is frozen: a later append reaches only the live buffer.
+    sink.append(event(&sink)).unwrap();
+    assert_eq!(count(&image), 1);
+    assert_eq!(count(&live), 3);
+    // Every other relation leaves the live records, which an exact compare
+    // against the stored row refuses: equal records,
+    let current = live.freeze_for_persistence().unwrap();
+    assert_eq!(
+        bytes(&live.committed_image(&current).unwrap()),
+        bytes(&current)
+    );
+    // records that diverge from the live ones,
+    let (other, other_sink) = fixture();
+    other_sink.append(event(&other_sink)).unwrap();
+    assert_eq!(
+        bytes(&live.committed_image(&other).unwrap()),
+        bytes(&current)
+    );
+    // and stored records ahead of the live ones.
+    let behind = stored.restore_observations_for_owner().unwrap();
+    assert_eq!(
+        bytes(&behind.committed_image(&current).unwrap()),
+        bytes(&stored)
+    );
+    // Neither side changes.
+    assert_eq!(count(&live), 3);
+    assert_eq!(count(&other), 1);
+    assert_eq!(count(&stored), 1);
+}
+
+#[test]
 fn restored_payload_is_data_and_frozen_store_candidates_cannot_gain_live_sink() {
     let (audit, sink) = fixture();
     sink.append(event(&sink)).unwrap();

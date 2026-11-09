@@ -35,6 +35,24 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-runtime`: a run whose operation records an authorization audit
+  observation after the run's terminal input rows were written now settles
+  in the same process. The observation waits on the live input row for the
+  row's next update, and the run's terminal completion finalization is that
+  update, but its exact compare-and-swap expected the live row, observation
+  included, which never matched the stored row: the finalization failed with
+  "terminal completion finalization lost the exact durable CAS", every retry
+  in the process failed the same way, unregistering the session (a mob
+  teardown included) failed with it, and the input's receipt stayed pending
+  until a restart settled it. The finalization and the other exact terminal
+  rewrites of input rows (payload retirement, interaction terminal outbox
+  adoption, finalization and publication receipt) now expect each row as it
+  was last written and commit the observation with the replacement; any
+  other difference from the stored row still refuses the rewrite. Affects
+  0.8.52 through 0.9.11.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

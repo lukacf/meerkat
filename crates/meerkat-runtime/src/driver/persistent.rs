@@ -875,6 +875,8 @@ impl PersistentRuntimeDriver {
         replacements: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
+        let expected = self.committed_input_row_images(expected).await?;
+        let expected = expected.as_slice();
         match self.store.input_state_batch_cas_implementation_profile() {
             InputStateBatchCasImplementationProfile::MultiWriter => self
                 .store
@@ -936,6 +938,50 @@ impl PersistentRuntimeDriver {
                 })
             }
         }
+    }
+
+    /// The exact pre-image of a terminal input-state CAS: each live row as it
+    /// was last durably written. A row write freezes the row's authorization
+    /// audit; an operation of the row's run can stage a later observation on
+    /// the live row, where it waits for the row's next update. The terminal
+    /// replacement is that update, frozen from the live row, so it carries the
+    /// observation, and the stored row is the live row without it. Each live
+    /// row is therefore expected with the audit records its stored row holds
+    /// (`InputAuthorizationAudit::committed_image`); the store's exact compare
+    /// still refuses every other difference. A live row with no audit record
+    /// cannot run ahead of its stored row and needs no read.
+    async fn committed_input_row_images(
+        &self,
+        live_rows: &[StoredInputState],
+    ) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
+        let mut images = Vec::with_capacity(live_rows.len());
+        for live in live_rows {
+            let mut image = live.clone();
+            if !live.state.authorization_audit.is_empty() {
+                let stored = self
+                    .store
+                    .load_input_state(&self.runtime_id, &live.state.input_id)
+                    .await
+                    .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                        reason: format!(
+                            "terminal input compare-and-swap could not read the stored row of \
+                             input {}: {error}",
+                            live.state.input_id
+                        ),
+                    })?;
+                if let Some(stored) = stored {
+                    image.state.authorization_audit = live
+                        .state
+                        .authorization_audit
+                        .committed_image(&stored.state.authorization_audit)
+                        .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                            reason: error.to_string(),
+                        })?;
+                }
+            }
+            images.push(image);
+        }
+        Ok(images)
     }
 
     /// Release terminal live state after its exact completion/publication CAS

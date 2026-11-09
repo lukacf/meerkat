@@ -20,6 +20,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from cli_support import DEPLOYMENT_ID, GUIDE_ID, Recording, Terminal, cli
@@ -490,11 +491,47 @@ async def test_install_folder_conflict_and_lost_answer_reads_status_instead_of_r
     forge.deployment.submit.reset_mock()
     forge.transport.lose.add(("POST", f"/api/guide/{GUIDE_ID}/deployment"))
     forge.deployment.submit.return_value = receipt(status="queued")
-    forge.deployment.status.return_value = receipt(status="running")
+
+    def installation(*args, **kwargs):
+        # The installation exists once Forge received the install request, which then ran.
+        if not forge.deployment.submit.await_count:
+            raise LookupError(ABSENT)
+        return receipt(status="running")
+
+    forge.deployment.status.side_effect = installation
     result = await run(forge, *argv, "--approve", digest, "--wait")
     assert result.code == 0, result.text
     forge.deployment.submit.assert_awaited_once()
     assert result.document["result"]["status"] == "running"
+
+
+class Dropping(Recording):
+    """One request is lost before it reaches Forge: the server never handles it, and no answer comes."""
+
+    def __init__(self, app, route):
+        super().__init__(app)
+        self.route = route
+
+    async def handle_async_request(self, request):
+        if (request.method, request.url.path) == self.route:
+            self.requests.append((request.method, request.url.path, dict(request.url.params), None))
+            raise httpx.ReadTimeout("The request never arrived.", request=request)
+        return await super().handle_async_request(request)
+
+
+async def test_a_lost_install_into_a_stopped_installations_folder_is_not_taken_for_success(forge):
+    forge.current.state = accepted_state()
+    forge.deployment.options.return_value = options()
+    # The folder already holds this setup's stopped installation of the same agent team.
+    forge.deployment.status.return_value = receipt(status="stopped", phase="stopped", health="unknown",
+                                                   console_url=None)
+    argv = install_args("--reuse-forge-keys", "--set", "CONSOLE_USER_ID=o", "--json")
+    digest = (await run(forge, *argv)).document["digest"]
+    transport = Dropping(server.app, ("POST", f"/api/guide/{GUIDE_ID}/deployment"))
+    result = await cli([*argv, "--approve", digest, "--wait"], transport=transport)
+    assert (result.code, result.document.get("error", {}).get("code")) == (83, "outcome_unknown"), result.text
+    assert result.document["next"][0]["command"] == f"meta-forge installation status {GUIDE_ID} --wait"
+    forge.deployment.submit.assert_not_awaited()
 
 
 async def test_installation_status_and_absence(forge):

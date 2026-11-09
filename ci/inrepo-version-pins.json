@@ -60,6 +60,10 @@
       "reason": "Schemas emitted from meerkat-contracts; the contract version they carry is checked by the parity script's own section."
     },
     {
+      "path": "docs/meta/**",
+      "reason": "The docs site's snapshot of meta/docs at the main commit docs/meta/_source.json records, which the Publish Meta docs workflow renders after a push to main changes meta/docs, so it follows a Meta bump after that bump lands; meta/docs itself is read, and scripts/check-meta-docs-lag.py bounds the lag."
+    },
+    {
       "path": "**/CHANGELOG.md",
       "reason": "Released notes record the versions each release shipped with."
     },
@@ -366,11 +370,6 @@
     {
       "path": "meta/docs/forge/*.mdx",
       "reason": "Forge's install pages download Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",
-      "removed_by": "the change that points Forge's install docs at its meta-installer releases in this repository"
-    },
-    {
-      "path": "docs/meta/forge/*.mdx",
-      "reason": "The generated mirror of Forge's install pages, which download Forge 0.3.0 from the standalone repository.",
       "removed_by": "the change that points Forge's install docs at its meta-installer releases in this repository"
     },
     {

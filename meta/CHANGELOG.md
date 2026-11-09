@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Forge: `meta-forge`, a terminal command beside `start.sh`, drives a running
+  Forge from the same computer, over SSH too: talk to the guide, accept a
+  plan, install an agent team on this computer and operate it, with text,
+  JSON or JSON Lines output, typed exit codes and digests for approvals. It
+  never takes or shows a secret value.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

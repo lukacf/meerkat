@@ -1,6 +1,6 @@
 ---
 title: "Forge reference"
-description: "Release packages, the Forge launcher and its settings, files and folders, generated package commands, blueprint fields and limits."
+description: "Release packages, the Forge launcher and its settings, terminal commands, files and folders, generated package commands, blueprint fields and limits."
 icon: "book"
 ---
 
@@ -126,11 +126,159 @@ The local `GET /api/capabilities` endpoint reports Forge's release as
 `agent_team_runtime`, and the Meta runtime and gateway selected for
 applications without a connection setup helper as `ordinary_runtime`.
 
+## Terminal commands
+
+```sh
+./meta-forge COMMAND [options]
+```
+
+`meta-forge`, beside `start.sh` in the Forge folder, drives a running Forge
+from a terminal on the same computer, for example over SSH. It uses the same
+local API as the browser, so each step keeps Forge's saved records, version
+checks and approvals, and it keeps no records of its own. Run it from the
+Forge folder or by its path. When `.venv` is missing, it first runs
+`bash start.sh --prepare-only` without provider keys or tokens in its
+environment. In a source checkout installed with pip, `meta-forge` is also a
+console script, and `.venv/bin/python -m launchkit.cli` runs it from the Forge
+folder.
+
+Forge is for a single person on their own computer or server account: other
+local users on the same machine can reach its local port.
+
+A first agent team from a terminal, with Forge running in a second terminal:
+
+```sh
+./meta-forge serve
+./meta-forge provider status
+./meta-forge chat --new
+./meta-forge install last --team --folder ~/agents/research --reuse-forge-keys
+./meta-forge installation open last
+```
+
+In the chat, answer the guide's questions and type `/accept` when the plan
+fits. The provider key for Forge's own agents is entered in **Guide settings**
+in a browser: over SSH, forward the port first (`ssh -L 8787:127.0.0.1:8787
+HOST`) and open `http://127.0.0.1:8787` on your own computer.
+
+| Command | What it does |
+| --- | --- |
+| `serve` | Runs `start.sh` in this terminal; `--port N` and `--prepare-only` as for the launcher. Provider keys and tokens in the calling shell are not forwarded to Forge unless `--inherit-provider-env` is given. |
+| `doctor` | One `ok`, `warn` or `fail` line each for Python, the application check sandbox, the Google Cloud CLI, the state folder, background operation, the server and the port. |
+| `version` | This folder's Forge release and the running server's, with its runtimes. The other commands refuse a server of another release. |
+| `provider status` | Which model providers Forge's own agents can use. It never shows a key. |
+| `guide status`, `guide start`, `guide stop` | Forge's setup team. `start` waits until it is ready. |
+| `setup list`, `setup show SETUP` | Saved setups (`--all` for more than the newest 100); one setup's status, open question, readiness and plan. |
+| `setup new` | Creates a setup and prints its request ID first. `setup new --request-id ID` with the same ID returns the same setup. |
+| `setup send SETUP` | Sends one turn: `--answer ID` (an option's ID or number, repeatable), `--combine`, `--text TEXT` or `--text-file FILE`, and `--attach FILE` (up to 4). With `--wait` it prints the guide's answer. |
+| `setup revisit SETUP TOPIC` | Reopens `purpose`, `connections`, `knowledge`, `autonomy` or `destination`. |
+| `setup retry SETUP` | Deliberately resends the saved answer of an interrupted or failed turn, like **Retry saved answer**. |
+| `setup timeline SETUP` | The guide's conversation frames (`--after CURSOR`, `--limit N`). |
+| `setup organization SETUP` | Adopts this Forge's updated workplace guidance for the setup. |
+| `chat SETUP`, `chat --new` | A conversation with the guide at a terminal. Type an option number or your own words; `/help` lists `/plan`, `/accept`, `/attach`, `/revisit`, `/retry`, `/status`, `/open` and `/quit`. |
+| `plan show SETUP` | Classes, identities, tools, connections, flows and open items. |
+| `plan accept SETUP` | Accepts the proposed plan, like **Use this plan**. |
+| `plan export SETUP` | The blueprint as JSON, or into a new file with `--out FILE`. |
+| `plan validate FILE` | Validates a blueprint file without a model. |
+| `plan package SETUP --out FILE` | Downloads the accepted plan's agent team package. |
+| `install SETUP --team --folder DIR` | Installs and starts the accepted agent team on this computer, like **Install agent team**. Options: `--port N` (the Console port), `--mode interactive` (runs while Forge runs; the default) or `--mode background` (an operating-system user service), `--reuse-forge-keys`, `--set NAME=VALUE` for a non-secret setting the package declares, and `--dry-run`. |
+| `installation status SETUP` | Status, phase, health, checks and links. |
+| `installation start SETUP` (or `stop`, `restart`, `retry`, `cleanup`) | Operates the installation. `start` applies to a stopped installation. `cleanup` stops an installation that runs while Forge runs and verifies its cleanup after a failed or interrupted start. |
+| `installation request SETUP ID` | Reads the record of the action with this request ID, for example after a lost answer. |
+| `installation log SETUP` | Bounded, redacted log lines; `--follow` keeps printing new ones. |
+| `installation open SETUP` | The Console and application links. |
+| `installation settings show SETUP` | The private settings' names and whether each is set. It never shows a value. |
+| `installation export SETUP --out FILE` | Downloads the installed package, without private settings. |
+
+`SETUP` is a full setup ID, a unique prefix of at least 8 of its hex digits,
+or `last`, the most recently updated setup. Commands that change a setup take
+`--version N`, the version you read; when the setup has changed since, they
+stop with exit code 82.
+
+### Global options
+
+These options go before or after the command name.
+
+| Option | Meaning |
+| --- | --- |
+| `--server URL` | The Forge server, at a loopback `http` address. Default: `http://127.0.0.1` with the port `META_FORGE_PORT` names, else 8787. |
+| `--home DIR` | The state folder, for `serve` and `doctor`. Default: as for `start.sh`. |
+| `-o text`, `-o json`, `-o jsonl` | Output mode; `--json` is the same as `-o json`. Default `text`. |
+| `--wait`, `--no-wait` | Whether to wait for a long step to finish. Default: wait when text output goes to a terminal. |
+| `--timeout DURATION` | Upper bound on waiting, such as `90s` or `15m`. The work continues in Forge. |
+| `--no-input` | Never prompt; implied when standard input is not a terminal. |
+| `--approve DIGEST` | Approves the review with this digest; repeatable. |
+| `-v`, `-q` | More or less progress detail. |
+
+### Output and exit codes
+
+Text output prints results on standard output, and progress, prompts and the
+next commands to run on standard error. `-o json` prints exactly one JSON
+document, also on failure: `format` (`meta-forge-cli/1`), `ok`, `command`,
+`setup`, then `result` with Forge's answer, or `error` with `code`,
+`exit_code`, `http_status`, `server_code` and `detail`; `needs`, what a person
+must do; and `next`, the commands to run next, each with its reason. `-o
+jsonl` prints one event per line while the command waits and ends with exactly
+one `result` or `error` event. Scripts should read `error.code`, not only the
+exit code.
+
+| Exit code | `error.code` | Meaning |
+| --- | --- | --- |
+| 0 | | Success. |
+| 1 | `operation_failed`, `operation_interrupted` | Forge reports that the operation failed or was interrupted. |
+| 2 | `usage`, `invalid_request` | Wrong arguments, or Forge refused the request. |
+| 80 | `server_unavailable`, `server_incompatible` | No Forge server of this release answers. |
+| 81 | `not_found` | No such setup, installation or record. |
+| 82 | `stale_version`, `conflict`, `busy` | The setup changed, or other work holds it. Read it again. |
+| 83 | `outcome_unknown` | The answer was lost or the outcome is not known yet. Read the state; nothing is repeated for you. |
+| 84 | `approval_required` | The step needs a person's approval. |
+| 85 | `input_required` | A person must answer a question or enter a secret. |
+| 86 | `prerequisite_unavailable` | A model provider, the setup team, the sandbox, the service manager or another prerequisite is unavailable. |
+| 87 | `wait_timeout` | `--timeout` elapsed; the work continues in Forge. |
+| 130 | `interrupted` | Ctrl+C stopped waiting; the work continues in Forge. |
+
+### Approvals
+
+Accepting a plan, adopting workplace guidance, installing, and starting,
+restarting or retrying an installation need a person's approval, as in the
+browser. The command first shows a review of what will happen, built from
+Forge's own records, and its digest (`sha256:` and 64 hex digits). At a
+terminal, answer `y` to approve. Otherwise the command stops with exit code 84
+and prints the review and the command to run with `--approve` and that digest.
+If anything has changed since, such as the setup's version, the folder, the
+port or the mode, the digest changes and the command stops again with exit
+code 84. `install --dry-run` prints the review and its digest and changes
+nothing.
+
+### Secrets
+
+No command takes a secret value: there is no option, environment variable,
+file or prompt for one, and nothing prints one. Keys for Forge's own agents are
+entered in **Guide settings**; `provider status` and
+`installation settings show` report only whether a value is set. `install
+--set` accepts only settings the package declares non-secret. When the
+package needs a secret setting, `install` stops with exit code 85 and names
+it: `--reuse-forge-keys` lets Forge copy its own saved provider keys into the
+installation, and other secret settings are entered by a person in Forge's
+installation form in the browser.
+
+### Interrupted and lost steps
+
+Ctrl+C and `--timeout` stop only the waiting, never Forge's work; the command
+prints the one that continues waiting. A turn continues with
+`setup show SETUP --wait`. An installation action prints its request ID first,
+and `installation request SETUP ID --wait` reads that action's own record.
+When an answer is lost, the commands read Forge's records instead of sending
+the step again: a lost guide turn or installation answer is followed by the
+setup's or installation's own record. `setup new` prints its request ID
+first; after a lost answer, `setup new --request-id ID` with that ID returns
+the setup the request created, or creates it if the request never arrived.
+
 ## Forge folder
 
 | Path | Contents |
 | --- | --- |
 | `start.sh` | The launcher. |
+| `meta-forge` | The [terminal command](#terminal-commands). |
 | `README.md` | This package's runtime selections, supported destination and exact source revisions. |
 | `GETTING_STARTED.md` | The full guided journey and its recovery controls. |
 | `standalone-manifest.json` | Pins the package's source, assets, SDKs, native product, checker dependencies and guide gateway. |

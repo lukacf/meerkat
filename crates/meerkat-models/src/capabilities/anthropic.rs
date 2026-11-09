@@ -139,9 +139,14 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     always on; default effort `high`; omit temperature, top_p and
     //     top_k; forced tool use returns 400; $8 / $40 per MTok):
     //     https://platform.claude.com/docs/en/models/fable-5-2/overview
-    //   - Models overview (not listed for the output-300k-2026-03-24 beta;
-    //     no Amazon Bedrock id):
+    //   - Models overview (not listed for the output-300k-2026-03-24 beta):
     //     https://platform.claude.com/docs/en/models/overview
+    //   - Platforms, each with the id claude-fable-5-2: the Claude API,
+    //     Claude Platform on AWS, Claude Models on Google Cloud (Anthropic
+    //     managed and Google managed) and Microsoft Foundry (on Anthropic
+    //     infrastructure); not Amazon Bedrock. The catalog keeps no
+    //     per-platform list: the client sends the id unchanged on every
+    //     backend.
     //   - What's new (`{type: "enabled"}` with `budget_tokens` and
     //     `{type: "disabled"}` both return 400; a `tool_choice` of `any` or
     //     a named tool returns 400; the five effort levels `low` to `max`;
@@ -217,7 +222,10 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // with "Same capabilities as Claude Fable 5.2" and the same
     // specifications and prices. The row is the claude-fable-5-2 row apart
     // from its identity and tier: supported, since only verified
-    // organizations can call it.
+    // organizations can call it. Its platforms are not Fable 5.2's: the
+    // Claude API, Claude Models on Google Cloud (Anthropic managed and Google
+    // managed) and Microsoft Foundry (on Anthropic infrastructure); not
+    // Claude Platform on AWS and not Amazon Bedrock.
     //
     // Sources:
     //   https://platform.claude.com/docs/en/models/mythos-5-2/overview

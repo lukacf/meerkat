@@ -90,6 +90,14 @@ Use `rkat models` for every supported ID and its current limits.
     | `claude-sonnet-4-6` | 1M | 64K | Previous Sonnet generation |
     | `claude-haiku-5-5` | 1M | 128K | Recommended Haiku model; adaptive thinking, effort default `medium`, no sampling parameters |
 
+    Meerkat sends the model id unchanged on every Anthropic backend and keeps
+    no list of the platforms that serve each model. Anthropic serves
+    `claude-fable-5-2` on the Claude API, Claude Platform on AWS, Claude
+    Models on Google Cloud and Microsoft Foundry, and not on Amazon Bedrock.
+    It serves `claude-mythos-5-2` only to organizations it has verified, on
+    the Claude API, Claude Models on Google Cloud and Microsoft Foundry, and
+    not on Claude Platform on AWS or Amazon Bedrock.
+
     ```toml
     [agent]
     model = "claude-opus-5-5"

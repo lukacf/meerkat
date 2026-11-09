@@ -49,7 +49,9 @@ them.
   requests carry the `drop_block` control and the
   `thinking-binding-controls-2026-08-01` beta, as Claude Fable 5.1's do,
   and a session that moves onto Fable 5.2 keeps sending its earlier turns'
-  thinking. The Anthropic default model stays `claude-opus-5-5`.
+  thinking. Anthropic serves neither model on Amazon Bedrock, and Mythos
+  5.2 is not served on Claude Platform on AWS (see the providers page). The
+  Anthropic default model stays `claude-opus-5-5`.
 
 ## [0.9.11] - 2026-11-09
 

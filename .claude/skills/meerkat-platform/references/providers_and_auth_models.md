@@ -133,6 +133,13 @@ recommended, S = supported):
 | `claude-sonnet-4-5` | S | 200K / 64K | enabled (budget) or `disabled` | - |
 | `claude-opus-4-5` | S | 200K / 64K | enabled (budget) or `disabled` | low, medium, high |
 
+The catalog keeps no per-platform model list and the client sends the model
+id unchanged on every Anthropic backend. Anthropic serves `claude-fable-5-2`
+on the Claude API, Claude Platform on AWS, Claude Models on Google Cloud and
+Microsoft Foundry, not on Amazon Bedrock; `claude-mythos-5-2` only to
+organizations it has verified, on the Claude API, Claude Models on Google
+Cloud and Microsoft Foundry, not on Claude Platform on AWS or Amazon Bedrock.
+
 | OpenAI | Tier | Context / output | Reasoning effort |
 |---|---|---|---|
 | `gpt-6-astra` (default) | R | 1.05M (922K input) / 128K | low..max |

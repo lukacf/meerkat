@@ -7748,6 +7748,112 @@ async fn a_shutdown_ends_a_budget_wait_at_once_and_records_nothing() {
     }
 }
 
+/// A shutdown while a retirement's distillation waits for a busy budget
+/// ends the wait at once: nothing is recorded or reported for the
+/// distillation, and its page still owes it: a successor over the same Core
+/// and metadata store runs the distillation again, which reads the
+/// session's transcript again. The retirement's harvest finds nothing to
+/// harvest, so the distillation is the side effect that waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_ends_a_distillation_s_budget_wait_and_leaves_it_owed() {
+    let alice = identity("personal:alice");
+    let retired = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    let runtime = runtime_over(None, &core);
+    runtime.set_identity_records(Arc::clone(&records), BUSY_BUDGET_MOB.to_string());
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, retired.clone())
+        .await
+        .expect("registered live");
+    let errors = Arc::new(StdMutex::new(Vec::new()));
+    runtime.set_error_hook(Some(keeping_errors(&errors)));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let transcripts = Arc::new(OneMessageEach::default());
+    let (memory, distiller) = memory_distilling(
+        memory_dir.path(),
+        &transcripts,
+        &Arc::new(GatedModel::new()),
+    );
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+    // Another run holds the realm's background budget for the whole row.
+    let _held = distiller
+        .hold_budget()
+        .expect("the budget admits the holder");
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    // The distillation read the session's transcript: it then waits for the
+    // budget.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while transcripts.reads_of(&retired) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retirement's distillation never read the session's transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let started = tokio::time::Instant::now();
+    runtime
+        .stop_lifecycle_projection(started + Duration::from_secs(10))
+        .await;
+    let stopped_in = started.elapsed();
+    assert!(
+        stopped_in < Duration::from_secs(3),
+        "the shutdown waited {stopped_in:?} for the budget wait"
+    );
+    let failures = runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert!(
+        failures.is_empty(),
+        "nothing is recorded for the stopped wait: {failures:?}"
+    );
+    let reported = lock(&errors)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        reported.is_empty(),
+        "nothing is reported for the stopped wait: {reported:?}"
+    );
+
+    // The next start: a successor over the same Core and metadata store,
+    // whose budget is free, owes the stopped page and runs the distillation.
+    let read_before = transcripts.reads_of(&retired);
+    let successor = runtime_over(None, &core);
+    successor.set_identity_records(Arc::clone(&records), BUSY_BUDGET_MOB.to_string());
+    let successor_memory_dir = tempfile::tempdir().expect("memory dir");
+    let (successor_memory, _) = memory_distilling(
+        successor_memory_dir.path(),
+        &transcripts,
+        &Arc::new(GatedModel::new()),
+    );
+    successor.set_agent_memory(Some(successor_memory)).await;
+    successor.bind_lifecycle_projection(None);
+    successor.settle_lifecycle_projection().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while transcripts.reads_of(&retired) == read_before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the successor never ran the distillation the stopped page owed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// The retirement hook of an incarnation a Meta step ended is called only
 /// once that step answered. The projection takes what the step kept for the
 /// hook (the registration it read before Core was asked, settled after Core

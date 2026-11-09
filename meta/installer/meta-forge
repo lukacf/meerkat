@@ -4,6 +4,14 @@
 # with start.sh when needed, and keeps the caller's working directory.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# PYTHONPATH below is this folder's path, and ":" separates PYTHONPATH's entries.
+case "$root" in
+  *:*)
+    echo "meta-forge: the path of this Forge folder contains ':', which Python's module search path cannot hold." >&2
+    echo "Move or rename the folder so that its path has no ':' (macOS Finder shows a ':' in a path as a '/' in a folder name)." >&2
+    exit 86
+    ;;
+esac
 if [ ! -x "$root/.venv/bin/python" ]; then
   echo "Preparing Forge's Python environment first (bash start.sh --prepare-only)..." >&2
   (

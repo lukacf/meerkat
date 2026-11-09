@@ -136,7 +136,9 @@ applications without a connection setup helper as `ordinary_runtime`.
 from a terminal on the same computer, for example over SSH. It uses the same
 local API as the browser, so each step keeps Forge's saved records, version
 checks and approvals, and it keeps no records of its own. Run it from the
-Forge folder or by its path. When `.venv` is missing, it first runs
+Forge folder or by its path. The Forge folder's path must not contain `:`
+(macOS Finder shows one as a `/` in a folder name); `meta-forge` refuses such
+a folder with exit code 86. When `.venv` is missing, it first runs
 `bash start.sh --prepare-only` without provider keys or tokens in its
 environment. In a source checkout installed with pip, `meta-forge` is also a
 console script, and `.venv/bin/python -m launchkit.cli` runs it from the Forge

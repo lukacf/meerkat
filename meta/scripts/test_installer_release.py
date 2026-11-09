@@ -1304,6 +1304,9 @@ class ManifestTests(unittest.TestCase):
 
 
 M = forge.META_DIR
+# The Guide's Meta release commit the inputs name: its sdk/python is the
+# source of the published client wheel a package carries.
+GUIDE_RELEASE = "9" * 40
 BASE_TREE = {
     forge.INSTALLER_CI: "python-version: '3.12'\nnode-version: '22'\n",
     ".github/workflows/ci.yml": "ci",
@@ -1312,6 +1315,7 @@ BASE_TREE = {
     M + "crates/meerkat-meta/src/lib.rs": "rust",
     M + "crates/meerkat-meta/src/rpc_gateway.rs": "gateway",
     M + "installer/launchkit/server.py": "server",
+    M + forge.INPUTS: json.dumps({"guide": {"version": "0.9.11", "meta_source": GUIDE_RELEASE}}),
     M + "installer/requirements-guide-sdk.txt": "guide requirements",
     M + "installer/requirements-standalone.txt": "standalone requirements",
     M + "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl": "guide wheel",
@@ -1333,6 +1337,9 @@ class FakeGitHub:
         # Run ID -> how many more forge.yml listings omit it, as GitHub's can.
         self.hidden = {}
         self.calls = []
+        # The Guide's release commit, with the same Meta SDK as BASE_TREE.
+        self.commit(GUIDE_RELEASE, {path: content for path, content in BASE_TREE.items()
+                                    if path.startswith(M + "sdk/python/")})
 
     def tree(self, node):
         entries = []
@@ -1529,6 +1536,23 @@ class EvidenceTests(unittest.TestCase):
             with self.subTest(change), github.installed(), \
                     self.assertRaisesRegex(forge.ProtocolError, "no longer green"):
                 forge.recheck_forge_ci(manifest)
+
+    def test_the_tested_meta_sdk_must_be_the_guide_release_sdk(self):
+        """The installer workflow tests the commit's own sdk/python, while the
+        package carries the published client of the Guide's Meta release: a
+        commit whose Meta SDK differs from that release's is never released."""
+        github = self.github()
+        github.commit(GUIDE_RELEASE, {M + "sdk/python/meerkat_meta/__init__.py": "unreleased sdk"})
+        with self.assertRaisesRegex(forge.ProtocolError, "differs from the Guide's Meta release"):
+            self.evidence(github)
+
+    def test_publication_rechecks_the_guide_release_sdk(self):
+        github = self.github()
+        manifest = {"source_sha": SHA, "forge_ci": self.evidence(github)}
+        github.extra[f"actions/runs/{FORGE_RUN}"] = github.runs[0]
+        github.commit(GUIDE_RELEASE, {M + "sdk/python/meerkat_meta/__init__.py": "unreleased sdk"})
+        with github.installed(), self.assertRaisesRegex(forge.ProtocolError, "differs from the Guide's Meta release"):
+            forge.recheck_forge_ci(manifest)
 
 
 def artifact_zip(path, members):

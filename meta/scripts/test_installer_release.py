@@ -1494,15 +1494,18 @@ class EvidenceTests(unittest.TestCase):
         github = self.github()
         record = self.evidence(github)
         manifest = {"source_sha": SHA, "forge_ci": record}
-        github.extra[f"actions/runs/{FORGE_RUN}"] = github.runs[0]
+        # The record of the bound attempt (the run's own record answers its
+        # latest attempt, which publication never reads).
+        bound = f"actions/runs/{FORGE_RUN}/attempts/{record['run_attempt']}"
+        github.extra[bound] = github.runs[0]
         with github.installed():
             forge.recheck_forge_ci(manifest)
         github.commit(SHA, {**BASE_TREE, M + "sdk/python/meerkat_meta/__init__.py": "changed"})
         with github.installed(), self.assertRaisesRegex(forge.ProtocolError, "no longer tested"):
             forge.recheck_forge_ci(manifest)
         github.commit(SHA, BASE_TREE)
-        for change in ({"conclusion": "failure"}, {"event": "pull_request"}):
-            github.extra[f"actions/runs/{FORGE_RUN}"] = {**github.runs[0], **change}
+        for change in ({"conclusion": "failure"}, {"event": "pull_request"}, {"run_attempt": 2}, {"id": FORGE_RUN + 1}):
+            github.extra[bound] = {**github.runs[0], **change}
             with self.subTest(change), github.installed(), \
                     self.assertRaisesRegex(forge.ProtocolError, "no longer green"):
                 forge.recheck_forge_ci(manifest)

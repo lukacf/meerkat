@@ -342,8 +342,9 @@ within those 15 seconds, does not run: it is recorded with the cause
 `distillation`), and reported as a run the budget skipped (the warning
 "agent memory background budget: run skipped" and `memory.budget.denied`).
 A shutdown ends a wait at once: nothing is recorded for the side effect,
-and it runs again at the next start, with the side effects after it. The
-discards stay in the session's memory scope and the transcript in the
+and over a durable metadata store it runs again at the next start, with
+the side effects after it.
+The discards stay in the session's memory scope and the transcript in the
 session store; a delete then drops that memory scope, and with it the
 discards no harvest took. In a burst of such retirements (a roster pass
 that unlists several identities, resets across a mob) the runs the budget

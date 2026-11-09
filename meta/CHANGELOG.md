@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   names its failure. When a run ends, the first waiting harvest to find the
   budget free takes the run, so the others do not read their discards
   again for it. A shutdown ends the wait at once: nothing is recorded, and
-  the harvest runs again at the next start.
+  over a durable metadata store the harvest runs again at the next start.
 
 - A retirement's transcript distillation (a reset's, a role move's, an
   unlisting's, a rotation's) waits for a busy agent memory background

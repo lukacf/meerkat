@@ -1536,4 +1536,16 @@ if ! grep -Fq "$LEVELS_LIST_FAIL" "${TEST_ROOT}/doctor-levels-meta.log" ||
     "$(cat "${TEST_ROOT}/doctor-levels-meta.log")"
 fi
 
+# 6. Connect's tag gates wait, bounded, instead of refusing, so a Connect tag
+#    can be pushed together with Core's and Meta's: the CI gate polls
+#    exact-main CI for up to 120 minutes, and the published-floor check first
+#    waits up to 120 minutes until every Core and Meta crate is on crates.io
+#    at the versions Connect declares. The test runs the gate's script under
+#    a fake clock, the wait with stub curl, date and sleep, the
+#    declared-versions step with a stub cargo, and the job graph; no network.
+if ! connect_log="$("$PYTHON" "${REPO_ROOT}/scripts/test_connect_release_workflow.py" 2>&1)"; then
+  fail "connect-release.yml's tag gates do not wait as scripts/test_connect_release_workflow.py requires" \
+    "${connect_log}"
+fi
+
 echo "release doctor workflow contract holds"

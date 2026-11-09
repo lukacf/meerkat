@@ -35,6 +35,8 @@ PREBUILD_PASS="PASS Pre-tag prebuilds publish nothing, and a tag publishes the p
 PREBUILD_FAIL="FAIL A pre-tag prebuild must publish nothing, and a tag may publish the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification"
 NON_INPUTS_PASS="PASS No release build job, local action or script names a path a reused prebuild may differ in (another product's root, a product changelog, a CI-only file)"
 NON_INPUTS_FAIL="FAIL A release build job, local action or script names a path a reused prebuild may differ in"
+MACOS_X86_PASS="PASS Intel macOS release binaries build on the BuildBuddy lane when it is selected, for a macOS version every supported Intel Mac runs, are run and inspected on Apple silicon, and trail the critical assets; the hosted cross-build builds them only on the GitHub-hosted backend"
+MACOS_X86_FAIL="FAIL Intel macOS release binaries must build on the BuildBuddy lane when it is selected"
 BASELINE_PASS="PASS Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 BASELINE_FAIL="FAIL The semver baseline rustdoc must stay off every path a user waits on"
 TRAILING_PASS="PASS Linux and macOS arm64 assets publish without waiting for the trailing Intel macOS and Windows lanes; no upload replaces a published asset"
@@ -526,6 +528,32 @@ elif name == "prebuild-build-names-product-root":
     replace_once(
         "  build_binaries_macos_x86_cross:\n    name: Cross-compile and package Intel macOS surface binaries on Apple silicon",
         "  build_binaries_macos_x86_cross:\n    name: Cross-compile and package Intel macOS surface binaries with connect/ resources on Apple silicon",
+    )
+elif name == "macos-x86-hosted-on-buildbuddy":
+    # The hosted Intel macOS cross-build runs on the BuildBuddy backend too.
+    exclusion = (
+        "      !(github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && "
+        "github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && "
+        "(vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&\n"
+    )
+    header = (
+        "    name: Cross-compile and package Intel macOS surface binaries on Apple silicon (${{ matrix.surface.bin }})\n"
+        "    needs: [require_ci_green, release_validate_gate, release_prebuild]\n"
+        "    if: >-\n"
+        "      always() &&\n"
+    )
+    replace_once(header + exclusion, header)
+elif name == "macos-x86-gates-critical":
+    # The critical gate waits for the BuildBuddy Intel macOS lane.
+    replace_once(
+        "    needs: [build_binaries, build_binaries_buildbuddy, release_prebuild]\n",
+        "    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_buildbuddy_macos_x86, release_prebuild]\n",
+    )
+elif name == "macos-x86-unverified":
+    # Nothing runs or inspects the BuildBuddy Intel macOS binaries.
+    replace_once(
+        '.release-tooling/scripts/check-macos-x86-release-binary "${binary}" "${VERSION}"',
+        "true",
     )
 elif name == "prebuild-any-backend":
     # The request no longer checks the backend, so a GitHub-hosted prebuild
@@ -1413,7 +1441,7 @@ run_doctor() {
 }
 
 run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-committed.log"
-for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
+for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$MACOS_X86_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
   if ! grep -Fxq "$line" "${TEST_ROOT}/doctor-committed.log"; then
     fail "doctor does not report \`${line}\` for the committed workflow" \
       "$(cat "${TEST_ROOT}/doctor-committed.log")"
@@ -1456,6 +1484,24 @@ if ! grep -Fq "$NON_INPUTS_FAIL" "${TEST_ROOT}/doctor-non-inputs.log"; then
   fail "doctor does not report \`${NON_INPUTS_FAIL}\` for a workflow whose build job names a CI-only file" \
     "$(cat "${TEST_ROOT}/doctor-non-inputs.log")"
 fi
+
+# Intel macOS on the BuildBuddy lane: the hosted cross-build must not run
+# there, the critical assets must not wait for the lane, and its binaries
+# must be run and inspected on Apple silicon before the binary build gate.
+for fixture in macos-x86-hosted-on-buildbuddy macos-x86-gates-critical macos-x86-unverified; do
+  mutate "${fixture}" "${TEST_ROOT}/doctor-${fixture}.yml"
+  run_doctor "${TEST_ROOT}/doctor-${fixture}.yml" "${TEST_ROOT}/doctor-${fixture}.log"
+  if ! grep -Fq "$MACOS_X86_FAIL" "${TEST_ROOT}/doctor-${fixture}.log"; then
+    fail "doctor does not report \`${MACOS_X86_FAIL}\` for the \`${fixture}\` workflow" \
+      "$(cat "${TEST_ROOT}/doctor-${fixture}.log")"
+  fi
+done
+expect_fail_named macos-x86-hosted-on-buildbuddy "${TEST_ROOT}/doctor-macos-x86-hosted-on-buildbuddy.yml" \
+  "job \`build_binaries_macos_x86_cross\` runs on the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY true" buildbuddy-macos-x86
+expect_fail_named macos-x86-gates-critical "${TEST_ROOT}/doctor-macos-x86-gates-critical.yml" \
+  "job \`build_binaries_critical_gate\` waits for \`build_binaries_buildbuddy_macos_x86\`" buildbuddy-macos-x86
+expect_fail_named macos-x86-unverified "${TEST_ROOT}/doctor-macos-x86-unverified.yml" \
+  "0 macOS runner jobs run \`scripts/check-macos-x86-release-binary\`" buildbuddy-macos-x86
 
 mutate semver-baseline-gates-homebrew "${TEST_ROOT}/doctor-baseline.yml"
 run_doctor "${TEST_ROOT}/doctor-baseline.yml" "${TEST_ROOT}/doctor-baseline.log"

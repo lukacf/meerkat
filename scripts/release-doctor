@@ -323,6 +323,12 @@ else
   bad "A release build job, local action or script names a path a reused prebuild may differ in, so a tag could publish artifacts its own commit would build differently (${non_inputs_contract//$'\n'/; })"
 fi
 
+if macos_x86_contract="$(workflow_contract buildbuddy-macos-x86)"; then
+  pass "Intel macOS release binaries build on the BuildBuddy lane when it is selected, for a macOS version every supported Intel Mac runs, are run and inspected on Apple silicon, and trail the critical assets; the hosted cross-build builds them only on the GitHub-hosted backend"
+else
+  bad "Intel macOS release binaries must build on the BuildBuddy lane when it is selected (release-build-macos-x86, for a macOS version every supported Intel Mac runs), be run and inspected on Apple silicon before the binary build gate succeeds, and trail the critical assets (${macos_x86_contract//$'\n'/; })"
+fi
+
 if baseline_contract="$(workflow_contract semver-baseline)"; then
   pass "Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 else

@@ -3943,6 +3943,256 @@ def check_readiness_attestation(text: str) -> list[str]:
     return violations
 
 
+# The BuildBuddy command that builds the Intel macOS release binaries, the
+# hosted job that builds them on the GitHub-hosted backend, and the script
+# that runs and inspects them on Apple silicon.
+BUILDBUDDY_MACOS_X86_COMMAND = "release-build-macos-x86"
+HOSTED_MACOS_X86_JOB = "build_binaries_macos_x86_cross"
+MACOS_X86_CHECK_SCRIPT = "scripts/check-macos-x86-release-binary"
+BUILDBUDDY_RELEASE_SCRIPT = "scripts/buildbuddy-bazel-poc"
+FULL_BUILD_GATE_JOB = "build_binaries_gate"
+
+
+def _release_backend_contexts() -> dict[str, list[EventContext]]:
+    """Tag pushes and prebuild dispatches on each release backend: BuildBuddy
+    for the owner while MEERKAT_RELEASE_BUILDBUDDY is true or 1 (a prebuild
+    names it as its release_backend), GitHub-hosted otherwise."""
+    outputs = {
+        f"{PREBUILD_LOOKUP_JOB}.run_id": "",
+        f"{PREBUILD_LOOKUP_JOB}.run_attempt": "",
+        f"{CI_GREEN_JOB}.{ATTESTATION_SCHEMA_OUTPUT}": "4",
+        f"{CI_GREEN_JOB}.{COVERS_OUTPUT}": "true",
+        f"{CI_GREEN_JOB}.prebuild_tag": "v0.0.0",
+    }
+    skipped = {"release_validate_gate": "skipped", SEMVER_GATE_JOB: "skipped", PREBUILD_LOOKUP_JOB: "skipped"}
+
+    def tag(label: str, actor: str, flag: str) -> EventContext:
+        return EventContext(
+            label=label,
+            event_name="push",
+            actor=actor,
+            variables={"MEERKAT_RELEASE_BUILDBUDDY": flag} if flag else {},
+            job_outputs=outputs,
+        )
+
+    def prebuild(label: str, actor: str, backend: str) -> EventContext:
+        return EventContext(
+            label=label,
+            event_name="workflow_dispatch",
+            ref="refs/heads/main",
+            actor=actor,
+            inputs={PREBUILD_INPUT: "true", "release_backend": backend},
+            job_results=skipped,
+            job_outputs=outputs,
+        )
+
+    return {
+        "buildbuddy": [
+            tag("the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY true", "lukacf", "true"),
+            tag("the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY 1", "lukacf", "1"),
+            prebuild("the owner's prebuild dispatch on BuildBuddy", "lukacf", "buildbuddy"),
+        ],
+        "github-hosted": [
+            tag("a tag push by another actor", "release-bot", "true"),
+            tag("the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY unset", "lukacf", ""),
+            prebuild("the owner's prebuild dispatch on the GitHub-hosted backend", "lukacf", "github-hosted"),
+        ],
+    }
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+def check_buildbuddy_macos_x86(text: str) -> list[str]:
+    """Intel macOS release binaries build on BuildBuddy when it is selected.
+
+    On the BuildBuddy release backend (the owner's tag push while
+    MEERKAT_RELEASE_BUILDBUDDY is true or 1, the owner's prebuild dispatch
+    with release_backend=buildbuddy) the x86_64-apple-darwin archives come
+    from one job running scripts/buildbuddy-bazel-poc's
+    `release-build-macos-x86` command, which cross-compiles them on the
+    Apple-silicon executors for a minimum macOS version no newer than
+    scripts/check-macos-x86-release-binary accepts. The job names, stamps and
+    attests its archives as every release build job does, a macOS runner job
+    runs and inspects them with that script, the binary build gate requires
+    both, and no hosted Intel macOS build job runs. Neither the critical
+    gate, the critical publisher nor the prebuild gate waits for them: the
+    critical Linux and macOS arm64 archives publish first, and Intel macOS
+    trails with Windows. On the GitHub-hosted backend the hosted cross-build
+    builds them and the BuildBuddy job does not run.
+    """
+    violations: list[str] = []
+    names = _job_names(text)
+    for job in (HOSTED_MACOS_X86_JOB, FULL_BUILD_GATE_JOB, "build_binaries_critical_gate", CRITICAL_PUBLISH_JOB):
+        if job not in names:
+            return [f"job `{job}` is not defined in the workflow"]
+    builders = [
+        job
+        for job in names
+        if f"BUILDBUDDY_BAZEL_COMMAND: {BUILDBUDDY_MACOS_X86_COMMAND}" in "\n".join(job_block(text, job))
+    ]
+    if len(builders) != 1:
+        return [
+            f"{len(builders)} jobs build the Intel macOS release binaries with BuildBuddy "
+            f"(`BUILDBUDDY_BAZEL_COMMAND: {BUILDBUDDY_MACOS_X86_COMMAND}`); expected exactly one"
+        ]
+    builder = builders[0]
+    builder_text = "\n".join(job_block(text, builder))
+    builder_steps = job_steps(job_block(text, builder))
+    if not any(BUILDBUDDY_RELEASE_SCRIPT in step.run for step in builder_steps):
+        violations.append(f"job `{builder}` does not run `{BUILDBUDDY_RELEASE_SCRIPT}`")
+    if "x86_64-apple-darwin" not in builder_text or 'artifact_name="${bin}-${VERSION}-${TARGET}.' not in builder_text:
+        violations.append(
+            f"job `{builder}` must package `<binary>-<version>-x86_64-apple-darwin.tar.gz`, "
+            "the names the Intel macOS assets have"
+        )
+    if not any(".source-commit" in step.run for step in builder_steps) or not any(
+        "actions/attest-build-provenance" in step.fields.get("uses", "") for step in builder_steps
+    ):
+        violations.append(f"job `{builder}` must stamp and attest its archives as every release build job does")
+    uploads = [step for step in builder_steps if "actions/upload-artifact" in step.fields.get("uses", "")]
+    if len(uploads) != 1 or not uploads[0].nested("with").get("name", "").startswith("meerkat-x86_64-apple-darwin"):
+        violations.append(
+            f"job `{builder}` must upload one `meerkat-x86_64-apple-darwin*` artifact, which the publishers download"
+        )
+
+    verifiers = [
+        job
+        for job in names
+        if builder in _job_needs(text, job)
+        and parse_mapping(job_block(text, job), 4).get("runs-on", "").strip().startswith("macos-")
+        and any(MACOS_X86_CHECK_SCRIPT.split("/")[-1] in step.run for step in job_steps(job_block(text, job)))
+    ]
+    if len(verifiers) != 1:
+        violations.append(
+            f"{len(verifiers)} macOS runner jobs run `{MACOS_X86_CHECK_SCRIPT}` on job `{builder}`'s archives; "
+            "expected exactly one"
+        )
+        return violations
+    verifier = verifiers[0]
+
+    contexts = _release_backend_contexts()
+    for context in contexts["buildbuddy"]:
+        for job in (builder, verifier):
+            if not _job_runs(text, job, context):
+                violations.append(f"job `{job}` does not run on {context.label}")
+        if _job_runs(text, HOSTED_MACOS_X86_JOB, context):
+            violations.append(
+                f"job `{HOSTED_MACOS_X86_JOB}` runs on {context.label}; "
+                "Intel macOS builds on the BuildBuddy lane there"
+            )
+        for job in names:
+            if job in (builder, HOSTED_MACOS_X86_JOB):
+                continue
+            block = "\n".join(job_block(text, job))
+            if "--target x86_64-apple-darwin" in block and _job_runs(text, job, context):
+                violations.append(f"job `{job}` builds Intel macOS binaries on {context.label}")
+    for context in contexts["github-hosted"]:
+        if not _job_runs(text, HOSTED_MACOS_X86_JOB, context):
+            violations.append(f"job `{HOSTED_MACOS_X86_JOB}` does not run on {context.label}")
+        if _job_runs(text, builder, context):
+            violations.append(f"job `{builder}` runs on {context.label}, which builds on GitHub-hosted runners")
+
+    # The binary build gate requires the lane of the selected backend.
+    gate_needs = _job_needs(text, FULL_BUILD_GATE_JOB)
+    for job in (builder, verifier, HOSTED_MACOS_X86_JOB):
+        if job not in gate_needs:
+            violations.append(f"job `{FULL_BUILD_GATE_JOB}` does not need `{job}`")
+    gate_steps = [step for step in job_steps(job_block(text, FULL_BUILD_GATE_JOB)) if "bb_selected" in step.run]
+    if len(gate_steps) != 1:
+        violations.append(f"job `{FULL_BUILD_GATE_JOB}` has no single step that checks the selected backend")
+    else:
+        common = {
+            "build_binaries_windows_cross": "success",
+            "verify_windows_binaries": "success",
+            PREBUILD_LOOKUP_JOB: "success",
+        }
+        buildbuddy_ok = {
+            **common,
+            "build_binaries": "skipped",
+            "build_binaries_buildbuddy": "success",
+            HOSTED_MACOS_X86_JOB: "skipped",
+            builder: "success",
+            verifier: "success",
+        }
+        hosted_ok = {
+            **common,
+            "build_binaries": "success",
+            "build_binaries_buildbuddy": "skipped",
+            HOSTED_MACOS_X86_JOB: "success",
+            builder: "skipped",
+            verifier: "skipped",
+        }
+        bb_tag, hosted_tag = contexts["buildbuddy"][0], contexts["github-hosted"][0]
+        cases = [
+            (bb_tag, buildbuddy_ok, True, "the BuildBuddy Intel macOS lane built and verified"),
+            (bb_tag, {**buildbuddy_ok, verifier: "failure"}, False, "the Intel macOS verification failed"),
+            (bb_tag, {**buildbuddy_ok, builder: "failure"}, False, "the BuildBuddy Intel macOS build failed"),
+            (
+                bb_tag,
+                {**buildbuddy_ok, builder: "skipped", verifier: "skipped", HOSTED_MACOS_X86_JOB: "success"},
+                False,
+                "only the hosted Intel macOS build ran",
+            ),
+            (hosted_tag, hosted_ok, True, "the hosted Intel macOS build ran"),
+            (hosted_tag, {**hosted_ok, HOSTED_MACOS_X86_JOB: "failure"}, False, "the hosted Intel macOS build failed"),
+        ]
+        for context, results, accepted, label in cases:
+            run = EventContext(**{**context.__dict__, "label": f"{context.label} where {label}", "job_results": results})
+            status, output = _run_gate_script(gate_steps[0], run)
+            if (status == 0) != accepted:
+                violations.append(
+                    f"step `{gate_steps[0].name}` {'refuses' if accepted else 'accepts'} {run.label}: "
+                    + " | ".join(line for line in output.splitlines() if line.strip())[:300]
+                )
+
+    # The critical archives publish without waiting for Intel macOS.
+    needs = {job: _job_needs(text, job) for job in names}
+
+    def closure(job: str) -> set[str]:
+        seen: set[str] = set()
+        frontier = list(needs.get(job, []))
+        while frontier:
+            upstream = frontier.pop()
+            if upstream in seen or upstream not in needs:
+                continue
+            seen.add(upstream)
+            frontier.extend(needs[upstream])
+        return seen
+
+    for job in ("build_binaries_critical_gate", CRITICAL_PUBLISH_JOB, PREBUILD_GATE_JOB):
+        waits = sorted({builder, verifier} & closure(job))
+        if waits:
+            violations.append(
+                f"job `{job}` waits for {', '.join(f'`{upstream}`' for upstream in waits)}; "
+                "Intel macOS trails the critical archives"
+            )
+
+    # The BuildBuddy command targets a macOS version every supported Intel
+    # Mac runs, as the inspection script requires.
+    try:
+        lane = (REPO_ROOT / BUILDBUDDY_RELEASE_SCRIPT).read_text(encoding="utf-8")
+        check = (REPO_ROOT / MACOS_X86_CHECK_SCRIPT).read_text(encoding="utf-8")
+    except OSError as error:
+        violations.append(f"cannot read the Intel macOS lane's scripts: {error}")
+        return violations
+    case = re.search(rf"(?ms)^  {re.escape(BUILDBUDDY_MACOS_X86_COMMAND)}\)\n(.*?)^    ;;", lane)
+    bound = re.search(r'MEERKAT_MACOS_X86_MAX_MINOS:-([0-9.]+)\}', check)
+    minimum = re.search(r"--macos_minimum_os=([0-9.]+)", case.group(1)) if case else None
+    if case is None or bound is None or minimum is None:
+        violations.append(
+            f"`{BUILDBUDDY_RELEASE_SCRIPT}` {BUILDBUDDY_MACOS_X86_COMMAND} must set `--macos_minimum_os` "
+            f"(the default otherwise follows the SDK), no newer than `{MACOS_X86_CHECK_SCRIPT}` accepts"
+        )
+    elif _version_tuple(minimum.group(1)) > _version_tuple(bound.group(1)):
+        violations.append(
+            f"`{BUILDBUDDY_RELEASE_SCRIPT}` {BUILDBUDDY_MACOS_X86_COMMAND} targets macOS {minimum.group(1)}, "
+            f"newer than the {bound.group(1)} `{MACOS_X86_CHECK_SCRIPT}` accepts"
+        )
+    return violations
+
+
 CHECKS: dict[str, Callable[[str], list[str]]] = {
     "semver-evidence": check_semver_evidence,
     "registry-slo": check_registry_slo,
@@ -3950,6 +4200,7 @@ CHECKS: dict[str, Callable[[str], list[str]]] = {
     "tag-validation": check_tag_validation,
     "prebuild": check_prebuild,
     "prebuild-non-inputs": check_prebuild_non_inputs,
+    "buildbuddy-macos-x86": check_buildbuddy_macos_x86,
     "semver-baseline": check_semver_baseline,
     "trailing-platforms": check_trailing_platforms,
     "token-permissions": check_token_permissions,

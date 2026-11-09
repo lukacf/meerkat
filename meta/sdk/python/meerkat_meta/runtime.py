@@ -139,6 +139,7 @@ from .types import (
     GatingDecisionResult,
     GatingEvaluateResult,
     GatingPendingEntry,
+    GatingWithdrawResult,
     MemberHealth,
     MemberReloadResult,
     MemberSnapshot,
@@ -4432,6 +4433,23 @@ class MobHandle:
         }
         raw = await self._runtime._rpc("meta/gating/decide", params)
         return GatingDecisionResult.from_dict(raw)
+
+    async def gating_withdraw(
+        self,
+        pending_id: str,
+        reason: str | None = None,
+    ) -> GatingWithdrawResult:
+        """Withdraw a pending request this host minted (``meta/gating/withdraw``).
+
+        Not a decision: the request leaves the queue with no approver, its
+        audit records ``request_withdrawn`` and nothing runs. A request that
+        was already decided, timed out or withdrawn answers an unknown id.
+        """
+        params: dict[str, Any] = {"pending_id": pending_id}
+        if reason is not None:
+            params["reason"] = reason
+        raw = await self._runtime._rpc("meta/gating/withdraw", params)
+        return GatingWithdrawResult.from_dict(raw)
 
     async def gating_audit(self, limit: int = 100) -> list[GatingAuditEntry]:
         """Query the gating audit log."""

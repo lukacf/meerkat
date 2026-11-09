@@ -26970,7 +26970,8 @@ var DECIDED_EVENTS = {
   approval_decided: "approve",
   rejection_decided: "reject",
   escalation_decided: "escalate",
-  timeout_fallback: "expired"
+  timeout_fallback: "expired",
+  request_withdrawn: "withdrawn"
 };
 function recordedDecisions(value) {
   const payload = value && typeof value === "object" ? value : void 0;
@@ -26982,7 +26983,7 @@ function recordedDecisions(value) {
     const action = typeof record10?.event_type === "string" ? DECIDED_EVENTS[record10.event_type] : void 0;
     if (!pendingId || !action || found.has(pendingId)) continue;
     const detail = record10?.detail && typeof record10.detail === "object" ? record10.detail : {};
-    const by = action === "expired" ? void 0 : text2(detail.deciding_principal) || text2(detail.approver_id);
+    const by = action === "expired" || action === "withdrawn" ? void 0 : text2(detail.deciding_principal) || text2(detail.approver_id);
     found.set(pendingId, { action, ...by ? { by } : {} });
   }
   return found;
@@ -32455,14 +32456,15 @@ var DECIDED_WORDS = {
   approve: { text: "Approved", tone: "ok" },
   reject: { text: "Rejected", tone: "warn" },
   escalate: { text: "Escalated", tone: "info" },
-  expired: { text: "Expired before anyone decided", tone: "neutral" }
+  expired: { text: "Expired before anyone decided", tone: "neutral" },
+  withdrawn: { text: "Withdrawn by the requester", tone: "neutral" }
 };
 function DepartedApprovalCard({ departed }) {
   const { request, decided } = departed;
   const titleIsId = request.action === request.actionId;
   const title = titleIsId ? humanizeEnum(request.actionId) || request.action : request.action;
   const words2 = decided ? DECIDED_WORDS[decided.action] : { text: "Decided elsewhere", tone: "neutral" };
-  const text14 = decided && decided.action !== "expired" ? "".concat(words2.text, " ").concat(decided.by ? "by ".concat(decided.by) : "elsewhere") : words2.text;
+  const text14 = decided && decided.action !== "expired" && decided.action !== "withdrawn" ? "".concat(words2.text, " ").concat(decided.by ? "by ".concat(decided.by) : "elsewhere") : words2.text;
   return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("article", { className: "cc-approval cc-approval--departed", "data-state": "departed", "data-testid": "gating-departed:".concat(request.pendingId), children: [
     /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("header", { className: "cc-approval__header", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", title: titleIsId ? request.actionId : void 0, children: title }) }) }),
     /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("footer", { className: "cc-approval__footer", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("span", { className: "cc-approval__status", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { tone: words2.tone, mark: true, children: text14 }) }) })
@@ -67913,6 +67915,9 @@ function recordVerdict(record10) {
     // as on the decisions strip.
     case "timeout_fallback":
       return { label: "Timed out", tone: "neutral" };
+    // The requester withdrew it before anyone decided; nothing ran.
+    case "request_withdrawn":
+      return { label: "Withdrawn", tone: "neutral" };
     case "pending_created":
       return { label: "Requested", tone: "neutral" };
     case "approval_notification":

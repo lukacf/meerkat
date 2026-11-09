@@ -15,7 +15,7 @@ use crate::runtime::{
     BigQuerySessionStoreAdapter, BigQuerySessionStoreError, ConsoleRestJsonRequest,
     ConsoleRestJsonResponse, DeliveryHistoryRequest, DeliverySendError, DeliverySendRequest,
     GatingDecideError, GatingDecideRequest, GatingDecision, GatingEvaluateRequest, GatingRiskTier,
-    LocalJsonMemoryStoreError, MemoryIndexError, MemoryIndexRequest, MemoryQueryRequest,
+    GatingWithdrawError, GatingWithdrawRequest, LocalJsonMemoryStoreError, MemoryIndexError, MemoryIndexRequest, MemoryQueryRequest,
     MetaRuntimeHandle, ModuleRouteError, ModuleRouteRequest, ROUTING_RETRY_MAX_CAP,
     RoutingResolveError, RoutingResolveRequest, RuntimeDecisionState, RuntimeRoute,
     RuntimeRouteMutationError, SessionPersistenceRow, SubscribeError, SubscribeRequest,
@@ -42,8 +42,9 @@ pub(crate) mod workgraph_methods;
 pub use console_ingress::handle_console_ingress_json;
 
 use gating_methods::{
-    GatingParamsError, gating_audit_result, gating_decide_rpc_error, parse_gating_audit_params,
-    parse_gating_decide_params, parse_gating_evaluate_params, parse_gating_pending_params,
+    GatingParamsError, gating_audit_result, gating_decide_rpc_error, gating_withdraw_rpc_error,
+    parse_gating_audit_params, parse_gating_decide_params, parse_gating_evaluate_params,
+    parse_gating_pending_params, parse_gating_withdraw_params,
 };
 pub(crate) use gating_methods::{gating_ids_unavailable_rpc_error, parse_gating_audit_cursor};
 use memory_methods::{
@@ -788,6 +789,7 @@ pub fn handle_meta_rpc_json(
                 "meta/gating/evaluate",
                 "meta/gating/pending",
                 "meta/gating/decide",
+                "meta/gating/withdraw",
                 "meta/gating/audit",
                 "meta/call_tool",
                 "meta/models/catalog",
@@ -1285,6 +1287,28 @@ pub fn handle_meta_rpc_json(
                 }),
             },
         },
+        "meta/gating/withdraw" => {
+            // The RPC caller is the embedding host: it withdraws requests it
+            // minted on an actor's behalf. Console sessions have no route.
+            match parse_gating_withdraw_params(&request.params).and_then(|withdraw_request| {
+                runtime
+                    .withdraw_gating_action(withdraw_request)
+                    .map_err(GatingParamsError::Withdrawal)
+            }) {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: Some(serde_json::to_value(result).unwrap_or(Value::Null)),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(gating_withdraw_rpc_error(err)),
+                },
+            }
+        }
         "meta/gating/decide" => {
             match parse_gating_decide_params(&request.params).and_then(|decide_request| {
                 runtime
@@ -2054,6 +2078,7 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/cross_mob/unwire_local",
     "meta/topology/apply",
     "meta/gating/decide",
+    "meta/gating/withdraw",
     "meta/spawn_member",
     "meta/ensure_member",
     "meta/spawn_helper",
@@ -2700,6 +2725,7 @@ async fn handle_unified_rpc_json_inner(
                 "meta/gating/evaluate",
                 "meta/gating/pending",
                 "meta/gating/decide",
+                "meta/gating/withdraw",
                 "meta/gating/audit",
                 "meta/call_tool",
                 "meta/models/catalog",
@@ -3876,6 +3902,31 @@ async fn handle_unified_rpc_json_inner(
                 }),
             },
         },
+        "meta/gating/withdraw" => {
+            // The RPC caller is the embedding host: it withdraws requests it
+            // minted on an actor's behalf. Console sessions have no route.
+            let withdraw_result = match parse_gating_withdraw_params(&request.params) {
+                Ok(withdraw_request) => runtime
+                    .withdraw_gating_action(withdraw_request)
+                    .await
+                    .map_err(GatingParamsError::Withdrawal),
+                Err(e) => Err(e),
+            };
+            match withdraw_result {
+                Ok(result) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: Some(serde_json::to_value(result).unwrap_or(Value::Null)),
+                    error: None,
+                },
+                Err(err) => JsonRpcResponse {
+                    jsonrpc: JSONRPC_VERSION.to_string(),
+                    id: response_id,
+                    result: None,
+                    error: Some(gating_withdraw_rpc_error(err)),
+                },
+            }
+        }
         "meta/gating/decide" => {
             let decide_result = match parse_gating_decide_params(&request.params) {
                 Ok(decide_request) => runtime

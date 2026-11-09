@@ -175,6 +175,7 @@ import {
   parseRuntimeRouteResult,
   parseGatingEvaluateResult,
   parseGatingDecisionResult,
+  parseGatingWithdrawResult,
   parseGatingAuditEntry,
   parseGatingPendingEntry,
   parseRediscoverReport,
@@ -275,6 +276,7 @@ import {
   type RuntimeRouteResult,
   type GatingEvaluateResult,
   type GatingDecisionResult,
+  type GatingWithdrawResult,
   type GatingAuditEntry,
   type GatingPendingEntry,
   type RediscoverReport,
@@ -4279,6 +4281,24 @@ export class MobHandle {
         decision,
         approver_id: approverId,
         ...(options ?? {}),
+      }),
+    );
+  }
+
+  /**
+   * Withdraw a pending request this host minted (`meta/gating/withdraw`).
+   * Not a decision: the request leaves the queue with no approver, its audit
+   * records `request_withdrawn` and nothing runs. A request already decided,
+   * timed out or withdrawn answers an unknown id.
+   */
+  async gatingWithdraw(
+    pendingId: string,
+    reason?: string,
+  ): Promise<GatingWithdrawResult> {
+    return parseGatingWithdrawResult(
+      await this._runtime._rpc("meta/gating/withdraw", {
+        pending_id: pendingId,
+        ...(reason === undefined ? {} : { reason }),
       }),
     );
   }

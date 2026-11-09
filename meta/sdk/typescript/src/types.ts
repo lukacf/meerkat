@@ -925,6 +925,37 @@ export function parseGatingDecisionResult(
   };
 }
 
+// -- GatingWithdrawResult -------------------------------------------------
+
+/** A requester's withdrawal of its own pending request: no decision, no
+ * approver, and nothing runs (`outcome` is `safe_draft`). */
+export interface GatingWithdrawResult {
+  readonly pendingId: string;
+  readonly actionId: string;
+  readonly actorId: string;
+  readonly withdrawnBy: string;
+  readonly outcome?: string | null;
+  readonly withdrawnAtMs?: number | null;
+  readonly reason?: string | null;
+}
+
+export function parseGatingWithdrawResult(
+  raw: unknown,
+): GatingWithdrawResult {
+  const d = asRecord(raw);
+  return {
+    pendingId: String(d.pending_id ?? ""),
+    actionId: String(d.action_id ?? ""),
+    actorId: String(d.actor_id ?? ""),
+    withdrawnBy: String(d.withdrawn_by ?? ""),
+    outcome: typeof d.outcome === "string" ? d.outcome : null,
+    withdrawnAtMs: typeof d.withdrawn_at_ms === "number"
+      && Number.isSafeInteger(d.withdrawn_at_ms) && d.withdrawn_at_ms >= 0
+      ? d.withdrawn_at_ms : null,
+    reason: typeof d.reason === "string" ? d.reason : null,
+  };
+}
+
 // -- GatingAuditEntry -----------------------------------------------------
 
 export interface GatingAuditEntry {

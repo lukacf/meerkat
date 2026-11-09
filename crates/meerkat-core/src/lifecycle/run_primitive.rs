@@ -511,6 +511,10 @@ pub enum AnthropicEffort {
     Medium,
     High,
     Max,
+    // Written `x_high` (stored sessions, schedule targets and the published
+    // schemas carry it). `xhigh`, the spelling the model catalog advertises,
+    // the wire type writes and Anthropic receives, reads too.
+    #[serde(alias = "xhigh")]
     XHigh,
 }
 

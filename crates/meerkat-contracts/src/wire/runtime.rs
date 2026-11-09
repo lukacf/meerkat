@@ -573,7 +573,8 @@ pub enum WireAnthropicEffort {
     Medium,
     High,
     Max,
-    #[serde(rename = "xhigh")]
+    // Written `xhigh`. `x_high`, the core type's written spelling, reads too.
+    #[serde(rename = "xhigh", alias = "x_high")]
     XHigh,
 }
 

@@ -3378,6 +3378,75 @@ mod tests {
         );
     }
 
+    /// A run a wait for the budget took for its caller counts against the
+    /// hour's window once it starts its work: a harvest the budget kept
+    /// waiting behind another run, which the wait handed the run when that
+    /// one ended, leaves the window holding both runs.
+    #[tokio::test]
+    async fn a_run_a_wait_took_counts_against_the_window_once_it_starts() {
+        let provider = Arc::new(CapturingProvider::default());
+        let (engine, _client) = engine_with(
+            vec![NOOP_REPLY],
+            provider,
+            None,
+            Vec::new(),
+            None,
+            DistillerConfig {
+                enabled: true,
+                runs_per_hour: 2,
+                ..DistillerConfig::default()
+            },
+        );
+        let discards = vec![DiscardEntry {
+            content: "discarded: wrapper reminder".to_string(),
+            range: Some((0, 2)),
+        }];
+        let held = engine.hold_budget().expect("the budget admits the holder");
+        let busy = engine
+            .harvest_compaction_within_bound(
+                "identity:a",
+                "sess-1",
+                Some(discards.clone()),
+                false,
+                None,
+            )
+            .await
+            .expect_err("the held run holds the ceiling");
+        assert_eq!(
+            busy,
+            BoundedRunError::Busy(BudgetDenied::ConcurrencyCeiling { cap: 1 })
+        );
+        let waiting = tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move { engine.until_budget_admits(Duration::from_secs(10)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "the harvest waits for the held run");
+        drop(held);
+        let taken = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the held run's end ends the wait")
+            .expect("the wait task")
+            .expect("the wait takes the run");
+        engine
+            .harvest_compaction_within_bound(
+                "identity:a",
+                "sess-1",
+                Some(discards),
+                false,
+                Some(taken),
+            )
+            .await
+            .expect("the harvest runs with the run the wait took");
+
+        assert_eq!(
+            engine
+                .hold_budget()
+                .expect_err("the window holds the held run and the harvest's"),
+            BudgetDenied::WindowExhausted { used: 2, cap: 2 }
+        );
+    }
+
     // -- trigger sink over the observe stream --------------------------------
 
     fn envelope(

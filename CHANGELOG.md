@@ -46,12 +46,13 @@ them.
   "terminal completion finalization lost the exact durable CAS", every retry
   in the process failed the same way, unregistering the session (a mob
   teardown included) failed with it, and the input's receipt stayed pending
-  until a restart settled it. The finalization and the other exact terminal
-  rewrites of input rows (payload retirement, interaction terminal outbox
-  adoption, finalization and publication receipt) now expect each row as it
-  was last written and commit the observation with the replacement; any
-  other difference from the stored row still refuses the rewrite. Affects
-  0.8.52 through 0.9.11.
+  until a restart settled it. Every exact terminal rewrite of input rows (the
+  terminal completion finalization and payload retirement, the interaction
+  terminal outbox adoption, finalization and publication receipt, and the
+  normalization of the terminal carriers 0.8.31 wrote) now expects each row
+  as it was last written and commits the observations staged before the
+  rewrite with its replacement; any other difference from the stored row
+  still refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
 ## [0.9.11] - 2026-11-09
 

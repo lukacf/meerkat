@@ -9,10 +9,10 @@
       "scope": "Private Connect resource packaging input; full user-journey qualification remains separate."
     },
     {
-      "upload_name": "toolkit-library-20261009-installed-entry-recovery-linux-x86_64.tar.gz",
-      "bytes": 137446294,
-      "sha256": "50b5ee1e384ae24f7a4a0511efaca781025eeaa8489414d71fd825557e48f146",
-      "scope": "Unchanged private Connect Linux resource packaging input; no new platform qualification."
+      "upload_name": "toolkit-library-20261109-connect-ad31c1fd-linux-x86_64.tar.gz",
+      "bytes": 120640110,
+      "sha256": "de622a11f8789592fec5f5c5959be7692a57b8d7eb688a9c9e3ecc63516d3bd4",
+      "scope": "The Linux library Connect 0.9.11 ships, as a private Connect resource packaging input; full user-journey qualification remains separate."
     }
   ]
 }

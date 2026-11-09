@@ -24,6 +24,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `readback-` directory beside the setup attempts, where the list does not
   look.
 
+- Resource packaging pins the Linux library Connect 0.9.11 ships,
+  `toolkit-library-20261109-connect-ad31c1fd`, in
+  `scripts/package-connect-resources.py` and the product's
+  `release-manifest.json`, and the starter exported with it is the Linux
+  default starter. They pinned
+  `toolkit-library-20261009-installed-entry-recovery`, whose bootstrap
+  refuses `--enable-public-github-research`, an argument product
+  preparation always forwards, so every first-run setup on a Linux prefix
+  packaged from those pins ended `owner_refused` at the bootstrap.
+
 - Under sustained heavy CPU load, attaching a native service no longer
   stalls before all of its members are attached. A readiness check's 250 ms
   budget now bounds only its waits for the member and the optional read of

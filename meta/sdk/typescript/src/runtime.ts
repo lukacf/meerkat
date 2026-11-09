@@ -4292,7 +4292,10 @@ export class MobHandle {
    * followed along its escalations to the live successor, which is
    * withdrawn; the result's `pendingId` names the id actually withdrawn. A
    * request already decided, timed out or withdrawn (or whose escalation
-   * chain ended so) answers an unknown id.
+   * chain ended so) answers an unknown id. The chain is read from the gating
+   * audit, which keeps only the last 512 records: if the escalation record
+   * has aged out, withdrawing the original id answers an unknown id although
+   * the successor is still pending, so withdraw the successor by its own id.
    */
   async gatingWithdraw(
     pendingId: string,

@@ -2,13 +2,18 @@
 
 ## Unreleased
 
-### Added
-
-- `MetaRuntime.gatingWithdraw(pendingId, reason?)` calls
+- `MobHandle.gatingWithdraw(pendingId, reason?)` calls
   `meta/gating/withdraw` and returns `GatingWithdrawResult`: the host
   withdraws a pending request it minted, with no decision. An escalated
   request is followed to its live successor; `pendingId` names the id
   withdrawn.
+
+- `parseErrorEvent` words a `lifecycle_effect_failed` event whose `cause`
+  is `budget_busy` as a side effect that did not run ("the
+  compaction_harvest of ... did not run: ...", or "... did not run after N
+  failed attempts: ..." when attempts failed before it): the realm's agent
+  memory background budget did not admit its run within its wait.
+  `context.cause` carries the cause; an event without one reads as before.
 
 ## 0.9.11
 

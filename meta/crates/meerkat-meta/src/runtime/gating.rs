@@ -1984,8 +1984,10 @@ mod withdraw_tests {
 
     #[test]
     fn a_console_decision_after_a_host_withdrawal_is_refused() {
-        // The console decides through decide_gating_action_authorized; after
-        // the host withdrew the request it sees no entry and is refused.
+        // The console decides through decide_gating_action_attested, which
+        // shares decide_gating_action_fenced with the authorized variant
+        // called here; after the host withdrew the request it sees no entry
+        // and is refused.
         let mut owner = owner();
         let pending_id = pend(&mut owner);
         owner

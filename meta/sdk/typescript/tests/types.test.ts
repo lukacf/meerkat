@@ -1779,6 +1779,49 @@ describe("parseErrorEvent", () => {
     assert.equal(result.context.effect, "compaction_harvest");
   });
 
+  it("parses a compaction_harvest the busy budget kept from running as not run", () => {
+    const result = parseErrorEvent({
+      category: "lifecycle_effect_failed",
+      identity: "keeper",
+      agent_runtime_id: "rt:keeper:2",
+      session_id: "s-1",
+      effect: "compaction_harvest",
+      attempts: 0,
+      error:
+        "the realm's background budget did not admit the fallback harvest of the " +
+        "compactions the session's memory holds within 15000 ms: concurrency " +
+        "ceiling reached (1 in flight)",
+      cause: "budget_busy",
+    });
+    assert.equal(result.category, ErrorCategory.LIFECYCLE_EFFECT_FAILED);
+    assert.equal(
+      result.message,
+      "the compaction_harvest of keeper (rt:keeper:2) did not run: the realm's " +
+        "background budget did not admit the fallback harvest of the compactions " +
+        "the session's memory holds within 15000 ms: concurrency ceiling reached " +
+        "(1 in flight)",
+    );
+    assert.equal(result.context.cause, "budget_busy");
+
+    const afterFailures = parseErrorEvent({
+      category: "lifecycle_effect_failed",
+      identity: "keeper",
+      agent_runtime_id: "rt:keeper:2",
+      effect: "compaction_harvest",
+      attempts: 1,
+      error:
+        "the harvest of the settled compaction batch failed (timed out), and the " +
+        "budget was busy",
+      cause: "budget_busy",
+    });
+    assert.equal(
+      afterFailures.message,
+      "the compaction_harvest of keeper (rt:keeper:2) did not run after 1 failed " +
+        "attempts: the harvest of the settled compaction batch failed (timed out), " +
+        "and the budget was busy",
+    );
+  });
+
   it("parses lifecycle_projection_off with its detail", () => {
     const result = parseErrorEvent({
       category: "lifecycle_projection_off",

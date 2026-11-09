@@ -635,6 +635,174 @@ async fn observation_timeout_keeps_same_accepted_attempt_and_cannot_reattach() {
     }
 }
 
+// Every currentness fence here takes longer than the whole readiness budget,
+// as one does on a loaded host. The fences must not use up the budget of the
+// waits between them: each operation is still waited for, so the first sweep
+// observes the member ready and admits B, and later sweeps change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_currentness_fences_leave_every_operation_its_readiness_wait() {
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let (b, stored, control) = approved_operations(&fixture, &["read", "search"]).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = calls.clone();
+        let observed = observer(McpAttachmentReadiness::Usable {
+            connection_generation: 7,
+        });
+        let answer = receipt(observed.clone());
+        let held = keep(
+            &fixture.source,
+            &b,
+            &stored,
+            control,
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                Ok(answer)
+            }),
+        );
+        fixture
+            .source
+            .delay_attachment_fences_for_test(OBSERVATION_BUDGET + Duration::from_millis(50));
+        // The recovery task revisits the row on each sweep.
+        for _ in 0..3 {
+            let current = fixture.store.get(&stored.key).await.unwrap().unwrap();
+            fixture
+                .source
+                .step_service_input_with_attachment(&fixture.store, &current)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *observed.operations.lock().unwrap(),
+            vec!["read", "search", "read", "search"],
+            "each operation is waited for once at attachment and once at the final recheck"
+        );
+        let saved = fixture.store.get(&stored.key).await.unwrap().unwrap();
+        let record = fixture.source.decode_record(&saved, &b).unwrap();
+        assert!(record.final_association.is_some() && record.service_admission.is_some());
+        assert_eq!(fixture.inputs().await, Ok(2));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "accepted work never reattaches"
+        );
+        assert!(
+            fixture
+                .source
+                .held_service_attachment(&b, &held.task)
+                .unwrap()
+                .is_none()
+        );
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+// The same slow fences keep every refusal they make: a task cancelled before
+// the observation is refused by the fence before the first wait, which never
+// starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_currentness_fences_still_refuse_a_task_cancelled_before_the_wait() {
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let (b, stored, control) = approved(&fixture).await;
+        let observed = observer(McpAttachmentReadiness::Usable {
+            connection_generation: 7,
+        });
+        let answer = receipt(observed.clone());
+        let held = keep(
+            &fixture.source,
+            &b,
+            &stored,
+            control,
+            Box::pin(async move { Ok(answer) }),
+        );
+        let reply = held.receipt(|| Ok(())).await.unwrap().unwrap();
+        fixture
+            .source
+            .delay_attachment_fences_for_test(OBSERVATION_BUDGET + Duration::from_millis(50));
+        fixture
+            .source
+            .record_task_group_cancelled(&b)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture.source.service_attachment_ready(&held, &reply).await,
+            Err(PrivateOriginalError::Denied | PrivateOriginalError::Unavailable)
+        ));
+        assert!(
+            observed.operations.lock().unwrap().is_empty(),
+            "the fence refuses before any wait"
+        );
+        fixture.source.join_service_attachments().await;
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+// And a task cancelled while an operation's wait is held is refused by the
+// fence after that wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_currentness_fences_still_refuse_a_task_cancelled_during_the_wait() {
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let (b, stored, control) = approved(&fixture).await;
+        let observed = Arc::new(Observer {
+            value: Mutex::new(McpAttachmentReadiness::Usable {
+                connection_generation: 7,
+            }),
+            operations: Mutex::new(vec![]),
+            held: Some((tokio::sync::Notify::new(), tokio::sync::Notify::new())),
+        });
+        let answer = receipt(observed.clone());
+        let held = keep(
+            &fixture.source,
+            &b,
+            &stored,
+            control,
+            Box::pin(async move { Ok(answer) }),
+        );
+        let reply = held.receipt(|| Ok(())).await.unwrap().unwrap();
+        fixture
+            .source
+            .delay_attachment_fences_for_test(OBSERVATION_BUDGET + Duration::from_millis(50));
+        let mut ready = Box::pin(fixture.source.service_attachment_ready(&held, &reply));
+        tokio::select! {
+            _ = &mut ready => panic!("the wait should be held"),
+            _ = observed.held.as_ref().unwrap().0.notified() => (),
+        }
+        fixture
+            .source
+            .record_task_group_cancelled(&b)
+            .await
+            .unwrap();
+        observed.held.as_ref().unwrap().1.notify_one();
+        assert!(matches!(
+            tokio::time::timeout(WAIT, ready).await.unwrap(),
+            Err(PrivateOriginalError::Denied | PrivateOriginalError::Unavailable)
+        ));
+        assert_eq!(*observed.operations.lock().unwrap(), vec!["read"]);
+        fixture.source.join_service_attachments().await;
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 // These cases exercise the actual keeper and real mechanical login owner.
 // They do not authenticate a Human or prove the production B-to-A login join.
 fn login_owner() -> (

@@ -32,7 +32,9 @@ runs:
         path: ${{ runner.temp }}/nextest-archives
 
     - name: Install nextest
-      uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+      uses: ./.github/actions/setup-cargo-tool-ci
+      with:
+        tool: nextest
       env:
         HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 

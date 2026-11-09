@@ -5,7 +5,9 @@
 \* The declared apply records a host's roster as identity entries
 \* (DeclareIdentityEntry, one arm per verdict of identity_entry_verdict),
 \* seals a complete roster (SealDeclaredRoster: an unlisted Declared entry is
-\* marked while its member is seated, or removed when it is not), and keeps
+\* marked while its member is seated; the seal ends no entry itself, and is
+\* refused while an unseated Declared entry it does not list remains, which
+\* the one-entry unlist, UnlistIdentityEntry, ends first), and keeps
 \* every entry seated or unseated with a typed cause. The end of a
 \* retirement the seal did not start keeps the entry unseated, owed a seat
 \* (hosted on its first use when its incarnation was hosted elsewhere), with
@@ -17,7 +19,7 @@
 \* otherwise; a role hold ends only when the member's own role is declared
 \* or a rotation terminal commits another role, and never outlives its
 \* entry (every end of the entry ends it: its member's retirement end, live,
-\* replayed or in a destroy, the seal's removal of an unseated entry and a
+\* replayed or in a destroy, the unlist of an unseated entry and a
 \* reset). The generated ci profile has no identities, so these arms
 \* hold there only vacuously. This module keeps
 \* the generated model unchanged, extends member_residency_audit for its
@@ -29,7 +31,9 @@
 \*     archived session was built under, or another with the migration from
 \*     it declared or not) and seated on its archived session (the revive)
 \*     or, its record let go (ForgetArchivedSession), on a fresh one; the seal
-\*     over every desired set, the replay of an unlisted retirement's mark,
+\*     over every desired set (refused while member 1's unseated entry is
+\*     unlisted), the one-entry unlist of member 1, the replay of an
+\*     unlisted retirement's mark,
 \*     the listing of a marked member, the build seed's composition authority
 \*     (a candidate composition declares and seals nothing) and the mob's
 \*     forced destroy. The run holds no reset, so an entry is seated on a
@@ -74,7 +78,10 @@
 \*     entry custody and its membership commit) and its abort; the dormant
 \*     seat's refusal of a held or hosted entry; member 1 recovered and
 \*     retired by replay (ever created), declared held; the seal (which
-\*     leaves member 2 unmarked while its spawn is in flight); Stop,
+\*     leaves member 2 unmarked while its spawn is in flight, and is refused
+\*     while an unseated entry it does not list remains) and the one-entry
+\*     unlist of either member (which ends an unseated entry the seal
+\*     would refuse over); Stop,
 \*     Resume, Complete and the forced destroy (which ends the held spawn's
 \*     ladder, its membership committed or not), where the declaration and
 \*     the seal refuse; the declared apply's open fact (open, busy, refused,
@@ -89,7 +96,8 @@
 \*     is retired without its adoption).
 \*
 \* Each run explores its whole reachable space under a VIEW that leaves out
-\* model_step_count and topology_epoch, which no guard reads, with TLC
+\* model_step_count, topology_epoch and the identity life marker
+\* (identity_life_resets, identity_life_ends), which no guard reads, with TLC
 \* coverage. Properties: every generated invariant of ci.cfg (the declared
 \* apply's among them: entry_is_seated_or_has_an_unseated_cause,
 \* unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
@@ -200,38 +208,38 @@ AuditEngine == "engine_1"
 \* <<profile, mode, placement, held, migration, intent managed, memory only,
 \* resume session role, first-boot request>>, in every lifecycle phase.
 DeclareArm(id, s) ==
-    \/ DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryMobNotRunningCompleted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryMobNotRunningDestroyed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
+    \/ DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryMobNotRunningCompleted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryMobNotRunningDestroyed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
 
 DeclareEnabled(id, s) ==
-    << ENABLED DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryMobNotRunningCompleted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE),
-       ENABLED DeclareIdentityEntryMobNotRunningDestroyed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE) >>
+    << ENABLED DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryHostedOnFirstUse(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryAwaitHeldCreation(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryLifecycleInFlight(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNameHeldByWorker(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedHostAdopted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryRefusedNonAuthoritative(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryMobNotRunningCompleted(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0),
+       ENABLED DeclareIdentityEntryMobNotRunningDestroyed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0) >>
 
 \* (The declared apply's refusals of a created, removed or unreadable name
 \* answer only a name these runs never record; created_identity_audit counts
@@ -240,19 +248,31 @@ DeclareOneArm(id, s) == Cardinality({i \in 1..15 : DeclareEnabled(id, s)[i]}) = 
 
 \* Every arm of the seal of one desired set, in every lifecycle phase.
 SealArm(d) ==
-    \/ SealDeclaredRosterSealed(d)
-    \/ SealDeclaredRosterNonAuthoritative(d)
-    \/ SealDeclaredRosterMobNotRunningStopped(d)
-    \/ SealDeclaredRosterMobNotRunningCompleted(d)
-    \/ SealDeclaredRosterMobNotRunningDestroyed(d)
+    \/ SealDeclaredRosterSealed(d, {})
+    \/ SealDeclaredRosterRefused(d, {})
+    \/ SealDeclaredRosterNonAuthoritative(d, {})
+    \/ SealDeclaredRosterMobNotRunningStopped(d, {})
+    \/ SealDeclaredRosterMobNotRunningCompleted(d, {})
+    \/ SealDeclaredRosterMobNotRunningDestroyed(d, {})
 
 SealOneArm(d) ==
-    Cardinality({i \in 1..5 :
-        << ENABLED SealDeclaredRosterSealed(d),
-           ENABLED SealDeclaredRosterNonAuthoritative(d),
-           ENABLED SealDeclaredRosterMobNotRunningStopped(d),
-           ENABLED SealDeclaredRosterMobNotRunningCompleted(d),
-           ENABLED SealDeclaredRosterMobNotRunningDestroyed(d) >>[i]}) = 1
+    Cardinality({i \in 1..6 :
+        << ENABLED SealDeclaredRosterSealed(d, {}),
+           ENABLED SealDeclaredRosterRefused(d, {}),
+           ENABLED SealDeclaredRosterNonAuthoritative(d, {}),
+           ENABLED SealDeclaredRosterMobNotRunningStopped(d, {}),
+           ENABLED SealDeclaredRosterMobNotRunningCompleted(d, {}),
+           ENABLED SealDeclaredRosterMobNotRunningDestroyed(d, {}) >>[i]}) = 1
+
+\* Every arm of the one-entry unlist of a roster-owned identity, in the
+\* Running and Stopped phases the runs that drive it reach.
+UnlistArm(id) ==
+    \/ UnlistIdentityEntryRetiring(id)
+    \/ UnlistIdentityEntryRemoved(id)
+    \/ UnlistIdentityEntryDeferred(id)
+    \/ UnlistIdentityEntryNotADeclaredEntry(id)
+    \/ UnlistIdentityEntryNonAuthoritative(id)
+    \/ UnlistIdentityEntryMobNotRunningStopped(id)
 
 \* Every arm of the legacy adoption, in the run's phases, over the shell's
 \* raw observations: the spawn row's durable-identity marker (m) and
@@ -305,8 +325,10 @@ EntryReplay(id, rid) ==
     \/ RecoverIdentityEntrySeatedRunning(id, rid, "Declared")
     \/ RecoverIdentityEntrySeatedStopped(id, rid, "Declared")
 
-\* Every state variable but the two counters.
-StateView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads: model_step_count,
+\* topology_epoch and the identity life marker.
+StateView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 Cause(id) == IF id \in DOMAIN member_host_preparation_causes THEN Some(member_host_preparation_causes[id]) ELSE None
 Unseated(id) == IF id \in DOMAIN identity_entry_unseated THEN Some(identity_entry_unseated[id]) ELSE None
@@ -412,19 +434,44 @@ A2MarkFor(rid) ==
     \/ RecoverIdentityEntryRetiringStaleRunning(Id2, rid)
 A2Mark == \E rid \in {Rid1, Rid2} : A2MarkFor(rid)
 
-\* The declaration, seal, record release and adoption steps of both runs.
+\* The declaration, seal, unlist, record release and adoption steps of both
+\* runs.
 ApplyIdentitySteps ==
     \/ \E id \in {Id1, Id2}, s \in ApplyShapes : DeclareArm(id, s)
     \/ \E d \in SUBSET {Id1, Id2} : SealArm(d)
+    \/ \E id \in {Id1, Id2} : UnlistArm(id)
     \/ AForget
     \/ A2Adopt
+
+\* A host's adoption over member 1's entry, in every arm, the archive
+\* terminal that ends the entry it marked, and the replay of the mark.
+ATakeOver ==
+    \/ TakeOverIdentityEntryAdopting(Id1)
+    \/ TakeOverIdentityEntryEnded(Id1)
+    \/ TakeOverIdentityEntryDeferred(Id1)
+    \/ TakeOverIdentityEntryNotADeclaredEntry(Id1)
+    \/ TakeOverIdentityEntryNonAuthoritative(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningStopped(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningCompleted(Id1)
+    \/ TakeOverIdentityEntryMobNotRunningDestroyed(Id1)
+AHostAdoptedArchive(inc) ==
+    ObserveMemberRetirementArchivedLiveHostAdopted(Id1, inc[1], inc[2], inc[3], Some(inc[4]), AuditDisposal, TRUE)
+AAdoptMark ==
+    \E rid \in {Rid1, Rid3} :
+        \/ RecoverIdentityEntryAdoptingMarkedRunning(Id1, rid)
+        \/ RecoverIdentityEntryAdoptingStaleRunning(Id1, rid)
 
 \* The run holds no reset: an entry is seated on a fresh session here only
 \* once its record is let go (the legacy run drives the reset).
 ApplyNext ==
+    \/ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d, {Id1})
+    \/ ATakeOver
+    \/ \E inc \in AIncarnations : AHostAdoptedArchive(inc)
+    \/ AAdoptMark
     \/ ASeed
     \/ \E s \in ApplyShapes : DeclareArm(Id1, s)
     \/ \E d \in SUBSET {Id1} : SealArm(d)
+    \/ UnlistArm(Id1)
     \/ AAuthorize
     \/ \E inc \in AIncarnations : AOpen(inc) \/ ASeat(inc) \/ ARetire(inc) \/ AArchive(inc)
     \/ AAbort
@@ -485,15 +532,56 @@ AuditMarkReplayExactlyOne ==
                     ENABLED RecoverIdentityEntryRetiringStaleRunning(Id2, rid) >>[i]}) = 1
 
 \* A Declared entry leaves the entries only at the end of the
-\* retirement the seal marked, at the seal itself when it is unseated, at a
-\* destroy or at a mob reset.
+\* retirement the seal or a host's adoption marked, at the one-entry unlist
+\* of the entry or a host's takeover of it when it is unseated (the seal
+\* ends no entry itself), at a destroy or at a mob reset.
 AuditEntryLeavesBySealDestroyOrReset ==
     [][\A id \in LeftEntries :
          \/ id \in identity_entry_retiring
-         \/ \E d \in SUBSET {Id1, Id2} : SealDeclaredRosterSealed(d)
+         \/ UnlistIdentityEntryRemoved(id)
+         \/ id \in identity_entry_adopting
+         \/ TakeOverIdentityEntryEnded(id)
          \/ destroy_admitted
          \/ phase' = "Destroyed"
          \/ ResetToRunning
+      ]_vars
+
+\* While a host's adoption takes member 1's entry over, the declared apply
+\* changes nothing of it: a declaration answers it as a host-adopted
+\* identity and the seal neither marks nor unmarks it, so the adoption and
+\* the apply never both act on the entry.
+AuditApplyLeavesAdoptingEntryAlone ==
+    [][(((\E s \in ApplyShapes : DeclareArm(Id1, s)) \/ (\E d \in SUBSET {Id1} : SealArm(d)))
+          /\ Id1 \in identity_entry_adopting)
+         => /\ Id1 \in identity_entry_adopting'
+            /\ Id1 \notin identity_entry_retiring'
+            /\ identity_entry_origins' = identity_entry_origins
+            /\ identity_to_runtime' = identity_to_runtime
+            /\ member_state_markers' = member_state_markers
+            /\ member_rotation_targets' = member_rotation_targets
+            /\ member_host_preparation_causes' = member_host_preparation_causes
+      ]_vars
+
+\* Exactly one arm of the takeover answers member 1.
+AuditTakeOverExactlyOneApply ==
+    Cardinality({i \in 1..8 :
+        << ENABLED TakeOverIdentityEntryAdopting(Id1),
+           ENABLED TakeOverIdentityEntryEnded(Id1),
+           ENABLED TakeOverIdentityEntryDeferred(Id1),
+           ENABLED TakeOverIdentityEntryNotADeclaredEntry(Id1),
+           ENABLED TakeOverIdentityEntryNonAuthoritative(Id1),
+           ENABLED TakeOverIdentityEntryMobNotRunningStopped(Id1),
+           ENABLED TakeOverIdentityEntryMobNotRunningCompleted(Id1),
+           ENABLED TakeOverIdentityEntryMobNotRunningDestroyed(Id1) >>[i]}) = 1
+
+\* The seal spares every identity a host's intent row names: it neither
+\* marks nor ends its entry, listed or not.
+AuditSealSparesIntentNamed ==
+    [][\A d \in SUBSET {Id1}, n \in SUBSET {Id1} :
+         SealDeclaredRosterSealed(d, n)
+           => \A id \in n :
+                /\ (id \in Entries <=> id \in DOMAIN identity_entry_origins')
+                /\ (id \in identity_entry_retiring <=> id \in identity_entry_retiring')
       ]_vars
 
 \* Under a candidate composition no declaration, seal, record release or
@@ -540,7 +628,7 @@ AuditForgetNamesRecord ==
 \* declared.
 AuditResumeRoleMoveNeedsMigration ==
     [][\A s \in ApplyShapes :
-         (DeclareIdentityEntrySeatOwed(Id1, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
+         (DeclareIdentityEntrySeatOwed(Id1, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
             /\ s[8] # None /\ s[8] # Some(s[1]))
            => s[5] = s[8]
       ]_vars
@@ -548,12 +636,12 @@ AuditResumeRoleMoveNeedsMigration ==
 \* A seated member listed again before its unlisted retirement started
 \* loses its mark, so a later retirement keeps its entry.
 SeatedListed(id, s) ==
-    \/ DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
-    \/ DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE)
+    \/ DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRuntimeModeRestamp(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleMigrate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
+    \/ DeclareIdentityEntryRoleRotate(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0)
     \/ (id \in DOMAIN identity_to_runtime
-          /\ DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE))
+          /\ DeclareIdentityEntryRoleMigrationHeld(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE, FALSE, FALSE, FALSE, 0))
 AuditListingUnmarks ==
     [][\A s \in ApplyShapes : SeatedListed(Id1, s) => Id1 \notin identity_entry_retiring']_vars
 
@@ -636,7 +724,7 @@ AuditWitnessStaleMarkIgnored ==
 AuditWitnessRelistedAfterUnlist ==
     /\ Id1 \notin Entries
     /\ Record(Id1) = Some(Sess1)
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* The revive: the entry seated Dormant on its archived session, at its next
 \* generation.
 AuditWitnessRevived ==
@@ -657,11 +745,18 @@ AuditWitnessFreshAfterForget ==
     /\ Unseated(Id1) = Some("SeatOwed")
     /\ Record(Id1) = None
     /\ ASeat(AFresh)
-\* The seal removes an unseated entry it does not list.
-AuditWitnessSealRemovesUnseated ==
+\* The seal is refused while an unseated entry it does not list remains,
+\* and changes nothing.
+AuditWitnessSealRefusesUnseated ==
     /\ Id1 \in Entries
     /\ Id1 \in DOMAIN identity_entry_unseated
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterRefused({}, {})
+    /\ Id1 \in DOMAIN identity_entry_origins'
+\* The one-entry unlist ends an unseated entry at once.
+AuditWitnessUnlistEndsUnseated ==
+    /\ Id1 \in Entries
+    /\ Id1 \in DOMAIN identity_entry_unseated
+    /\ UnlistIdentityEntryRemoved(Id1)
     /\ Id1 \notin DOMAIN identity_entry_origins'
 \* The replay of an unlisted retirement marks the entry.
 AuditWitnessReplayMarked ==
@@ -671,19 +766,19 @@ AuditWitnessReplayMarked ==
 \* mark.
 AuditWitnessListedAgainUnmarked ==
     /\ Id1 \in identity_entry_retiring
-    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
     /\ Id1 \notin identity_entry_retiring'
 \* An unseated identity whose seat would resume a session built under
 \* another role, with no migration from it declared, is recorded owed its
 \* seat and held; declared with the migration, it is owed its seat.
 AuditWitnessResumeRoleHeld ==
     /\ Id1 \notin DOMAIN identity_to_runtime
-    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, Some(AuditProfile), "None", FALSE, FALSE)
+    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, Some(AuditProfile), "None", FALSE, FALSE, FALSE, FALSE, 0)
     /\ UnseatedNext(Id1) = Some("SeatOwed")
     /\ CauseNext(Id1) = Some("RoleMigrationUndeclared")
 AuditWitnessResumeRoleMigrationOwed ==
     /\ Id1 \notin DOMAIN identity_to_runtime
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, Some(AuditProfile), "None", FALSE, FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, Some(AuditProfile), "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* A seat of a held identity keeps the role hold.
 AuditWitnessSeatKeepsRoleHold ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
@@ -691,10 +786,31 @@ AuditWitnessSeatKeepsRoleHold ==
     /\ CauseNext(Id1) = Some("RoleMigrationUndeclared")
 \* Refusals: a candidate composition, a name a worker holds, an intent row,
 \* and a declaration while the member's ladder is open.
-AuditWitnessCandidateRefused == DeclareIdentityEntryRefusedNonAuthoritative(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
-AuditWitnessNameHeldByWorker == DeclareIdentityEntryRefusedNameHeldByWorker(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
-AuditWitnessHostAdopted == DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, TRUE, FALSE, None, "None", FALSE, FALSE)
-AuditWitnessInFlight == DeclareIdentityEntryLifecycleInFlight(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+AuditWitnessCandidateRefused == DeclareIdentityEntryRefusedNonAuthoritative(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
+AuditWitnessNameHeldByWorker == DeclareIdentityEntryRefusedNameHeldByWorker(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
+AuditWitnessHostAdopted == DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, TRUE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
+\* A declaration of an entry a host's adoption takes over, with no intent
+\* row in its declaration, is answered as a host-adopted identity.
+AuditWitnessDeclareOverAdopting ==
+    /\ Id1 \in identity_entry_adopting
+    /\ DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
+\* The seal of a roster that no longer lists an entry a host's adoption
+\* takes over leaves it unmarked.
+AuditWitnessSealSparesAdopting ==
+    /\ Id1 \in identity_entry_adopting
+    /\ SealDeclaredRosterSealed({}, {})
+\* A host's adoption waits while the seal's mark stands: the seal's
+\* retirement wins, and ends the entry.
+AuditWitnessTakeOverDeferredBySeal ==
+    /\ Id1 \in identity_entry_retiring
+    /\ TakeOverIdentityEntryDeferred(Id1)
+\* The host-adopted archive ends the entry the adoption marked.
+AuditWitnessAdoptedEntryEnds ==
+    /\ Id1 \in identity_entry_adopting
+    /\ \E inc \in AIncarnations : AHostAdoptedArchive(inc)
+\* The replay marks the entry a host's adoption took over again.
+AuditWitnessAdoptionMarkReplayed == \E rid \in {Rid1, Rid3} : RecoverIdentityEntryAdoptingMarkedRunning(Id1, rid)
+AuditWitnessInFlight == DeclareIdentityEntryLifecycleInFlight(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* A mob reset and a destroy with entries present.
 AuditWitnessResetEndsEntries == Entries # {} /\ ResetToRunning
 AuditWitnessDestroyEndsEntries == Entries # {} /\ DestroyFromAny
@@ -704,13 +820,13 @@ AuditWitnessPreflightAdmitsMembers == Id2 \in DOMAIN identity_to_runtime /\ Admi
 \* The reset after member 2's retirement ended with its entry kept unseated
 \* and its archived session recorded: the reset ends the entry.
 AuditWitnessResetEndsRetiredEntry == Id2 \in Entries /\ Record(Id2) # None /\ ResetToRunning
-\* A role hold never outlives its entry: a complete seal that does not list
-\* a held unseated entry removes the entry and ends its role hold, and so
-\* does a reset over one.
-AuditWitnessSealEndsRoleHold ==
+\* A role hold never outlives its entry: the one-entry unlist of a held
+\* unseated entry removes the entry and ends its role hold, and so does a
+\* reset over one.
+AuditWitnessUnlistEndsRoleHold ==
     /\ Id1 \in DOMAIN identity_entry_unseated
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ SealDeclaredRosterSealed({})
+    /\ UnlistIdentityEntryRemoved(Id1)
     /\ Id1 \notin DOMAIN identity_entry_origins'
     /\ CauseNext(Id1) = None
 AuditWitnessResetEndsRoleHold ==
@@ -738,7 +854,8 @@ NotAuditWitnessRelistedAfterUnlist == [][~AuditWitnessRelistedAfterUnlist]_vars
 NotAuditWitnessRevived == [][~AuditWitnessRevived]_vars
 NotAuditWitnessRetiredEntryKept == [][~AuditWitnessRetiredEntryKept]_vars
 NotAuditWitnessFreshAfterForget == [][~AuditWitnessFreshAfterForget]_vars
-NotAuditWitnessSealRemovesUnseated == [][~AuditWitnessSealRemovesUnseated]_vars
+NotAuditWitnessSealRefusesUnseated == [][~AuditWitnessSealRefusesUnseated]_vars
+NotAuditWitnessUnlistEndsUnseated == [][~AuditWitnessUnlistEndsUnseated]_vars
 NotAuditWitnessReplayMarked == [][~AuditWitnessReplayMarked]_vars
 NotAuditWitnessListedAgainUnmarked == [][~AuditWitnessListedAgainUnmarked]_vars
 NotAuditWitnessResumeRoleHeld == [][~AuditWitnessResumeRoleHeld]_vars
@@ -746,13 +863,37 @@ NotAuditWitnessResumeRoleMigrationOwed == [][~AuditWitnessResumeRoleMigrationOwe
 NotAuditWitnessSeatKeepsRoleHold == [][~AuditWitnessSeatKeepsRoleHold]_vars
 NotAuditWitnessCandidateRefused == [][~AuditWitnessCandidateRefused]_vars
 NotAuditWitnessNameHeldByWorker == [][~AuditWitnessNameHeldByWorker]_vars
+\* The seal of a roster that no longer lists an entry a host's intent row
+\* names leaves it unmarked and seated.
+AuditWitnessSealSparesIntentNamed ==
+    /\ Id1 \in Entries
+    /\ Id1 \in DOMAIN identity_to_runtime
+    /\ SealDeclaredRosterSealed({}, {Id1})
+NotAuditWitnessSealSparesIntentNamed == [][~AuditWitnessSealSparesIntentNamed]_vars
+\* The seal of a roster that leaves out an unseated entry a host's intent row
+\* names seals, and the entry stands, while the one-entry unlist would end
+\* that entry (no member step of it is in flight): an entry a host's intent
+\* row names is no entry to end, so it neither refuses the seal nor is ended
+\* by it.
+AuditWitnessSealSparesUnseatedIntentNamed ==
+    /\ Id1 \in Entries
+    /\ Id1 \in DOMAIN identity_entry_unseated
+    /\ ENABLED UnlistIdentityEntryRemoved(Id1)
+    /\ SealDeclaredRosterSealed({}, {Id1})
+    /\ Id1 \in DOMAIN identity_entry_origins'
+NotAuditWitnessSealSparesUnseatedIntentNamed == [][~AuditWitnessSealSparesUnseatedIntentNamed]_vars
 NotAuditWitnessHostAdopted == [][~AuditWitnessHostAdopted]_vars
+NotAuditWitnessDeclareOverAdopting == [][~AuditWitnessDeclareOverAdopting]_vars
+NotAuditWitnessSealSparesAdopting == [][~AuditWitnessSealSparesAdopting]_vars
+NotAuditWitnessTakeOverDeferredBySeal == [][~AuditWitnessTakeOverDeferredBySeal]_vars
+NotAuditWitnessAdoptedEntryEnds == [][~AuditWitnessAdoptedEntryEnds]_vars
+NotAuditWitnessAdoptionMarkReplayed == [][~AuditWitnessAdoptionMarkReplayed]_vars
 NotAuditWitnessInFlight == [][~AuditWitnessInFlight]_vars
 NotAuditWitnessResetEndsEntries == [][~AuditWitnessResetEndsEntries]_vars
 NotAuditWitnessDestroyEndsEntries == [][~AuditWitnessDestroyEndsEntries]_vars
 NotAuditWitnessPreflightAdmitsMembers == [][~AuditWitnessPreflightAdmitsMembers]_vars
 NotAuditWitnessResetEndsRetiredEntry == [][~AuditWitnessResetEndsRetiredEntry]_vars
-NotAuditWitnessSealEndsRoleHold == [][~AuditWitnessSealEndsRoleHold]_vars
+NotAuditWitnessUnlistEndsRoleHold == [][~AuditWitnessUnlistEndsRoleHold]_vars
 NotAuditWitnessResetEndsRoleHold == [][~AuditWitnessResetEndsRoleHold]_vars
 NotAuditWitnessReplayEndsRoleHold == [][~AuditWitnessReplayEndsRoleHold]_vars
 
@@ -865,7 +1006,7 @@ AuditWitnessRoleHoldRefusesPeerWake ==
 \* A declared migration restamps the member on its own session under its
 \* new role.
 AuditWitnessMigrationVerdict ==
-    DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE, FALSE)
+    DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 AuditWitnessMigrationRestamped ==
     /\ Profile(Id1) = Some(AuditProfile)
     /\ QCommit
@@ -873,18 +1014,18 @@ AuditWitnessMigrationRestamped ==
     /\ BindingNext(Id1) = Binding(Id1)
 \* A runtime-mode change is restamped; a memory-only session rotates.
 AuditWitnessRestampVerdict ==
-    DeclareIdentityEntryRuntimeModeRestamp(Id1, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    DeclareIdentityEntryRuntimeModeRestamp(Id1, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 AuditWitnessRotateVerdict ==
-    DeclareIdentityEntryRoleRotate(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, TRUE, None, "None", FALSE, FALSE)
+    DeclareIdentityEntryRoleRotate(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, TRUE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* The host restores the role: the hold ends.
 AuditWitnessRoleHoldEnded ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
     /\ Id1 \notin DOMAIN member_host_preparation_causes'
 \* A first-boot preparation stands over a role move, and holds the wakes.
 AuditWitnessFirstBootKeptOverRoleHold ==
     /\ Cause(Id1) = Some("FirstBootRow")
-    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* A same-session successor under the new role takes member 1's key under
 \* that role's comms name.
 AuditWitnessRoleMoveTakesNewName ==
@@ -961,6 +1102,7 @@ HeldNext ==
     \/ \E s \in HeldShapes1 : DeclareArm(Id1, s)
     \/ \E s \in HeldShapes2 : DeclareArm(Id2, s)
     \/ \E d \in SUBSET {Id1, Id2} : SealArm(d)
+    \/ \E id \in {Id1, Id2} : UnlistArm(id)
     \/ H2Authorize
     \/ \E custody \in BOOLEAN : H2Open(custody)
     \/ H2Spawn
@@ -1014,7 +1156,7 @@ AuditWitnessApplyBusy == OpenDeclaredApplyBusy
 AuditWitnessEverCreatedOwedSeat ==
     /\ Id1 \notin DOMAIN identity_to_runtime
     /\ Id1 \in DOMAIN identity_runtime_generations
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 \* The forced destroy ends a ladder whose membership committed, and the
 \* startup binding request its commit recorded: no ladder or request
 \* outlives the members it named.
@@ -1034,7 +1176,7 @@ AuditWitnessSealDefersInFlightSpawn ==
     /\ Id2 \in DOMAIN spawn_exec_phase
     /\ Id2 \in Entries
     /\ identity_entry_origins[Id2] = "Declared"
-    /\ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d)
+    /\ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d, {})
     /\ Id2 \notin identity_entry_retiring'
 
 NotAuditWitnessHeldWaiting == ~AuditWitnessHeldWaiting
@@ -1208,7 +1350,7 @@ AuditRoleHoldEndsAtNewRole ==
 \* migration writes the role hold there.
 AuditSeatedResumeWritesRoleHold ==
     [][(Id1 \in DOMAIN identity_to_runtime
-          /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE, FALSE))
+          /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE, FALSE, FALSE, FALSE, 0))
          => CauseNext(Id1) = Some("RoleMigrationUndeclared")
       ]_vars
 
@@ -1217,7 +1359,7 @@ AuditSeatedResumeWritesRoleHold ==
 \* commits the new role ends it, and so does a fresh-session terminal.
 AuditWitnessMigrateKeepsHold ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE, FALSE)
+    /\ DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE, FALSE, FALSE, FALSE, 0)
 AuditWitnessHoldEndsAtSameSessionCommit ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
     /\ QCommit
@@ -1237,7 +1379,7 @@ AuditWitnessHoldKeptOnSameRole ==
 \* reveals the role hold in the same step.
 AuditWitnessSeatedResumeRevealsHold ==
     /\ Cause(Id1) = Some("FirstBootRow")
-    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE, FALSE)
+    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE, FALSE, FALSE, FALSE, 0)
     /\ CauseNext(Id1) = Some("RoleMigrationUndeclared")
 
 NotAuditWitnessMigrateKeepsHold == [][~AuditWitnessMigrateKeepsHold]_vars

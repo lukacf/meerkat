@@ -11,7 +11,37 @@ use meerkat_runtime::{
     input_state::{InputLifecycleState, verify_exact_replay},
 };
 
+use crate::private_originals::foreground_test_store::ForegroundTestStore;
+use meerkat_core::authorization::ControllerReadinessFailure;
+use meerkat_runtime::meerkat_machine::{AuthenticatedOriginalSource, RetainedCustody};
+
 type ColdFixture = FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>>;
+
+fn assert_cold_unknown(
+    owner: &crate::original_ingress::ToolkitOriginalOwner,
+    association: &InputAuthorityAssociation,
+) {
+    let c = association.candidate();
+    assert!(matches!(
+        owner.retained_custody(&c.ingress_namespace, &c.original_work),
+        Err(ControllerReadinessFailure::PolicyUnavailable)
+    ));
+    assert!(matches!(
+        meerkat_runtime::meerkat_machine::require_source_original_live(
+            owner.grants().as_ref(),
+            owner,
+            &c.ingress_namespace,
+            &c.original_work,
+            &c.logical_executor,
+            c.represented_subject.as_ref()
+        ),
+        Err(
+            meerkat_runtime::input_authority::NativeAdmissionError::Readiness(
+                ControllerReadinessFailure::PolicyUnavailable
+            )
+        )
+    ));
+}
 
 // Own the same actual close future across the test body's cancellation. The
 // completed result carries no fixture Arc, so old-owner death remains testable.
@@ -118,363 +148,216 @@ async fn cold_restore_control(tampered: bool) {
     let mut retained = Some(retained);
     let mut continuation = Some(adapter);
     let mut first_cold_round = None;
-    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        WAIT * 4,
-        Box::pin(async {
-            let (association, original_input, native_record, source_record, grants, session) = {
-                let fixture = active.as_ref().unwrap();
-                assert!(
-                    fixture.source.owner.has_installed_pair_recovery().unwrap(),
-                    "only the production installed opener selects this intact pair"
-                );
-                fixture
-                    .source
-                    .start_custody_recovery(
-                        fixture
-                            .continuation_native()
-                            .continuation_source_announcer(),
-                    )
-                    .unwrap();
-                let admitted = fixture.submit().await;
-                assert!(
-                    matches!(
-                        &admitted,
-                        Ok(PrivateOriginalSubmission::Admitted {
-                            deduplicated: false,
-                            source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
-                            ..
-                        })
-                    ),
-                    "first input must actually admit and publish its source"
-                );
-                fixture.finish(&admitted).await.unwrap();
-                let context = fixture.probe.as_ref().unwrap().captured();
-                tokio::time::timeout(
-                    WAIT,
-                    fixture.machine.wait_run_settled(
-                        &fixture.session,
-                        context.retained_work().unwrap().run_id(),
-                    ),
-                )
-                .await
-                .unwrap();
-                let association = fixture.binding().await.unwrap().unwrap();
-                // Live Task custody retains its real issuer; the exact cold rebind preserves it.
-                assert_eq!(
-                    fixture.cold_source_custody(&association),
-                    Some((true, false))
-                );
-                let held = fixture
-                    .source
-                    .retained
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|held| held.reference == *fixture.original_reference())
-                    .cloned()
-                    .unwrap();
-                let pending = held
-                    .first_custody
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .expect("C1 was selected before the actual first invocation");
-                assert!(pending.handoff.enrolled());
-                let native_receipt = pending.native_admission.lock().unwrap().clone().unwrap();
-                assert_eq!(native_receipt.session_id, fixture.session);
-                assert_eq!(native_receipt.input_id, *pending.input.id());
-
-                fixture.source.stop_custody_recovery();
-                let (native, source) =
-                    tokio::join!(native_close.join(), fixture.source.join_custody_recovery());
-                assert!(native.is_ok(), "first native and local owners: {native:?}");
-                assert!(source.is_ok(), "first source owner: {source:?}");
-                let source_record = fixture.cold_source_record().await;
-                assert_eq!(source_record.data.version, 4);
-                let attempt: CustodyAttempt =
-                    serde_json::from_value(source_record.data.body["custody_attempt"].clone())
-                        .unwrap();
-                assert!(matches!(attempt.decision(), CustodyDecision::Promoted));
-                attempt.validate_binding(&association).unwrap();
-                let rows = runtime_store
-                    .as_ref()
-                    .unwrap()
-                    .load_input_states_strict(&LogicalRuntimeId::for_session(&fixture.session))
-                    .await
-                    .unwrap();
-                assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
-                assert!(
-                    rows[0].state.persisted_input.is_none(),
-                    "completed native payload was retired"
-                );
-                let original_input: meerkat_runtime::Input =
-                    serde_json::from_value(source_record.data.body["bound_service_input"].clone())
-                        .unwrap();
-                assert!(
-                    original_input.header().ingress_context.is_none(),
-                    "canonical bytes retain no process owner"
-                );
-                assert_eq!(rows[0].state.input_id, native_receipt.input_id);
-                assert!(attempt.matches_input(&original_input).unwrap());
-                verify_exact_replay(&rows[0].state, &original_input).unwrap();
-                let grants =
-                    std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl"))
-                        .unwrap();
-                (
-                    association,
-                    original_input,
-                    serde_json::to_value(&rows[0]).unwrap(),
-                    source_record,
-                    grants,
-                    fixture.session.clone(),
-                )
-            };
-
-            let weak_source = Arc::downgrade(&active.as_ref().unwrap().source);
-            let weak_machine = Arc::downgrade(&active.as_ref().unwrap().machine);
-            let weak_service = Arc::downgrade(&active.as_ref().unwrap().service);
-            let weak_lifetime = Arc::downgrade(active.as_ref().unwrap().lifetime());
-            let weak_store = Arc::downgrade(runtime_store.as_ref().unwrap());
-            let weak_adapter = Arc::downgrade(continuation.as_ref().unwrap());
-            drop(continuation.take());
-            drop(active.take());
-            drop(runtime_store.take());
-            assert!(
-                weak_adapter.upgrade().is_none(),
-                "first continuation owner remains"
-            );
-            assert!(
-                weak_source.upgrade().is_none(),
-                "first source owner remains"
-            );
-            assert!(
-                weak_machine.upgrade().is_none(),
-                "first native machine remains"
-            );
-            assert!(weak_service.upgrade().is_none(), "first service remains");
-            assert!(
-                weak_lifetime.upgrade().is_none(),
-                "first installed lifetime remains"
-            );
-            assert!(
-                weak_store.upgrade().is_none(),
-                "first runtime store remains"
-            );
-
-            let (fixture, history, adapter) =
-                ColdFixture::reopen_durable_continuation(retained.take().unwrap()).await;
-            active = Some(Arc::new(fixture));
-            native_close = active.as_ref().unwrap().retained_close_for_test();
-            runtime_store = Some(history);
-            continuation = Some(adapter);
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT * 4, Box::pin(async {
+        let (association, original_input, native_record, source_record, grants, session) = {
             let fixture = active.as_ref().unwrap();
-            assert_eq!(fixture.session, session);
-            assert_eq!(fixture.model_requests(), 0);
-            assert!(fixture.cold_source_custody(&association).is_none());
-            assert_eq!(fixture.cold_source_record().await, source_record);
-            assert!(fixture.source.owner.has_installed_pair_recovery().unwrap());
-            assert!(
-                !fixture
-                    .source
-                    .owner
-                    .has_live_first_binding(&source_record.key)
-                    .unwrap()
-            );
-            // Select the real recovery owner, but isolate this one-shot exact-input
-            // restoration from its background census. This permit holds no authority
-            // lock and is released outside the cancellable body before owner join.
-            first_cold_round = Some(fixture.source.hold_first_custody_round_for_test());
-            fixture
-                .source
-                .start_custody_recovery(
-                    fixture
-                        .continuation_native()
-                        .continuation_source_announcer(),
-                )
-                .unwrap();
+            assert!(fixture.source.owner.has_installed_pair_recovery().unwrap(),
+                "only the production installed opener selects this intact pair");
+            fixture.source.start_custody_recovery(
+                fixture.continuation_native().continuation_source_announcer(),
+            ).unwrap();
+            let admitted = fixture.submit().await;
+            assert!(matches!(&admitted, Ok(PrivateOriginalSubmission::Admitted {
+                deduplicated: false,
+                source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+                ..
+            })), "first input must actually admit and publish its source");
+            fixture.finish(&admitted).await.unwrap();
+            let context = fixture.probe.as_ref().unwrap().captured();
+            tokio::time::timeout(WAIT, fixture.machine.wait_run_settled(
+                &fixture.session, context.retained_work().unwrap().run_id(),
+            )).await.unwrap();
+            let association = fixture.binding().await.unwrap().unwrap();
+            // Live Task custody retains its real issuer; the exact cold rebind preserves it.
+            assert_eq!(fixture.cold_source_custody(&association), Some((true, false)));
+            let held = fixture.source.retained.lock().unwrap().iter()
+                .find(|held| held.reference == *fixture.original_reference()).cloned().unwrap();
+            let pending = held.first_custody.lock().unwrap().clone()
+                .expect("C1 was selected before the actual first invocation");
+            assert!(pending.handoff.enrolled());
+            let native_receipt = pending.native_admission.lock().unwrap().clone().unwrap();
+            assert_eq!(native_receipt.session_id, fixture.session);
+            assert_eq!(native_receipt.input_id, *pending.input.id());
 
-            // No send/submit, new Input, or synthetic admission occurs after reopen.
-            // The real machine must join the original persisted input to the current
-            // registration, attachment and controller before publishing this source.
-            let original = fixture
-                .bind_existing_source_for_recovery_test(&association)
-                .await;
-            // The tuple is (Admitted, Task issuer is None), not (admitted, restored).
-            // This exact rebind retained its selected task issuer before recovery.
-            let bound_custody = fixture.cold_source_custody(&association);
-            assert_eq!(bound_custody, Some((false, false)));
-            assert!(
-                !fixture
-                    .source
-                    .owner
-                    .has_admitted_source(&association)
-                    .unwrap()
-            );
-            if tampered {
-                // Make the changed source internally consistent, so a decoder or
-                // Connect fingerprint rejection cannot stand in for native proof.
-                // No altered prompt is ever passed to an input submission API.
-                let mut altered = original_input.clone();
-                let meerkat_runtime::Input::Prompt(prompt) = &mut altered else {
-                    panic!("canonical prompt")
-                };
-                let changed_content = "A different request that native never admitted";
-                prompt.content = meerkat_core::ContentInput::Text(changed_content.into());
-                let mut data = source_record.data.clone();
-                data.body["bound_service_input"] = serde_json::to_value(&altered).unwrap();
-                data.body["event"]["content_sha256"] =
-                    serde_json::json!(crate::private_originals::digest(changed_content.as_bytes()));
-                // This is the documented exact-input fingerprint domain of the
-                // canonical witness, not native's private prompt replay identity.
-                data.body["custody_attempt"]["prepared_input_sha256"] =
-                    serde_json::json!(crate::private_originals::digest(
-                        &toolkit_package::canonical_json(&(
-                            "toolkit.prepared-original-input.v1",
-                            &altered
-                        ))
-                        .unwrap()
-                    ));
-                let changed = fixture
-                    .store
-                    .compare_and_swap(toolkit_store::Transition {
-                        key: source_record.key.clone(),
-                        expected_revision: source_record.revision,
-                        expected_digest: Some(source_record.content_digest.clone()),
-                        claim: None,
-                        data,
-                        events: vec![],
-                        effects: vec![],
-                    })
-                    .await
-                    .unwrap();
-                let decoded = fixture.source.decode_stored(&changed).unwrap();
-                fixture
-                    .source
-                    .check_source_binding(&decoded, &association)
-                    .unwrap();
-                assert_eq!(changed.key, source_record.key);
-                assert_eq!(decoded.final_association.as_ref(), Some(&association));
-                assert_eq!(
-                    serde_json::to_value(
-                        decoded
-                            .bound_service_input
-                            .as_ref()
-                            .unwrap()
-                            .decode()
-                            .unwrap()
-                    )
-                    .unwrap(),
-                    serde_json::to_value(&altered).unwrap()
-                );
-                assert!(
-                    decoded
-                        .custody_attempt
-                        .as_ref()
-                        .unwrap()
-                        .matches_input(&altered)
-                        .unwrap()
-                );
-                let rows = runtime_store
-                    .as_ref()
-                    .unwrap()
-                    .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
-                    .await
-                    .unwrap();
-                assert_eq!(rows.len(), 1);
-                assert_eq!(serde_json::to_value(&rows[0]).unwrap(), native_record);
-                assert!(rows[0].state.persisted_input.is_none());
-                assert!(
-                    verify_exact_replay(&rows[0].state, &altered).is_err(),
-                    "native retained replay authority rejects the changed canonical witness"
-                );
-                assert!(matches!(
-                    fixture
-                        .source
-                        .restore_promoted_custody(&source_record.key, &original)
-                        .await,
-                    Err(crate::private_originals::PrivateOriginalError::Conflict)
-                ));
-                assert_eq!(
-                    fixture.cold_source_custody(&association),
-                    bound_custody,
-                    "refused native replay preserves the exact preexisting bound custody"
-                );
-                assert!(
-                    !fixture
-                        .source
-                        .owner
-                        .has_admitted_source(&association)
-                        .unwrap()
-                );
-                assert_eq!(
-                    fixture.cold_source_record().await,
-                    changed,
-                    "refusal does not write or restore source custody"
-                );
-                let rows = runtime_store
-                    .as_ref()
-                    .unwrap()
-                    .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
-                    .await
-                    .unwrap();
-                assert_eq!(rows.len(), 1);
-                assert_eq!(serde_json::to_value(&rows[0]).unwrap(), native_record);
-                verify_exact_replay(&rows[0].state, &original_input).unwrap();
-                assert_eq!(
-                    std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl"))
-                        .unwrap(),
-                    grants
-                );
-                assert_eq!(fixture.model_requests(), 0);
-                return;
-            }
-            fixture
-                .source
-                .restore_promoted_custody(&source_record.key, &original)
-                .await
-                .unwrap();
-            assert_eq!(
-                fixture.cold_source_custody(&association),
-                Some((true, false))
-            );
-            assert_eq!(
-                fixture.source.route_for_binding(&association).unwrap(),
-                fixture.original_reference().route
-            );
-            assert_eq!(fixture.cold_source_record().await, source_record);
-            assert_eq!(
-                std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl")).unwrap(),
-                grants
-            );
-            let rows = runtime_store
-                .as_ref()
-                .unwrap()
-                .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
-                .await
-                .unwrap();
-            assert_eq!(rows.len(), 1, "restoration must not submit another input");
-            assert_eq!(&rows[0].state.input_id, original_input.id());
+            fixture.source.stop_custody_recovery();
+            let (native, source) = tokio::join!(
+                native_close.join(), fixture.source.join_custody_recovery());
+            assert!(native.is_ok(), "first native and local owners: {native:?}");
+            assert!(source.is_ok(), "first source owner: {source:?}");
+            // The close released the store: read what it retained as the
+            // next opener does.
+            let source_record = fixture.closed_source_record().await;
+            assert_eq!(source_record.data.version, 4);
+            let attempt: CustodyAttempt = serde_json::from_value(
+                source_record.data.body["custody_attempt"].clone()).unwrap();
+            assert!(matches!(attempt.decision(), CustodyDecision::Promoted));
+            attempt.validate_binding(&association).unwrap();
+            let rows = runtime_store.as_ref().unwrap().load_input_states_strict(
+                &LogicalRuntimeId::for_session(&fixture.session)).await.unwrap();
+            assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
-            assert_eq!(
-                serde_json::to_value(&rows[0]).unwrap(),
-                native_record,
-                "source restoration preserves the complete native terminal record"
-            );
+            assert!(rows[0].state.persisted_input.is_none(), "completed native payload was retired");
+            let original_input: meerkat_runtime::Input = serde_json::from_value(
+                source_record.data.body["bound_service_input"].clone()).unwrap();
+            assert!(original_input.header().ingress_context.is_none(), "canonical bytes retain no process owner");
+            assert_eq!(rows[0].state.input_id, native_receipt.input_id);
+            assert!(attempt.matches_input(&original_input).unwrap());
             verify_exact_replay(&rows[0].state, &original_input).unwrap();
-            assert_eq!(
-                rows[0].state.authority_contributors[0].association(),
-                &association
-            );
-            assert_eq!(
-                fixture.model_requests(),
-                0,
-                "source restoration does not replay the first turn"
-            );
-        }),
-    ))
-    .catch_unwind()
-    .await;
+            let grants = std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl")).unwrap();
+            (association, original_input, serde_json::to_value(&rows[0]).unwrap(),
+                source_record, grants, fixture.session.clone())
+        };
+
+        let weak_source = Arc::downgrade(&active.as_ref().unwrap().source);
+        let weak_machine = Arc::downgrade(&active.as_ref().unwrap().machine);
+        let weak_service = Arc::downgrade(&active.as_ref().unwrap().service);
+        let weak_lifetime = Arc::downgrade(active.as_ref().unwrap().lifetime());
+        let weak_store = Arc::downgrade(runtime_store.as_ref().unwrap());
+        let weak_adapter = Arc::downgrade(continuation.as_ref().unwrap());
+        drop(continuation.take());
+        drop(active.take());
+        drop(runtime_store.take());
+        assert!(weak_adapter.upgrade().is_none(), "first continuation owner remains");
+        assert!(weak_source.upgrade().is_none(), "first source owner remains");
+        assert!(weak_machine.upgrade().is_none(), "first native machine remains");
+        assert!(weak_service.upgrade().is_none(), "first service remains");
+        assert!(weak_lifetime.upgrade().is_none(), "first installed lifetime remains");
+        assert!(weak_store.upgrade().is_none(), "first runtime store remains");
+
+        let read_gate = Arc::new(std::sync::OnceLock::new());
+        let capture = read_gate.clone();
+        let (fixture, history, adapter) = ColdFixture::reopen_durable_continuation_with_source(
+            retained.take().unwrap(), Box::new(move |inner| {
+                let gate = Arc::new(ForegroundTestStore::new(inner));
+                assert!(capture.set(gate.clone()).is_ok());
+                gate
+            })).await;
+        active = Some(Arc::new(fixture));
+        native_close = active.as_ref().unwrap().retained_close_for_test();
+        runtime_store = Some(history);
+        continuation = Some(adapter);
+        let fixture = active.as_ref().unwrap();
+        assert_eq!(fixture.session, session);
+        assert_eq!(fixture.model_requests(), 0);
+        assert!(fixture.cold_source_custody(&association).is_none());
+        assert_eq!(fixture.cold_source_record().await, source_record);
+        assert!(fixture.source.owner.has_installed_pair_recovery().unwrap());
+        assert!(!fixture.source.owner.has_live_first_binding(&source_record.key).unwrap());
+        // Select the real recovery owner, but isolate this one-shot exact-input
+        // restoration from its background census. This permit holds no authority
+        // lock and is released outside the cancellable body before owner join.
+        first_cold_round = Some(fixture.source.hold_first_custody_round_for_test());
+        fixture.source.start_custody_recovery(
+            fixture.continuation_native().continuation_source_announcer(),
+        ).unwrap();
+
+        let claims = association.candidate();
+        assert!(matches!(fixture.source.owner.original_disposition(
+            &claims.ingress_namespace, &claims.original_work),
+            Err(ControllerReadinessFailure::PolicyUnavailable)),
+            "before binding, the original is already unknown");
+        // No send/submit, new Input, or synthetic admission occurs after reopen.
+        // The real machine must join the original persisted input to the current
+        // registration, attachment and controller before publishing this source.
+        let original = fixture.bind_existing_source_for_recovery_test(&association).await;
+        // The tuple is (Admitted, Task issuer is None), not (admitted, restored).
+        // This exact rebind retained its selected task issuer before recovery.
+        let bound_custody = fixture.cold_source_custody(&association);
+        assert_eq!(bound_custody, Some((false, false)));
+        assert!(!fixture.source.owner.has_admitted_source(&association).unwrap());
+        assert_cold_unknown(fixture.source.owner.as_ref(), &association);
+        if tampered {
+            // Make the changed source internally consistent, so a decoder or
+            // Connect fingerprint rejection cannot stand in for native proof.
+            // No altered prompt is ever passed to an input submission API.
+            let mut altered = original_input.clone();
+            let meerkat_runtime::Input::Prompt(prompt) = &mut altered else { panic!("canonical prompt") };
+            let changed_content = "A different request that native never admitted";
+            prompt.content = meerkat_core::ContentInput::Text(changed_content.into());
+            let mut data = source_record.data.clone();
+            data.body["bound_service_input"] = serde_json::to_value(&altered).unwrap();
+            data.body["event"]["content_sha256"] = serde_json::json!(
+                crate::private_originals::digest(changed_content.as_bytes()));
+            // This is the documented exact-input fingerprint domain of the
+            // canonical witness, not native's private prompt replay identity.
+            data.body["custody_attempt"]["prepared_input_sha256"] = serde_json::json!(
+                crate::private_originals::digest(&toolkit_package::canonical_json(&(
+                    "toolkit.prepared-original-input.v1", &altered)).unwrap()));
+            let changed = fixture.store.compare_and_swap(toolkit_store::Transition {
+                key: source_record.key.clone(), expected_revision: source_record.revision,
+                expected_digest: Some(source_record.content_digest.clone()), claim: None,
+                data, events: vec![], effects: vec![],
+            }).await.unwrap();
+            let decoded = fixture.source.decode_stored(&changed).unwrap();
+            fixture.source.check_source_binding(&decoded, &association).unwrap();
+            assert_eq!(changed.key, source_record.key);
+            assert_eq!(decoded.final_association.as_ref(), Some(&association));
+            assert_eq!(serde_json::to_value(decoded.bound_service_input.as_ref().unwrap().decode().unwrap()).unwrap(),
+                serde_json::to_value(&altered).unwrap());
+            assert!(decoded.custody_attempt.as_ref().unwrap().matches_input(&altered).unwrap());
+            let rows = runtime_store.as_ref().unwrap().load_input_states_strict(
+                &LogicalRuntimeId::for_session(&session)).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(serde_json::to_value(&rows[0]).unwrap(), native_record);
+            assert!(rows[0].state.persisted_input.is_none());
+            assert!(verify_exact_replay(&rows[0].state, &altered).is_err(),
+                "native retained replay authority rejects the changed canonical witness");
+            assert!(matches!(fixture.source.restore_promoted_custody(&source_record.key, &original).await,
+                Err(crate::private_originals::PrivateOriginalError::Conflict)));
+            assert_eq!(fixture.cold_source_custody(&association), bound_custody,
+                "refused native replay preserves the exact preexisting bound custody");
+            assert!(!fixture.source.owner.has_admitted_source(&association).unwrap());
+            assert_eq!(fixture.cold_source_record().await, changed,
+                "refusal does not write or restore source custody");
+            let rows = runtime_store.as_ref().unwrap().load_input_states_strict(
+                &LogicalRuntimeId::for_session(&session)).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(serde_json::to_value(&rows[0]).unwrap(), native_record);
+            verify_exact_replay(&rows[0].state, &original_input).unwrap();
+            assert_eq!(std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl")).unwrap(), grants);
+            assert_eq!(fixture.model_requests(), 0);
+            return;
+        }
+        // Poll the real restoration through its exact canonical get, then
+        // drop only that observer future. This cannot manufacture terminal
+        // absence or a bounded Candidate. The existing background census stays held.
+        let gate = read_gate.get().unwrap();
+        gate.hold_one_get(source_record.key.clone());
+        {
+            let restore = fixture.source.restore_promoted_custody(&source_record.key, &original);
+            tokio::pin!(restore);
+            tokio::select! {
+                _ = gate.get_entered.notified() => {},
+                result = &mut restore => panic!("restoration did not reach the held canonical read: {result:?}"),
+            }
+        }
+        assert_eq!(gate.dropped_gets.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_cold_unknown(fixture.source.owner.as_ref(), &association);
+        assert_eq!(fixture.cold_source_record().await, source_record);
+        fixture.source.restore_promoted_custody(&source_record.key, &original).await.unwrap();
+        assert_eq!(fixture.cold_source_custody(&association), Some((true, false)));
+        assert!(matches!(fixture.source.owner.retained_custody(
+            &claims.ingress_namespace, &claims.original_work), Ok(RetainedCustody::Retained(ref basis))
+            if basis == &claims.authority_basis));
+        assert!(meerkat_runtime::meerkat_machine::require_source_original_live(
+            fixture.source.owner.grants().as_ref(), fixture.source.owner.as_ref(),
+            &claims.ingress_namespace, &claims.original_work, &claims.logical_executor,
+            claims.represented_subject.as_ref()).is_ok(),
+            "the exact restored native source is live under its actual current grants");
+        assert_eq!(fixture.source.route_for_binding(&association).unwrap(), fixture.original_reference().route);
+        assert_eq!(fixture.cold_source_record().await, source_record);
+        assert_eq!(std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl")).unwrap(), grants);
+        let rows = runtime_store.as_ref().unwrap().load_input_states_strict(
+            &LogicalRuntimeId::for_session(&session)).await.unwrap();
+        assert_eq!(rows.len(), 1, "restoration must not submit another input");
+        assert_eq!(&rows[0].state.input_id, original_input.id());
+        assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(serde_json::to_value(&rows[0]).unwrap(), native_record,
+            "source restoration preserves the complete native terminal record");
+        verify_exact_replay(&rows[0].state, &original_input).unwrap();
+        assert_eq!(rows[0].state.authority_contributors[0].association(), &association);
+        assert_eq!(fixture.model_requests(), 0, "source restoration does not replay the first turn");
+    }))).catch_unwind().await;
     drop(first_cold_round.take());
     let cleanup = if let Some(fixture) = active.as_ref() {
         fixture.source.stop_custody_recovery();

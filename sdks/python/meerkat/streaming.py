@@ -21,13 +21,17 @@ from .errors import (
     meerkat_error_from_jsonrpc_code,
 )
 from .events import Event, StreamTruncated, TextDelta
-from .tools import ToolCallDedupeKey
+from .tools import ToolCallDedupeKey, ToolCallRequester
 
 if TYPE_CHECKING:
     from .session import Session
     from .types import RunResult
 
 RPC_STDOUT_LIMIT_BYTES = 64 * 1024 * 1024
+# The notification a stdio connection shows its operator a durable decision
+# with. It names no session and this client has no handler for it: it is
+# dropped, never buffered as a session event.
+_DECISION_NOTICE_NOTIFICATION = "decision/notice"
 
 # Bytes of the child's most recent stderr kept for the CONNECTION_CLOSED error.
 STDERR_TAIL_LIMIT_BYTES = 16 * 1024
@@ -112,6 +116,8 @@ class _SubscriptionEvent:
 
     event: dict[str, Any]
     rpc_sequence: int | None
+    # The sequence space of a member stream event's envelope ``seq``.
+    epoch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -355,6 +361,8 @@ class _StdoutDispatcher:
                     if self._consent_notice_sink is not None:
                         self._consent_notice_sink(params)
                     continue
+                if method == _DECISION_NOTICE_NOTIFICATION:
+                    continue
                 if method in {"session/stream_event", "mob/stream_event"}:
                     stream_id = str(params.get("stream_id", ""))
                     raw_event = params.get("event") or params
@@ -370,6 +378,7 @@ class _StdoutDispatcher:
                     else:
                         event = raw_event
                     sequence = params.get("sequence")
+                    epoch = params.get("epoch")
                     delivery = _SubscriptionEvent(
                         event=event,
                         rpc_sequence=(
@@ -379,6 +388,7 @@ class _StdoutDispatcher:
                             and 0 <= sequence <= (1 << 64) - 1
                             else None
                         ),
+                        epoch=epoch if isinstance(epoch, str) and epoch else None,
                     )
                     queue = self._stream_queues.get(stream_id)
                     if queue is not None:
@@ -422,12 +432,17 @@ class _StdoutDispatcher:
             # Present when an agent-loop round dispatched the call; absent or
             # unparseable is no key, never a failed call.
             dedupe_key = ToolCallDedupeKey.from_wire(params.get("dedupe_key"))
-            if dedupe_key is None:
-                content, is_error = await self._tool_handler.handle(tool_name, arguments)
-            else:
-                content, is_error = await self._tool_handler.handle(
-                    tool_name, arguments, dedupe_key=dedupe_key
-                )
+            # The runtime names the run's requester here, never in the
+            # arguments; absent or malformed is no requester.
+            requester = ToolCallRequester.from_wire(params.get("requester"))
+            keywords: dict[str, Any] = {}
+            if dedupe_key is not None:
+                keywords["dedupe_key"] = dedupe_key
+            if requester is not None:
+                keywords["requester"] = requester
+            content, is_error = await self._tool_handler.handle(
+                tool_name, arguments, **keywords
+            )
             response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -635,6 +650,7 @@ class EventSubscription:
         self._closed = False
         self._last_rpc_sequence: int | None = None
         self._last_event_seq: int | None = None
+        self._last_event_epoch: str | None = None
         self._terminal_outcome: dict[str, Any] | None = None
 
     @property
@@ -652,11 +668,22 @@ class EventSubscription:
 
     @property
     def last_event_seq(self) -> int | None:
-        """Last delivered canonical event seq, not a replay cursor.
+        """Last delivered canonical event seq.
 
-        Gap markers do not replace it.
+        Gap markers do not replace it. On a mob member stream it is, with
+        :attr:`last_event_epoch`, the position to resume the stream from
+        (``MobStreamCursor(epoch=..., seq=...)``); elsewhere it is not a
+        replay cursor.
         """
         return self._last_event_seq
+
+    @property
+    def last_event_epoch(self) -> str | None:
+        """Sequence space of the last delivered canonical event's seq.
+
+        Only a mob member stream names one; gap markers do not replace it.
+        """
+        return self._last_event_epoch
 
     async def __aenter__(self) -> EventSubscription:
         return self
@@ -713,4 +740,5 @@ class EventSubscription:
             self._last_rpc_sequence = delivery.rpc_sequence
             if not isinstance(getattr(envelope, "payload", None), StreamTruncated):
                 self._last_event_seq = getattr(envelope, "seq", None)
+                self._last_event_epoch = delivery.epoch
             yield event

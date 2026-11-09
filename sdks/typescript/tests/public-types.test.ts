@@ -2121,6 +2121,21 @@ const inventedBoundAxis: import("../src/generated/event_types.js").ToolResultBou
 void [canonicalToolResultsBoundedEvent, inventedBoundAxis];
 
 
+// A requested compaction's skip is a generated event: the run whose check
+// consumed the request, and why nothing was compacted.
+const canonicalRequestedCompactionSkippedEvent: Extract<
+  import("../src/generated/event_types.js").AgentEvent,
+  { type: "requested_compaction_skipped" }
+> = {
+  type: "requested_compaction_skipped",
+  run_id: "01900000-0000-7000-8000-000000000003",
+  reason: "first_model_request",
+};
+// @ts-expect-error The generated skip reason is a closed union.
+const inventedSkipReason: import("../src/generated/event_types.js").RequestedCompactionSkipReason = "invented_reason";
+void [canonicalRequestedCompactionSkippedEvent, inventedSkipReason];
+
+
 // Future native tags use an explicit SDK wrapper and retain the exact wire cause.
 const futureHookFailedReason: import("../src/index.js").HookFailureReason = {
   reason_code: "unknown", rawReasonCode: "future_guard_busy",

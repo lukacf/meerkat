@@ -47,6 +47,9 @@ pub(crate) mod private;
 
 mod first_target;
 
+/// Standalone protected provider presentation without session creation.
+pub mod provider_only;
+
 // Native operations create these values. Presenters must not recover them from
 // terminal output or infer provider completion from a displayed URL.
 enum SignInNotice {
@@ -204,13 +207,28 @@ async fn observe(
     Ok(Observation::Credential(status))
 }
 
+/// A realm's model targets as Core lowers its section. The routes of a GitHub
+/// Copilot account configured once (`[copilot]`) are targets too, though no
+/// raw backend, auth or binding table names them.
+fn realm_connection_set(
+    config: &meerkat_core::Config,
+    realm: &meerkat_core::RealmId,
+) -> Result<Option<meerkat_core::RealmConnectionSet>, ConnectError> {
+    config
+        .realm
+        .get(realm.as_str())
+        .map(|section| meerkat_core::RealmConnectionSet::from_config(realm.as_str(), section))
+        .transpose()
+        .map_err(|e| ConnectError::native("Read realm model targets", e))
+}
+
 fn configured_choices(startup: &SessionStartup) -> Result<Vec<AuthBindingRef>, ConnectError> {
     let chain = RealmChain::resolve(&startup.config, &startup.storage.locator.realm)
         .map_err(|e| ConnectError::native("Resolve model target inheritance", e))?;
     let mut choices = Vec::new();
     for realm in chain.realms() {
-        if let Some(section) = startup.config.realm.get(realm.as_str()) {
-            for binding in section.binding.keys() {
+        if let Some(set) = realm_connection_set(&startup.config, realm)? {
+            for binding in set.bindings.keys() {
                 let reference = AuthBindingRef {
                     realm: realm.clone(),
                     binding: BindingId::parse(binding.clone())
@@ -406,10 +424,25 @@ where
         )
         .map_err(|e| ConnectError::native("Write model setup status", e))?;
     }
-    let choices = configured_choices(startup)?;
+    let mut choices = configured_choices(startup)?;
     if choices.is_empty() {
         return first_target::present(startup, original, input, output, interrupt.as_mut()).await;
     }
+    let request_for = |reference: &AuthBindingRef| CreateSessionModelResolutionRequest {
+        model: model.clone(),
+        auth_binding: Some(reference.clone()),
+        ..Default::default()
+    };
+    // Core's account affinity runs a shared credential account's route of the
+    // model's family, whichever route of the account a request names. List
+    // only the targets the model's session runs on.
+    choices.retain(|reference| {
+        match resolve_create_session_model(&startup.config, request_for(reference)) {
+            Ok(selected) => selected.auth_binding.as_ref() == Some(reference),
+            // Choosing this target reports the refusal.
+            Err(_) => true,
+        }
+    });
     input
         .require_terminal()
         .map_err(|e| ConnectError::native("Require protected model setup terminal", e))?;
@@ -447,11 +480,7 @@ where
                 .map_err(|e| ConnectError::native("Write model target guidance", e))?;
             continue;
         };
-        let request = CreateSessionModelResolutionRequest {
-            model: model.clone(),
-            auth_binding: Some(reference.clone()),
-            ..Default::default()
-        };
+        let request = request_for(reference);
         let selected = match resolve_create_session_model(&startup.config, request.clone()) {
             Ok(selected) => selected,
             Err(CreateSessionModelResolutionError::ProviderModelMismatch(_)) => {
@@ -465,6 +494,12 @@ where
                     error,
                 ));
             }
+        };
+        // Show, observe and keep the route the session runs on.
+        let reference = selected.auth_binding.as_ref().unwrap_or(reference);
+        let request = CreateSessionModelResolutionRequest {
+            auth_binding: Some(reference.clone()),
+            ..request
         };
         let target = resolve_explicit_auth_binding_target(&startup.config, reference)
             .map_err(|e| ConnectError::native("Resolve chosen native credential owner", e))?;
@@ -592,6 +627,7 @@ mod api_key_tests {
             E::SlotRefused(R::AccountMismatch),
             E::SlotRefused(R::ContextMismatch),
             E::SlotRefused(R::UnverifiedConnectorPublication),
+            E::AdmissionInProgress,
         ] {
             let expected = error.clone();
             let mapped = credential_save_error(error);
@@ -614,9 +650,12 @@ mod api_key_tests {
             E::TokenStore("private-credential-canary".into()),
             E::AuthLifecycle("private-credential-canary".into()),
             E::LockFailed("private-credential-canary".into()),
+            E::AdmissionFenceUnavailable("private-credential-canary".into()),
+            E::RollbackFailed("private-credential-canary".into()),
         ] {
             let expected = std::mem::discriminant(&error);
             let mapped = credential_save_error(error);
+            assert!(!mapped.to_string().contains("private-credential-canary"));
             assert!(!format!("{mapped:?}").contains("private-credential-canary"));
             let ConnectError::ProviderSetup { source, .. } = mapped else {
                 panic!("native credential failure lost its typed source");
@@ -772,16 +811,21 @@ mod api_key_tests {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
             value: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
             self.saves.fetch_add(1, Ordering::SeqCst);
             self.entered.add_permits(1);
             self.release.acquire().await.unwrap().forget();
-            self.inner.save(key, value).await
+            self.inner.save(fence, key, value).await
         }
-        async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-            self.inner.clear(key).await
+        async fn clear(
+            &self,
+            fence: &meerkat_core::AdmissionGuard,
+            key: &TokenKey,
+        ) -> Result<(), TokenStoreError> {
+            self.inner.clear(fence, key).await
         }
         async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
             self.inner.list().await
@@ -875,7 +919,9 @@ parent = "owner"
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let storage = crate::RealmOptions {
             context_root: root.into(),
@@ -887,6 +933,7 @@ parent = "owner"
         let factory = meerkat::AgentFactory::new(root.join("state/owner"))
             .with_provider_auth_persistence(persistence);
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config,
             factory,
@@ -967,7 +1014,9 @@ parent = "owner"
             });
             let persistence = ProviderAuthPersistence::new(
                 held.clone(),
-                Arc::new(FileLockCoordinator::new(root.join("locks"))),
+                Arc::new(FileLockCoordinator::new(
+                    root.join("credentials").join("refresh-locks"),
+                )),
             );
             let storage = crate::RealmOptions {
                 context_root: root.into(),
@@ -977,6 +1026,7 @@ parent = "owner"
             .resolve("owner")
             .unwrap();
             let mut startup = SessionStartup {
+                provider_store_root: None,
                 storage,
                 config,
                 factory: meerkat::AgentFactory::new(root.join("state/owner"))
@@ -1193,7 +1243,9 @@ parent = "owner"
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         startup.factory = startup
             .factory
@@ -1608,12 +1660,14 @@ fn credential_save_error(
         E::AuthLifecycle(_) => E::AuthLifecycle("details withheld".into()),
         E::Cancelled => E::Cancelled,
         E::LockFailed(_) => E::LockFailed("details withheld".into()),
+        E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
         E::SlotRefused(reason) => E::SlotRefused(reason),
         E::CredentialAccess { refusal, .. } => E::CredentialAccess {
             refusal,
             detail: "details withheld".into(),
         },
-        E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
+        E::AdmissionInProgress => E::AdmissionInProgress,
+        E::AdmissionFenceUnavailable(_) => E::AdmissionFenceUnavailable("details withheld".into()),
     };
     ConnectError::provider_setup("Store native API-key credential", error)
 }

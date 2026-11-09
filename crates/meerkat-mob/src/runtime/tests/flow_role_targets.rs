@@ -1150,3 +1150,51 @@ async fn external_identity_conflict_is_typed() {
     );
     assert_eq!(handle.list_runs(None).await.expect("list runs").len(), 1);
 }
+
+/// RED row (drop the exemption from the flow engine's role-wide target
+/// selection): a member seated exempt from the definition's wiring rules
+/// (`DefinitionWiring::Exempt`, as a side conversation is seated) is outside
+/// the role-wide steps of the definition's flows. A role-wide run dispatches
+/// the review step to every other Active reviewer and never to it; a run
+/// whose role targets name it dispatches to it.
+#[tokio::test]
+async fn a_role_wide_step_skips_an_exempt_member_and_role_targets_bind_it() {
+    let (handle, _service) = create_test_mob(review_definition(CollectionPolicy::All)).await;
+    spawn_members(&handle, REVIEWER, &["rev-a1"]).await;
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new(REVIEWER, AgentIdentity::from("rev-side"))
+                .with_definition_wiring(crate::DefinitionWiring::Exempt),
+        )
+        .await
+        .expect("seat the exempt reviewer");
+
+    let role_wide = handle
+        .run_flow(flow_id("review"), serde_json::json!({}))
+        .await
+        .expect("run the role-wide flow");
+    let terminal = wait_for_run_terminal(&handle, &role_wide, Duration::from_secs(10)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert_eq!(
+        dispatched_to(&handle, &role_wide, "review").await,
+        names(&["rev-a1"]),
+        "a role-wide step skips the member exempt from the definition's wiring"
+    );
+
+    let bound = handle
+        .run_flow_with_role_targets(
+            flow_id("review"),
+            serde_json::json!({}),
+            bind(&[(REVIEWER, &["rev-a1", "rev-side"])]),
+            None,
+        )
+        .await
+        .expect("admit the run bound to the exempt reviewer");
+    let terminal = wait_for_run_terminal(&handle, &bound, Duration::from_secs(10)).await;
+    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert_eq!(
+        dispatched_to(&handle, &bound, "review").await,
+        names(&["rev-a1", "rev-side"]),
+        "role targets that name the exempt member dispatch to it"
+    );
+}

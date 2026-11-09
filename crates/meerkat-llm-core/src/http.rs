@@ -329,6 +329,10 @@ mod review_entry_tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     struct Owner(OperationReviewTier, Arc<AtomicUsize>);

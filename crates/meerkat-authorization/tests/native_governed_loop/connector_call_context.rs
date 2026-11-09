@@ -121,6 +121,7 @@ fn record_grants() -> (Arc<LocalGrantAuthority>, GrantLineageRef, GrantLineageRe
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -130,6 +131,7 @@ fn record_grants() -> (Arc<LocalGrantAuthority>, GrantLineageRef, GrantLineageRe
         .expect("controller lineage");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -149,6 +151,7 @@ fn record_machine(
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

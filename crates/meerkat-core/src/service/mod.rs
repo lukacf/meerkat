@@ -1282,6 +1282,18 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Opaque transport for this build's own MCP credential source, in place
+    /// of the one its factory holds (the `llm_client_override` type-erasure
+    /// precedent: the facade's `encode_mcp_auth_resolver_override_for_service`
+    /// erases an `Arc<dyn McpAuthResolver>`). Every MCP connection the build
+    /// opens reads its OAuth bearer and its stdio service secrets through it.
+    ///
+    /// Process-local: never serialized and never recovered, so a host that
+    /// needs it supplies it on every build of the session (a create, a
+    /// resume, a wake, a rebuild). Factory builders decode it fail-closed: a
+    /// payload that is not a credential source refuses every credential,
+    /// never falls back to the factory's.
+    pub mcp_auth_resolver_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// Opaque transport for an optional per-session comms-runtime override
     /// (multi-host mobs, DEC-P3H-3 — the `llm_client_override` type-erasure
     /// precedent).
@@ -1363,9 +1375,10 @@ pub struct SessionBuildOptions {
     /// spawn, a restore or a wake): the incarnation of the mob the member is
     /// built in, as that runtime runs it. Set only by the mob runtime, from
     /// its own handle; `None` for every other build, and for a placed member
-    /// compiled on a host that does not run its mob. Never persisted. Not
-    /// consumed by the standard build pipeline: a host's member build hook
-    /// passes it to the mob operator grants
+    /// compiled on a host that does not run its mob. Never persisted. The
+    /// build forms the member's tool grant subject from it (its identity in
+    /// this incarnation, read before its session), and a host's member build
+    /// hook passes it to the mob operator grants
     /// (`meerkat_runtime::mob_operator_authority`) to mint the member's scope
     /// for the mob as it runs, without holding the mob's handle.
     pub mob_incarnation: Option<LiveMobIncarnation>,
@@ -1458,6 +1471,14 @@ pub struct SessionBuildOptions {
     /// Recorded in the session's tooling, so a resume that leaves this unset
     /// restores the recorded gate. A gate needs the runtime's grant service.
     pub grant_gated_tools: Option<crate::tool_grant::GrantGatedTools>,
+    /// The entries of a mob member's gate that come from its role's current
+    /// gate and that its own gate (`grant_gated_tools`) lacks. None ever
+    /// refuses the build: each is installed where the build can show it (a
+    /// tool name always, since it is gated from the moment it appears; a
+    /// family when the build mounts it), and a family the build does not
+    /// mount, or a name its tool policy refuses, is ignored. Set by the mob
+    /// runtime's member builds only.
+    pub grant_gated_tools_where_mounted: Option<crate::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy identity for this session.
     pub application_tool_policy: crate::ApplicationToolPolicyBinding,
     /// Host-scoped in-process registry. Executable policy is never serialized.
@@ -2434,6 +2455,7 @@ impl Default for SessionBuildOptions {
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: HostPromptSections::Full,
@@ -2473,6 +2495,7 @@ impl Default for SessionBuildOptions {
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
             application_tool_policy: crate::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             shell_env: None,
@@ -2516,6 +2539,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field(
+                "mcp_auth_resolver_override",
+                &self.mcp_auth_resolver_override.is_some(),
+            )
             .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
@@ -2567,6 +2594,10 @@ impl std::fmt::Debug for SessionBuildOptions {
                 &self.tool_dispatch_admission.is_some(),
             )
             .field("grant_gated_tools", &self.grant_gated_tools)
+            .field(
+                "grant_gated_tools_where_mounted",
+                &self.grant_gated_tools_where_mounted,
+            )
             .field("shell_timeout_secs", &self.shell_timeout_secs)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
@@ -2606,6 +2637,12 @@ pub struct StartTurnRuntimeSemantics {
     /// adapters stamp these values onto `InputHeader`; direct session
     /// backends that cannot provide durable input dedup must reject it.
     pub input_identity: Option<StartTurnInputIdentity>,
+    /// The original requester of this turn's input: an opaque, qualified
+    /// principal the host supplies from the caller it authenticated (never
+    /// from a request body, a tool argument or model output). Runtime
+    /// adapters stamp it onto `InputHeader`; direct session backends, which
+    /// keep no admitted input to carry it, reject it.
+    pub requester: Option<crate::PrincipalRef>,
     /// Handling mode for this turn's ordinary content-bearing work.
     ///
     /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
@@ -2636,6 +2673,7 @@ impl Default for StartTurnRuntimeSemantics {
         Self {
             work_authorization: None,
             input_identity: None,
+            requester: None,
             handling_mode: HandlingMode::Queue,
             turn_tool_overlay: None,
             typed_turn_appends: Vec::new(),
@@ -2654,6 +2692,7 @@ impl StartTurnRuntimeSemantics {
         Self {
             work_authorization: None,
             input_identity: None,
+            requester: None,
             handling_mode,
             turn_tool_overlay,
             typed_turn_appends: Vec::new(),
@@ -2678,6 +2717,14 @@ impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn with_input_identity(mut self, input_identity: StartTurnInputIdentity) -> Self {
         self.input_identity = Some(input_identity);
+        self
+    }
+
+    /// Carry the original requester the host authenticated for this turn's
+    /// input (see [`Self::requester`]).
+    #[must_use]
+    pub fn with_requester(mut self, requester: crate::PrincipalRef) -> Self {
+        self.requester = Some(requester);
         self
     }
 
@@ -3541,6 +3588,21 @@ pub enum DurableForkSourceAdmission {
     /// its ordinary meaning and is still refused when it splits a tool-use
     /// group.
     CallerTurn,
+    /// The fork takes no message of the source: only `message_count =
+    /// Some(0)` is admitted, and any other count is refused with
+    /// `SessionError::Unsupported` before anything is read. The child starts
+    /// with an empty transcript and the build of the source's last committed
+    /// snapshot.
+    ///
+    /// The owner takes no lock and refuses no running source: an empty
+    /// prefix observes none of the transcript a running turn is about to
+    /// extend, so it neither waits for that turn nor queues behind it. The
+    /// committed snapshot is read whole, through a running turn's provisional
+    /// tail when one stands, and the owner never writes the source from this
+    /// path (no replayed-projection persist, no audit receipt repair; a
+    /// missing receipt fails the fork closed), as for
+    /// [`Self::CallerTurn`].
+    EmptyPrefix,
 }
 
 /// Result of creating an edited transcript branch.
@@ -4785,6 +4847,7 @@ mod tests {
             crate::AuthErrorKind::CredentialInteractionRequired,
             crate::AuthErrorKind::CredentialAccessPending,
             crate::AuthErrorKind::CredentialStoreUnavailable,
+            crate::AuthErrorKind::SourceUnavailable,
         ];
         for kind in kinds {
             let failure = SessionProviderAuthFailure {

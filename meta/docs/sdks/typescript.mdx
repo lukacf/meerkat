@@ -49,6 +49,36 @@ const results = await handle.memoryQuery({
 
 ```
 
+## Operator instructions
+
+Standing instructions for the members of the gateway's mob: the host writes
+one body per slot (a `namespace` it owns and a `key`) at a revision, for
+every member, the members of one profile, or one identity. Each member it
+selects applies the instruction at its next run start, never inside a run.
+Host methods only: no agent tool sets, revokes or reads them.
+
+```typescript
+const receipt = await rt.setInstruction("app.example", "tone", 1, "Answer formally.", {
+  kind: "profile",
+  profile: "worker",
+});
+await rt.setInstruction("app.example", "persona", 1, "You review releases.", {
+  kind: "member",
+  identity: "triage:main",
+});
+const status = await rt.instructionStatus({ identity: "triage:main" });
+await rt.revokeInstruction("app.example", "tone", 2);
+```
+
+A write resolves once the record is durable (`disposition` `"committed"`, or
+`"duplicate"` for an exact repeat); a refusal rejects with an RPC error whose
+`data.instruction_set_code` names it (for example `stale_revision`). The
+status read never wakes a member and names each member by its `identity`;
+its advisory values (a pending or blocked `reason`, `residency`) may be new
+to this SDK, so keep them as they are. These replace
+`activateMemberInstruction` (`meta/member_activate_instruction`, deprecated
+since 0.9.11). See [Operator instructions](/api/rpc#operator-instructions).
+
 ## Fork instruction policy
 
 A member forked with `fork_off`, a delegation fork or a council does not run
@@ -75,6 +105,48 @@ default applies. The setting applies to every fork of the gateway's mob and
 cannot be chosen per fork. See
 [Fork instruction policy](/reference/configuration#fork-instruction-policy)
 for what each value does and what `reactivate_inherited` trusts.
+
+## Durable decisions
+
+`MobHandle` calls the [durable decision methods](/api/rpc#durable-decision-methods)
+of the stdio gateway: `decisionsList({kind, phase, approverId, requester,
+after, limit})`, `decisionsGet(decisionId, {includeRequest})`,
+`decisionsRendering(decisionId, {maxPartBytes})`,
+`decisionsPresent(decisionId, presentation)`, `decisionsWithdraw(decisionId)`
+and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
+attestation})`. Each resolves to the gateway's result object.
+
+```typescript
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .persistentState("./state")
+  .accessControl("config/access.toml")
+  .decisionIngresses([{ ingress: "chat", attests: "person", maxClockSkewMs: 5000 }])
+  .build();
+
+rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
+const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
+await mob.decisionsDecide(decisionId, {
+  approve: true,
+  presentedDigest: subjectDigest,
+  attestation: {
+    ingress: "chat",
+    subject: "U123",
+    scope: "chat-session-1",
+    eventRef: "chat:event-1",
+    observedAtMs: Date.now(),
+  },
+});
+```
+
+`decisionIngresses` declares the ingresses as `runtime_options.decisions`.
+`MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.
+The gateway writes the notices before a list answers; a handler may still be
+running after `decisionsList` resolves. Without an `attestation` the stdio
+operator decides, eligible only for a decision presented to it on this
+connection. A decide called while the SDK serves a host tool callback rejects
+with `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`)
+and sends nothing: an agent's tool call never decides.
 
 ## Member restore
 
@@ -188,6 +260,69 @@ leaves `deliveryScope` `null` and the rest usable. An unknown recovery state
 reads as `unresolved`, never `absent`. See
 [Scope-bound dispatch](/api/rpc#scope-bound-dispatch).
 
+## Scoped tool grants
+
+A profile's `tools.grant_gated` mounts tools closed on every build of its
+members; a grant to an identity opens one for a fixed window, across the
+member's respawns and the gateway's restarts. The grant wakes nothing and
+applies at the member's next model request.
+
+```typescript
+import { ToolGrantRequestRefusedError } from "@rkat/meta-sdk";
+
+const granted = await runtime.grantTool("agent-a", {
+  tool: "datetime",
+  durationMs: 600_000,
+  decisionRef: "approval-7", // your own record of the decision
+});
+const grantId = (granted.grant as { grant_id: string }).grant_id;
+await runtime.listToolGrants("agent-a", { includeEnded: true });
+await runtime.toolGrantAudit("agent-a", { limit: 50 });
+await runtime.revokeToolGrant(grantId, { reason: "done" });
+
+try {
+  await runtime.grantTool("agent-a", { family: "shell", durationMs: 600_000 });
+} catch (error) {
+  if (error instanceof ToolGrantRequestRefusedError) {
+    error.refusalKind; // "target_not_gated", ...
+  }
+}
+```
+
+Name exactly one of `tool` and `family`, and exactly one of `durationMs` and
+`expiresAtMs`. Every refusal rejects with `ToolGrantRequestRefusedError`; its
+kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+[Scoped tool grants](/api/rpc#scoped-tool-grants).
+
+## Realm MCP administration
+
+The stdio gateway lets its host administer the installation realm's own MCP
+servers and the secret values of their stdio servers' `secret_env` slots,
+kept in the launch's provider credential store:
+
+```typescript
+import { RealmMcpRefusedError } from "@rkat/meta-sdk";
+
+const listed = await runtime.realmMcpServers(); // {servers, generation}
+const server = { name: "search", command: "search-mcp", secret_env: ["SEARCH_API_KEY"] };
+await runtime.realmMcpInstall(server, { expectedGeneration: listed.generation as number });
+await runtime.realmMcpSetSecret(server, "SEARCH_API_KEY", apiKey);
+try {
+  await runtime.realmMcpInstall(server, { expectedGeneration: listed.generation as number });
+} catch (error) {
+  if (error instanceof RealmMcpRefusedError) {
+    error.refusalKind; // "generation_conflict"
+  }
+}
+await runtime.realmMcpRemoveSecret(server, "SEARCH_API_KEY");
+```
+
+The value is sent once, in the `set_secret` request, and never appears in an
+answer or an error. A launch whose credential store did not open rejects the
+secret methods with `RealmMcpUnavailableError`; a write whose result is
+unknown rejects with `RealmMcpOutcomeUnknownError`. See
+[Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).
+
 ## Durable detached tools
 
 Long-running host work must declare detached execution rather than keeping a
@@ -236,7 +371,35 @@ inside the 120-second public contract (125-second host and 130-second wire
 margins). Reconnect offers the exact committed attempt, fence, lease,
 checkpoint, and runner handle. Reopening never mints a fence; only a
 machine-authorized claim or retry does. Credentials are resolved per attempt
-and never serialized into durable job state.
+and never serialized into durable job state. `ctx.requester` is the requester
+of the run that submitted the job (see below), recorded with the job, or
+`undefined` when that run had none.
+
+## Who a tool call serves
+
+A tool handler's optional second argument is the original requester of the
+run the call serves (`ToolCallRequester`): its `principal` (`kind`, `id`, and
+`trustDomainId` when it is qualified) and `carried`, true when the run's work
+reached the agent through another actor, such as a peer hop. A person the
+Meta console authenticated appears with `trustDomainId` `oidc-issuer:`
+followed by the token's issuer; a run without a requester
+passes `undefined`. The runtime sets it, never the arguments, so a tool that
+acts in one person's name can refuse everyone else:
+
+```typescript
+draft.registerTool("read_mail", async (args, requester) => {
+  if (
+    requester === undefined ||
+    requester.carried ||
+    requester.principal.kind !== "human" ||
+    requester.principal.id !== OWNER_SUB ||
+    requester.principal.trustDomainId !== OWNER_DOMAIN
+  ) {
+    throw new Error("this mailbox serves its owner only");
+  }
+  return readMail(args);
+});
+```
 
 For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and delete them with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context.
 

@@ -34,7 +34,7 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Conflict);
         }
-        let route = self.route(&decision.route)?;
+        let route = &self.route(&decision.route)?;
         // Reproduce the historical bounds without treating expiry as revoke.
         // This API observes evidence only; no native entry can consume it.
         let mut expected = selected.restrictions(route, decision, 0)?;
@@ -62,7 +62,7 @@ impl PrivateOriginals {
         decision: &catalog::ServiceCatalogDecision,
         requested: &ExecutionRestrictions,
     ) -> Result<RetainedServiceSelection, PrivateOriginalError> {
-        let mut expected = decision.restrictions(self.route(&decision.route)?, 0)?;
+        let mut expected = decision.restrictions(self.route(&decision.route)?.as_ref(), 0)?;
         expected.delegation_depth = DelegationDepth::remaining(1);
         if &expected != requested {
             return Err(PrivateOriginalError::Conflict);

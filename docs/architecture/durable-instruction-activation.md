@@ -10,6 +10,11 @@ Status: Accepted for implementation, pending integrated review and CI
 Date: 2026-08-25
 Scope: persistent Meerkat sessions and model-visible textual instructions
 
+Deprecated since 0.9.11: the write verb (`session/activate_instruction`)
+keeps working, but new hosts set standing instructions with operator
+instructions (`session/set_instruction`, `mob/set_instruction`; see
+[Operator instructions](/reference/session-contracts#operator-instructions)).
+
 ## Need
 
 Long-lived agents need to adopt reviewed instruction revisions without

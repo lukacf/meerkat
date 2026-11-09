@@ -3,20 +3,31 @@
 //! The service holds no grant state. Each grant is one stored row: its
 //! immutable descriptor and the state of its generated
 //! `ToolGrantLifecycleMachine`. Every grant, revoke, list, audit read, timer
-//! fire, model-request boundary and gated dispatch reads the rows it needs,
-//! reads the host clock once (after its reads), rebuilds each machine from
-//! its row and applies one input. It decides only from the effects of that
-//! input: `UseAdmitted` admits, `UseRefused` refuses, and an `Expired` or
-//! `Revoked` effect is a lifecycle change it writes back with a
+//! fire, model-request boundary, gated dispatch and run end reads the rows it
+//! needs, reads the host clock once (after its reads), rebuilds each machine
+//! from its row and applies one input. It decides only from the effects of
+//! that input: `UseAdmitted` admits, `UseRefused` refuses, and an `Expired`,
+//! `Revoked` or `RunEnded` effect is a lifecycle change it writes back with a
 //! compare-and-swap, in one store write with the change's audit row. On a
 //! conflict it reloads the row and applies the input once more; a second
 //! conflict is [`ToolGrantServiceError::Conflict`].
+//!
+//! A grant may be scoped to one run of its subject session: it then admits
+//! uses of that run only, and ends with it ([`ToolGrantService::end_run`],
+//! or the first use of a later run).
+//!
+//! A grant a person approved through a `tool_grant.issue` decision is
+//! issued under the id its decision derives, with the decision as its
+//! issuer ([`ToolGrantService::issued_for`]; see [`super::request`]).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
+use meerkat_core::RunId;
+use meerkat_core::approval::decision::DecisionId;
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
+    GatedToolView, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
     ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
 };
 use meerkat_core::types::ToolNameSet;
@@ -29,10 +40,11 @@ use super::audit::{
 use super::dsl::{
     ToolGrantEndReason, ToolGrantLifecycleEffect, ToolGrantLifecycleInput,
     ToolGrantLifecycleMachineAuthority, ToolGrantLifecycleMachineMutator,
-    ToolGrantLifecycleMachineState, ToolGrantPhase, ToolGrantUseRefusal,
+    ToolGrantLifecycleMachineState, ToolGrantPhase, ToolGrantRunId, ToolGrantUseRefusal,
 };
+use super::request::{ToolGrantIssueBody, ToolGrantRequestHost};
 use super::{HostToolGrantClock, ToolGrantClock, ToolGrantPolicy};
-use crate::store::{RuntimeStore, RuntimeStoreError};
+use crate::store::{QuarantinedToolGrant, RuntimeStore, RuntimeStoreError};
 
 /// A grant's status, as its stored row records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +56,10 @@ pub enum ToolGrantStatus {
     Expired,
     /// Revoked before its deadline. Terminal.
     Revoked,
+    /// The run it was scoped to ended before its deadline. Terminal. A
+    /// binary older than this status reads such a row as unreadable: it
+    /// opens nothing there.
+    RunEnded,
 }
 
 /// One grant's durable row: its immutable descriptor and the state of its
@@ -64,6 +80,21 @@ pub struct StoredToolGrant {
     /// set exactly when it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// The run a run-scoped grant was issued for: it admits uses of that run
+    /// only, and ends with it. Absent for a grant bounded by its window
+    /// only, whose row a binary older than run scopes still reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_scope: Option<RunId>,
+    /// Whether the grant ended with its subject (`Revoked` with the machine's
+    /// end reason `SubjectEnded`): the identity it was issued to ended. Such a
+    /// grant explains no refusal. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subject_ended: bool,
+}
+
+/// The machine's key of a run.
+fn run_key(run_id: &RunId) -> ToolGrantRunId {
+    ToolGrantRunId(run_id.to_string())
 }
 
 impl StoredToolGrant {
@@ -92,13 +123,26 @@ impl StoredToolGrant {
     /// The generated machine, rebuilt from this row. The machine's
     /// invariants refuse a torn row.
     fn authority(&self) -> Result<ToolGrantLifecycleMachineAuthority, ToolGrantServiceError> {
-        let (lifecycle_phase, end_reason) = match self.status {
-            ToolGrantStatus::Active => (ToolGrantPhase::Active, None),
-            ToolGrantStatus::Expired => {
+        let (lifecycle_phase, end_reason) = match (self.status, self.subject_ended) {
+            (ToolGrantStatus::Active, false) => (ToolGrantPhase::Active, None),
+            (ToolGrantStatus::Expired, false) => {
                 (ToolGrantPhase::Expired, Some(ToolGrantEndReason::Deadline))
             }
-            ToolGrantStatus::Revoked => {
+            (ToolGrantStatus::Revoked, false) => {
                 (ToolGrantPhase::Revoked, Some(ToolGrantEndReason::Revoked))
+            }
+            (ToolGrantStatus::RunEnded, false) => {
+                (ToolGrantPhase::RunEnded, Some(ToolGrantEndReason::RunEnded))
+            }
+            (ToolGrantStatus::Revoked, true) => (
+                ToolGrantPhase::Revoked,
+                Some(ToolGrantEndReason::SubjectEnded),
+            ),
+            (status, true) => {
+                return Err(ToolGrantServiceError::CorruptRow {
+                    grant_id: self.record.grant_id.to_string(),
+                    detail: format!("a {status:?} grant cannot have ended with its subject"),
+                });
             }
         };
         ToolGrantLifecycleMachineAuthority::recover_from_state(ToolGrantLifecycleMachineState {
@@ -108,6 +152,7 @@ impl StoredToolGrant {
             expires_at_ms: self.expires_at_ms,
             ended_at_ms: self.ended_at_ms,
             end_reason,
+            run_scope: self.run_scope.as_ref().map(run_key),
         })
         .map_err(|error| ToolGrantServiceError::CorruptRow {
             grant_id: self.record.grant_id.to_string(),
@@ -125,11 +170,25 @@ impl StoredToolGrant {
             ToolGrantPhase::Active => ToolGrantStatus::Active,
             ToolGrantPhase::Expired => ToolGrantStatus::Expired,
             ToolGrantPhase::Revoked => ToolGrantStatus::Revoked,
+            ToolGrantPhase::RunEnded => ToolGrantStatus::RunEnded,
             ToolGrantPhase::Unissued => {
                 return Err(ToolGrantServiceError::Machine {
                     detail: format!("grant {} has no issued state to store", record.grant_id),
                 });
             }
+        };
+        let run_scope = match &state.run_scope {
+            None => None,
+            Some(run) => Some(
+                uuid::Uuid::parse_str(&run.0)
+                    .map(RunId::from_uuid)
+                    .map_err(|error| ToolGrantServiceError::Machine {
+                        detail: format!(
+                            "grant {} names the run {:?}, which is not a run id: {error}",
+                            record.grant_id, run.0
+                        ),
+                    })?,
+            ),
         };
         Ok(Self {
             record,
@@ -137,6 +196,8 @@ impl StoredToolGrant {
             issued_at_ms: state.issued_at_ms,
             expires_at_ms: state.expires_at_ms,
             ended_at_ms: state.ended_at_ms,
+            run_scope,
+            subject_ended: state.end_reason == Some(ToolGrantEndReason::SubjectEnded),
         })
     }
 }
@@ -163,6 +224,10 @@ pub struct ToolGrantRequest {
     pub reason: Option<String>,
     /// How long it lasts; at most the policy's maximum lifetime.
     pub window: ToolGrantWindow,
+    /// The run of its subject session it is scoped to, if any: it then
+    /// admits uses of that run only, and ends with it. The window still
+    /// applies.
+    pub run_scope: Option<RunId>,
 }
 
 /// Who revoked a grant, and why, for the audit.
@@ -228,8 +293,8 @@ struct ReadRow {
 /// What a lifecycle change's audit row records beyond its effect.
 #[derive(Clone, Copy)]
 enum AuditContext<'a> {
-    /// An expiry observed by this driver.
-    Expiry(ToolGrantExpiryDriver),
+    /// An expiry, or the end of a run, observed by this driver.
+    Observed(ToolGrantExpiryDriver),
     /// A revoke: a `Revoked` effect records it, and an `Expired` effect
     /// records the expiry the revoke observed.
     Revocation(&'a ToolGrantRevocation),
@@ -255,7 +320,9 @@ fn apply(
     let changed = effects.iter().any(|effect| {
         matches!(
             effect,
-            ToolGrantLifecycleEffect::Expired { .. } | ToolGrantLifecycleEffect::Revoked { .. }
+            ToolGrantLifecycleEffect::Expired { .. }
+                | ToolGrantLifecycleEffect::Revoked { .. }
+                | ToolGrantLifecycleEffect::RunEnded { .. }
         )
     });
     let next = if changed {
@@ -290,7 +357,7 @@ fn lifecycle_audit_rows(
                     expires_at_ms: *expires_at_ms,
                     observed_at_ms: *observed_at_ms,
                     driver: match context {
-                        AuditContext::Expiry(driver) => driver,
+                        AuditContext::Observed(driver) => driver,
                         AuditContext::Revocation(_) => ToolGrantExpiryDriver::Revoke,
                     },
                 },
@@ -300,7 +367,7 @@ fn lifecycle_audit_rows(
                     AuditContext::Revocation(revocation) => {
                         (revocation.actor.clone(), revocation.reason.clone())
                     }
-                    AuditContext::Expiry(_) => (None, None),
+                    AuditContext::Observed(_) => (None, None),
                 };
                 ToolGrantAuditRow {
                     at_ms: *observed_at_ms,
@@ -309,6 +376,26 @@ fn lifecycle_audit_rows(
                         observed_at_ms: *observed_at_ms,
                         actor,
                         reason,
+                    },
+                }
+            }
+            ToolGrantLifecycleEffect::RunEnded { observed_at_ms, .. } => {
+                // The machine ends only a run-scoped grant with its run.
+                let Some(run_id) = row.run_scope.clone() else {
+                    return Err(ToolGrantServiceError::Machine {
+                        detail: format!("grant {grant_id} ended with a run it was not scoped to"),
+                    });
+                };
+                ToolGrantAuditRow {
+                    at_ms: *observed_at_ms,
+                    event: ToolGrantAuditEvent::RunEnded {
+                        grant_id: grant_id.clone(),
+                        run_id,
+                        observed_at_ms: *observed_at_ms,
+                        driver: match context {
+                            AuditContext::Observed(driver) => driver,
+                            AuditContext::Revocation(_) => ToolGrantExpiryDriver::Revoke,
+                        },
                     },
                 }
             }
@@ -327,7 +414,9 @@ fn lifecycle_audit_rows(
 }
 
 /// What one grant's `AdmitUse` decided for a call, from its effects: `Ok`
-/// for `UseAdmitted`, the refusal for `UseRefused`.
+/// for `UseAdmitted`, the refusal for `UseRefused`. A grant scoped to a run
+/// that is not the call's (another run, which ended the grant, or no run)
+/// covers nothing there: the call needs a grant.
 fn use_verdict(
     row: &StoredToolGrant,
     effects: &[ToolGrantLifecycleEffect],
@@ -352,6 +441,17 @@ fn use_verdict(
                     grant_id: row.record.grant_id.clone(),
                 }));
             }
+            // A grant that ended with its run, a run-scoped grant asked
+            // outside its run, and a grant that ended with its subject
+            // explain nothing: no live grant covers the name here, and a
+            // later life of the subject needs a grant of its own.
+            ToolGrantLifecycleEffect::UseRefused {
+                reason:
+                    ToolGrantUseRefusal::RunEnded
+                    | ToolGrantUseRefusal::OutsideRun
+                    | ToolGrantUseRefusal::SubjectEnded,
+                ..
+            } => return Ok(Err(ToolGrantRefusal::Required)),
             _ => {}
         }
     }
@@ -365,7 +465,8 @@ fn use_verdict(
 
 /// Which refusal explains a refused call when several grants cover its
 /// name: an expired grant, then a revoked one, then an unavailable read;
-/// with none of them the call needs a grant.
+/// with none of them the call needs a grant. A grant that ended with its
+/// subject explains nothing (it answers `Required`).
 fn refusal_rank(refusal: &ToolGrantRefusal) -> u8 {
     match refusal {
         ToolGrantRefusal::Expired { .. } => 3,
@@ -381,13 +482,51 @@ fn unavailable(error: &ToolGrantServiceError) -> ToolGrantRefusal {
     }
 }
 
+/// The row a list reports for a grant whose scope the store quarantined:
+/// its subject and target are unknown, so every subject's list reports it,
+/// among the rows that admit nothing.
+fn quarantined_row(grant: &QuarantinedToolGrant) -> UnreadableToolGrant {
+    UnreadableToolGrant {
+        grant_id: grant
+            .grant_id
+            .clone()
+            .unwrap_or_else(|| grant.refusal.scope.clone()),
+        detail: format!(
+            "the store quarantined the grant's scope, so its subject and target are unknown: {}",
+            grant.refusal
+        ),
+    }
+}
+
+/// The refusal of a call no known live grant admits while the store holds
+/// grants it quarantined: their targets are unknown, so any of them may
+/// have admitted it. Ranked as an unavailable read, below an expired or a
+/// revoked covering grant.
+fn quarantined_refusal(quarantined: &[QuarantinedToolGrant]) -> ToolGrantRefusal {
+    let grants: Vec<String> = quarantined
+        .iter()
+        .map(|grant| {
+            let id = grant.grant_id.as_deref().unwrap_or(&grant.refusal.scope);
+            format!("{id}: {}", grant.refusal)
+        })
+        .collect();
+    ToolGrantRefusal::Unavailable {
+        detail: format!(
+            "tool grants the store quarantined may cover this call, and their rows cannot be \
+             read until each scope is repaired in the store and the realm is reopened ({})",
+            grants.join("; ")
+        ),
+    }
+}
+
 /// A served session's model-request boundary, adjudicated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BoundaryAdjudication {
     /// The gated names a live grant opens now.
     pub(crate) open: ToolNameSet,
-    /// The earliest deadline of the grants that opened them.
-    pub(crate) next_deadline_ms: Option<u64>,
+    /// Per subject, the earliest deadline of the grants of it that opened
+    /// them: when the subject's deadline driver looks again.
+    pub(crate) next_deadlines: BTreeMap<ToolGrantSubjectKey, u64>,
 }
 
 /// A subject's grants, settled at one clock reading.
@@ -421,14 +560,17 @@ pub struct ToolGrantListing {
 }
 
 /// The rows filed under some subjects: the readable ones, and the ones this
-/// binary cannot read.
+/// binary cannot read, and the grants the store quarantined, whose subject
+/// is unknown.
 struct SubjectRows {
     readable: Vec<ReadRow>,
     unreadable: Vec<UnreadableToolGrant>,
+    quarantined: Vec<QuarantinedToolGrant>,
 }
 
 impl SubjectRows {
-    /// Log the rows this binary cannot read: they admit nothing.
+    /// Log the rows this binary cannot read and the grants the store
+    /// quarantined: they admit nothing.
     fn warn_unreadable(&self, adjudication: &'static str) {
         for row in &self.unreadable {
             tracing::warn!(
@@ -436,6 +578,14 @@ impl SubjectRows {
                 detail = %row.detail,
                 adjudication,
                 "an unreadable tool grant row admits nothing"
+            );
+        }
+        for grant in &self.quarantined {
+            tracing::warn!(
+                grant_id = ?grant.grant_id,
+                refusal = %grant.refusal,
+                adjudication,
+                "a tool grant whose scope the store quarantined admits nothing"
             );
         }
     }
@@ -446,6 +596,9 @@ pub struct ToolGrantService {
     store: Arc<dyn RuntimeStore>,
     clock: StdRwLock<Arc<dyn ToolGrantClock>>,
     policy: StdRwLock<ToolGrantPolicy>,
+    /// What the runtime takes its agents' grant requests with, while it
+    /// takes them.
+    request_host: StdRwLock<Option<ToolGrantRequestHost>>,
 }
 
 impl std::fmt::Debug for ToolGrantService {
@@ -458,14 +611,33 @@ impl std::fmt::Debug for ToolGrantService {
 
 impl ToolGrantService {
     /// The grant service over `store`, on the host clock and the default
-    /// policy.
+    /// policy, taking no grant requests.
     #[must_use]
     pub fn new(store: Arc<dyn RuntimeStore>) -> Self {
         Self {
             store,
             clock: StdRwLock::new(Arc::new(HostToolGrantClock)),
             policy: StdRwLock::new(ToolGrantPolicy::default()),
+            request_host: StdRwLock::new(None),
         }
+    }
+
+    /// Take the agents' grant requests through `host` (`None`: take none).
+    pub fn set_request_host(&self, host: Option<ToolGrantRequestHost>) {
+        *self
+            .request_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
+    }
+
+    /// What the agents' grant requests are held with, while the runtime
+    /// takes them.
+    #[must_use]
+    pub fn request_host(&self) -> Option<ToolGrantRequestHost> {
+        self.request_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Read `clock` instead of the host clock.
@@ -504,6 +676,11 @@ impl ToolGrantService {
 
     /// Issue one grant.
     ///
+    /// The service writes the grant row and consults no mob roster: for a
+    /// mob member identity subject, issue the grant through
+    /// `meerkat_mob::MobHandle::grant_member_tool`, which decides it against
+    /// the mob's live roster as it commits.
+    ///
     /// # Errors
     /// [`ToolGrantServiceError::InvalidWindow`] for a window that is past,
     /// empty or longer than the policy's maximum lifetime,
@@ -513,12 +690,89 @@ impl ToolGrantService {
         &self,
         request: ToolGrantRequest,
     ) -> Result<StoredToolGrant, ToolGrantServiceError> {
-        if request.target.names().next().is_none()
-            || request.target.names().any(|name| name.as_str().is_empty())
+        if request.target.is_empty() || request.target.names().any(|name| name.as_str().is_empty())
         {
             return Err(ToolGrantServiceError::EmptyTarget);
         }
         let now_ms = self.now_ms()?;
+        self.issue(request, ToolGrantId::mint(), now_ms).await
+    }
+
+    /// The grant the approved `tool_grant.issue` decision `decision_id`
+    /// issued: the row under the id the decision derives
+    /// ([`ToolGrantId::approved`]), when that decision issued it.
+    ///
+    /// # Errors
+    /// Store failures, and a row under that id this binary cannot read.
+    pub async fn issued_for(
+        &self,
+        decision_id: &DecisionId,
+    ) -> Result<Option<StoredToolGrant>, ToolGrantServiceError> {
+        let grant_id = ToolGrantId::approved(decision_id).to_string();
+        let Some(bytes) = self.store.load_tool_grant(&grant_id).await? else {
+            return Ok(None);
+        };
+        let row = StoredToolGrant::decode(&grant_id, &bytes)?;
+        let issued_here = matches!(
+            &row.record.issuer,
+            ToolGrantIssuer::Approval { approval_id } if approval_id == decision_id.as_str()
+        );
+        Ok(issued_here.then_some(row))
+    }
+
+    /// Issue the grant the approved `tool_grant.issue` decision `decision_id`
+    /// holds (`body`), at the clock reading `now_ms`: under the id the
+    /// decision derives, issuer [`ToolGrantIssuer::Approval`] with the
+    /// decision's id, for `[now_ms, now_ms + duration)`, scoped as the
+    /// request asked. The grant the decision already issued is answered as it
+    /// stands, so a replayed execution meets it.
+    ///
+    /// # Errors
+    /// As [`Self::grant`]; [`ToolGrantServiceError::Conflict`] when another
+    /// grant holds the id the decision derives.
+    pub(crate) async fn issue_approved_at(
+        &self,
+        decision_id: &DecisionId,
+        body: &ToolGrantIssueBody,
+        now_ms: u64,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+        if body.target.names().next().is_none()
+            || body.target.names().any(|name| name.as_str().is_empty())
+        {
+            return Err(ToolGrantServiceError::EmptyTarget);
+        }
+        let grant_id = ToolGrantId::approved(decision_id);
+        let request = ToolGrantRequest {
+            subject: body.subject.clone(),
+            target: body.target.clone(),
+            issuer: ToolGrantIssuer::Approval {
+                approval_id: decision_id.to_string(),
+            },
+            reason: body.reason.clone(),
+            window: ToolGrantWindow::For(Duration::from_millis(body.duration_ms)),
+            run_scope: body.run_scope.clone(),
+        };
+        match self.issue(request, grant_id.clone(), now_ms).await {
+            Err(ToolGrantServiceError::Conflict { .. }) => self
+                .issued_for(decision_id)
+                .await?
+                .ok_or(ToolGrantServiceError::Conflict {
+                    grant_id: grant_id.to_string(),
+                }),
+            issued => issued,
+        }
+    }
+
+    /// Issue `request` as the grant `grant_id`, at the clock reading
+    /// `now_ms`: the machine's `Issue`, then one store write of the row and
+    /// its `granted` audit row. A row already stored under the id is a
+    /// [`ToolGrantServiceError::Conflict`].
+    async fn issue(
+        &self,
+        request: ToolGrantRequest,
+        grant_id: ToolGrantId,
+        now_ms: u64,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
         let expires_at_ms = match request.window {
             ToolGrantWindow::For(lifetime) => {
                 now_ms.saturating_add(u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX))
@@ -526,7 +780,6 @@ impl ToolGrantService {
             ToolGrantWindow::Until { expires_at_ms } => expires_at_ms,
         };
         let max_lifetime_ms = self.policy().max_lifetime_ms();
-        let grant_id = ToolGrantId::mint();
         let mut authority = ToolGrantLifecycleMachineAuthority::new();
         let effects = ToolGrantLifecycleMachineMutator::apply(
             &mut authority,
@@ -535,6 +788,7 @@ impl ToolGrantService {
                 now_ms,
                 expires_at_ms,
                 max_lifetime_ms,
+                run_scope: request.run_scope.as_ref().map(run_key),
             },
         )
         .map_err(|error| ToolGrantServiceError::Machine {
@@ -576,6 +830,7 @@ impl ToolGrantService {
                 issuer: row.record.issuer.clone(),
                 reason: row.record.reason.clone(),
                 expires_at_ms: row.expires_at_ms,
+                run_scope: row.run_scope.clone(),
             },
         }
         .encode()
@@ -615,15 +870,16 @@ impl ToolGrantService {
         grant_id: &ToolGrantId,
         revocation: ToolGrantRevocation,
     ) -> Result<RevokedToolGrant, ToolGrantServiceError> {
-        let read = self.load_row(&grant_id.to_string()).await?;
+        let store = self.store.as_ref();
+        let read = load_row(store, &grant_id.to_string()).await?;
         let now_ms = self.now_ms()?;
-        let (grant, effects) = self
-            .apply_and_commit(
-                read,
-                &|| ToolGrantLifecycleInput::Revoke { now_ms },
-                AuditContext::Revocation(&revocation),
-            )
-            .await?;
+        let (grant, effects) = apply_and_commit(
+            store,
+            read,
+            &|| ToolGrantLifecycleInput::Revoke { now_ms },
+            AuditContext::Revocation(&revocation),
+        )
+        .await?;
         let changed = effects.iter().any(|effect| {
             matches!(
                 effect,
@@ -633,8 +889,89 @@ impl ToolGrantService {
         Ok(RevokedToolGrant { grant, changed })
     }
 
+    /// End every live grant of `subject` with it: its owner ended the subject
+    /// (a mob member identity whose identity ended, or a session that
+    /// identity held). Each grant ends through the machine's
+    /// `EndWithSubject`: revoked, its end reason `SubjectEnded`, so it
+    /// explains no later refusal; a grant at or after its deadline records
+    /// the expiry it reached instead, and a grant that already ended is left
+    /// as it stands. A row this binary cannot read admits nothing and is left
+    /// as it is, logged. A store without the grant domain holds no grant, so
+    /// there it ends none. Answers how many grants this call ended.
+    ///
+    /// # Errors
+    /// Store, clock and conflict failures; a grant the call did not reach
+    /// stays live, so the caller retries the whole end.
+    pub async fn revoke_subject(
+        &self,
+        subject: &ToolGrantSubjectKey,
+        revocation: ToolGrantRevocation,
+    ) -> Result<usize, ToolGrantServiceError> {
+        let store = self.store.as_ref();
+        let rows = match subject_rows(store, std::slice::from_ref(subject)).await {
+            Ok(rows) => rows,
+            Err(ToolGrantServiceError::Store(RuntimeStoreError::Unsupported(_))) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        rows.warn_unreadable("revoke_subject");
+        let mut ended = 0;
+        for read in rows.readable {
+            if read.row.status != ToolGrantStatus::Active {
+                continue;
+            }
+            let now_ms = self.now_ms()?;
+            let effects = match apply_and_commit(
+                store,
+                read,
+                &|| ToolGrantLifecycleInput::EndWithSubject { now_ms },
+                AuditContext::Revocation(&revocation),
+            )
+            .await
+            {
+                Ok((_, effects)) => effects,
+                // A row whose machine refuses to rebuild admits nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "revoke_subject",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    ToolGrantLifecycleEffect::Revoked { .. }
+                        | ToolGrantLifecycleEffect::Expired { .. }
+                )
+            }) {
+                ended += 1;
+            }
+        }
+        Ok(ended)
+    }
+
+    /// One grant as its row stands, read without settling it.
+    ///
+    /// # Errors
+    /// [`ToolGrantServiceError::NotFound`], [`ToolGrantServiceError::CorruptRow`]
+    /// for a row this binary cannot read, and store failures.
+    pub async fn load(
+        &self,
+        grant_id: &ToolGrantId,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+        Ok(load_row(self.store.as_ref(), &grant_id.to_string())
+            .await?
+            .row)
+    }
+
     /// Every grant of `subject`, each due one settled as expired first, and
-    /// every row of the subject this binary cannot read.
+    /// every row of the subject this binary cannot read, with every grant
+    /// whose scope the store quarantined (its subject is unknown, so every
+    /// subject's list reports it there).
     ///
     /// # Errors
     /// Store and clock failures.
@@ -696,26 +1033,29 @@ impl ToolGrantService {
     /// Settle `subject_key`'s due grants as expired, observed by `driver`,
     /// and answer every readable grant with the next deadline of the grants
     /// still live. A grant is live when its own `AdmitUse` at the reading
-    /// admits: an ended grant arms no deadline.
+    /// (of its own run, for a run-scoped grant) admits: an ended grant arms
+    /// no deadline.
     pub(crate) async fn settle(
         &self,
         subject_key: &ToolGrantSubjectKey,
         driver: ToolGrantExpiryDriver,
     ) -> Result<SettledGrants, ToolGrantServiceError> {
-        let rows = self.subject_rows(std::slice::from_ref(subject_key)).await?;
+        let store = self.store.as_ref();
+        let rows = subject_rows(store, std::slice::from_ref(subject_key)).await?;
         rows.warn_unreadable("settle");
         let now_ms = self.now_ms()?;
         let mut grants = Vec::with_capacity(rows.readable.len());
         let mut unreadable = rows.unreadable;
+        unreadable.extend(rows.quarantined.iter().map(quarantined_row));
         let mut next_deadline_ms: Option<u64> = None;
         for read in rows.readable {
-            let (row, _) = match self
-                .apply_and_commit(
-                    read,
-                    &|| ToolGrantLifecycleInput::Expire { now_ms },
-                    AuditContext::Expiry(driver),
-                )
-                .await
+            let (row, _) = match apply_and_commit(
+                store,
+                read,
+                &|| ToolGrantLifecycleInput::Expire { now_ms },
+                AuditContext::Observed(driver),
+            )
+            .await
             {
                 Ok(applied) => applied,
                 // A row whose machine refuses to rebuild is reported, not
@@ -732,9 +1072,12 @@ impl ToolGrantService {
                 }
                 Err(error) => return Err(error),
             };
+            let own_use = ToolGrantLifecycleInput::AdmitUse {
+                now_ms,
+                run_id: row.run_scope.as_ref().map(run_key),
+            };
             let live = matches!(
-                apply(&row, ToolGrantLifecycleInput::AdmitUse { now_ms })
-                    .and_then(|applied| use_verdict(&row, &applied.effects)),
+                apply(&row, own_use).and_then(|applied| use_verdict(&row, &applied.effects)),
                 Ok(Ok(()))
             );
             if live {
@@ -751,10 +1094,12 @@ impl ToolGrantService {
         })
     }
 
-    /// A model-request boundary: the gated names of `gated` a live grant of
-    /// `subjects` opens at this moment. A grant the boundary finds past its
-    /// deadline is settled as expired; a row this binary cannot read opens
-    /// nothing.
+    /// A model-request boundary of the run `run_id`: the gated names of
+    /// `view` a live grant of `subjects` opens at this moment (a name or
+    /// family target's gated names, and a server target's gated names its
+    /// server provides now). A grant the boundary finds past its deadline is
+    /// settled as expired, and a grant scoped to an earlier run is settled as
+    /// ended with it; a row this binary cannot read opens nothing.
     ///
     /// # Errors
     /// `Unavailable` when the grants cannot be read or settled: the gate
@@ -762,34 +1107,32 @@ impl ToolGrantService {
     pub(crate) async fn adjudicate_boundary(
         &self,
         subjects: &[ToolGrantSubjectKey],
-        gated: &GatedToolTable,
+        view: &GatedToolView,
+        run_id: Option<&RunId>,
     ) -> Result<BoundaryAdjudication, ToolGrantRefusal> {
-        let rows = self
-            .subject_rows(subjects)
+        let store = self.store.as_ref();
+        let rows = subject_rows(store, subjects)
             .await
             .map_err(|error| unavailable(&error))?;
         rows.warn_unreadable("boundary");
         let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
+        let run_id = run_id.map(run_key);
         let mut adjudication = BoundaryAdjudication::default();
         for read in rows.readable {
-            let covered: Vec<_> = read
-                .row
-                .record
-                .target
-                .names()
-                .filter(|name| gated.is_gated(name.as_str()))
-                .cloned()
-                .collect();
+            let covered = view.covered_by(&read.row.record.target);
             if covered.is_empty() {
                 continue;
             }
-            let (row, effects) = match self
-                .apply_and_commit(
-                    read,
-                    &|| ToolGrantLifecycleInput::AdmitUse { now_ms },
-                    AuditContext::Expiry(ToolGrantExpiryDriver::Boundary),
-                )
-                .await
+            let (row, effects) = match apply_and_commit(
+                store,
+                read,
+                &|| ToolGrantLifecycleInput::AdmitUse {
+                    now_ms,
+                    run_id: run_id.clone(),
+                },
+                AuditContext::Observed(ToolGrantExpiryDriver::Boundary),
+            )
+            .await
             {
                 Ok(applied) => applied,
                 // A row whose machine refuses to rebuild opens nothing.
@@ -811,11 +1154,11 @@ impl ToolGrantService {
                 for name in covered {
                     adjudication.open.insert(name);
                 }
-                adjudication.next_deadline_ms = Some(
-                    adjudication
-                        .next_deadline_ms
-                        .map_or(row.expires_at_ms, |next| next.min(row.expires_at_ms)),
-                );
+                adjudication
+                    .next_deadlines
+                    .entry(row.record.subject.key())
+                    .and_modify(|next| *next = (*next).min(row.expires_at_ms))
+                    .or_insert(row.expires_at_ms);
             }
         }
         Ok(adjudication)
@@ -825,18 +1168,23 @@ impl ToolGrantService {
     /// read after that read, and an admission returns with nothing awaited
     /// after the clock reading, so the caller hands the call on at the
     /// moment it was adjudicated. A refusal settles any grant it found past
-    /// its deadline, then appends a `refused` audit row; a failed append is
-    /// logged and never turns the refusal into an admission.
+    /// its deadline, or scoped to an earlier run than the call's, then
+    /// appends a `refused` audit row; a failed append is logged and never
+    /// turns the refusal into an admission.
     ///
     /// # Errors
-    /// The refusal: no live grant covers the name, the covering grant
-    /// expired or was revoked, or the grants could not be read.
+    /// The refusal: no live grant covers the name (in the call's run, for a
+    /// run-scoped grant), the covering grant expired or was revoked, the
+    /// grants could not be read, or no known grant admits it while the store
+    /// holds grants it quarantined (their targets are unknown): `Unavailable`,
+    /// naming them.
     pub(crate) async fn admit_call(
         &self,
         subjects: &[ToolGrantSubjectKey],
         call: ToolGrantCall<'_>,
     ) -> Result<(), ToolGrantRefusal> {
-        let rows = match self.subject_rows(subjects).await {
+        let store = self.store.as_ref();
+        let rows = match subject_rows(store, subjects).await {
             Ok(rows) => rows,
             Err(error) => {
                 let refusal = unavailable(&error);
@@ -853,57 +1201,168 @@ impl ToolGrantService {
                 return Err(refusal);
             }
         };
+        let run_id = call.run_id.map(run_key);
+        let call_use = || ToolGrantLifecycleInput::AdmitUse {
+            now_ms,
+            run_id: run_id.clone(),
+        };
         // Adjudicate every covering grant at this one reading before
-        // anything else awaits: one admitted grant admits the call.
-        let mut observed_expiries = Vec::new();
-        let mut refusal = ToolGrantRefusal::Required;
+        // anything else awaits: one admitted grant admits the call. With no
+        // covering grant the call needs one, unless the store quarantined
+        // grants whose targets are unknown: one of them may have admitted it.
+        let mut observed_ends = Vec::new();
+        let mut refusal = if rows.quarantined.is_empty() {
+            ToolGrantRefusal::Required
+        } else {
+            quarantined_refusal(&rows.quarantined)
+        };
         // The subject whose log records the refusal: the explaining grant's,
         // else the session's.
         let mut refusal_subject = subjects.first().cloned();
         for read in rows.readable {
-            if !read.row.record.target.covers(call.name) {
+            if !read.row.record.target.covers(call.name, call.server) {
                 continue;
             }
-            let verdict = apply(&read.row, ToolGrantLifecycleInput::AdmitUse { now_ms }).and_then(
-                |applied| {
-                    use_verdict(&read.row, &applied.effects)
-                        .map(|verdict| (verdict, applied.next.is_some()))
-                },
-            );
-            let (found, observed_expiry) = match verdict {
+            let verdict = apply(&read.row, call_use()).and_then(|applied| {
+                use_verdict(&read.row, &applied.effects)
+                    .map(|verdict| (verdict, applied.next.is_some()))
+            });
+            let (found, observed_end) = match verdict {
                 Ok((Ok(()), _)) => return Ok(()),
-                Ok((Err(found), observed_expiry)) => (found, observed_expiry),
+                Ok((Err(found), observed_end)) => (found, observed_end),
                 Err(error) => (unavailable(&error), false),
             };
             if refusal_rank(&found) > refusal_rank(&refusal) {
                 refusal = found;
                 refusal_subject = Some(read.row.record.subject.key());
             }
-            if observed_expiry {
-                observed_expiries.push(read);
+            if observed_end {
+                observed_ends.push(read);
             }
         }
-        // Refused: settle the expiries this adjudication observed.
-        for read in observed_expiries {
+        // Refused: settle the ends this adjudication observed.
+        for read in observed_ends {
             let grant_id = read.grant_id.clone();
-            if let Err(error) = self
-                .apply_and_commit(
-                    read,
-                    &|| ToolGrantLifecycleInput::AdmitUse { now_ms },
-                    AuditContext::Expiry(ToolGrantExpiryDriver::Dispatch),
-                )
-                .await
+            if let Err(error) = apply_and_commit(
+                store,
+                read,
+                &call_use,
+                AuditContext::Observed(ToolGrantExpiryDriver::Dispatch),
+            )
+            .await
             {
                 tracing::warn!(
                     %grant_id,
                     %error,
-                    "a gated dispatch could not record a tool grant's expiry"
+                    "a gated dispatch could not record the end of a tool grant"
                 );
             }
         }
         self.record_refusal(refusal_subject.as_ref(), call, &refusal)
             .await;
         Err(refusal)
+    }
+
+    /// The run `run_id` of the subjects' session ended, as `driver` observed
+    /// it: end every grant of `subjects` scoped to that run. A grant bounded
+    /// by its window only, a grant of another run and an ended grant are
+    /// left as they are; a grant whose deadline already passed records its
+    /// expiry instead. A row this binary cannot read is logged and left.
+    ///
+    /// # Errors
+    /// Store and clock failures, and a row another writer kept changing.
+    pub async fn end_run(
+        &self,
+        subjects: &[ToolGrantSubjectKey],
+        run_id: &RunId,
+        driver: ToolGrantExpiryDriver,
+    ) -> Result<(), ToolGrantServiceError> {
+        let clock = Arc::clone(
+            &*self
+                .clock
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        end_run_over(
+            self.store.as_ref(),
+            clock.as_ref(),
+            subjects,
+            run_id,
+            driver,
+        )
+        .await
+    }
+
+    /// Which of the MCP servers `servers` a live server grant of `subjects`
+    /// covers at this moment, with or without a `tools` subset: a build
+    /// attaches a gated server only while one does. Each covering grant is
+    /// adjudicated as a boundary does (`AdmitUse`), outside any run: a build
+    /// belongs to no run, so a grant scoped to a run covers no server here
+    /// (its use outside its run is refused, and the grant stays as it is).
+    /// One found past its deadline is settled as expired by the build. A row
+    /// this binary cannot read covers nothing.
+    ///
+    /// # Errors
+    /// `Unavailable` when the grants cannot be read or settled: the build
+    /// attaches no gated server.
+    pub(crate) async fn granted_servers(
+        &self,
+        subjects: &[ToolGrantSubjectKey],
+        servers: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, ToolGrantRefusal> {
+        let mut granted = BTreeSet::new();
+        if servers.is_empty() {
+            return Ok(granted);
+        }
+        let store = self.store.as_ref();
+        let rows = subject_rows(store, subjects)
+            .await
+            .map_err(|error| unavailable(&error))?;
+        rows.warn_unreadable("build");
+        let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
+        for read in rows.readable {
+            let Some(server) = read
+                .row
+                .record
+                .target
+                .mcp_server()
+                .filter(|server| servers.contains(*server) && !granted.contains(*server))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let (row, effects) = match apply_and_commit(
+                store,
+                read,
+                &|| ToolGrantLifecycleInput::AdmitUse {
+                    now_ms,
+                    run_id: None,
+                },
+                AuditContext::Observed(ToolGrantExpiryDriver::Build),
+            )
+            .await
+            {
+                Ok(applied) => applied,
+                // A row whose machine refuses to rebuild covers nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "build",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(unavailable(&error)),
+            };
+            if use_verdict(&row, &effects)
+                .map_err(|error| unavailable(&error))?
+                .is_ok()
+            {
+                granted.insert(server);
+            }
+        }
+        Ok(granted)
     }
 
     /// Append a `refused` row for `call` to `subject`'s log. Best effort.
@@ -949,90 +1408,177 @@ impl ToolGrantService {
             );
         }
     }
+}
 
-    async fn load_row(&self, grant_id: &str) -> Result<ReadRow, ToolGrantServiceError> {
-        let bytes = self.store.load_tool_grant(grant_id).await?.ok_or_else(|| {
-            ToolGrantServiceError::NotFound {
+/// End every grant of `subjects` in `store` scoped to the run `run_id`, at
+/// one reading of `clock` taken after the rows are read; see
+/// [`ToolGrantService::end_run`]. Durable-tail recovery calls it over the
+/// store it recovers, for the run it closed.
+pub(crate) async fn end_run_over(
+    store: &dyn RuntimeStore,
+    clock: &dyn ToolGrantClock,
+    subjects: &[ToolGrantSubjectKey],
+    run_id: &RunId,
+    driver: ToolGrantExpiryDriver,
+) -> Result<(), ToolGrantServiceError> {
+    let rows = subject_rows(store, subjects).await?;
+    rows.warn_unreadable("run end");
+    let now_ms = clock.now_ms().map_err(|_| ToolGrantServiceError::Clock)?;
+    let run_id = run_key(run_id);
+    for read in rows.readable {
+        match apply_and_commit(
+            store,
+            read,
+            &|| ToolGrantLifecycleInput::EndRun {
+                run_id: run_id.clone(),
+                now_ms,
+            },
+            AuditContext::Observed(driver),
+        )
+        .await
+        {
+            Ok(_) => {}
+            // A row whose machine refuses to rebuild ends nothing; it admits
+            // nothing either.
+            Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                tracing::warn!(
+                    %grant_id,
+                    %detail,
+                    adjudication = "run end",
+                    "an unreadable tool grant row admits nothing"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// End the run-scoped grants of the run `run_id` of `session_id`, which
+/// durable-tail recovery closed in `store` (it committed the run's tail as
+/// interrupted or completed), at the host clock. Best effort: a failure is
+/// logged, and the grants then admit no use of a later run either, whose
+/// first use ends them.
+pub(crate) async fn end_recovered_run(
+    store: &dyn RuntimeStore,
+    session_id: &meerkat_core::types::SessionId,
+    run_id: &RunId,
+) {
+    let subject = ToolGrantSubject::session(session_id.clone()).key();
+    if let Err(error) = end_run_over(
+        store,
+        &HostToolGrantClock,
+        std::slice::from_ref(&subject),
+        run_id,
+        ToolGrantExpiryDriver::Recovery,
+    )
+    .await
+    {
+        // A store without tool grants has none to end.
+        if matches!(
+            error,
+            ToolGrantServiceError::Store(RuntimeStoreError::Unsupported(_))
+        ) {
+            return;
+        }
+        tracing::warn!(
+            %session_id,
+            %run_id,
+            %error,
+            "recovery could not end the run-scoped tool grants of the run it closed"
+        );
+    }
+}
+
+async fn load_row(
+    store: &dyn RuntimeStore,
+    grant_id: &str,
+) -> Result<ReadRow, ToolGrantServiceError> {
+    let bytes =
+        store
+            .load_tool_grant(grant_id)
+            .await?
+            .ok_or_else(|| ToolGrantServiceError::NotFound {
                 grant_id: grant_id.to_string(),
-            }
-        })?;
-        let row = StoredToolGrant::decode(grant_id, &bytes)?;
-        Ok(ReadRow {
-            grant_id: grant_id.to_string(),
-            bytes,
-            row,
-        })
-    }
+            })?;
+    let row = StoredToolGrant::decode(grant_id, &bytes)?;
+    Ok(ReadRow {
+        grant_id: grant_id.to_string(),
+        bytes,
+        row,
+    })
+}
 
-    /// Every row filed under `subjects`.
-    /// Every row filed under `subjects`: the readable ones, and the ones this
-    /// binary cannot decode, which admit nothing and block nothing.
-    async fn subject_rows(
-        &self,
-        subjects: &[ToolGrantSubjectKey],
-    ) -> Result<SubjectRows, ToolGrantServiceError> {
-        let mut rows = SubjectRows {
-            readable: Vec::new(),
-            unreadable: Vec::new(),
+/// Every row filed under `subjects`: the readable ones, and the ones this
+/// binary cannot decode, which admit nothing and block nothing; and the
+/// grants the store quarantined, whose subject is unknown, so that every
+/// subject's read carries them.
+async fn subject_rows(
+    store: &dyn RuntimeStore,
+    subjects: &[ToolGrantSubjectKey],
+) -> Result<SubjectRows, ToolGrantServiceError> {
+    let mut rows = SubjectRows {
+        readable: Vec::new(),
+        unreadable: Vec::new(),
+        quarantined: Vec::new(),
+    };
+    for subject in subjects {
+        for (grant_id, bytes) in store.list_tool_grants(subject.as_str()).await? {
+            match StoredToolGrant::decode(&grant_id, &bytes) {
+                Ok(row) => rows.readable.push(ReadRow {
+                    grant_id,
+                    bytes,
+                    row,
+                }),
+                Err(error) => rows.unreadable.push(UnreadableToolGrant {
+                    grant_id,
+                    detail: error.to_string(),
+                }),
+            }
+        }
+    }
+    rows.quarantined = store.quarantined_tool_grants();
+    Ok(rows)
+}
+
+/// Apply one input to a row's rebuilt machine and commit what its effects
+/// record: the row after an `Expired`, `Revoked` or `RunEnded` effect, with
+/// that effect's audit row, in one store write. A CAS conflict (another
+/// writer changed the row first) reloads the row and applies the input once
+/// more; a second conflict is [`ToolGrantServiceError::Conflict`].
+///
+/// Returns the row as it now stands and the effects of the input as last
+/// applied.
+async fn apply_and_commit(
+    store: &dyn RuntimeStore,
+    mut read: ReadRow,
+    input: &(dyn Fn() -> ToolGrantLifecycleInput + Send + Sync),
+    context: AuditContext<'_>,
+) -> Result<(StoredToolGrant, Vec<ToolGrantLifecycleEffect>), ToolGrantServiceError> {
+    for attempt in 0..2 {
+        let applied = apply(&read.row, input())?;
+        let Some(next) = applied.next else {
+            return Ok((read.row, applied.effects));
         };
-        for subject in subjects {
-            for (grant_id, bytes) in self.store.list_tool_grants(subject.as_str()).await? {
-                match StoredToolGrant::decode(&grant_id, &bytes) {
-                    Ok(row) => rows.readable.push(ReadRow {
-                        grant_id,
-                        bytes,
-                        row,
-                    }),
-                    Err(error) => rows.unreadable.push(UnreadableToolGrant {
-                        grant_id,
-                        detail: error.to_string(),
-                    }),
-                }
-            }
+        let audit = lifecycle_audit_rows(&read.row, &applied.effects, context)?;
+        let subject_key = read.row.record.subject.key();
+        if store
+            .compare_and_put_tool_grant(
+                &read.grant_id,
+                subject_key.as_str(),
+                &read.bytes,
+                &next.encode()?,
+                &audit,
+            )
+            .await?
+        {
+            return Ok((next, applied.effects));
         }
-        Ok(rows)
-    }
-
-    /// Apply one input to a row's rebuilt machine and commit what its
-    /// effects record: the row after an `Expired` or `Revoked` effect, with
-    /// that effect's audit row, in one store write. A CAS conflict (another
-    /// writer changed the row first) reloads the row and applies the input
-    /// once more; a second conflict is [`ToolGrantServiceError::Conflict`].
-    ///
-    /// Returns the row as it now stands and the effects of the input as
-    /// last applied.
-    async fn apply_and_commit(
-        &self,
-        mut read: ReadRow,
-        input: &(dyn Fn() -> ToolGrantLifecycleInput + Send + Sync),
-        context: AuditContext<'_>,
-    ) -> Result<(StoredToolGrant, Vec<ToolGrantLifecycleEffect>), ToolGrantServiceError> {
-        for attempt in 0..2 {
-            let applied = apply(&read.row, input())?;
-            let Some(next) = applied.next else {
-                return Ok((read.row, applied.effects));
-            };
-            let audit = lifecycle_audit_rows(&read.row, &applied.effects, context)?;
-            let subject_key = read.row.record.subject.key();
-            if self
-                .store
-                .compare_and_put_tool_grant(
-                    &read.grant_id,
-                    subject_key.as_str(),
-                    &read.bytes,
-                    &next.encode()?,
-                    &audit,
-                )
-                .await?
-            {
-                return Ok((next, applied.effects));
-            }
-            if attempt == 0 {
-                read = self.load_row(&read.grant_id).await?;
-            }
+        if attempt == 0 {
+            read = load_row(store, &read.grant_id).await?;
         }
-        Err(ToolGrantServiceError::Conflict {
-            grant_id: read.grant_id,
-        })
     }
+    Err(ToolGrantServiceError::Conflict {
+        grant_id: read.grant_id,
+    })
 }

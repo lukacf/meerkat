@@ -95,6 +95,10 @@ impl PreparedOperationAuthorization for Decision {
             Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into())
         }
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 struct AllowReviewer;

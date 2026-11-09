@@ -167,8 +167,9 @@ pub struct GovernedConnection {
     /// connection starts.
     #[cfg(unix)]
     decision_approver: Option<meerkat_core::approval::consent::AuthenticatedApprover>,
-    /// The connection's operator for durable decisions: `decision/list`
-    /// presents to it and `decision/decide` decides as it.
+    /// The connection's operator for durable decisions: the pipe presents to
+    /// it each decision it acts for when the decision opens and when
+    /// `decision/list` lists it, and `decision/decide` decides as it.
     #[cfg(unix)]
     decisions: Option<Arc<crate::handlers::decision::operator::DecisionOperator>>,
     /// The exact target each session was last bound to by this connection,
@@ -209,12 +210,12 @@ impl GovernedConnection {
     }
 
     /// Serve durable decisions on this pipe to its operator `approver`, who
-    /// must carry the pipe's own authentication scope: `decision/list`
-    /// presents the decisions of each listed page the operator acts for, and
-    /// `decision/decide` decides as the operator. The approver ids the
-    /// operator acts for are the host's configuration as the pipe started
-    /// (`[governance.decisions]`); a change reaches the pipe at its next
-    /// start.
+    /// must carry the pipe's own authentication scope: the pipe presents to
+    /// the operator each decision it acts for when the decision opens and
+    /// when `decision/list` lists it, and `decision/decide` decides as the
+    /// operator. The approver ids the operator acts for are the host's
+    /// configuration as the pipe started (`[governance.decisions]`); a
+    /// change reaches the pipe at its next start.
     #[cfg(unix)]
     pub(crate) fn serve_decisions_as(
         &mut self,
@@ -257,6 +258,15 @@ impl GovernedConnection {
         self.decisions
             .as_deref()
             .ok_or_else(|| crate::session_runtime::runtime_driver_error_to_rpc(unsupported()))
+    }
+
+    /// The pipe's operator for durable decisions, to present to it each
+    /// decision that opens; `None` for a pipe that serves none.
+    #[cfg(unix)]
+    pub(crate) fn presenting_operator(
+        &self,
+    ) -> Option<Arc<crate::handlers::decision::operator::DecisionOperator>> {
+        self.decisions.clone()
     }
 
     /// Live `mcp/add` needs the scoped destination its control is joined to.

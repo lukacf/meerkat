@@ -482,6 +482,17 @@ Avoid manual runtime ID extraction for ordinary identity-scoped work. Do not ass
 
 ## Standing Instructions And Forks
 
+- `meta/set_instruction`, `meta/revoke_instruction` and
+  `meta/instruction_status` keep operator instructions for the gateway's
+  mob: one body per slot (`namespace`, `key`) at a revision, for every
+  member (`{"kind": "mob"}`), one profile (`{"kind": "profile", ...}`) or
+  one identity (`{"kind": "member", "identity": ...}`). Each member applies
+  them at its next run start, never inside a run; the status read names
+  members by identity and wakes none. Host verbs, never agent tools; a
+  candidate launch refuses the two writes and delivers nothing (owed members
+  stay owed, counted by a `candidate launch census` WARN). A target refuses
+  a field its kind does not have. They replace the activation verb
+  below, deprecated since 0.9.11.
 - `meta/member_activate_instruction` appends one keyed, immutable instruction
   activation (a skill body, a persona, any namespace) to a member's current
   session; `meta/member_instruction_activations` reads them, and a query that

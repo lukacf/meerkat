@@ -111,6 +111,7 @@ impl FixtureAuthorization {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 id("controller"),
                 executor.clone(),
@@ -120,6 +121,7 @@ impl FixtureAuthorization {
             .unwrap();
         let operations = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 id("operations"),
                 executor.clone(),
@@ -170,6 +172,7 @@ impl FixtureAuthorization {
             invocation_owner: owner.clone(),
             operation_owner: owner.clone(),
             retained_resume: None,
+            kept_original: None,
             // This single-session integration fixture supplies exact ingress
             // and checks native session/input coordinates at every use. It does
             // not claim the separate scoped-destination registration contract.

@@ -262,7 +262,7 @@ impl McpAdapterComposer for NativeSetup {
 
 /// Only forwards to LocalApprovals after the actual adapter/installation
 /// composition exists. It introduces no independent decision or permission.
-struct PreparedAdmission(OnceLock<Arc<dyn ToolDispatchAdmission>>);
+pub(super) struct PreparedAdmission(pub(super) OnceLock<Arc<dyn ToolDispatchAdmission>>);
 
 #[async_trait]
 impl ToolDispatchAdmission for PreparedAdmission {

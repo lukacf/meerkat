@@ -70,6 +70,7 @@ mod tests {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         }
     }
 
@@ -299,6 +300,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             content: "hi".into(),
             typed_turn_appends: Vec::new(),

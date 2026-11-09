@@ -50,7 +50,10 @@ fn evidence(value: &str) -> HistoricalEvidenceRef {
     }
 }
 fn store(path: &Path) -> Arc<dyn GrantOwnerStore> {
-    Arc::new(FileGrantOwnerStore::new(path))
+    Arc::new(FileGrantOwnerStore::new(
+        path,
+        meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+    ))
 }
 pub(crate) fn initialized(path: &Path) -> Arc<ToolkitOriginalOwner> {
     initialized_with_clock(path, Arc::new(HostAuthorizationClock))
@@ -83,6 +86,7 @@ fn base(owner: &ToolkitOriginalOwner) -> GrantLineageRef {
     owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("base"),
             principal("admin"),
@@ -332,6 +336,7 @@ fn original_operation_child_cannot_be_a_sibling_controller_in_either_restore_ord
     let b_child = owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             &base,
             id("b-child"),
@@ -613,6 +618,596 @@ fn source_settlement_promotes_exact_custody_but_cold_restore_does_not() {
             .is_none()
     );
     drop(pending);
+}
+
+// A native reader of retained custody (Core's ingress check and operation
+// ceilings) can meet the in-memory source collection while another owner
+// holds it for a short synchronous section. That is contention, not a
+// policy answer: the reader waits for the holder, within a bound.
+fn admitted_original(
+    dir: &Path,
+) -> (
+    Arc<ToolkitOriginalOwner>,
+    Arc<RetainedToolkitOriginal>,
+    QualifiedIngressNamespace,
+    OriginalWorkRef,
+) {
+    let owner = initialized(&dir.join("grants"));
+    let base = base(&owner);
+    let a = enroll(&owner, claims("a", &base), "a-child");
+    assert!(Arc::ptr_eq(
+        &owner.record_candidate(&a).unwrap().admit().unwrap(),
+        &a
+    ));
+    let namespace = a.association.candidate().ingress_namespace.clone();
+    let work = a.association.candidate().original_work.clone();
+    (owner, a, namespace, work)
+}
+
+#[test]
+fn retained_custody_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, namespace, work) = admitted_original(dir.path());
+    assert!(matches!(
+        owner.retained_custody(&namespace, &work),
+        Ok(RetainedCustody::Retained(_))
+    ));
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let answer = owner.retained_custody(&namespace, &work);
+        assert!(
+            matches!(answer, Ok(RetainedCustody::Retained(_))),
+            "a held source collection is waited for, not answered unavailable: {answer:?}"
+        );
+        holder.join().unwrap();
+    });
+}
+
+#[test]
+fn retained_custody_stays_unavailable_on_a_poisoned_source_collection() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, namespace, work) = admitted_original(dir.path());
+    let poisoned = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _originals = owner.originals.lock().unwrap();
+                panic!("controlled source collection poison");
+            })
+            .join()
+    });
+    assert!(poisoned.is_err());
+    assert!(owner.originals.is_poisoned());
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        owner.retained_custody(&namespace, &work),
+        Err(ControllerReadinessFailure::PolicyUnavailable)
+    ));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "poison answers unavailable at once, without waiting"
+    );
+}
+
+#[test]
+fn retained_custody_waits_at_most_its_bound_and_then_answers_unavailable() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, namespace, work) = admitted_original(dir.path());
+    let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(bound + std::time::Duration::from_millis(1500));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let started = std::time::Instant::now();
+        let answer = owner.retained_custody(&namespace, &work);
+        let waited = started.elapsed();
+        assert!(
+            matches!(answer, Err(ControllerReadinessFailure::PolicyUnavailable)),
+            "a holder that outlasts the bound is answered unavailable: {answer:?}"
+        );
+        assert!(
+            waited >= bound,
+            "the reader waits up to its bound: {waited:?}"
+        );
+        assert!(
+            waited < bound + std::time::Duration::from_millis(1000),
+            "and never past it: {waited:?}"
+        );
+        holder.join().unwrap();
+    });
+}
+
+// Core's ingress check authenticates an original through the same source
+// collection, from the same kind of synchronous native callback.
+#[test]
+fn authenticated_original_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, a, namespace, work) = admitted_original(dir.path());
+    let ingress = ingress_for(&a);
+    let found = |owner: &ToolkitOriginalOwner| {
+        owner
+            .authenticated_original(&ingress, &namespace, &work)
+            .map(|found| found.is_some())
+    };
+    assert_eq!(found(&owner), Ok(true));
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let answer = found(&owner);
+        assert_eq!(
+            answer,
+            Ok(true),
+            "a held source collection is waited for, not answered unavailable"
+        );
+        holder.join().unwrap();
+    });
+}
+
+// Hold `lock` on another thread until released, run `wait` on this thread once
+// the lock is held, then release and join the holder on every path. A wait
+// that returns without its release (for example without pausing), and a
+// panic, drop the release sender, which ends the holder's wait as well.
+fn with_released_holder<L: Send, T>(
+    lock: &std::sync::Mutex<L>,
+    wait: impl FnOnce(&std::sync::mpsc::Sender<()>, &std::sync::mpsc::Receiver<()>) -> T,
+) -> T {
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (freed, free) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(move || {
+            let guard = lock.lock().unwrap();
+            held.send(()).unwrap();
+            let _ = released.recv();
+            drop(guard);
+            let _ = freed.send(());
+        });
+        holding.recv().unwrap();
+        let release = release;
+        let answer = wait(&release, &free);
+        drop(release);
+        holder.join().unwrap();
+        answer
+    })
+}
+
+// The wait shared by both native readers (retained_custody and
+// authenticated_original): a reader descheduled across its deadline while the
+// holder releases must not read at the next attempt. It answers unavailable,
+// as a reader whose holder outlasts the bound does.
+#[test]
+fn source_wait_never_reads_after_its_deadline() {
+    let lock = std::sync::Mutex::new(());
+    let mut pauses = 0;
+    let answer = with_released_holder(&lock, |release, free| {
+        // The deadline starts once the lock is held, never before the
+        // holder's handshake.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        super::wait_for_lock(&lock, deadline, |_| {
+            pauses += 1;
+            if pauses == 1 {
+                // Descheduled across the deadline: the holder releases
+                // meanwhile, so the lock is free at the next attempt.
+                release.send(()).unwrap();
+                free.recv().unwrap();
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        })
+        .map(drop)
+    });
+    assert_eq!(pauses, 1);
+    assert_eq!(
+        answer,
+        Err(ControllerReadinessFailure::PolicyUnavailable),
+        "a reader past its deadline answers unavailable, even with the lock free"
+    );
+}
+
+// A wait whose deadline passed before its first attempt answers at once,
+// without pausing, so it never releases the holder itself: the harness still
+// releases and joins it.
+#[test]
+fn source_wait_past_its_deadline_releases_its_holder() {
+    let lock = std::sync::Mutex::new(());
+    let mut pauses = 0;
+    let answer = with_released_holder(&lock, |_, _| {
+        super::wait_for_lock(&lock, std::time::Instant::now(), |_| pauses += 1).map(drop)
+    });
+    assert_eq!(pauses, 0, "an expired wait never pauses");
+    assert_eq!(answer, Err(ControllerReadinessFailure::PolicyUnavailable));
+}
+
+// The cancellation's change rounds share one deadline. A caller descheduled
+// across it between its outside wait (which took the collection) and its next
+// round begins no owner change and applies nothing, even with the collection
+// free again; and no change is open while it is held there.
+#[test]
+fn change_rounds_check_their_deadline_before_every_new_round() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, _a, _namespace, _work) = admitted_original(dir.path());
+    let (mut pauses, mut rounds, mut applied) = (0, 0, 0);
+    let mut open_between_rounds = None;
+    let mut stamp = None;
+    let answer = with_released_holder(&owner.originals, |release, free| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        owner.change_with_collection_within(
+            deadline,
+            |_| {
+                pauses += 1;
+                if pauses == 1 {
+                    // The holder releases: the outside wait's next attempt
+                    // takes the collection, before the deadline.
+                    release.send(()).unwrap();
+                    free.recv().unwrap();
+                }
+            },
+            || {
+                rounds += 1;
+                open_between_rounds = Some(owner.publication().change_in_progress().is_some());
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                stamp = Some(owner.publication().observe(|| ()).unwrap().1);
+            },
+            |_| {
+                applied += 1;
+                Ok(())
+            },
+        )
+    });
+    assert_eq!(
+        answer,
+        Err(OriginalWriterError::Unavailable),
+        "a round past the deadline is unavailable, even with the collection free"
+    );
+    assert_eq!(applied, 0, "nothing is applied after the deadline");
+    assert_eq!(pauses, 1);
+    assert_eq!(
+        rounds, 1,
+        "the first round never reruns; the second is checked first"
+    );
+    assert_eq!(
+        open_between_rounds,
+        Some(false),
+        "no change is open between rounds"
+    );
+    assert!(
+        stamp.unwrap().check_current().is_ok(),
+        "no owner change begins after the deadline"
+    );
+}
+
+// Hold the source collection on another thread for `hold`, then run `check`
+// on this thread while it is held, and answer what `check` answered.
+fn while_collection_held<T>(
+    owner: &ToolkitOriginalOwner,
+    hold: std::time::Duration,
+    check: impl FnOnce() -> T,
+) -> T {
+    let (held, holding) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let holder = scope.spawn(|| {
+            let originals = owner.originals.lock().unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        let answer = check();
+        holder.join().unwrap();
+        answer
+    })
+}
+
+// A follow-up source checks its admitted parent through the same source
+// collection, under the source writer: a short hold of the collection is
+// waited for, not answered unavailable.
+#[test]
+fn followup_parent_check_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, a, _namespace, _work) = admitted_original(dir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let followup = || {
+        runtime.block_on(owner.retain_followup_source(&a.association, || async {
+            Ok::<_, OriginalWriterError>("published")
+        }))
+    };
+    assert_eq!(followup(), Ok("published"));
+    let answer = while_collection_held(&owner, std::time::Duration::from_millis(300), followup);
+    assert_eq!(
+        answer,
+        Ok("published"),
+        "a held source collection is waited for, not answered unavailable"
+    );
+}
+
+// The writer-side waits share the readers' bound: a holder that outlasts it
+// is answered unavailable at the bound, and a poisoned collection at once.
+#[test]
+fn followup_parent_check_waits_at_most_its_bound_and_refuses_poison_at_once() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, a, _namespace, _work) = admitted_original(dir.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let followup = || {
+        let started = std::time::Instant::now();
+        let answer = runtime.block_on(owner.retain_followup_source(&a.association, || async {
+            Ok::<_, OriginalWriterError>("published")
+        }));
+        (answer, started.elapsed())
+    };
+    let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let (answer, waited) = while_collection_held(
+        &owner,
+        bound + std::time::Duration::from_millis(1500),
+        followup,
+    );
+    assert_eq!(answer, Err(OriginalWriterError::Unavailable));
+    assert!(
+        waited >= bound,
+        "the check waits up to its bound: {waited:?}"
+    );
+    assert!(
+        waited < bound + std::time::Duration::from_millis(1000),
+        "and never past it: {waited:?}"
+    );
+    let poisoned = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _originals = owner.originals.lock().unwrap();
+                panic!("controlled source collection poison");
+            })
+            .join()
+    });
+    assert!(poisoned.is_err());
+    let (answer, waited) = followup();
+    assert_eq!(answer, Err(OriginalWriterError::Unavailable));
+    assert!(
+        waited < std::time::Duration::from_millis(500),
+        "poison answers unavailable at once: {waited:?}"
+    );
+}
+
+async fn cancellable_event(
+    dir: &Path,
+    label: &str,
+) -> (
+    Arc<ToolkitOriginalOwner>,
+    Arc<crate::private_originals::PrivateOriginals>,
+    crate::private_originals::PrivateOriginalRef,
+) {
+    use crate::private_originals::service_grants::tests as access;
+    let owner = initialized(&dir.join("grants"));
+    let adapter = access::adapter(owner.clone(), &dir.join("originals")).await;
+    let event = adapter.retain_event(private_event(label)).await.unwrap();
+    (owner, adapter, event)
+}
+
+// A cancellation takes the source writer before any other guard. Another
+// writer holds it across its own durable write, so the cancellation waits for
+// that writer instead of refusing, and then reads every fact afresh.
+#[tokio::test]
+async fn cancellation_waits_for_a_held_source_writer_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, adapter, event) = cancellable_event(dir.path(), "held-writer").await;
+    let writer = owner.source_writer().await;
+    let (cancelled, ()) = tokio::join!(adapter.record_operation_cancelled(&event), async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(writer);
+    });
+    assert_eq!(
+        cancelled,
+        Ok(()),
+        "a held source writer is waited for, not answered unavailable"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_waits_at_most_its_bound_for_the_source_writer() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (owner, adapter, event) = cancellable_event(dir.path(), "outlasting-writer").await;
+    let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+    let writer = owner.source_writer().await;
+    let started = std::time::Instant::now();
+    let cancelled = adapter.record_operation_cancelled(&event).await;
+    let waited = started.elapsed();
+    drop(writer);
+    assert_eq!(
+        cancelled,
+        Err(crate::private_originals::PrivateOriginalError::Unavailable),
+        "a writer that outlasts the bound is answered unavailable"
+    );
+    assert!(
+        waited >= bound,
+        "the cancellation waits up to its bound: {waited:?}"
+    );
+    assert!(
+        waited < bound + std::time::Duration::from_millis(1000),
+        "and never past it: {waited:?}"
+    );
+    // The refused attempt changed nothing: the same cancellation runs once the
+    // writer is free.
+    adapter.record_operation_cancelled(&event).await.unwrap();
+}
+
+// Under the source writer, the cancellation reads and then changes the source
+// collection: a short hold of the collection is waited for there too.
+#[test]
+fn cancellation_waits_for_a_held_source_collection_instead_of_refusing() {
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (owner, adapter, event) =
+        runtime.block_on(cancellable_event(dir.path(), "held-collection"));
+    let answer = while_collection_held(&owner, std::time::Duration::from_millis(300), || {
+        runtime.block_on(adapter.record_operation_cancelled(&event))
+    });
+    assert_eq!(
+        answer,
+        Ok(()),
+        "a held source collection is waited for, not answered unavailable"
+    );
+}
+
+// A cancellation changes the source collection only inside an owner change of
+// the shared publication, and never waits while that change is open. When
+// another owner takes the collection between the cancellation's read and its
+// change, the change ends unchanged, the collection is waited for outside any
+// change, and the change begins again.
+#[test]
+fn cancellation_waits_for_the_collection_outside_any_owner_change() {
+    use toolkit_store::ToolkitStore;
+    let dir = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (owner, a, namespace, work) = admitted_original(dir.path());
+    let store = toolkit_store::SqliteStore::open(dir.path().join("sources.sqlite")).unwrap();
+    let row = Arc::new(
+        runtime
+            .block_on(store.admit(toolkit_store::AdmissionRequest {
+                key: toolkit_store::StoreKey {
+                    realm: "test-realm".into(),
+                    owner: "cancel-source".into(),
+                    id: "cancel-a".into(),
+                },
+                admission_key: "cancel-a".into(),
+                data: toolkit_store::RecordData {
+                    schema: "test.cancellation-change".into(),
+                    version: 1,
+                    body: serde_json::json!({}),
+                },
+                events: vec![],
+                effects: vec![],
+            }))
+            .unwrap()
+            .record()
+            .clone(),
+    );
+    let (grab, grabbed) = std::sync::mpsc::channel::<()>();
+    let (taken, taking) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (open_at_release, observed) = std::sync::mpsc::channel();
+    let validated = row.clone();
+    // Runs after the cancellation's first read: another owner takes the
+    // collection before the cancellation's change can.
+    let validate = move |_: Option<InputAuthorityAssociation>,
+                         _: Option<Arc<toolkit_store::StoredRecord>>| {
+        grab.send(()).unwrap();
+        taking.recv().unwrap();
+        async move { Ok(validated) }
+    };
+    let answer = std::thread::scope(|scope| {
+        let shared = &owner;
+        let holder = scope.spawn(move || {
+            grabbed.recv().unwrap();
+            let originals = shared.originals.lock().unwrap();
+            taken.send(()).unwrap();
+            released.recv().unwrap();
+            // The cancellation is waiting now; no owner change may be open.
+            open_at_release
+                .send(shared.publication().change_in_progress().is_some())
+                .unwrap();
+            drop(originals);
+        });
+        let (owner, runtime) = (&owner, &runtime);
+        let (realm, original) = (&namespace.realm, &work);
+        let cancel = scope.spawn(move || {
+            runtime.block_on(owner.record_operation_cancelled(
+                realm,
+                original,
+                validate,
+                |stored| async move { Ok(stored) },
+            ))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        cancel.join().unwrap()
+    });
+    assert!(
+        !observed.recv().unwrap(),
+        "no owner change stays open while the cancellation waits for the collection"
+    );
+    assert_eq!(
+        answer,
+        Ok(()),
+        "a collection taken between the read and the change is waited for, not refused"
+    );
+    assert!(
+        owner
+            .originals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(OriginalRecord::bound)
+            .any(|held| Arc::ptr_eq(&held.retained, &a)
+                && matches!(
+                    held.operation,
+                    OriginalOperationDisposition::Cancelled { .. }
+                )),
+        "the cancellation applied its change once it could"
+    );
 }
 
 pub(crate) fn private_event(label: &str) -> crate::private_originals::PrivateAuthenticatedEvent {
@@ -929,6 +1524,7 @@ async fn standing_original_cancel_is_durable_without_revoking_shared_grant_or_co
     let controller = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("controller"),
             principal("agent"),
@@ -1186,6 +1782,7 @@ async fn durable_binding_callback_and_original_cancel_share_the_writer_mutex() {
     let standing = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("standing"),
             principal("agent"),
@@ -1224,18 +1821,20 @@ async fn durable_binding_callback_and_original_cancel_share_the_writer_mutex() {
         _ = waiting => {},
         result = &mut binding => panic!("binding escaped the held durable callback: {result:?}"),
     }
-    // The callback has committed its row but not published. Cancellation must
-    // refuse before it can interleave a second durable write/publication.
-    assert!(matches!(
-        adapter.record_operation_cancelled(&reference).await,
-        Err(crate::private_originals::PrivateOriginalError::Unavailable)
-    ));
+    // The callback has committed its row but not published. Cancellation waits
+    // for the source writer the callback holds: it cannot interleave a second
+    // durable write or publication, and it runs once the binding published.
+    let cancelled = adapter.record_operation_cancelled(&reference);
+    tokio::pin!(cancelled);
+    tokio::select! {
+        result = &mut cancelled => panic!(
+            "cancellation returned while the durable callback held the source writer: {result:?}"
+        ),
+        () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {},
+    }
     release.send(()).unwrap();
     let retained = binding.await.unwrap();
-    adapter
-        .record_operation_cancelled(&reference)
-        .await
-        .unwrap();
+    cancelled.await.unwrap();
     assert!(matches!(
         owner.record_candidate(&retained),
         Err(OriginalWriterError::OperationCancelled)
@@ -1265,7 +1864,7 @@ async fn standing_rebuild_cannot_reclassify_an_original_specific_task_child() {
                 &principal("user"),
                 &principal("frontend"),
                 None,
-                |_| async { Ok(None) }
+                |_| async { Ok(CanonicalBindingObservation::Unretained) }
             )
             .await,
         Err(OriginalWriterError::Conflict)
@@ -1280,7 +1879,7 @@ async fn standing_rebuild_cannot_reclassify_an_original_specific_task_child() {
             &principal("user"),
             &principal("frontend"),
             None,
-            |_| async { Ok(None) },
+            |_| async { Ok(CanonicalBindingObservation::Unretained) },
         )
         .await
         .unwrap();
@@ -1346,6 +1945,18 @@ pub(crate) mod cancellation_store_faults {
         }
         pub(crate) async fn wait_for_held_cancellation(&self) {
             self.entered.notified().await;
+        }
+        /// The SQLite store under the scripted faults.
+        pub(crate) fn sqlite(&self) -> &Arc<SqliteStore> {
+            &self.sqlite
+        }
+        /// Let the held cancellation's worker write, without joining it.
+        pub(crate) fn release_cancellation(&self) {
+            self.release.notify_one();
+        }
+        /// Join the released cancellation's worker.
+        pub(crate) async fn join_cancellation(&self) {
+            self.join_workers().await;
         }
         pub(crate) async fn release_and_join_cancellation(&self) {
             self.release.notify_one();
@@ -1536,6 +2147,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -1546,6 +2158,7 @@ pub(crate) mod cancellation_store_faults {
             let controller = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("controller"),
                     principal("agent"),
@@ -1755,6 +2368,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -1973,6 +2587,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2081,6 +2696,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2184,6 +2800,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2280,6 +2897,7 @@ pub(crate) mod cancellation_store_faults {
         let standing = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("standing"),
                 principal("agent"),
@@ -3234,5 +3852,220 @@ mod canonical_adapter {
         assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
         let refused = if left.is_err() { left } else { right };
         assert!(matches!(refused, Err(PrivateOriginalError::Denied)));
+    }
+}
+
+#[tokio::test]
+async fn workflow_target_binding_preserves_task_isolation_and_native_revocation() {
+    use crate::installed_host::operator_setup::{workflow_mcp, workflow_public};
+    use meerkat_authorization_contracts::constraints::{
+        ActionRef, DelegationDepth, DomainRestriction, ExactRestriction, LifetimeRestriction,
+        ProcessorRef,
+    };
+    for with_public in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("grants");
+        let owner = initialized(&path);
+        let grants = owner.grants();
+        let application = principal("admin");
+        let mut server = meerkat_core::McpServerConfig::stdio(
+            "toolkit-setup",
+            "unused",
+            vec![],
+            Default::default(),
+        );
+        server.access = Some(meerkat_core::mcp_config::McpServerAccess::allowing([
+            "setup_state",
+        ]));
+        let now = owner.clock().now().unwrap().unix_ms;
+        let envelope = ExecutionRestrictions {
+            actions: ExactRestriction::exact([
+                ActionRef {
+                    feature: "mcp".into(),
+                    action: "setup_state".into(),
+                },
+                meerkat_authorization::mcp_installation::mcp_connector_action(
+                    "toolkit-setup",
+                    &meerkat_core::McpConnectorApproval::NoConnector,
+                ),
+                ActionRef {
+                    feature: "toolkit".into(),
+                    action: "catalog-read".into(),
+                },
+                ActionRef {
+                    feature: "toolkit".into(),
+                    action: "setup-public-service-request".into(),
+                },
+            ]),
+            resource_domains: DomainRestriction::owned_by([application.clone()]),
+            processors: ExactRestriction::exact([ProcessorRef::Principal {
+                principal: principal("agent"),
+            }]),
+            audiences: ExactRestriction::exact([AudienceRef::Principal {
+                principal: principal("user"),
+            }]),
+            lifetime: LifetimeRestriction::window(now, now + 60_000),
+            delegation_depth: DelegationDepth::remaining(0),
+        };
+        let mut root_bounds = envelope.clone();
+        root_bounds.delegation_depth = DelegationDepth::remaining(1);
+        let root = grants
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &application,
+                id("workflow-base"),
+                application.clone(),
+                None,
+                root_bounds,
+            )
+            .unwrap();
+        let leaf = grants
+            .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
+                &application,
+                &root,
+                id("workflow-leaf"),
+                principal("agent"),
+                envelope.clone(),
+            )
+            .unwrap();
+        let base = vec![root, leaf];
+        let ids = workflow_mcp::target_ids(&base).unwrap();
+        let target_bounds = workflow_mcp::target_bounds(&application, &envelope, &server).unwrap();
+        let mut target_root = target_bounds.clone();
+        target_root.delegation_depth = DelegationDepth::remaining(1);
+        let root = grants
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &application,
+                ids[0].clone(),
+                application.clone(),
+                None,
+                target_root,
+            )
+            .unwrap();
+        let leaf = grants
+            .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
+                &application,
+                &root,
+                ids[1].clone(),
+                principal("agent"),
+                target_bounds,
+            )
+            .unwrap();
+        let target = vec![root, leaf];
+        let public = if with_public {
+            Some(
+                workflow_public::issue(
+                    &grants,
+                    &application,
+                    &principal("agent"),
+                    None,
+                    &base,
+                    &envelope,
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let mut candidate = claims("workflow-target", &base[0]).candidate().clone();
+        candidate.authority_basis =
+            workflow_mcp::basis_with_public(base, target.clone(), public.clone());
+        let association = InputAuthorityAssociation::new(candidate).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let bind = || {
+            owner.bind_workflow_access_async(
+                association.clone(),
+                source(&association),
+                &association.candidate().requester,
+                &association.candidate().ingress_actor,
+                &application,
+                |observed| {
+                    assert_eq!(observed, association);
+                    async { Ok(CanonicalBindingObservation::Unretained) }
+                },
+            )
+        };
+        let retained = bind().await.unwrap();
+        assert_eq!(retained.association(), &association);
+        assert!(Arc::ptr_eq(&retained, &bind().await.unwrap()));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut other = claims("different-workflow", &target[0]).candidate().clone();
+        other.authority_basis = association.candidate().authority_basis.clone();
+        let other = InputAuthorityAssociation::new(other).unwrap();
+        assert!(matches!(
+            owner
+                .bind_workflow_access_async(
+                    other.clone(),
+                    source(&other),
+                    &other.candidate().requester,
+                    &other.candidate().ingress_actor,
+                    &application,
+                    |_| async {
+                        panic!("a second original must not acquire the existing task leaves")
+                    }
+                )
+                .await,
+            Err(OriginalWriterError::Conflict)
+        ));
+        let machine = machine(&owner);
+        if let Some(public) = &public {
+            {
+                let mut custody = machine.try_controller_grant_mutation().unwrap();
+                grants
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &application,
+                        &public[1],
+                        &mut custody,
+                    )
+                    .unwrap();
+            }
+            // Historical task shape/isolation and base/MCP restoration remain
+            // intact. This is not a new native input admission after revocation.
+            owner.check_historical_task_child(&association).unwrap();
+            for lineage in
+                workflow_mcp::planning_lineages(&association.candidate().authority_basis).unwrap()
+            {
+                grants
+                    .resolve_lineage(lineage, &principal("agent"), None)
+                    .unwrap()
+                    .check_current()
+                    .unwrap();
+            }
+            assert!(
+                matches!(bind().await, Err(OriginalWriterError::Grant(_))),
+                "fresh native binding still resolves every selected target"
+            );
+        }
+        {
+            let mut custody = machine.try_controller_grant_mutation().unwrap();
+            grants
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &application,
+                    &target[0],
+                    &mut custody,
+                )
+                .unwrap();
+        }
+        let after_revoke = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            owner
+                .bind_workflow_access_async(
+                    association.clone(),
+                    source(&association),
+                    &association.candidate().requester,
+                    &association.candidate().ingress_actor,
+                    &application,
+                    |_| async { panic!("revoked target must refuse before source publication") }
+                )
+                .await,
+            Err(OriginalWriterError::Grant(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), after_revoke);
+        assert_eq!(retained.association(), &association);
     }
 }

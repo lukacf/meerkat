@@ -257,6 +257,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for Allowed {
     ) -> Result<(), meerkat_core::OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// Admits every operation: only the delegate's own rules are under test.
@@ -569,6 +573,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for Tiered {
         &self,
         _binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
     ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
         Ok(())
     }
 }

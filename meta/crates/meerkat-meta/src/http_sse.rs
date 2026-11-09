@@ -300,11 +300,26 @@ impl StreamAuthentication {
 }
 
 /// Whether `view` lets its caller watch one agent's events, under the name
-/// the request used and the member that name resolved to.
+/// the request used and the member that name resolved to: neither may be
+/// hidden from the caller ([`agent_stream_hidden`]), and under enforced
+/// access both need `agent.view`.
 fn agent_stream_allowed(view: &AccessView, agent_id: &str, policy_identity: &str) -> bool {
-    !view.enforced()
-        || (view.allows_agent(ACTION_AGENT_VIEW, agent_id)
-            && view.allows_agent(ACTION_AGENT_VIEW, policy_identity))
+    !agent_stream_hidden(view, agent_id, policy_identity)
+        && (!view.enforced()
+            || (view.allows_agent(ACTION_AGENT_VIEW, agent_id)
+                && view.allows_agent(ACTION_AGENT_VIEW, policy_identity)))
+}
+
+/// Whether the agent a stream names is one its caller may not know of
+/// ([`AccessView::hides_agent`]: private to another person), under the name
+/// the request used or the member it resolved to. Such a stream is refused
+/// as a stream of an unknown member, enforced access or not.
+pub(crate) fn agent_stream_hidden(
+    view: &AccessView,
+    agent_id: &str,
+    policy_identity: &str,
+) -> bool {
+    view.hides_agent(agent_id) || view.hides_agent(policy_identity)
 }
 
 /// Whether `view` lets its caller watch the mob-wide streams.
@@ -595,8 +610,9 @@ async fn agent_events_sse_handler(
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let SseCaller {
-        access_view,
+        audience,
         mut authentication,
+        ..
     } = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
@@ -639,15 +655,25 @@ async fn agent_events_sse_handler(
     } else {
         agent_id.clone()
     };
-    prime_sse_access_cache(state.prime_runtime.as_ref(), state.access.as_ref()).await;
-    if let (Some(identity_runtime), Some(controller)) =
-        (state.prime_identity_runtime.as_ref(), state.access.as_ref())
-    {
-        crate::http_console::prime_current_runtime_aliases(identity_runtime, controller).await;
+    // The stream's audience controller: the access controller when one is
+    // wired, else the stream's own, primed either way.
+    let audience_access = audience.controller();
+    prime_sse_access_cache(state.prime_runtime.as_ref(), Some(&audience_access)).await;
+    if let Some(identity_runtime) = state.prime_identity_runtime.as_ref() {
+        crate::http_console::prime_current_runtime_aliases(identity_runtime, &audience_access)
+            .await;
     }
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
-    let mut live_view = access_view.map(LiveAccessView::new);
+    let mut live_view = Some(LiveAccessView::new(audience));
+    // An agent private to another person is answered as a member the
+    // console does not hold.
+    if live_view
+        .as_ref()
+        .is_some_and(|live| agent_stream_hidden(live.view(), &agent_id, &policy_identity))
+    {
+        return Err(http_error(StatusCode::NOT_FOUND, "member_not_found"));
+    }
     // The access rules judge the member the request resolved to as well
     // as the spelling it used: a runtime alias is not a name the rules
     // describe, the member it names is.
@@ -659,7 +685,7 @@ async fn agent_events_sse_handler(
     }
     let reprime_runtime = state.prime_runtime.clone();
     let reprime_identity_runtime = state.prime_identity_runtime.clone();
-    let reprime_access = state.access.clone();
+    let reprime_access = Some(audience_access);
 
     let AgentEventReplay {
         epoch,
@@ -836,15 +862,14 @@ pub(crate) fn mob_events_sse_router_with_access_and_priming(
 /// Refresh the access attribute cache from the live roster and the spawn
 /// registry before an SSE stream applies any per-agent filter, so
 /// label/role/lineage rules resolve without depending on a prior
-/// `/console/experience` call.
+/// `/console/experience` call. `access` is the stream's audience controller
+/// ([`SseCaller::audience`]), primed whether or not access is enforced: the
+/// private-owner rule reads it too.
 async fn prime_sse_access_cache(
     prime_runtime: Option<&MobRuntime>,
     access: Option<&AccessController>,
 ) {
-    if let (Some(runtime), Some(controller)) = (
-        prime_runtime,
-        access.filter(|controller| controller.enabled()),
-    ) {
+    if let (Some(runtime), Some(controller)) = (prime_runtime, access) {
         crate::http_console::prime_access_cache_from_runtime(runtime, controller).await;
     }
 }
@@ -888,6 +913,10 @@ pub(crate) async fn project_structural_envelope_for_console(
 pub(crate) struct ProjectedStructuralEvent {
     envelope: crate::MobStructuralEventEnvelope,
     member: StructuralEventMember,
+    /// The members the event names besides the one it is attributed to: the
+    /// endpoints of a mob-level event, and the members of the run it belongs
+    /// to (its bound members and every member a step dispatched to).
+    endpoints: Vec<String>,
 }
 
 enum StructuralEventMember {
@@ -910,7 +939,7 @@ pub(crate) async fn project_structural_member(
     require_exact_authority: bool,
 ) -> ProjectedStructuralEvent {
     let envelope = projection.envelope;
-    let member = if let Some(identity) = envelope.agent_identity.as_deref() {
+    let mut member = if let Some(identity) = envelope.agent_identity.as_deref() {
         let exact = if let Some(authority) = projection.member_authority.as_ref() {
             crate::http_console::sse_member_authorization_projection(
                 handle,
@@ -948,19 +977,49 @@ pub(crate) async fn project_structural_member(
     } else {
         StructuralEventMember::Mob
     };
-    ProjectedStructuralEvent { envelope, member }
+    let mut endpoints = projection.endpoints;
+    if let Some(run_id) = envelope
+        .run_id
+        .as_deref()
+        .and_then(|run_id| run_id.parse::<meerkat_mob::RunId>().ok())
+        && let Ok(Some(run)) = handle.flow_status(run_id).await
+    {
+        // The members of the run, from its role targets and the mob's
+        // per-target dispatch records. Who a run reached that cannot be read
+        // leaves the event unresolved: it is shown to no one.
+        match crate::run_members::run_members(runtime, handle, &run).await {
+            Ok(members) => endpoints.extend(members),
+            Err(_) => member = StructuralEventMember::Unresolved,
+        }
+    }
+    ProjectedStructuralEvent {
+        envelope,
+        member,
+        endpoints,
+    }
 }
 
 impl ProjectedStructuralEvent {
     /// Decide the event under `access_view` and project its payload. Nothing
     /// here awaits, so a stream decides under the view it settled after its
-    /// last await.
+    /// last await. Any view decides the agents private to another person; an
+    /// enforcing one also decides its rules.
     pub(crate) fn decide(
         self,
         visibility_policy: &dyn ConsoleVisibilityPolicy,
         access_view: Option<&AccessView>,
     ) -> Option<crate::MobStructuralEventEnvelope> {
-        let access_view = access_view.filter(|view| view.enforced());
+        // An event that names a member hidden from the caller (a wiring edge
+        // to it, an instruction for it, a run that reached it) is shown to no
+        // one but that member's audience.
+        if access_view.is_some_and(|view| {
+            self.endpoints
+                .iter()
+                .any(|endpoint| view.hides_agent(endpoint))
+        }) {
+            return None;
+        }
+        let enforced_view = access_view.filter(|view| view.enforced());
         let mut envelope = self.envelope;
         let policy_identity = match self.member {
             StructuralEventMember::Mob => {
@@ -975,7 +1034,10 @@ impl ProjectedStructuralEvent {
                 exact.identity
             }
             StructuralEventMember::ByAlias { identity, visible } => {
-                if access_view.is_some() || !visible {
+                if enforced_view.is_some()
+                    || access_view.is_some_and(|view| view.hides_agent(&identity))
+                    || !visible
+                {
                     return None;
                 }
                 identity
@@ -995,6 +1057,8 @@ impl ProjectedStructuralEvent {
 
 /// Read the live roster into the shared attribute cache for the structural
 /// stream: through the runtime when there is one, else through the handle.
+/// `access` is the stream's audience controller, primed whether or not
+/// access is enforced.
 async fn prime_structural_access_cache(
     runtime: Option<&MobRuntime>,
     handle: &MobHandle,
@@ -1002,7 +1066,7 @@ async fn prime_structural_access_cache(
 ) {
     if runtime.is_some() {
         prime_sse_access_cache(runtime, access).await;
-    } else if let Some(controller) = access.filter(|controller| controller.enabled()) {
+    } else if let Some(controller) = access {
         crate::http_console::prime_access_cache_from_handle(handle, controller).await;
     }
 }
@@ -1014,8 +1078,9 @@ async fn mob_events_sse_handler(
     uri: Uri,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let SseCaller {
-        access_view,
+        audience,
         mut authentication,
+        ..
     } = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
@@ -1024,16 +1089,20 @@ async fn mob_events_sse_handler(
         &uri,
     )
     .map_err(|()| sse_unauthorized("mob events stream requires a valid auth token"))?;
-    prime_sse_access_cache(state.prime_runtime.as_ref(), state.access.as_ref()).await;
+    // The stream's audience controller: the access controller when one is
+    // wired, else the stream's own, primed either way.
+    let audience_access = audience.controller();
+    prime_sse_access_cache(state.prime_runtime.as_ref(), Some(&audience_access)).await;
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
-    let mut live_view = access_view.map(LiveAccessView::new);
+    let mut live_view = Some(LiveAccessView::new(audience));
     // `mob.observe` gates access to the merged stream surface. The events
     // flowing through it carry the same rich per-agent payload as
     // `/agents/{id}/events`, so each one is still filtered by `agent.view`
     // on its source — otherwise a `mob.observe` grant would silently defeat
     // a per-agent view denial. "Observe everything" is expressed by also
-    // granting `agent.view` on `*`.
+    // granting `agent.view` on `*`. The events of an agent private to
+    // another person are filtered out whether or not access is enforced.
     if live_view
         .as_ref()
         .is_some_and(|live| !mob_stream_allowed(live.view()))
@@ -1044,7 +1113,7 @@ async fn mob_events_sse_handler(
     // for members spawned AFTER the one-time subscribe prime (the view reads
     // attributes through the controller's shared cache).
     let reprime_runtime = state.prime_runtime.clone();
-    let reprime_access = state.access.clone();
+    let reprime_access = Some(audience_access);
     let visibility_runtime = state.prime_runtime.clone();
     let visibility_policy = state.visibility_policy;
     let mut router_handle = (state.subscribe_fn)().await.map_err(|err| {
@@ -1090,10 +1159,6 @@ async fn mob_events_sse_handler(
             let Some(attributed) = attributed else {
                 continue;
             };
-            let enforced = live_view
-                .as_ref()
-                .and_then(LiveAccessView::enforced)
-                .is_some();
             // Decode the comms-safe roster member id back to the public
             // alias space: SDK `EventStream` consumers filter by alias, and
             // fail-closed per-agent ABAC view rules are written against
@@ -1110,7 +1175,9 @@ async fn mob_events_sse_handler(
                 .insert(authorization_alias.clone(), concrete_source.clone())
                 .as_deref()
                 != Some(concrete_source.as_str());
-            if enforced && source_changed {
+            // Every stream decides per agent (the private-owner rule binds
+            // without enforced access too), so a new source is primed.
+            if source_changed {
                 prime_sse_access_cache(reprime_runtime.as_ref(), reprime_access.as_ref()).await;
             }
             let exact = if let Some(runtime) = visibility_runtime.as_ref() {
@@ -1148,8 +1215,9 @@ async fn mob_events_sse_handler(
                 break;
             }
             let stream_view = live_view.as_ref().and_then(LiveAccessView::enforced);
+            let audience_view = live_view.as_ref().map(LiveAccessView::view);
             let policy_identity = if let Some(exact) = exact {
-                if !sse_access_allows_agent_attributes(stream_view, &exact.attributes)
+                if !sse_access_allows_agent_attributes(audience_view, &exact.attributes)
                     || !exact.visible
                 {
                     continue;
@@ -1159,8 +1227,11 @@ async fn mob_events_sse_handler(
                 // The low-level AllowAll router predates runtime-aware
                 // projection and has no roster handle. Preserve that default
                 // compatibility, but any enforced access view without exact
-                // roster authority must fail closed.
-                if stream_view.is_some() {
+                // roster authority must fail closed, and an agent private to
+                // another person stays hidden.
+                if stream_view.is_some()
+                    || audience_view.is_some_and(|view| view.hides_agent(&authorization_alias))
+                {
                     continue;
                 }
                 authorization_alias.clone()
@@ -1707,6 +1778,7 @@ async fn workgraph_facts_sse_handler(
     let SseCaller {
         access_view,
         authentication,
+        ..
     } = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
@@ -1879,8 +1951,10 @@ pub(crate) fn sse_access_context(
     uri: &Uri,
 ) -> Result<SseCaller, ()> {
     let Some(decisions) = decisions else {
+        let audience = sse_audience_view(access, None, None);
         return Ok(SseCaller {
-            access_view: access.map(|controller| controller.view_for_subject(None)),
+            access_view: access.map(|_| audience.clone()),
+            audience,
             authentication: None,
         });
     };
@@ -1913,13 +1987,35 @@ pub(crate) fn sse_access_context(
             crate::runtime::resolve_authorized_console_caller_from_token(decisions, fences, &token)
         })
     };
-    let access_view = access.map(|controller| {
-        controller.view_for_subject(caller.as_ref().map(|caller| caller.auth.email.as_str()))
-    });
+    let private_owner_key = caller
+        .as_ref()
+        .and_then(|caller| caller.human.as_ref())
+        .map(crate::http_console::console_person_private_owner_key);
+    let audience = sse_audience_view(
+        access,
+        caller.as_ref().map(|caller| caller.auth.email.as_str()),
+        private_owner_key.as_deref(),
+    );
     Ok(SseCaller {
-        access_view,
+        access_view: access.map(|_| audience.clone()),
+        audience,
         authentication: caller.map(|caller| StreamAuthentication::new(caller.verification)),
     })
+}
+
+/// The agent audience of a stream's caller: `access`'s view when an access
+/// controller is wired, else a view with no access configuration that only
+/// the private-owner rule decides ([`crate::access::PRIVATE_TO_LABEL`]),
+/// one per stream.
+fn sse_audience_view(
+    access: Option<&AccessController>,
+    subject: Option<&str>,
+    private_owner_key: Option<&str>,
+) -> AccessView {
+    access
+        .cloned()
+        .unwrap_or_else(AccessController::audience_only)
+        .view_for_caller(subject, private_owner_key)
 }
 
 /// The caller of an SSE route, as its request authenticated it.
@@ -1927,6 +2023,11 @@ pub(crate) struct SseCaller {
     /// The caller's [`AccessView`] when an [`AccessController`] is wired
     /// (an anonymous view on open routes).
     pub(crate) access_view: Option<AccessView>,
+    /// The caller's agent audience, always present: `access_view` when an
+    /// access controller is wired, else a view with no access configuration.
+    /// Every per-agent decision of a stream reads it: it hides the agents
+    /// private to another person, enforced access or not.
+    pub(crate) audience: AccessView,
     /// The caller's authentication when a token identified the caller: a
     /// stream ends once the verifier no longer accepts that token.
     pub(crate) authentication: Option<StreamAuthentication>,
@@ -1961,8 +2062,9 @@ async fn mob_structural_events_sse_handler(
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
     let SseCaller {
-        access_view,
+        audience,
         mut authentication,
+        ..
     } = sse_access_context(
         state.decisions.as_ref(),
         &state.session_fences,
@@ -1971,18 +2073,18 @@ async fn mob_structural_events_sse_handler(
         &uri,
     )
     .map_err(|()| sse_unauthorized("mob_events stream requires a valid auth token"))?;
-    if state.prime_runtime.is_some() {
-        prime_sse_access_cache(state.prime_runtime.as_ref(), state.access.as_ref()).await;
-    } else if let Some(controller) = state
-        .access
-        .as_ref()
-        .filter(|controller| controller.enabled())
-    {
-        crate::http_console::prime_access_cache_from_handle(&state.handle, controller).await;
-    }
+    // The stream's audience controller: the access controller when one is
+    // wired, else the stream's own, primed either way.
+    let audience_access = audience.controller();
+    prime_structural_access_cache(
+        state.prime_runtime.as_ref(),
+        &state.handle,
+        Some(&audience_access),
+    )
+    .await;
     // The stream decides under the policy committed before each event, not
     // the one the request read; the gate below reads the same view.
-    let mut live_view = access_view.map(LiveAccessView::new);
+    let mut live_view = Some(LiveAccessView::new(audience));
     // Structural events span the whole mob: require the mob-wide
     // observation grant, mirroring `meta/mob_events/query`. Envelopes
     // attributed to a specific agent are additionally filtered by
@@ -2040,7 +2142,7 @@ async fn mob_structural_events_sse_handler(
     // for members spawned AFTER the one-time subscribe prime.
     let reprime_runtime = state.prime_runtime.clone();
     let reprime_handle = state.handle.clone();
-    let reprime_access = state.access.clone();
+    let reprime_access = Some(audience_access);
     let visibility_handle = state.handle.clone();
     let visibility_policy = state.visibility_policy;
     let require_exact_authority = state.require_exact_authority;
@@ -2078,10 +2180,6 @@ async fn mob_structural_events_sse_handler(
             let Some(event) = event else {
                 continue;
             };
-            let enforced = live_view
-                .as_ref()
-                .and_then(LiveAccessView::enforced)
-                .is_some();
             let projection = store.project_event_with_authority(&event).await;
             if !crate::unified_runtime::mob_events::envelope_matches(&projection.envelope, &query) {
                 continue;
@@ -2094,14 +2192,14 @@ async fn mob_structural_events_sse_handler(
                 // concrete member generation. Refresh the live projection for
                 // every attributed event before deciding; the subsequent
                 // visibility lookup fails closed if the alias disappeared.
-                if enforced {
-                    prime_structural_access_cache(
-                        reprime_runtime.as_ref(),
-                        &reprime_handle,
-                        reprime_access.as_ref(),
-                    )
-                    .await;
-                }
+                // Every stream decides per agent (the private-owner rule
+                // binds without enforced access too).
+                prime_structural_access_cache(
+                    reprime_runtime.as_ref(),
+                    &reprime_handle,
+                    reprime_access.as_ref(),
+                )
+                .await;
             }
             let projected = project_structural_member(
                 &visibility_handle,
@@ -2131,7 +2229,7 @@ async fn mob_structural_events_sse_handler(
             }
             let Some(envelope) = projected.decide(
                 visibility_policy.as_ref(),
-                live_view.as_ref().and_then(LiveAccessView::enforced),
+                live_view.as_ref().map(LiveAccessView::view),
             ) else {
                 continue;
             };

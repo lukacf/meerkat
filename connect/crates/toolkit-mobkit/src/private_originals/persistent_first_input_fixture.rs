@@ -97,6 +97,29 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         (fixture, store, continuation.unwrap())
     }
 
+    /// Keep the real restored member seated without the fixture's controller
+    /// pin read, which would otherwise require an already materialized actor.
+    pub(crate) async fn reopen_seated_durable_continuation(
+        retained: DurableFirstInput,
+    ) -> (
+        Self,
+        Arc<dyn meerkat_runtime::RuntimeStore>,
+        Arc<crate::installed_host::acquisition::InstalledNativeContinuation>,
+    ) {
+        let (fixture, store, _, continuation) = Self::construct_persistent_reopen_mode(
+            true,
+            Some(retained),
+            None,
+            false,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await;
+        (fixture, store, continuation.unwrap())
+    }
+
     pub(crate) async fn reopen_durable_continuation_with_source(
         retained: DurableFirstInput,
         decorate: crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
@@ -136,16 +159,6 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             configuration(&first.scope.realm)
         }));
         let session = first.session.clone();
-        // The restore below takes the grant store's lease, which the first
-        // owners hold until their last reference drops. Their close settles
-        // the host, but tasks of the closed runtime can still hold them for a
-        // few milliseconds after the drops below, so they are watched.
-        let first_grants = Arc::downgrade(&first.source.owner.grants());
-        let first_owner = Arc::downgrade(&first.source.owner);
-        let first_source = Arc::downgrade(&first.source);
-        let first_machine = Arc::downgrade(&first.machine);
-        let first_service = Arc::downgrade(&first.service);
-        let first_store = Arc::downgrade(&first.store);
         let closed = first.close_durable_owners().await;
         drop(continuation);
         drop(history);
@@ -154,24 +167,6 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             closed.is_ok(),
             "initial persistent owners must settle: {closed:?}"
         );
-        let held = || {
-            first_grants.strong_count()
-                + first_owner.strong_count()
-                + first_source.strong_count()
-                + first_machine.strong_count()
-                + first_service.strong_count()
-                + first_store.strong_count()
-        };
-        // A host close does not yet guarantee that the grant store's lease is released at once.
-        let deadline = tokio::time::Instant::now() + WAIT;
-        while held() > 0 {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the initial owners must drop once their close settled: {} references held",
-                held()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
         let config = match config {
             Ok(config) => config,
             Err(payload) => std::panic::resume_unwind(payload),
@@ -222,11 +217,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         use meerkat_toolkit::host_lifetime::control::{
             HostCloseReason, HostCloseState, PrivateHostLifetimeControl,
         };
+        // The product's close order: custody recovery stops as the close
+        // begins, and its last round is joined, within the product's bound,
+        // before the native join and the final release. A test that joins
+        // the recovery itself checks its result; the close only waits for it.
+        self.source.stop_custody_recovery();
         let close = self
             ._lifetime
             .begin_close_activation(HostCloseReason::Shutdown)
             .map_err(|error| error.to_string());
         let native = self.shutdown().await;
+        let _recovery = tokio::time::timeout(
+            crate::host_gateway::CLOSE_JOIN_BOUND,
+            self.source.join_custody_recovery(),
+        )
+        .await;
         let local = match close {
             Ok(close) => self
                 ._lifetime
@@ -240,7 +245,13 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         if local.state != HostCloseState::Settled {
             return Err(format!("host close: {local:?}"));
         }
-        Ok(())
+        // Every join of this host returned, its custody recovery's, its
+        // native runtime's and its lifetime's: the close's final release
+        // ends the native custody.
+        self._lifetime
+            .release_native_custody()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub(super) async fn publish_fixture_controller(
@@ -332,6 +343,40 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         Option<DurableFirstInput>,
         Option<Arc<crate::installed_host::acquisition::InstalledNativeContinuation>>,
     ) {
+        Self::construct_persistent_reopen_mode(
+            durable,
+            retained,
+            decorate,
+            human_policy,
+            console_human,
+            observations,
+            source_store,
+            true,
+        )
+        .await
+    }
+
+    async fn construct_persistent_reopen_mode(
+        durable: bool,
+        retained: Option<DurableFirstInput>,
+        decorate: Option<AttachmentModelDecorator>,
+        human_policy: bool,
+        console_human: Option<meerkat_core::PrincipalRef>,
+        observations: Option<NativeIngressObservations>,
+        source_store: Option<
+            crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
+        >,
+        publish_controller: bool,
+    ) -> (
+        Self,
+        Arc<dyn meerkat_runtime::RuntimeStore>,
+        Option<DurableFirstInput>,
+        Option<Arc<crate::installed_host::acquisition::InstalledNativeContinuation>>,
+    ) {
+        assert!(
+            publish_controller || (durable && retained.is_some()),
+            "seat-only mode requires an actual durable reopen"
+        );
         let mut opened = None;
         let mut owners = None;
         let built = std::panic::AssertUnwindSafe(tokio::time::timeout(
@@ -346,6 +391,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 console_human,
                 observations,
                 source_store,
+                publish_controller,
             )),
         ))
         .catch_unwind()
@@ -395,6 +441,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         source_store: Option<
             crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
         >,
+        publish_controller: bool,
     ) -> (
         Self,
         Arc<dyn meerkat_runtime::RuntimeStore>,
@@ -593,8 +640,14 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             None
         } else {
             let member = MemberIdentity::from(MEMBER);
+            // The identity label marks this spawn as the identity's member, as
+            // Meta marks its own: registering the identity then adopts the
+            // member as the identity's entry, where an unmarked one is refused
+            // as a worker holding the name.
             handle
-                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()))
+                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()).with_labels(
+                    BTreeMap::from([("agent_identity".to_owned(), MEMBER.to_owned())]),
+                ))
                 .await
                 .unwrap();
             let session = handle
@@ -665,7 +718,10 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         }
         if let Some(session) = &live_session {
             // Core already owns this spawned member and session; registration adds its roster spec.
-            runtime.register(member_spec.clone()).await;
+            runtime
+                .register(member_spec.clone())
+                .await
+                .expect("the identity registers");
             let status = runtime.status(&identity).await.unwrap();
             assert_eq!(status.state, IdentityLifecycleState::Active);
             assert_eq!(status.session_id, Some(session.clone()));
@@ -732,15 +788,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             }
             // Each activation publishes the current actor's actual pin. No
             // controller witness is retained across the joined close/reopen.
-            // The roster pass seats the identity without building it, so the
-            // member is woken first for its actor to exist.
-            native
-                .identity_runtime()
-                .unwrap()
-                .materialize(&identity)
-                .await
-                .unwrap();
-            Self::publish_fixture_controller(&service, &machine, &session).await;
+            if publish_controller {
+                let scope = native
+                    .identity_runtime()
+                    .unwrap()
+                    .materialize_tracked(&identity)
+                    .await
+                    .unwrap()
+                    .expect("the live fixture requires a session-backed member");
+                assert_eq!(
+                    scope.session_id(),
+                    &session,
+                    "fixture materialization keeps the selected session"
+                );
+                Self::publish_fixture_controller(&service, &machine, &session).await;
+            }
             session
         } else {
             native.attach_identity_first_context(context);

@@ -1818,3 +1818,44 @@ async fn a_stale_ready_verdict_after_bound_rolls_the_reload_back() {
         Some(mob_dsl::MemberMaterializationPhase::Dormant)
     );
 }
+
+/// A reload of a member built in this process (the warm recipe) whose
+/// rebuild the session builder refuses with structured data: the restore
+/// failure the reload answers keeps that data, and so does the refusal Core
+/// mints from the member's record afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reload_whose_rebuild_fails_with_structured_data_keeps_it() {
+    let mob = create_isolation_mob(2).await;
+    mob.degrade_member(0).await;
+    mob.store.fail_commit(mob.session(0), false);
+    mob.service
+        .set_create_session_failure_error(mob.session(0), host_build_refusal)
+        .await;
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+    let failure = tokio::time::timeout(
+        Duration::from_secs(5),
+        mob.handle.reload_member_registration(mob.member(0)),
+    )
+    .await
+    .expect("a refused rebuild settles the reload")
+    .expect_err("a refused rebuild cannot be reloaded");
+    assert!(
+        matches!(failure, MobError::MemberRestoreFailed { .. }),
+        "the reload answers the member's restore failure: {failure:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&failure),
+        expected,
+        "the reload's answer keeps the builder's data"
+    );
+    let refused = match mob.handle.member(mob.member(0)).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    };
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "the refusal minted from the member's record keeps it"
+    );
+}

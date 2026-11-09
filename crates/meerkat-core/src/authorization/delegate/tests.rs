@@ -33,6 +33,10 @@ impl PreparedOperationAuthorization for Allowed {
     ) -> Result<(), OperationObservationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// Allows every operation and records each model operation it prepares.

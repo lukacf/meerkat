@@ -153,6 +153,22 @@ pub enum GrantTarget {
         route: String,
         capability: meerkat_core::ServerToolKind,
     },
+    /// Holds of a decision for the approver id `approver_id`: the target of
+    /// the owner-produced `DecisionHold` (an access offer). A hold asks a
+    /// person for a decision and grants nothing; its lineage covers no
+    /// other operation, and the base never covers a hold. A
+    /// [`WorkAuthorityBasis::GrantLineage`] basis's one lineage covers a
+    /// hold too, for any approver id: the approver id binds nothing there,
+    /// and Core derives it (the offering grant's child rule), never the
+    /// model.
+    DecisionHold {
+        approver_id: meerkat_core::approval::decision::ApproverId,
+    },
+    /// Replies of an approval-carried work to its own requester: the target
+    /// of the owner-produced `RequesterReply`. Its authority is Core's rule
+    /// for that work, never a grant lineage: no basis selects one, and
+    /// outside an approval-carried work it is denied.
+    RequesterReply,
 }
 
 /// One target's selected exact lineage.
@@ -217,6 +233,10 @@ impl WorkAuthorityBasis {
                                         | meerkat_core::ServerToolKind::GoogleSearch
                                 )
                         }
+                        // The approver id is validated where it is built.
+                        GrantTarget::DecisionHold { .. } => true,
+                        // A reply's authority is never a selected lineage.
+                        GrantTarget::RequesterReply => false,
                     };
                     if !named {
                         return Err(AssociationError::Shape);
@@ -417,6 +437,21 @@ impl InputAuthorityAssociation {
         )
     }
 
+    /// This association's [`AssociationDigest`]: SHA-256 over
+    /// [`Self::canonical_bytes`], under [`ASSOCIATION_DIGEST_VERSION`]. It is
+    /// the one digest function a governed submission's receipt names its
+    /// association by; hosts call it and never compute their own.
+    ///
+    /// # Errors
+    /// As [`Self::canonical_bytes`].
+    pub fn digest(&self) -> Result<AssociationDigest, AssociationError> {
+        use sha2::Digest as _;
+        let bytes = self.canonical_bytes()?;
+        Ok(AssociationDigest {
+            sha256: sha2::Sha256::digest(&bytes).into(),
+        })
+    }
+
     /// Complete qualified native index data. Hashing it may choose an index
     /// bucket, but actual replay must compare every field and the full exact
     /// association/content/semantic binding separately. A key is not read access.
@@ -460,6 +495,96 @@ impl QualifiedInputKey {
             self,
             MAX_ASSOCIATION_BYTES,
         )
+    }
+}
+
+/// The version of [`AssociationDigest`] this build writes and reads.
+pub const ASSOCIATION_DIGEST_VERSION: u8 = 1;
+
+/// The digest a governed submission names its authority association by:
+/// SHA-256 over the association's canonical V1 bytes
+/// ([`InputAuthorityAssociation::canonical_bytes`]), under
+/// [`ASSOCIATION_DIGEST_VERSION`] ([`InputAuthorityAssociation::digest`]).
+///
+/// It identifies an association. It is no permission and no evidence that
+/// anything was admitted. Its text form is `v1:` and 64 lowercase hex
+/// digits. A reader refuses any other version or shape: a digest of an
+/// unknown version is never read as another association, nor as none.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AssociationDigest {
+    sha256: [u8; 32],
+}
+
+/// Why a text is no [`AssociationDigest`] this build reads.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AssociationDigestError {
+    /// A digest of a version this build does not know.
+    #[error("unknown association digest version {0:?}")]
+    UnknownVersion(String),
+    /// Not a digest.
+    #[error("malformed association digest")]
+    Malformed,
+}
+
+impl AssociationDigest {
+    /// The version this digest was computed under.
+    #[must_use]
+    pub fn version(&self) -> u8 {
+        ASSOCIATION_DIGEST_VERSION
+    }
+
+    /// Read a digest's text form, refusing any version but
+    /// [`ASSOCIATION_DIGEST_VERSION`].
+    ///
+    /// # Errors
+    /// [`AssociationDigestError::UnknownVersion`] for another version,
+    /// [`AssociationDigestError::Malformed`] for anything else.
+    pub fn parse(text: &str) -> Result<Self, AssociationDigestError> {
+        let (version, hex) = text
+            .split_once(':')
+            .ok_or(AssociationDigestError::Malformed)?;
+        if version != "v1" {
+            return Err(AssociationDigestError::UnknownVersion(version.to_string()));
+        }
+        if hex.len() != 64 || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(AssociationDigestError::Malformed);
+        }
+        let mut sha256 = [0u8; 32];
+        for (byte, pair) in sha256.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+            let pair = std::str::from_utf8(pair).map_err(|_| AssociationDigestError::Malformed)?;
+            *byte = u8::from_str_radix(pair, 16).map_err(|_| AssociationDigestError::Malformed)?;
+        }
+        Ok(Self { sha256 })
+    }
+}
+
+impl fmt::Display for AssociationDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("v1:")?;
+        for byte in self.sha256 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for AssociationDigest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AssociationDigest({self})")
+    }
+}
+
+impl Serialize for AssociationDigest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for AssociationDigest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1711,5 +1836,100 @@ mod tests {
             InputAuthorityAssociation::new(unordered),
             Err(AssociationError::Shape)
         );
+    }
+
+    /// The association digest is a function of the canonical bytes: the
+    /// same association gives the same digest, any field change gives
+    /// another, its text form round-trips, and a reader refuses an unknown
+    /// version or shape instead of reading it as some association or none.
+    #[test]
+    fn the_association_digest_is_versioned_and_follows_every_field() {
+        let digest = |candidate: InputAuthorityAssociationCandidate| {
+            InputAuthorityAssociation::new(candidate)
+                .expect("association")
+                .digest()
+                .expect("digest")
+        };
+        let base = digest(candidate());
+        assert_eq!(
+            base,
+            digest(candidate()),
+            "the same association, the same digest"
+        );
+        assert_eq!(base.version(), ASSOCIATION_DIGEST_VERSION);
+        let changes: &[(&str, fn(&mut InputAuthorityAssociationCandidate))] = &[
+            ("requester", |c| {
+                c.requester = principal("another-requester");
+            }),
+            ("ingress actor", |c| {
+                c.ingress_actor = principal("another-actor");
+            }),
+            ("represented subject", |c| {
+                c.represented_subject = Some(principal("represented"));
+            }),
+            ("original authentication", |c| {
+                c.original_authentication = evidence("another-authentication");
+            }),
+            ("logical executor", |c| {
+                c.logical_executor = principal("another-executor");
+            }),
+            ("target context", |c| {
+                c.target.context = id("another-context");
+            }),
+            ("target generation", |c| c.target.context_generation = 1),
+            ("original work", |c| {
+                c.original_work.work = id("another-work");
+            }),
+            ("root event", |c| c.root_event = evidence("another-event")),
+            ("contributing work", |c| c.contributing_work.clear()),
+            ("authority basis", |c| {
+                fixture_lineage_mut(c)[0].issued_revision = 2;
+            }),
+            ("controller model", |c| {
+                c.controller_model = Some(controller_selection("controller"));
+            }),
+            ("source observations", |c| c.source_observations.clear()),
+            ("occurrence scope", |c| {
+                c.ingress_namespace.occurrence_scope = id("another-occurrence");
+            }),
+        ];
+        for &(field, change) in changes {
+            let mut changed = candidate();
+            change(&mut changed);
+            assert_ne!(
+                digest(changed),
+                base,
+                "changing the {field} changes the digest"
+            );
+        }
+
+        let text = base.to_string();
+        assert!(text.starts_with("v1:") && text.len() == 3 + 64, "{text}");
+        assert_eq!(AssociationDigest::parse(&text), Ok(base));
+        let wire = serde_json::to_value(base).expect("wire");
+        assert_eq!(wire, serde_json::Value::String(text.clone()));
+        assert_eq!(
+            serde_json::from_value::<AssociationDigest>(wire).expect("decode"),
+            base
+        );
+        assert_eq!(
+            AssociationDigest::parse(&text.replacen("v1:", "v2:", 1)),
+            Err(AssociationDigestError::UnknownVersion("v2".into())),
+            "an unknown version is refused, never read as another association"
+        );
+        for malformed in [
+            "",
+            "v1",
+            "v1:",
+            &text[..text.len() - 1],
+            &text.to_uppercase().replacen("V1:", "v1:", 1),
+        ] {
+            assert_eq!(
+                AssociationDigest::parse(malformed),
+                Err(AssociationDigestError::Malformed),
+                "{malformed:?}"
+            );
+        }
+        assert!(serde_json::from_str::<AssociationDigest>("\"v9:00\"").is_err());
     }
 }

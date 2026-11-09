@@ -62,6 +62,28 @@ impl Drop for RefreshCaseCleanup {
     }
 }
 
+// The new session's runtime loop takes the session driver on its first pass
+// after the attachment commits. A release that meets that pass is refused by
+// native controller custody with a typed Busy that changed nothing. Wait it
+// out as `meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated`
+// does: retry exactly that refusal, within the test's bound.
+async fn release_lease_within_bound(authority: &GeneratedAuthLeaseHandle, lease: &LeaseKey) {
+    let deadline = tokio::time::Instant::now() + BOUND;
+    loop {
+        match authority.release_lease(lease) {
+            Ok(()) => return,
+            Err(error)
+                if error.controller_readiness_refusal()
+                    == Some(ControllerReadinessFailure::Busy)
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("lease release refused: {error:?}"),
+        }
+    }
+}
+
 async fn cloud_token(
     State(endpoint): State<Arc<CloudEndpoint>>,
     Form(form): Form<HashMap<String, String>>,
@@ -338,6 +360,7 @@ async fn exercise_expiry(case: CredentialCase) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -347,6 +370,7 @@ async fn exercise_expiry(case: CredentialCase) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("operation"),
             principal("executor"),
@@ -395,6 +419,7 @@ async fn exercise_expiry(case: CredentialCase) {
         unconfigured
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -474,7 +499,7 @@ async fn exercise_expiry(case: CredentialCase) {
         )
         .unwrap();
     if matches!(case, CredentialCase::Released) {
-        authority.release_lease(&lease).unwrap();
+        release_lease_within_bound(&authority, &lease).await;
     }
     let expected = match case {
         CredentialCase::Current => CredentialUseDisposition::Authorized,

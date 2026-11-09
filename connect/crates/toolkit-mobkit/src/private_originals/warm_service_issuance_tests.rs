@@ -174,7 +174,7 @@ async fn approved_source(
     }
 }
 
-async fn partial_case(mismatched_child: bool) {
+async fn partial_case(mismatched_child: bool, close_before_cleanup: bool) {
     let script = acquisition_denial::Script::paused_for_helper_entry();
     let report = Report::new(script.tools().result_tool());
     let (fixture, history) = Fixture::for_warm_helper_report(script.clone(), report.clone()).await;
@@ -206,7 +206,7 @@ async fn partial_case(mismatched_child: bool) {
         let find_id = EvidenceId::new(format!("original-configured-setup-{}", key.id)).unwrap();
         let native = fixture.lifetime().selected_policy().native_host.as_ref().unwrap();
         let application = native.grant_administrator.clone();
-        let route = source.route(&b.route).unwrap();
+        let route = &source.route(&b.route).unwrap();
         let mut drifted = setup.clone();
         drifted.helper.audience = meerkat_authorization_contracts::constraints::AudienceRef::Principal {
             principal: route.logical_executor.clone(),
@@ -222,7 +222,7 @@ async fn partial_case(mismatched_child: bool) {
                 std::slice::from_ref(&setup.configured.capability.parent), &application,
                 route.represented_subject.as_ref()).unwrap().restrictions().clone();
             wrong.delegation_depth = meerkat_authorization_contracts::constraints::DelegationDepth::remaining(0);
-            source.owner.grants().issue_child(&application, &setup.configured.capability.parent,
+            source.owner.grants().issue_child(&meerkat_core::AdmissionGuard::none(), &application, &setup.configured.capability.parent,
                 find_id.clone(), route.logical_executor.clone(), wrong).unwrap();
         }
         let sql = rusqlite::Connection::open(&fixture.source_path).unwrap();
@@ -243,6 +243,56 @@ async fn partial_case(mismatched_child: bool) {
         source.record_task_group_cancelled(&b).await.unwrap();
         assert!(!source.decode_record(&fixture.store.get(&source.key(fixture.original_reference()).unwrap()).await.unwrap().unwrap(),
             fixture.original_reference()).unwrap().operation_cancelled, "A remains unrelated to B-only cleanup");
+        if close_before_cleanup {
+            use meerkat_toolkit::host_lifetime::control::{HostCloseReason, PrivateHostLifetimeControl};
+            assert!(!mismatched_child);
+            let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
+                authority: route.source_authority.clone(), work: b.original.clone(),
+            };
+            let expected = vec![issued.grant_id.as_str().to_owned()];
+            let mut service_lineages = Vec::new();
+            for grant in record.approved_task.as_ref().unwrap().grants() {
+                service_lineages.push(source.service_grant_lineage(grant, &original).await.unwrap());
+            }
+            let journal = fixture.source_path.with_file_name("grants.jsonl");
+            let before_cleanup = std::fs::read(&journal).unwrap();
+            fixture.lifetime().begin_close_activation(HostCloseReason::Shutdown).unwrap();
+            assert!(source.service_operator_setup(fixture.lifetime().clone()).is_err());
+            assert!(source.issue_service_setup(&b, &setup, Some(&login)).await.is_err(),
+                "close permits exact compensation, never new setup issuance");
+            assert_eq!(std::fs::read(&journal).unwrap(), before_cleanup);
+            {
+                let _writer = source.owner.try_source_writer().unwrap();
+                let saved = fixture.store.get(&key).await.unwrap().unwrap();
+                source.prepare_service_setup_cleanup(&b, &saved).await.unwrap().revoke(source).unwrap();
+            }
+            let reconciled = source.decode_record(&fixture.store.get(&key).await.unwrap().unwrap(), &b).unwrap();
+            assert_eq!(reconciled.service_setup_children.len(), 1,
+                "lost child observation is recovered from actual native attenuation");
+            let after_cleanup = std::fs::read(&journal).unwrap();
+            assert!(after_cleanup.starts_with(&before_cleanup));
+            let actual: Vec<_> = std::str::from_utf8(&after_cleanup[before_cleanup.len()..]).unwrap()
+                .lines().map(|line| {
+                    let row: serde_json::Value = serde_json::from_str(line).unwrap();
+                    row["change"]["kind"]["revoked"]["grant_id"].as_str()
+                        .expect("compensation only revokes its exact native grants").to_owned()
+                }).collect();
+            assert_eq!(actual, expected);
+            assert!(source.owner.grants().resolve_lineage(
+                &[setup.configured.capability.parent.clone(), issued.clone()],
+                &route.logical_executor, route.represented_subject.as_ref()).is_err());
+            {
+                let _writer = source.owner.try_source_writer().unwrap();
+                let saved = fixture.store.get(&key).await.unwrap().unwrap();
+                source.prepare_service_setup_cleanup(&b, &saved).await.unwrap().revoke(source).unwrap();
+            }
+            assert_eq!(std::fs::read(&journal).unwrap(), after_cleanup,
+                "closed compensation is idempotent and cannot issue replacement grants");
+            for lineage in service_lineages {
+                source.owner.grants().resolve_lineage(&lineage, &route.logical_executor,
+                    route.represented_subject.as_ref()).unwrap().check_current().unwrap();
+            }
+        } else {
         let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&native.realm).unwrap().operator;
         let members = native.members.iter().map(|member| member.member.clone()).collect::<Vec<_>>();
         let rows = source.source_status_page_with_recovery(None).await.unwrap();
@@ -280,6 +330,7 @@ async fn partial_case(mismatched_child: bool) {
             assert!(!source.prepare_service_recovery(&repeat, row).await.unwrap().revoke().unwrap().uncertain);
             assert_eq!(std::fs::read(&journal).unwrap(), revoked, "observed already-revoked children reconcile idempotently");
         }
+        }
         source.owner.grants().resolve_lineage(std::slice::from_ref(&setup.configured.capability.parent),
             &application, route.represented_subject.as_ref()).unwrap().check_current().unwrap();
         for lineage in a.candidate().authority_basis.grant_lineages() {
@@ -308,10 +359,15 @@ async fn partial_case(mismatched_child: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warm_partial_child_write_requires_fresh_recovery_offer_and_preserves_shared_parents() {
-    partial_case(false).await;
+    partial_case(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warm_preexisting_mismatched_child_stays_uncertain_and_unrevoked() {
-    partial_case(true).await;
+    partial_case(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_host_reconciles_only_partial_setup_child_without_new_issuance() {
+    partial_case(false, true).await;
 }

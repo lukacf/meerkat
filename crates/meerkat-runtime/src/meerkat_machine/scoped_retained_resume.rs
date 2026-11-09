@@ -42,7 +42,7 @@ use meerkat_authorization_contracts::work_association::{
 use meerkat_core::authorization::ControllerReadinessFailure;
 use meerkat_core::{OperationRefusalKind, OperationRefused};
 
-use super::local_authorization::NativeRetainedResumeCheck;
+use super::local_authorization::{NativeKeptOriginalCheck, NativeRetainedResumeCheck};
 use super::scoped_original::{
     AuthenticatedOriginalSource, CustodyClass, ScopedGrantComposition, ScopedInvocation,
     ScopedMandateOwner, classify_custody, require_contributor_live, resolve_original_basis,
@@ -112,6 +112,55 @@ impl ScopedRetainedResume {
     pub fn into_check(self) -> Arc<NativeRetainedResumeCheck> {
         let this = Arc::new(self);
         Arc::new(move |runtime, input, evidence| this.check(runtime, input, evidence))
+    }
+
+    /// Both checks of this composition, over the same owners: the
+    /// retained-resume check (`NativeGrantWorkConfiguration::retained_resume`)
+    /// and the kept-original check (`NativeGrantWorkConfiguration::kept_original`).
+    pub fn into_checks(self) -> (Arc<NativeRetainedResumeCheck>, Arc<NativeKeptOriginalCheck>) {
+        let this = Arc::new(self);
+        let retained = Arc::clone(&this);
+        (
+            Arc::new(move |runtime, input, evidence| retained.check(runtime, input, evidence)),
+            Arc::new(move |runtime, input, association| {
+                this.check_kept_original(runtime, input, association)
+            }),
+        )
+    }
+
+    /// Supply again the controller client of a kept governed input, whose
+    /// client did not survive the store, from its stored `association`: the
+    /// same reacquisition as a retained original's (the custody that
+    /// admitted the original still holds it with the stored authority basis,
+    /// the host invocation policy still lets the requester invoke the
+    /// executor and mandate, the basis resolves under the current grants,
+    /// every contributor it names is still held and live), then the
+    /// installed controller owner's client for the stored selection. A client
+    /// for another selection is refused. The local-grant host then validates
+    /// the controller admission again.
+    pub fn check_kept_original(
+        &self,
+        _runtime: &LogicalRuntimeId,
+        _input: &Input,
+        association: &InputAuthorityAssociation,
+    ) -> Result<meerkat_core::ControllerModelClient, RetainedResumeError> {
+        let selection = association
+            .candidate()
+            .controller_model
+            .as_ref()
+            .ok_or_else(|| refused(OperationRefusalKind::MalformedFacts))?;
+        self.reacquire(association)?;
+        let client = self
+            .controllers
+            .reacquire_controller(selection)
+            .map_err(RetainedResumeError::Readiness)?
+            .ok_or(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::UnsupportedScope,
+            ))?;
+        if client.selection() != selection {
+            return Err(refused(OperationRefusalKind::MalformedFacts));
+        }
+        Ok(client)
     }
 
     pub fn check(
@@ -211,8 +260,9 @@ impl ScopedRetainedResume {
 }
 
 impl ScopedGrantComposition {
-    /// The scoped original composition with its retained-resume check, where
-    /// fresh admission and resume use one adapter custody and one host
+    /// The scoped original composition with its retained-resume check and
+    /// its kept-original check, where fresh admission, resume and a kept
+    /// governed input's controller use one adapter custody and one host
     /// invocation policy, each taken from the same `Arc`.
     pub fn with_retained_resume<A, P>(
         grants: Arc<LocalGrantAuthority>,
@@ -226,14 +276,14 @@ impl ScopedGrantComposition {
         A: AuthenticatedOriginalSource + 'static,
         P: ScopedMandateOwner + AdmittedWorkPolicyOwner + RetainedInvocationOwner + 'static,
     {
-        let retained_resume = ScopedRetainedResume::new(
+        let (retained_resume, kept_original) = ScopedRetainedResume::new(
             Arc::clone(&grants),
             ingress_domain.clone(),
             Arc::clone(&originals) as Arc<dyn AuthenticatedOriginalSource>,
             Arc::clone(&policy) as Arc<dyn RetainedInvocationOwner>,
             controllers,
         )
-        .into_check();
+        .into_checks();
         Self {
             grants,
             ingress_domain,
@@ -241,6 +291,7 @@ impl ScopedGrantComposition {
             invocation: ScopedInvocation::from_policy(policy),
             operation_owner,
             retained_resume: Some(retained_resume),
+            kept_original: Some(kept_original),
         }
     }
 }

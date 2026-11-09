@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of the generated DurableDecisionMachine: one durable
 # decision's hold and sealed binding, its attested decision, the execution
-# permit and the executed fact, expiry, withdrawal and the requester notice
-# an ended decision owes. An approved decision expires at its deadline unless
-# an execution permit is outstanding: a permit is issued only before the
-# deadline and only for an approver who is still current, the executed fact
-# settles it at any time, and a release at or after the deadline records the
-# expiry.
+# permit and the executed fact, expiry, withdrawal, the requester notice an
+# ended decision owes, and what an executed decision owes after its
+# execution (the cleanup of what it left outside the store, and its one
+# reply). An approved decision expires at its deadline unless an execution
+# permit is outstanding: a permit is issued only before the deadline and
+# only for an approver who is still current, the executed fact settles it at
+# any time, and a release at or after the deadline records the expiry.
 #
 # usage: durable_decision_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's step
-# bound and its fifteen invariants, and checks them over the whole bounded
+# bound and its eighteen invariants, and checks them over the whole bounded
 # space (safety) with TLC coverage: every wrapper in covered_actions below
 # (one per generated arm, a per-phase arm's phases sharing one, and the
 # owner's commit) must generate a successor state, and the space must keep
@@ -49,7 +50,18 @@
 #     decision ends refused (ApproverRevokedEndsRefused);
 #   - an approver no longer current while a permit is outstanding: no new
 #     permit, and the commit made under it settles as executed
-#     (RevokedPermitSettledExecuted).
+#     (RevokedPermitSettledExecuted);
+#   - a cleanup opened under the permit and settled after the execution
+#     (CleanupSettledAfterExecution), and after the expiry a release at the
+#     deadline records (CleanupSettledAfterExpiry);
+#   - an executed decision's reply settled, then another reply refused
+#     (ReplySettledThenAnotherRefused);
+#   - a summary whose link served the held subject's rendering, recorded as
+#     the approver's presentation, then an approval
+#     (LinkedPresentationThenApproved);
+#   - a decision carrying a presentation that does not count, with none
+#     recorded, refused as incomplete, then an approval
+#     (UncountedCarriedThenApproved).
 # With --mutants it seeds one defect into a copy of the generated model per
 # mutant and requires TLC to refuse each with its property. TLC stops at its
 # first violation and reports only the first violated invariant of a state,
@@ -79,16 +91,27 @@
 #     millisecond as the first presentation
 #     (AuditDecisionFollowsPresentation);
 #   - a presentation that overwrites the first presentation time with its
-#     own, and one to another audience recorded as the approver's
+#     own, one to another audience recorded as the approver's, and a summary
+#     whose link served another rendering counted complete
 #     (AuditFirstPresentationIsTheEarliest);
 #   - a presentation at 0 recorded as the first presentation
 #     (first_presentation_is_a_reading, a generated invariant), and a
 #     decision accepted on a carried presentation at 0
 #     (AuditDecisionFollowsPresentation);
+#   - a carried presentation counted whatever its audience, subject and
+#     completeness (AuditDecisionFollowsPresentation);
 #   - an authorization that ignores the approver's answer, a refusal for an
 #     approver no longer current that drops the outstanding permit, and one
 #     that keeps the decision approved
-#     (AuditPermitOnlyForCurrentApprover).
+#     (AuditPermitOnlyForCurrentApprover);
+#   - a cleanup opened with no permit outstanding
+#     (AuditCleanupOwedUnderPermit);
+#   - a cleanup settled before the decision ended, an execution record and
+#     an expiry that drop an owed cleanup, and at a bound of 7 or more a
+#     settled cleanup that a second settlement reopens
+#     (AuditCleanupSettledAfterTheEnd);
+#   - another reply that overwrites the settled one, and a reply settled
+#     before the execution (AuditReplySettledOnce).
 # The executor's obligations are assumed, not checked: the machine records
 # that a permit is outstanding, not who holds it or whether a commit landed.
 # The audit models one executor per decision (one owner drives the permit),
@@ -127,7 +150,7 @@ trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -
 # green run found at the lane's bound; a run at a smaller bound is not held
 # to it.
 default_steps=6
-safety_states=42729
+safety_states=81907
 min_distinct_states=$(( safety_states * 9 / 10 ))
 
 # Every wrapper must fire. TLC names an arm after the audit's wrapper, so
@@ -206,6 +229,17 @@ covered_actions=(
   AuditSettleNoticeReplayed
   AuditSettleNoticeRefused
   AuditSettleNoticeRefusedNotEnded
+  AuditOweCleanup
+  AuditOweCleanupReplayed
+  AuditOweCleanupRefusedNotAuthorized
+  AuditOweCleanupRefusedNotApproved
+  AuditSettleCleanup
+  AuditSettleCleanupRefusedNotOwed
+  AuditSettleCleanupRefusedNotEnded
+  AuditSettleReply
+  AuditSettleReplyReplayed
+  AuditSettleReplyRefusedOther
+  AuditSettleReplyRefusedNotExecuted
   AuditCommit
 )
 
@@ -238,6 +272,9 @@ audit_invariants=(
   AuditPermitOnlyForCurrentApprover
   AuditCommittedIsSettleable
   AuditFirstPresentationIsTheEarliest
+  AuditCleanupOwedUnderPermit
+  AuditCleanupSettledAfterTheEnd
+  AuditReplySettledOnce
 )
 
 # usage: write_cfg <file> <first invariant or ""> <extra invariant lines>
@@ -352,7 +389,9 @@ for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefu
   WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
   HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
   AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
-  ApproverRevokedEndsRefused RevokedPermitSettledExecuted; do
+  ApproverRevokedEndsRefused RevokedPermitSettledExecuted CleanupSettledAfterExecution \
+  CleanupSettledAfterExpiry ReplySettledThenAnotherRefused LinkedPresentationThenApproved \
+  UncountedCarriedThenApproved; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "" "
   NotAuditWitness${witness}"
@@ -390,9 +429,10 @@ assert edits, "no edits"
 for edit in edits:
     assert len(edit) == 3, f"an edit is three lines (arm, old, new): {edit}"
     arm, old, new = edit[0], edit[1].replace("\\n", "\n"), edit[2].replace("\\n", "\n")
-    heads = text.count("\n" + arm + "(")
-    assert heads == 1, f"expected one {arm} definition, found {heads}"
-    start = text.index("\n" + arm + "(") + 1
+    # An arm with inputs is defined `Arm(...) ==`, one without `Arm ==`.
+    heads = [head for head in ("\n" + arm + "(", "\n" + arm + " ==") if head in text]
+    assert len(heads) == 1 and text.count(heads[0]) == 1, f"expected one {arm} definition, found {heads}"
+    start = text.index(heads[0]) + 1
     end = text.index("\n\n", start)
     block = text[start:end]
     count = block.count(old)
@@ -425,7 +465,9 @@ PY
 import os, re
 text = open(os.environ["MODEL"]).read()
 arm, variable, value = os.environ["ARM"], os.environ["VARIABLE"], os.environ["VALUE"]
-start = text.index("\n" + arm + "(") + 1
+heads = [head for head in ("\n" + arm + "(", "\n" + arm + " ==") if head in text]
+assert len(heads) == 1 and text.count(heads[0]) == 1, f"expected one {arm} definition, found {heads}"
+start = text.index(heads[0]) + 1
 end = text.index("\n\n", start)
 frames = re.findall(r"UnchangedFrame_[0-9a-f]+", text[start:end])
 assert len(frames) == 1, f"expected one frame in {arm}, found {frames}"
@@ -455,7 +497,7 @@ PY
   done
   cat > "${edits}" <<'EOF'
 DecideApproved
-/\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((carried_presentation_at_ms # None) /\ ((IF "value" \in DOMAIN carried_presentation_at_ms THEN carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)))
+/\ (IF ((first_presented_to_approver_at_ms # None) /\ ((IF "value" \in DOMAIN first_presented_to_approver_at_ms THEN first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)) THEN TRUE ELSE ((counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # None) /\ ((IF "value" \in DOMAIN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) THEN counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) <= observed_at_ms)))
 /\ TRUE
 EOF
   mutate approve_no_presentation AuditApprovalIsAttested "${edits}"
@@ -545,8 +587,8 @@ first_presented_to_approver_at_ms["value"] ELSE None) <= observed_at_ms)
 first_presented_to_approver_at_ms["value"] ELSE None) >= 0)
 --
 ${arm}
-carried_presentation_at_ms["value"] ELSE None) <= observed_at_ms)
-carried_presentation_at_ms["value"] ELSE None) >= 0)
+counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) <= observed_at_ms)
+counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest)["value"] ELSE None) >= 0)
 EOF
     case "${arm}" in
       DecideApproved) name=approve_before_presentation ;;
@@ -578,6 +620,16 @@ PresentToApprover
 EOF
   mutate present_to_another_audience AuditFirstPresentationIsTheEarliest "${edits}"
 
+  # A summary whose link served another rendering, counted complete: the
+  # audit reads the link's served digest from the input, never from the arm
+  # that fired.
+  cat > "${edits}" <<'EOF'
+PresentToApprover
+/\ presentation_complete(complete, link_served_digest, subject_digest)
+/\ (complete \/ link_served_digest # None)
+EOF
+  mutate link_to_another_rendering_counted_complete AuditFirstPresentationIsTheEarliest "${edits}"
+
   # A presentation at 0, no reading, recorded as the first presentation.
   cat > "${edits}" <<'EOF'
 PresentToApprover
@@ -589,10 +641,20 @@ EOF
   # A decision accepted on a carried presentation at 0.
   cat > "${edits}" <<'EOF'
 DecideApproved
-/\ (carried_presentation_at_ms # Some(0))
+/\ (counted_carried_presentation(carried_presentation_at_ms, carried_audience, carried_digest, carried_complete, carried_link_served_digest, approver_id, subject_digest) # Some(0))
 /\ TRUE
 EOF
   mutate decide_carries_untimed AuditDecisionFollowsPresentation "${edits}"
+
+  # A carried presentation counted whatever its audience, subject and
+  # completeness: the audit reads the carried presentation's facts from
+  # the input, never from the arm that fired.
+  cat > "${edits}" <<'EOF'
+counted_carried_presentation
+(IF ((audience = Some(arg_approver_id)) /\ (digest = Some(arg_subject_digest)) /\ presentation_complete(complete, link_served_digest, arg_subject_digest)) THEN presented_at_ms ELSE None)
+presented_at_ms
+EOF
+  mutate carried_counted_whatever_its_facts AuditDecisionFollowsPresentation "${edits}"
 
   # An authorization that ignores the host's answer for the approver.
   cat > "${edits}" <<'EOF'
@@ -613,5 +675,40 @@ AuthorizeExecutionRefusedApproverRevoked
 /\ phase' = "Approved"
 EOF
   mutate revoked_keeps_approval AuditPermitOnlyForCurrentApprover "${edits}"
+
+  # A cleanup opened with no permit outstanding.
+  cat > "${edits}" <<'EOF'
+OweCleanup
+/\ permit_issued
+/\ TRUE
+EOF
+  mutate owe_cleanup_without_permit AuditCleanupOwedUnderPermit "${edits}"
+
+  # A cleanup settled before the decision ended, an execution record and an
+  # expiry that drop an owed cleanup, and (from a bound of 7: opening,
+  # ending and settling a cleanup take six steps) a settled cleanup that a
+  # second settlement reopens.
+  frame_update SettleCleanupRefusedNotEndedApproved cleanup '"Settled"' > "${edits}"
+  mutate cleanup_settled_before_the_end AuditCleanupSettledAfterTheEnd "${edits}"
+
+  frame_update RecordExecuted cleanup '"NotOwed"' > "${edits}"
+  mutate execution_drops_cleanup AuditCleanupSettledAfterTheEnd "${edits}"
+
+  frame_update ReleaseExecutionAtDeadline cleanup '"NotOwed"' > "${edits}"
+  mutate expiry_drops_cleanup AuditCleanupSettledAfterTheEnd "${edits}"
+
+  if (( max_steps >= 7 )); then
+    frame_update SettleCleanupRefusedNotOwedExecuted cleanup \
+      '(IF cleanup = "Settled" THEN "Owed" ELSE cleanup)' > "${edits}"
+    mutate settled_cleanup_reopens AuditCleanupSettledAfterTheEnd "${edits}"
+  fi
+
+  # Another reply that overwrites the settled one, and a reply settled
+  # before the execution.
+  frame_update SettleReplyRefusedOther reply_digest 'Some(digest)' > "${edits}"
+  mutate second_reply_overwrites AuditReplySettledOnce "${edits}"
+
+  frame_update SettleReplyRefusedNotExecutedApproved reply_digest 'Some(digest)' > "${edits}"
+  mutate reply_before_execution AuditReplySettledOnce "${edits}"
 fi
 echo "durable decision audit passed at model_step_count <= ${max_steps}"

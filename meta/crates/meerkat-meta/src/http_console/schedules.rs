@@ -802,8 +802,6 @@ pub(crate) struct ConsoleSendDoor {
     pub(crate) identity_runtime: Option<Arc<crate::identity_first::IdentityRuntime>>,
     pub(crate) console_events: ConsoleEventStore,
     pub(crate) governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
-    pub(crate) operator_resolver:
-        Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
     pub(crate) session_fences: crate::auth::session_fence::ConsoleSessionFences,
 }
 
@@ -826,10 +824,14 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
         sender
             .admitted_now(&self.decisions, &self.session_fences, send.defined_at)
             .map_err(|refusal| format!("the Console refused the scheduled send: {refusal}"))?;
-        let access_view = self
-            .access
-            .as_ref()
-            .map(|controller| controller.view_for_subject(sender.principal()));
+        // The sender's agent audience, as its live request would hold it:
+        // a person owns the agents private to them.
+        let private_owner_key = super::private_owner_key_of_send_scope(&sender.scope());
+        let access_view = super::console_audience_view(
+            self.access.as_ref(),
+            sender.principal(),
+            private_owner_key.as_deref(),
+        );
         let governance = ConsoleSendGovernance {
             ingress: self.governed_ingress.current(),
             human: None,
@@ -837,6 +839,8 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             runtime_governed: self.runtime.native_work_governed(),
             access: self.access.clone(),
             verification: None,
+            side_chat_owner: None,
+            sender: Some(scheduled_sender(sender, &self.decisions)),
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),
@@ -854,17 +858,63 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             access: self.access.as_ref(),
             identity_runtime: self.identity_runtime.as_ref(),
             console_events: Some(&self.console_events),
-            operator_resolver: self.operator_resolver.as_ref(),
         };
         Box::pin(send_as_admitted_console_caller(
             &path,
-            access_view.as_ref(),
+            Some(&access_view),
             &governance,
             request,
         ))
         .await
         .map(|_accepted| ())
         .map_err(|error| scheduled_send_failure(&error))
+    }
+}
+
+/// Who a fire sends as: the sender the schedule recorded, named as that
+/// caller's live sends are named now. A person's fire on a console that
+/// requires sign-in carries the person's qualified principal (its verified
+/// `sub` in its issuer's trust domain) to the agent's run as its requester,
+/// as the person's live send would; no other fire names one. A recorded
+/// person whose issuer's tokens are now classified as shared accounts
+/// (`shared_account_tokens`) is no person any more: a live token of theirs
+/// names an account, so the fire names a token principal and no requester.
+fn scheduled_sender(
+    sender: &ConsoleScheduleSender,
+    decisions: &RuntimeDecisionState,
+) -> crate::console_aggregator::ConsoleSender {
+    let kind = match sender {
+        ConsoleScheduleSender::Anonymous => ConsoleActorKind::Anonymous,
+        ConsoleScheduleSender::Human { .. } if decisions.trusted_oidc.shared_account_tokens => {
+            ConsoleActorKind::TokenPrincipal
+        }
+        ConsoleScheduleSender::Human { .. } => ConsoleActorKind::Person,
+        ConsoleScheduleSender::Principal { provider, .. }
+            if provider == console_provider_name(&crate::AuthProvider::ServiceIdentity) =>
+        {
+            ConsoleActorKind::Service
+        }
+        ConsoleScheduleSender::Principal { .. } => ConsoleActorKind::TokenPrincipal,
+    };
+    let requester = match sender {
+        ConsoleScheduleSender::Human {
+            issuer, subject, ..
+        } if kind == ConsoleActorKind::Person && console_sends_name_requesters(decisions) => {
+            crate::runtime::console_human_principal(issuer, subject).ok()
+        }
+        ConsoleScheduleSender::Human { .. }
+        | ConsoleScheduleSender::Anonymous
+        | ConsoleScheduleSender::Principal { .. } => None,
+    };
+    crate::console_aggregator::ConsoleSender {
+        kind,
+        assurance: kind.assurance(),
+        display_name: sender.principal().map(ToString::to_string),
+        caller_scope: console_caller_scope(&sender.scope()),
+        requester,
+        // A schedule's fire is no human message: its turn carries no sender
+        // label, although it may act for the schedule's person.
+        model_label: None,
     }
 }
 

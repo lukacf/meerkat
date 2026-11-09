@@ -108,6 +108,9 @@ pub struct MemoryStackSeams {
     pub transcript_store: Option<Arc<dyn meerkat::SessionStore>>,
     pub event_sink: Option<Arc<dyn MemoryEventSink>>,
     pub mob_purpose: Option<Arc<dyn MobPurposeSource>>,
+    /// The members private to a person, whose memory the Steward dreams
+    /// over none of.
+    pub private_members: Option<Arc<dyn crate::memory::steward::PrivateMemberSource>>,
     pub steward_gating: Option<Arc<dyn MemoryGatingBridge>>,
     pub steward_conflicts: Option<Arc<dyn MemoryConflictBridge>>,
 }
@@ -188,6 +191,7 @@ pub fn attach_memory_engines_with_provider_auth(
         transcript_store,
         event_sink,
         mob_purpose,
+        private_members,
         steward_gating,
         steward_conflicts,
     } = seams;
@@ -293,6 +297,9 @@ pub fn attach_memory_engines_with_provider_auth(
         );
         if let Some(purpose) = mob_purpose {
             engine = engine.with_mob_context(purpose);
+        }
+        if let Some(private_members) = private_members {
+            engine = engine.with_private_members(private_members);
         }
         if let Some(gating) = steward_gating {
             engine = engine.with_gating(gating);

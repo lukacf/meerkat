@@ -11,25 +11,61 @@ use crate::{
     ConnectError, resources::InstalledResources, service_preparation::ServicePreparationPresenter,
 };
 
-use super::PromptBridge;
+use super::{FenceOrigin, PromptBridge};
 
-fn unconfirmed() -> ConnectError {
+#[derive(Debug)]
+pub(super) struct Failure {
+    pub(super) origin: FenceOrigin,
+    // Preserve the same generic failure value, without exposing error text.
+    pub(super) _error: ConnectError,
+}
+
+fn unconfirmed(origin: FenceOrigin) -> Failure {
     // Resource errors can contain private paths. The private-pipe driver needs
     // only a failure disposition; the original resource owner retains evidence.
-    ConnectError::InvalidInput(
+    Failure { origin, _error: ConnectError::InvalidInput(
         "The service preparation handoff is unconfirmed; close this setup session without retrying"
             .into(),
-    )
+    ) }
 }
 
 /// Drive this future through completion. Do not select it away on retirement.
 /// The driver's existing worker count must include it until it returns, and a
 /// failure remains a failure even when the binding has already been retired.
+#[cfg(any(not(target_os = "linux"), test))]
 pub(super) async fn run(
+    presenter: ServicePreparationPresenter,
+    storage: ResolvedStorage,
+    bridge: PromptBridge,
+) -> Result<(), Failure> {
+    run_inner(
+        presenter,
+        storage,
+        bridge,
+        #[cfg(target_os = "linux")]
+        None,
+    )
+    .await
+}
+
+#[cfg(target_os = "linux")]
+pub(super) async fn run_selected(
+    presenter: ServicePreparationPresenter,
+    storage: ResolvedStorage,
+    bridge: PromptBridge,
+    selected_input: Option<std::sync::Arc<crate::protected_parent::selected_input::SelectedInput>>,
+) -> Result<(), Failure> {
+    run_inner(presenter, storage, bridge, selected_input).await
+}
+
+async fn run_inner(
     mut presenter: ServicePreparationPresenter,
     storage: ResolvedStorage,
     bridge: PromptBridge,
-) -> Result<(), ConnectError> {
+    #[cfg(target_os = "linux")] selected_input: Option<
+        std::sync::Arc<crate::protected_parent::selected_input::SelectedInput>,
+    >,
+) -> Result<(), Failure> {
     loop {
         // A queued request must not enter resource preparation after the
         // binding has retired, including before this worker's first poll.
@@ -42,7 +78,7 @@ pub(super) async fn run(
             request = presenter.next() => request,
         };
         let Some(mut request) = request else {
-            return Err(unconfirmed());
+            return Err(unconfirmed(FenceOrigin::ServicePresenterClosed));
         };
         if bridge.retired() {
             return Ok(());
@@ -50,19 +86,25 @@ pub(super) async fn run(
         // A native tool waiter can disappear while the request is queued.
         // Observe its existing lease before locating resources or starting work.
         if request.closed().now_or_never().is_some() {
-            return Err(unconfirmed());
+            return Err(unconfirmed(FenceOrigin::ServiceWaiterClosedBeforeLocate));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(input) = selected_input.clone() {
+            request
+                .bind_selected_input(input)
+                .map_err(|_| unconfirmed(FenceOrigin::ServicePrepareError))?;
         }
         // File verification is synchronous. Retain and join it off the pipe's
         // reader task so controls stay responsive without abandoning that work.
         let resources = tokio::task::spawn_blocking(InstalledResources::locate)
             .await
-            .map_err(|_| unconfirmed())?
-            .map_err(|_| unconfirmed())?;
+            .map_err(|_| unconfirmed(FenceOrigin::ServiceLocateJoinFailed))?
+            .map_err(|_| unconfirmed(FenceOrigin::ServiceLocateFailed))?;
         if bridge.retired() {
             return Ok(());
         }
         if request.closed().now_or_never().is_some() {
-            return Err(unconfirmed());
+            return Err(unconfirmed(FenceOrigin::ServiceWaiterClosedAfterLocate));
         }
         let interrupted = async {
             bridge.closed().await;
@@ -78,7 +120,8 @@ pub(super) async fn run(
         match result {
             Ok(true) => {}
             Ok(false) if bridge.retired() => return Ok(()),
-            Ok(false) | Err(_) => return Err(unconfirmed()),
+            Ok(false) => return Err(unconfirmed(FenceOrigin::ServicePrepareFalseWhileLive)),
+            Err(_) => return Err(unconfirmed(FenceOrigin::ServicePrepareError)),
         }
     }
 }
@@ -98,7 +141,15 @@ mod tests {
     fn bridge() -> (PromptBridge, watch::Sender<bool>) {
         let (prompts, _receiver) = mpsc::channel(1);
         let (stop, retired) = watch::channel(false);
-        (PromptBridge { prompts, retired }, stop)
+        (
+            PromptBridge {
+                prompts,
+                retired,
+                probe_lifetime: None,
+                commissioning: false,
+            },
+            stop,
+        )
     }
 
     fn storage(root: &std::path::Path) -> ResolvedStorage {
@@ -158,7 +209,10 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(1), run(presenter, storage, bridge))
             .await
             .unwrap();
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().origin,
+            FenceOrigin::ServiceWaiterClosedBeforeLocate
+        );
         assert!(!lazy.owner().accepted());
         assert!(!artifacts.exists());
     }

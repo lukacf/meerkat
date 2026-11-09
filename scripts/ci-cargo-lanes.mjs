@@ -143,9 +143,10 @@
 // current estimates require comparison with hosted results. On d1dda1482 the
 // runtime unit lane models 15.1 minutes, not a measured completion guarantee.
 // The pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES, a
-// surrogate packing cap and not a measured timing. It is 20, since the
-// runtime lane models 18.3 minutes at 8ef2d8b939 (17.1 when the cap became
-// 18). Measured, the runtime lane alone took 790 and 839 s on the green
+// surrogate packing cap and not a measured timing. It is 21, since the
+// runtime lane models 20.1 minutes on the 0.9.11 release line (18.3 at
+// 8ef2d8b939, when the cap became 20, and 17.1 when it became 18). Measured,
+// the runtime lane alone took 790 and 839 s on the green
 // release pull-request runs 40055499505 and 40073579948, about 0.78 of its
 // modelled time at a model of about 18 minutes; earlier pull-request runs
 // took 359-715 s (39337274765, 39360046041, 39388235216 and 39394366439).
@@ -155,7 +156,9 @@
 // 1114 and 1173 s at a model of 18.3 minutes (a ratio of 1.01-1.07),
 // 448-488 s of it running tests the model does not count, and its execution
 // path reached 1146 and 1207 s. Runtime's lane therefore runs as two hash
-// partitions (PARTITIONED_UNIT_PACKAGES below). The cap sits above the
+// partitions (PARTITIONED_UNIT_PACKAGES below). Every partition's row builds
+// the whole crate, so each row models the lane's whole build, and another
+// partition would not lower it. The cap sits above the
 // gate's 18-minute execution budget because it is a model threshold; the
 // gate itself is unchanged.
 // The enforced limits are the CI gate's: 1080 s of lane execution and 1200 s
@@ -312,7 +315,7 @@ const NULL_SHA = "0000000000000000000000000000000000000000";
 const LINK_COST_PER_DEP = 8000;
 const COST_UNITS_PER_MINUTE = 35000;
 const LANE_SETUP_MINUTES = 1;
-export const PR_UNIT_BUDGET_MINUTES = 20;
+export const PR_UNIT_BUDGET_MINUTES = 21;
 // Packages whose unit tests run long get a unit lane of their own, so their
 // test time does not stack on other crates' builds; the line-and-closure
 // model counts only the build. xtask's lib and bin tests (the governance
@@ -456,25 +459,21 @@ const GPT_LIVE_TEST_STACK = 32 * 1024 * 1024;
 // change. An intermittent one stays out of both runs.
 export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md";
 const COLD_RESTORE = "cold-restore-refusals";
-const TOOL_RESULT = "tool-result-payload";
 const STALE = "stale-expectations";
 const INTERMITTENT = "intermittent-races";
+const OBSERVATION_BUDGET = "observation-budget";
+const REFUSAL_AFTER_PREPARED = "refusal-after-prepared";
+const SLOW_RUNNER = "slow-runner-timeouts";
 export const TOOLKIT_MOBKIT_KNOWN_REDS = [
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a", COLD_RESTORE],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission", COLD_RESTORE],
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection", COLD_RESTORE],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes", COLD_RESTORE],
   ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer", COLD_RESTORE],
-  ["private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn", TOOL_RESULT],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper", TOOL_RESULT],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", TOOL_RESULT],
-  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", TOOL_RESULT],
+  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", COLD_RESTORE],
   ["installed_host::acquisition::enrollment::tests::production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation", "interaction-lineage"],
   ["installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement", STALE],
   ["installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access", STALE],
-  ["installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication", STALE],
   ["installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write", STALE],
   ["private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b", STALE],
   ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input", STALE],
@@ -485,12 +484,39 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child", STALE],
   ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
   ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
-  ["original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row", STALE],
   ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
-  ["installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input", "double-model-request"],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
+  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", OBSERVATION_BUDGET, { intermittent: true }],
+  ["private_originals::service_approved_input::attachment::tests::complete_reviewed_raw_operation_set_must_belong_to_one_attempt_generation", OBSERVATION_BUDGET, { intermittent: true }],
+  ["private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::fresh_host_restores_governed_peer_binding_and_replays_it_exactly", REFUSAL_AFTER_PREPARED, { intermittent: true }],
+  ["private_originals::setup_workflow::launch::context_transfer::metadata::worker_stdio::actual_stdio_ready_runs_retained_metadata_page_and_joins_shutdown", SLOW_RUNNER, { intermittent: true }],
+].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
+
+// The known reds of the connect[console] suite below, under the same rules:
+// each names its class on meerkat-connect's console test-debt page, which the
+// plan checks against this list both ways. They fail in some runs only, so
+// the row excludes them without requiring them to fail.
+export const CONNECT_CONSOLE_TEST_DEBT = "connect/crates/meerkat-connect/CONSOLE-TEST-DEBT.md";
+const SETUP_CONTENTION = "setup-contention";
+const CONSENT_LEASE_HELD = "consent-lease-held";
+export const CONNECT_CONSOLE_KNOWN_REDS = [
+  ["resources::shared_setup::native_case::two_sdk_children_share_one_preparation_and_cancel_independently", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::observe_controls::owner_change_at_a_finds_helper_observation_is_waited_out_and_observed_again", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::two_sdk_originals_admit_one_fresh_dedicated_planning_input", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::installed_console_consent_rechecks_human_login_and_selected_policy", CONSENT_LEASE_HELD, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::entered_operation::registered_r2_find_enters_once_per_call_and_commits_real_context_graphs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::closed_workflow_refuses_context_replay_after_automatic_admission", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::committed_waiter_context_is_delivered_automatically_once_and_survives_departure", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_survives_a_departure_and_refuses_closed_recipient", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_validates_mutable_payload_without_replaying_find", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_join_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_release_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_install_check_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_install_reservation_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
 
 export const FEATURE_UNIT_SUITES = [
@@ -531,8 +557,14 @@ export const FEATURE_UNIT_SUITES = [
   // meerkat-mob through toolkit-mobkit's native host, so like its default
   // unit lane this suite runs on the push only. Its process controls
   // (resources::local_round) run under TOOLKIT_SHARED_TEST_PYTHON, which
-  // the unit jobs export.
-  { package: "meerkat-connect", id: "console", features: ["console"] },
+  // the unit jobs export. It runs without its intermittent known reds
+  // (CONNECT_CONSOLE_KNOWN_REDS).
+  {
+    package: "meerkat-connect",
+    id: "console",
+    features: ["console"],
+    knownReds: { doc: CONNECT_CONSOLE_TEST_DEBT, tests: CONNECT_CONSOLE_KNOWN_REDS },
+  },
   // toolkit-mobkit's native host (its installed host, private originals,
   // private host and original ingress) compiles only under `native-host`,
   // which meerkat-connect turns on, so the package's own unit lane runs a
@@ -3306,12 +3338,13 @@ function plan(args) {
 
 // Non-Rust lanes of the products (ported from their own workflows): a
 // changed path under one of `paths` selects the lane. Connect's checks are
-// its packaging unit tests, its docs check and the embedded Console panel's
-// Node test (connect/.github/workflows/checks.yml before the import); every
-// Connect path selects them, since the docs check reads the whole tree.
+// its script, SDK and docs checks (connect/.github/workflows/checks.yml, run
+// by ci.yml's connect-checks job); every Connect path selects them, since
+// the docs check reads the whole tree, and so does a change to Meta's
+// Python SDK, which Connect's installed acceptance controls import.
 // Meta's console, Flow Editor and SDK lanes keep Meta's own classifier
 // (meta/scripts/ci-changes.py) in the transition workflow meta-ci.yml.
-export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/"] }];
+export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/", "meta/sdk/python/"] }];
 
 // The plan's product section (see the header of ci-products.mjs):
 //   changed       the products whose roots hold a changed path (every

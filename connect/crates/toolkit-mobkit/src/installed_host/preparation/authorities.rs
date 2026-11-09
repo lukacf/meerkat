@@ -3,7 +3,8 @@
 use super::*;
 use crate::installed_host::acquisition::InstalledSetupSelection;
 use crate::installed_host::operator_setup::{
-    AgentSetupCapabilityRequest, HelperReportCapabilityRequest, setup_targets,
+    AgentSetupCapabilityRequest, HelperReportCapabilityRequest, SharedWorkflowSetupRequest,
+    setup_targets,
 };
 use meerkat_authorization::grants::GrantRefusal;
 use meerkat_authorization_contracts::{evidence::EvidenceId, grant::GrantLineageRef};
@@ -24,6 +25,8 @@ pub struct PreparationAuthorities {
     pub controllers: Vec<PreparedControllerRequest>,
     #[serde(default)]
     pub agent_setup: Vec<AgentSetupCapabilityRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_workflow_setup: Vec<SharedWorkflowSetupRequest>,
     pub helper_report: Option<HelperReportCapabilityRequest>,
 }
 
@@ -41,6 +44,8 @@ pub struct PreparationAuthorityIntent {
     pub controllers: Vec<PreparedControllerIntent>,
     #[serde(default)]
     pub agent_setup: Vec<AgentSetupCapabilityRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_workflow_setup: Vec<SharedWorkflowSetupRequest>,
     pub helper_report: Option<HelperReportCapabilityRequest>,
 }
 
@@ -167,12 +172,30 @@ impl From<PreparationAuthorities> for PreparationAuthorityIntent {
                 })
                 .collect(),
             agent_setup: requests.agent_setup,
+            shared_workflow_setup: requests.shared_workflow_setup,
             helper_report: requests.helper_report,
         }
     }
 }
 
 impl PreparationAuthorityIntent {
+    /// A helperless application cannot request any helper-derived authority.
+    pub fn validate_without_helper(&self) -> Result<(), HostLifetimeError> {
+        if self.helper_mcp.is_some()
+            || self.helper_catalog.is_some()
+            || self.helper_report.is_some()
+            || !self.agent_setup.is_empty()
+            || !self.shared_workflow_setup.is_empty()
+            || self
+                .controllers
+                .iter()
+                .any(|row| row.target == PreparedControllerTarget::Helper)
+        {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
+        Ok(())
+    }
+
     /// Validate the complete supplied inventory before yielding any issuance
     /// input. Target/key pairs are trusted caller observations, not native
     /// provenance: the held caller must first join each exact member, finished
@@ -219,6 +242,7 @@ impl PreparationAuthorityIntent {
             helper_mcp: self.helper_mcp.clone(),
             helper_catalog: self.helper_catalog.clone(),
             agent_setup: self.agent_setup.clone(),
+            shared_workflow_setup: self.shared_workflow_setup.clone(),
             helper_report: self.helper_report.clone(),
         };
         resolved.validate_inventory()?;
@@ -259,6 +283,14 @@ impl PreparationAuthorityIntent {
             previous,
             compiled,
         );
+        for request in &mut selected.shared_workflow_setup {
+            if &request.member == previous {
+                request.member = compiled.clone();
+            }
+            if &request.helper == previous {
+                request.helper = compiled.clone();
+            }
+        }
         selected
     }
 }
@@ -299,6 +331,20 @@ impl PreparationAuthorities {
                 return Err(HostLifetimeError::InvalidSelection);
             }
         }
+        for request in &self.shared_workflow_setup {
+            setup_targets::validate_workflow_targets(
+                request.targets.iter().map(|target| &target.target),
+            )?;
+            if !members.insert(request.member.member.clone())
+                || !ids.insert(request.issuance_id.clone())
+                || request
+                    .targets
+                    .iter()
+                    .any(|target| !ids.insert(target.issuance_id.clone()))
+            {
+                return Err(HostLifetimeError::InvalidSelection);
+            }
+        }
         if self.helper_report.as_ref().is_some_and(|request| {
             !ids.insert(request.issuance_id.clone())
                 || request
@@ -329,6 +375,14 @@ impl PreparationAuthorities {
             previous,
             compiled,
         );
+        for request in &mut selected.shared_workflow_setup {
+            if &request.member == previous {
+                request.member = compiled.clone();
+            }
+            if &request.helper == previous {
+                request.helper = compiled.clone();
+            }
+        }
         selected
     }
 }
@@ -364,6 +418,96 @@ impl PreparedInstallationOwner {
         let requests = intent.resolve_known_routes()?;
         let owner = Self::open(deployment_root, selected, startup)?;
         Ok((owner, requests))
+    }
+
+    /// Only explicit original-route requests apply when no helper is selected.
+    /// The caller still supplies the actual held controller observations.
+    pub fn configure_authorities_without_helper(
+        &mut self,
+        requests: &PreparationAuthorities,
+    ) -> Result<(), HostLifetimeError> {
+        PreparationAuthorityIntent::from(requests.clone()).validate_without_helper()?;
+        requests.validate_inventory()?;
+        self.selected.validate()?;
+        if requests.controllers.is_empty() {
+            return Ok(());
+        }
+        let operator = self
+            .selected
+            .native_host
+            .remote_operator
+            .clone()
+            .ok_or(HostLifetimeError::Denied)?;
+        // Resolve every target and retained parent before any issuance. These
+        // are the same original routes and native issuer used with a helper.
+        let rows = requests
+            .controllers
+            .iter()
+            .map(|request| {
+                let PreparedControllerTarget::OriginalRoute { route } = &request.target else {
+                    return Err(HostLifetimeError::InvalidSelection);
+                };
+                let selected = self
+                    .selected
+                    .native_host
+                    .routes
+                    .iter()
+                    .find(|row| &row.id == route)
+                    .ok_or(HostLifetimeError::Denied)?;
+                let target = selected.source_binding_in(&self.selected.channels)?.0;
+                let member = self
+                    .selected
+                    .native_host
+                    .members
+                    .iter()
+                    .find(|row| &row.member == target)
+                    .ok_or(HostLifetimeError::Denied)?;
+                if selected.controller_parent.as_ref().is_some_and(|refs| {
+                    refs.len() != 1
+                        || refs[0].grant_id != request.issuance_id
+                        || refs[0].root_authority != operator
+                }) {
+                    return Err(HostLifetimeError::Denied);
+                }
+                let expected = application_operations::parent_restrictions(
+                    application_operations::controller(
+                        &self.selected.native_host.grant_administrator,
+                        &selected.logical_executor,
+                        &member.audience,
+                        &request.controller_route,
+                        application_operations::ControllerAction::Inference,
+                    ),
+                );
+                Ok((
+                    route.clone(),
+                    selected.represented_subject.clone(),
+                    selected.controller_parent.clone(),
+                    expected,
+                ))
+            })
+            .collect::<Result<Vec<_>, HostLifetimeError>>()?;
+        for (request, (route, subject, selected, expected)) in requests.controllers.iter().zip(rows)
+        {
+            let parent = controller_parent(
+                &self.source,
+                &self.selected.native_host.grant_administrator,
+                &operator,
+                subject.as_ref(),
+                request,
+                expected,
+            )?;
+            if selected.as_ref().is_some_and(|old| old != &parent) {
+                return Err(HostLifetimeError::Denied);
+            }
+            self.selected
+                .native_host
+                .routes
+                .iter_mut()
+                .find(|row| row.id == route)
+                .ok_or(HostLifetimeError::Denied)?
+                .controller_parent = Some(parent);
+        }
+        self.selected.validate()
     }
 
     /// Complete explicit parent selections on the same retained owner. Held
@@ -420,6 +564,7 @@ impl PreparedInstallationOwner {
         let helper_audience = member.audience.clone();
         let any = !requests.controllers.is_empty()
             || !requests.agent_setup.is_empty()
+            || !requests.shared_workflow_setup.is_empty()
             || requests.helper_report.is_some()
             || requests.helper_mcp.is_some()
             || requests.helper_catalog.is_some();
@@ -523,11 +668,53 @@ impl PreparedInstallationOwner {
                 selected.route != request.route
                     || selected.parent.grant_id != request.issuance_id
                     || selected.parent.root_authority != operator
+                    || !selected.workflow_targets.is_empty()
                     || selected.helper_targets.len() != request.helper_targets.len()
                     || selected
                         .helper_targets
                         .iter()
                         .zip(&request.helper_targets)
+                        .any(|(old, new)| {
+                            old.target != new.target
+                                || old.parent.grant_id != new.issuance_id
+                                || old.parent.root_authority != operator
+                        })
+            }) {
+                return Err(HostLifetimeError::Denied);
+            }
+        }
+        for request in &requests.shared_workflow_setup {
+            if request.helper != helper.member {
+                return Err(HostLifetimeError::Denied);
+            }
+            let route = self
+                .selected
+                .native_host
+                .routes
+                .iter()
+                .find(|row| row.id == request.route)
+                .ok_or(HostLifetimeError::Denied)?;
+            if route.source_binding_in(&self.selected.channels)?.0 != &request.member {
+                return Err(HostLifetimeError::Denied);
+            }
+            let member = self
+                .selected
+                .native_host
+                .members
+                .iter()
+                .find(|row| row.member == request.member)
+                .ok_or(HostLifetimeError::Denied)?;
+            if member.setup_capability.as_ref().is_some_and(|selected| {
+                selected.route != request.route
+                    || selected.parent.grant_id != request.issuance_id
+                    || selected.parent.root_authority != operator
+                    || selected.helper.as_ref() != Some(&request.helper)
+                    || !selected.helper_targets.is_empty()
+                    || selected.workflow_targets.len() != request.targets.len()
+                    || selected
+                        .workflow_targets
+                        .iter()
+                        .zip(&request.targets)
                         .any(|(old, new)| {
                             old.target != new.target
                                 || old.parent.grant_id != new.issuance_id
@@ -694,11 +881,36 @@ impl PreparedInstallationOwner {
             }
             member.setup_capability = Some(capability);
         }
+        for request in &requests.shared_workflow_setup {
+            let capability = operator_setup::configured_setup::configure_shared_prepared(
+                &self.selected.native_host,
+                &self.selected.channels,
+                &self.source,
+                &operator,
+                request,
+                helper,
+            )?;
+            let member = self
+                .selected
+                .native_host
+                .members
+                .iter_mut()
+                .find(|row| row.member == request.member)
+                .ok_or(HostLifetimeError::Denied)?;
+            if member
+                .setup_capability
+                .as_ref()
+                .is_some_and(|old| old != &capability)
+            {
+                return Err(HostLifetimeError::Denied);
+            }
+            member.setup_capability = Some(capability);
+        }
         self.selected.validate()
     }
 }
 
-fn controller_parent(
+pub(crate) fn controller_parent(
     source: &ToolkitOriginalOwner,
     application: &meerkat_core::PrincipalRef,
     operator: &meerkat_core::PrincipalRef,
@@ -711,6 +923,7 @@ fn controller_parent(
         let parent = match grants.issued_reference(&request.issuance_id)? {
             Some(parent) => parent,
             None => grants.issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 operator,
                 request.issuance_id.clone(),
                 application.clone(),
@@ -738,6 +951,6 @@ fn controller_parent(
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
     })
 }

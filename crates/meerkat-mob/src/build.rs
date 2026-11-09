@@ -398,6 +398,36 @@ pub async fn build_agent_config(
     // recomposes them without the lossy in-process spawn overlay.
     config.mcp_servers = profile.tools.mcp_servers.clone();
 
+    // The member's tool grant gate: its own gate (from the profile this
+    // build runs on) joined with its role's current gate, at every build. A
+    // family of the member's own gate is mounted, closed by the gate, whatever
+    // its switch, so a resume over a session that recorded the family
+    // disabled still builds it closed (an explicit category on the build
+    // wins over the recorded one); the docs tell authors to leave the switch
+    // off, so a binary that drops the gate keeps the family off. The role
+    // entries the own gate lacks travel apart: the factory installs each
+    // where the build mounts it and never refuses for one. The build always
+    // names its gate, the empty gate included, so a member resume installs
+    // the gate its profiles define now, never an older recorded one.
+    let own_gate = profile.tools.grant_gated.clone();
+    for family in &own_gate.families {
+        let category = match family.as_str() {
+            "shell" => &mut config.override_shell,
+            "memory" => &mut config.override_memory,
+            "workgraph" => &mut config.override_workgraph,
+            "schedule" => &mut config.override_schedule,
+            "image_generation" => &mut config.override_image_generation,
+            _ => continue,
+        };
+        *category = meerkat_core::ToolCategoryOverride::Enable;
+    }
+    let role_entries = role_profile
+        .as_ref()
+        .map(|role| role.tools.grant_gated.without(&own_gate))
+        .unwrap_or_default();
+    config.grant_gated_tools_where_mounted = (!role_entries.is_empty()).then_some(role_entries);
+    config.grant_gated_tools = Some(own_gate);
+
     // Opaque application context passed through to the agent build pipeline
     config.app_context = context;
     config.additional_instructions = additional_instructions;
@@ -414,6 +444,10 @@ pub async fn build_agent_config(
     // provider that contradicts a catalogued model's owner at build time.
     config.provider = profile.provider;
     config.self_hosted_server_id = profile.self_hosted_server_id.clone();
+    // The profile's auth binding names the credentials the member resolves
+    // through; a spawn that names its own binding replaces it after this
+    // build. `None` leaves the realm's resolution for the provider.
+    config.auth_binding = profile.auth_binding.clone();
 
     // Mob-scoped `[models.<id>]` entries ride the build config into the
     // effective model registry (single owner for provider inference,
@@ -543,9 +577,11 @@ pub(crate) async fn current_role_profile(
 
 /// Conjoin the role's current tool restriction (`role`, from
 /// [`current_role_profile`]) into a profile's own: the role's deny entries
-/// are added and its read-only flag applies. A profile compiled for another
-/// host (a placed member's portable profile) carries the restriction this
-/// way, since that host has no definition to read it from.
+/// are added, its read-only flag applies and its tool grant gate joins the
+/// profile's. A profile compiled for another host (a placed member's
+/// portable profile) carries the restriction this way, since that host has
+/// no definition to read it from; a gate it carries then refuses the
+/// placement, so the role's gate is never dropped.
 pub(crate) fn conjoin_role_tool_restriction(
     tools: &mut crate::profile::ToolConfig,
     role: &crate::profile::ToolConfig,
@@ -556,6 +592,7 @@ pub(crate) fn conjoin_role_tool_restriction(
             tools.deny.push(name.clone());
         }
     }
+    tools.grant_gated.extend(&role.grant_gated);
 }
 
 /// The tool names a profile's deny list may name beyond the factory's
@@ -666,7 +703,12 @@ pub async fn build_resumed_agent_config(
     let metadata = resumed_session
         .session_metadata()
         .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
-    apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, resume_from_role)?;
+    apply_resumed_session_metadata_with_role_migration(
+        &mut config,
+        &metadata,
+        resume_from_role,
+        expected_session_id,
+    )?;
     // Rematerialization authors nothing. Prompt configuration can be needed
     // to rebuild the disposable executor, but it is never new durable input.
     // New ordered System content enters through the typed admission API after
@@ -680,17 +722,26 @@ pub async fn build_resumed_agent_config(
     Ok(config)
 }
 
+/// [`apply_resumed_session_metadata_with_role_migration`] without a role
+/// migration, for a session that has no id of its own here (a fresh one
+/// stands in for it in a refusal).
 fn apply_resumed_session_metadata(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
 ) -> Result<(), MobError> {
-    apply_resumed_session_metadata_with_role_migration(config, metadata, None)
+    apply_resumed_session_metadata_with_role_migration(
+        config,
+        metadata,
+        None,
+        &meerkat_core::SessionId::new(),
+    )
 }
 
 fn apply_resumed_session_metadata_with_role_migration(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
     resume_from_role: Option<&ProfileName>,
+    session_id: &meerkat_core::SessionId,
 ) -> Result<(), MobError> {
     let Some(current_comms_name) = config.comms_name.clone() else {
         return Err(MobError::Internal(
@@ -710,6 +761,7 @@ fn apply_resumed_session_metadata_with_role_migration(
         }
     }
     let role_migrated = admit_resumed_member_identity(
+        session_id,
         &current_comms_name,
         &stored_comms_name,
         config.mob_member_binding.as_ref(),
@@ -858,6 +910,7 @@ pub(crate) fn resumed_comms_name_matches_current_or_legacy(current: &str, stored
 /// materialization restamps the current binding through the ordinary factory
 /// path.
 fn admit_resumed_member_identity(
+    session_id: &meerkat_core::SessionId,
     current_comms_name: &str,
     stored_comms_name: &str,
     current_binding: Option<&meerkat_core::MobMemberBinding>,
@@ -881,15 +934,17 @@ fn admit_resumed_member_identity(
     let canonical_member = current_binding
         .map(|binding| binding.member.as_str())
         .unwrap_or(current_member);
+    let rejection = ResumedIdentityRejection {
+        session_id,
+        member: canonical_member,
+        role: current_role,
+        resume_from_role,
+    };
 
     if current_mob != stored_mob {
-        return Err(role_migration_identity_rejection(
-            canonical_member,
-            current_role,
-            resume_from_role,
-            format!(
-                "persisted comms_name '{stored_comms_name}' does not prove the current mob/member identity '{current_comms_name}'"
-            ),
+        return Err(rejection.bound_to_another_member(
+            stored_mob,
+            stored_binding.map_or(stored_member_from_name, |binding| binding.member.as_str()),
         ));
     }
 
@@ -912,29 +967,22 @@ fn admit_resumed_member_identity(
             stored_mob,
             stored_role_from_name,
             stored_member_from_name,
-        ) || binding.mob_id != current_mob
+        ) {
+            // The session's own durable records disagree: its binding does not
+            // prove the comms name it was created under.
+            return Err(rejection.inconsistent_record(format!(
+                "persisted mob member binding '{binding:?}' contradicts persisted comms_name '{stored_comms_name}'"
+            )));
+        }
+        if binding.mob_id != current_mob
             || !member_segments_prove_same_identity(canonical_member, &binding.member)
         {
-            return Err(role_migration_identity_rejection(
-                canonical_member,
-                current_role,
-                resume_from_role,
-                format!(
-                    "persisted mob member binding '{binding:?}' contradicts persisted comms_name '{stored_comms_name}' or the requested mob/member identity"
-                ),
-            ));
+            return Err(rejection.bound_to_another_member(&binding.mob_id, &binding.member));
         }
         binding.role.as_str()
     } else {
         if !member_segments_prove_same_identity(canonical_member, stored_member_from_name) {
-            return Err(role_migration_identity_rejection(
-                canonical_member,
-                current_role,
-                resume_from_role,
-                format!(
-                    "persisted comms_name '{stored_comms_name}' does not prove the current mob/member identity '{current_comms_name}'"
-                ),
-            ));
+            return Err(rejection.bound_to_another_member(stored_mob, stored_member_from_name));
         }
         stored_role_from_name
     };
@@ -963,20 +1011,50 @@ fn admit_resumed_member_identity(
     Ok(true)
 }
 
-fn role_migration_identity_rejection(
-    current_member: &str,
-    current_role: &str,
-    resume_from_role: Option<&ProfileName>,
-    reason: String,
-) -> MobError {
-    match resume_from_role {
-        Some(declared_predecessor_role) => MobError::MemberRoleMigrationRejected {
-            member_id: AgentIdentity::from(current_member),
-            declared_predecessor_role: declared_predecessor_role.clone(),
-            requested_role: ProfileName::from(current_role),
-            reason,
-        },
-        None => MobError::Internal(reason),
+/// The refusals of a resume whose session does not prove the identity being
+/// seated. With a declared role migration each is that migration's typed
+/// rejection.
+struct ResumedIdentityRejection<'a> {
+    session_id: &'a meerkat_core::SessionId,
+    member: &'a str,
+    role: &'a str,
+    resume_from_role: Option<&'a ProfileName>,
+}
+
+impl ResumedIdentityRejection<'_> {
+    /// The session is durably bound to member `bound_member` of mob
+    /// `bound_mob`, not to the member being seated.
+    fn bound_to_another_member(&self, bound_mob: &str, bound_member: &str) -> MobError {
+        match self.resume_from_role {
+            Some(declared_predecessor_role) => MobError::MemberRoleMigrationRejected {
+                member_id: AgentIdentity::from(self.member),
+                declared_predecessor_role: declared_predecessor_role.clone(),
+                requested_role: ProfileName::from(self.role),
+                reason: format!(
+                    "session '{}' is bound to member '{bound_member}' of mob '{bound_mob}'",
+                    self.session_id
+                ),
+            },
+            None => MobError::ResumeSessionBoundToAnotherMember {
+                session_id: self.session_id.clone(),
+                member_id: AgentIdentity::from(self.member),
+                bound_mob_id: MobId::from(bound_mob),
+                bound_member_id: AgentIdentity::from(bound_member),
+            },
+        }
+    }
+
+    /// The session's own durable records contradict each other.
+    fn inconsistent_record(&self, reason: String) -> MobError {
+        match self.resume_from_role {
+            Some(declared_predecessor_role) => MobError::MemberRoleMigrationRejected {
+                member_id: AgentIdentity::from(self.member),
+                declared_predecessor_role: declared_predecessor_role.clone(),
+                requested_role: ProfileName::from(self.role),
+                reason,
+            },
+            None => MobError::Internal(reason),
+        }
     }
 }
 
@@ -1196,6 +1274,10 @@ async fn assemble_system_prompt(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod member_grant_gate_tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::definition::{BackendConfig, MobDefinition, OrchestratorConfig, WiringRules};
@@ -1291,6 +1373,7 @@ mod tests {
                 model: "claude-opus-4-8".into(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1310,6 +1393,7 @@ mod tests {
                     mcp_servers: vec![],
                     rust_bundles: vec![],
                     bundles: Vec::new(),
+                    grant_gated: Default::default(),
                 },
                 peer_description: "Orchestrates the mob".into(),
                 external_addressable: true,
@@ -1328,6 +1412,7 @@ mod tests {
                 model: "claude-sonnet-4-5".into(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -1347,6 +1432,7 @@ mod tests {
                     mcp_servers: vec![],
                     rust_bundles: vec![],
                     bundles: Vec::new(),
+                    grant_gated: Default::default(),
                 },
                 peer_description: "Does work".into(),
                 external_addressable: false,
@@ -1727,6 +1813,112 @@ mod tests {
 
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "planner");
+    }
+
+    /// A profile that names an auth binding builds its member through it; a
+    /// profile that names none leaves the binding to the realm's resolution
+    /// for the provider.
+    #[tokio::test]
+    async fn test_build_agent_config_threads_profile_auth_binding() {
+        let def = sample_definition();
+        let profile_name = ProfileName::from("worker");
+        let agent_identity = AgentIdentity::from("worker-1");
+        let unbound = def.profiles[&profile_name].as_inline().unwrap().clone();
+        assert_eq!(unbound.auth_binding, None);
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("profile_named").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let mut bound = unbound.clone();
+        bound.auth_binding = Some(binding.clone());
+
+        let mut builds = Vec::new();
+        for profile in [&unbound, &bound] {
+            builds.push(
+                build_agent_config(BuildAgentConfigParams {
+                    mob_id: &def.id,
+                    profile_name: &profile_name,
+                    agent_identity: &agent_identity,
+                    profile,
+                    definition: &def,
+                    realm_profile_store: None,
+                    external_tools: None,
+                    compaction_curator_override: None,
+                    context: None,
+                    labels: None,
+                    additional_instructions: None,
+                    shell_env: None,
+                    mob_tool_authority_context: None,
+                    mob_incarnation: Some(crate::tests::fresh_live_incarnation()),
+                    tool_access_policy: None,
+                    inherited_tool_filter: None,
+                    system_prompt_override: None,
+                })
+                .await
+                .expect("build_agent_config"),
+            );
+        }
+
+        assert_eq!(builds[0].auth_binding, None);
+        assert_eq!(builds[1].auth_binding, Some(binding.clone()));
+        let request = to_create_session_request(&builds[1], "fresh".into());
+        assert_eq!(
+            request
+                .build
+                .as_ref()
+                .and_then(|build| build.auth_binding.as_ref()),
+            Some(&binding),
+            "the session build names the profile's binding"
+        );
+    }
+
+    /// An operator's own TOML definition keeps the field: a
+    /// `[profiles.<name>]` table that names an `auth_binding` parses, and its
+    /// member builds on that binding. (A pack's or an application setup's
+    /// definition that names one is refused where it is read.)
+    #[tokio::test]
+    async fn test_an_operator_toml_profile_auth_binding_builds_on_that_binding() {
+        let def = crate::definition::MobDefinition::from_toml(
+            "[mob]\nid = \"operator\"\n\n[profiles.worker]\nmodel = \"claude-sonnet-4-5\"\nauth_binding = { realm = \"tenant_a\", binding = \"team_key\" }\n\n[profiles.worker.tools]\ncomms = true\n",
+        )
+        .expect("an operator definition names a profile binding");
+        let profile_name = ProfileName::from("worker");
+        let agent_identity = AgentIdentity::from("worker-1");
+        let profile = def.profiles[&profile_name]
+            .as_inline()
+            .expect("inline worker profile");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("team_key").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        assert_eq!(profile.auth_binding.as_ref(), Some(&binding));
+
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &profile_name,
+            agent_identity: &agent_identity,
+            profile,
+            definition: &def,
+            realm_profile_store: None,
+            external_tools: None,
+            compaction_curator_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            mob_incarnation: Some(crate::tests::fresh_live_incarnation()),
+            tool_access_policy: None,
+            inherited_tool_filter: None,
+            system_prompt_override: None,
+        })
+        .await
+        .expect("build_agent_config");
+        assert_eq!(config.auth_binding, Some(binding));
     }
 
     /// Spawn-site threading: the spec's `tool_access_policy` must reach
@@ -4880,9 +5072,13 @@ mod tests {
     #[test]
     fn resumed_role_drift_requires_an_explicit_one_request_declaration() {
         let (mut config, metadata) = role_migration_fixture();
-        let error =
-            apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, None)
-                .expect_err("role drift without authority must fail closed");
+        let error = apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            None,
+            &SessionId::new(),
+        )
+        .expect_err("role drift without authority must fail closed");
 
         assert!(matches!(
             error,
@@ -4904,6 +5100,7 @@ mod tests {
             &mut config,
             &metadata,
             Some(&declared),
+            &SessionId::new(),
         )
         .expect_err("a declaration cannot authorize a different predecessor");
 
@@ -4922,8 +5119,13 @@ mod tests {
     fn exact_role_migration_keeps_current_tooling_and_restamps_current_identity() {
         let (mut config, metadata) = role_migration_fixture();
         let declared = ProfileName::from("domain");
-        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, Some(&declared))
-            .expect("exact predecessor declaration should authorize the restamp");
+        apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            Some(&declared),
+            &SessionId::new(),
+        )
+        .expect("exact predecessor declaration should authorize the restamp");
 
         assert!(
             config.resume_override_mask.comms_name && config.resume_override_mask.peer_meta,
@@ -4967,8 +5169,13 @@ mod tests {
         let expected_comms_name = config.comms_name.clone();
         let expected_binding = config.mob_member_binding.clone();
         let declared = ProfileName::from("domain");
-        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, Some(&declared))
-            .expect("an already-consumed predecessor declaration must be inert");
+        apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            Some(&declared),
+            &SessionId::new(),
+        )
+        .expect("an already-consumed predecessor declaration must be inert");
 
         assert_eq!(config.comms_name, expected_comms_name);
         assert_eq!(config.mob_member_binding, expected_binding);
@@ -5002,8 +5209,13 @@ mod tests {
                 .with_label("durable_annotation", "retained"),
         );
 
-        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, None)
-            .expect("same-role identity admission should succeed");
+        apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            None,
+            &SessionId::new(),
+        )
+        .expect("same-role identity admission should succeed");
 
         assert!(
             config.resume_override_mask.comms_name && config.resume_override_mask.peer_meta,

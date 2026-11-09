@@ -170,6 +170,58 @@ impl UnifiedRuntime {
             .restore_gating_state(snapshot)
     }
 
+    /// How long the gating owner's state (pending entries and audit) is
+    /// kept: `Durable` where this runtime keeps it in a durable metadata
+    /// store (the stock gateways, or a runtime built with
+    /// [`UnifiedRuntimeBuilder::keep_gating_state`](crate::UnifiedRuntimeBuilder::keep_gating_state)),
+    /// `Process` otherwise.
+    pub async fn gating_retention(&self) -> crate::runtime::RecordRetention {
+        self.module_runtime.lock().await.gating_retention()
+    }
+
+    /// Keep the gating owner's state in the composition's metadata store
+    /// from now on ([`crate::gating_persistence`]): restore what the store
+    /// holds, then write the state after every gating change and at
+    /// shutdown. Called once, right after bootstrap, before anything
+    /// evaluates a gating action: an owner that already holds state is not
+    /// restored, and keeps its state in memory only, as does an owner whose
+    /// metadata store keeps nothing across restarts.
+    pub(crate) async fn keep_gating_state_in_realm(&self) {
+        let mut slot = self.gating_persistence.lock().await;
+        if slot.is_some() {
+            return;
+        }
+        let restored = {
+            let mut owner = self.module_runtime.lock().await;
+            crate::gating_persistence::GatingStatePersistence::restore(
+                &self.persistent_metadata,
+                &mut owner,
+            )
+            .await
+        };
+        let Some(persistence) = restored else {
+            return;
+        };
+        let changes = self.module_runtime.lock().await.subscribe_gating_changes();
+        let task = persistence.spawn(std::sync::Arc::downgrade(&self.module_runtime), changes);
+        *slot = Some(super::GatingPersistence { persistence, task });
+    }
+
+    /// Stop writing the gating owner's state after every change, and write
+    /// its last state once.
+    pub(super) async fn stop_gating_persistence(&self) {
+        let Some(super::GatingPersistence { persistence, task }) =
+            self.gating_persistence.lock().await.take()
+        else {
+            return;
+        };
+        persistence.stop();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        persistence.persist(&self.module_runtime).await;
+    }
+
     /// See [`crate::runtime::MetaRuntimeHandle::set_gating_escalation_routes`].
     pub async fn set_gating_escalation_routes(
         &self,

@@ -114,6 +114,13 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // mob-set state holds one machine state per quarantined store in
             // memory, and every restore pass derives them again.
             "MobStoreRestoreLifecycleMachine",
+            // Host store writer fence owns the writer fence of ONE realm:
+            // the writer's phase, the token it commits with, the grant it
+            // has not installed, the acquires it gave up on, the holder it
+            // waits out, and why it stopped or lost the realm. Realm-scoped
+            // and volatile, and clock-free: the realm reports time as
+            // inputs.
+            "HostStoreWriterFenceMachine",
         ]
     );
 
@@ -285,7 +292,12 @@ fn session_persistence_version_witness_stays_a_pure_version_encoder() {
 /// answers exactly one mechanical question: "is the persisted marker equal-to /
 /// newer-than / staler-than / unrelated-to the live credential projection?"
 /// (a tuple `Ord`/`Eq` over `(token_key, expires_at, generation,
-/// credential_published_at_millis)`). The admission POLICY lives in the
+/// credential_published_at_millis)`, with two more scalar inputs from the
+/// snapshot: `adopted_marker_generation`, the generation the lease records for
+/// its publication's marker, which the marker's generation is compared with
+/// when present, and `released_publication_at_millis`, the publication time a
+/// lease without a credential withdrew, which a record must be strictly later
+/// than). The admission POLICY lives in the
 /// resolver (`meerkat-auth-core::resolver`), which maps `Matches` → proceed and
 /// `{TokenNewer, TokenStale, Invalid}` → stale-credential rejection. The witness
 /// never mints a lease fact, never advances any lifecycle, and never decides
@@ -349,10 +361,15 @@ fn auth_lease_durable_marker_witness_stays_a_pure_ordering_relation() {
     );
 
     // (2) The witness compares EXACTLY the four pure scalar fields plus the
-    // three opaque identity-key fields — nothing richer. Each scalar binds to a
-    // real producer obligation field (the codegen re-validates this too). A pure
-    // comparison witness owns no other inputs, so it cannot grow into a reducer
-    // that folds additional facts into a conclusion.
+    // three opaque identity-key fields, and reads two more scalar inputs from
+    // the lease snapshot: `adopted_marker_generation` (the generation compared
+    // with the marker's when the lease records one) and
+    // `released_publication_at_millis` (the bound a record's publication time
+    // must exceed while the lease holds no credential). Nothing richer. Each
+    // marker scalar binds to a real producer obligation field (the codegen
+    // re-validates this too). A pure comparison witness owns no other inputs,
+    // so it cannot grow into a reducer that folds additional facts into a
+    // conclusion.
     for (label, binding) in [
         ("phase", &marker.phase),
         ("expires_at", &marker.expires_at),
@@ -3111,6 +3128,8 @@ mod grant_candidate_wire {
             represented_subject: None,
             issued_revision: 1,
             restrictions: ExecutionRestrictions::unrestricted(),
+            child_approval: None,
+            approval: None,
         };
         let wire = serde_json::to_string(&record).expect("record wire");
         let mut missing_incarnation = serde_json::to_value(&record).expect("record value");

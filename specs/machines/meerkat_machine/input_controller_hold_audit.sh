@@ -163,9 +163,14 @@ def arms(name, phases):
 ALL = ("Idle", "Attached", "Running", "Retired", "Stopped")
 
 def guard_on_holds(line):
+    # The Steer lane order guard (steer_lane_fifo_across_requesters) names
+    # the holds too, of the Steer inputs waiting before the staged one
+    # (waiting_input_id), which hold nothing back: not a hold guard of the
+    # input itself.
     return (line.startswith("    /\\ ")
             and re.search(r"\\(?:not)?in input_controller_holds\b", line) is not None
-            and "input_controller_holds'"'"'" not in line)
+            and "input_controller_holds'"'"'" not in line
+            and "waiting_input_id" not in line)
 
 def holds_update(line):
     return line.startswith("    /\\ input_controller_holds'"'"' = ")

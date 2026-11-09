@@ -452,13 +452,15 @@ async fn enforced_access_reads_the_roster_at_most_once_per_replay_page() {
         snapshot_read_model: ConsoleSnapshotReadModel::default(),
         access: Some(controller),
         memory_panel: None,
-        operator_resolver: None,
         identity_roster: None,
         workgraph: None,
         topology: None,
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
+        console_audit: None,
+        console_attention: None,
     });
 
     let mut sse = open_stream(&app, "console:0")

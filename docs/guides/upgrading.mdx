@@ -137,6 +137,519 @@ so every run admitted more than 15 minutes before a graceful restart ended
 be when it runs: a kept input now runs after a restart shorter than
 `max_age`, whenever it was admitted.
 
+### Meta's roster pass declares through Core
+
+Meerkat Meta's roster pass (the bootstrap, each refresh and the held pass)
+declares the host's roster in Core's mob through Core's declared apply, and
+no longer seats, respawns, releases or retires members itself. A send, a
+dispatch or a materialization of an identity Core holds no member for
+declares that identity alone first. What changes for a host:
+
+- A member Meta 0.9.3 spawned carries the identity's `agent_identity` label
+  but not the durable-identity marker. When the roster lists its identity,
+  Core adopts the member as the identity's entry and keeps it as it is: Meta
+  no longer respawns it onto its session to give it the marker, so its
+  session resolves no principal for extension documents until the identity's
+  next fresh life. The roster pass no longer retires such a member when the
+  roster stops listing it either. Every Meta from 0.9.4 to 0.9.10 respawned
+  these members at its first roster pass, so a state directory Meta 0.9.10
+  last ran holds none.
+- A rotation (`reset`, `delete_identity`) a crash interrupted is finished by
+  Core, from its own record, when the mob next starts; Meta's roster pass no
+  longer drives it. Meta still writes its record of the rotation, which a
+  rollback's roster pass reads.
+- An identity a complete roster no longer lists is unlisted by Core's seal,
+  which retires its member; the pass answers each such identity in
+  `RestoreFlowResult::unlisted` (Rust).
+
+**Do:** coming from Meta 0.9.3 or earlier, run Meta 0.9.10 over the state
+directory once before 0.9.11.
+
+### A host's adoption of a declared identity
+
+A host's adoption of an identity a declared roster lists
+(`MobHandle::adopt_member_identity_declaration` over a declared identity
+entry, Rust only) takes the entry over: Core retires the member with the
+cause `MemberRetirementCause::HostAdopted` and materializes it again under
+the host's intent, on its own session, as no entry, and the end of that
+retirement ends the entry. The adoption ends the identity's entry, not the
+identity: the identity continues under the host's intent and keeps its
+scoped tool grants. In 0.9.10 the entry outlived the retirement,
+unseated and owed its seat, and Core refused the host's spawn of the
+identity (`IdentityMember`), so the identity was not served again. From the
+host's intent row on, a declared apply answers the identity host-adopted
+(`DeclaredEntryRefusal::HostAdopted`), and a complete roster's seal leaves
+its entry as it is, whether the roster lists the identity or not.
+
+**Do:** nothing on the upgrade; see the rollback below.
+
+### Host store implementers: token order and conflicted scopes
+
+Two rules of the host store SPI are new or newly enforced in 0.9.11, each
+with a row of the host store chapter in `meerkat-store-conformance`:
+
+- **Token order** (the `token_order` row). Every grant answers a token
+  above every earlier grant of the realm, in either acquire mode and to any
+  caller, a takeover of the caller's own recorded lease included. Core now
+  holds a re-acquire's grant to it: a grant at or below the token the
+  writer holds loses the realm until it is reopened, with a cause that
+  names your store's token order, not another writer.
+- **Conflicted scopes** (the `a_conflicted_scope_is_listed_typed` row). A
+  store that meets obligation 4 by failing a scope's load with a typed
+  conflict (two batches at one of its versions) reports that scope per
+  scope in its listings: `list_heads` answers it in `HeadPage::conflicts`
+  as `ScopeConflict::new(name, version, commit_ids)`, with the version that
+  holds the two batches (the `current` the load's `Conflict` names) and
+  their commit ids, ascending, without repeats and the same each time, or
+  none. Every `read_rows` of the scope answers the same conflict. It is never
+  listed among the heads and never fails the page, and a
+  page holds at most `limit` entries across both lists. A page the store
+  cannot decide yet (a pending acquire cut) answers `Unavailable`, never a
+  conflict. Core quarantines such a scope and opens the rest of the realm
+  (see [A Conflicted Scope](/reference/host-store-spi#a-conflicted-scope));
+  a store that still fails the page keeps the realm from opening.
+  `HeadPage` is `#[non_exhaustive]`: a struct literal no longer compiles.
+
+**Do:**
+
+- Build each listing page with `HeadPage::new(heads, next)`, and add the
+  conflicted scopes with `HeadPage::with_conflicts`.
+- Answer every grant with a token above every earlier one.
+- Run the host store chapter against your store before you upgrade. A
+  store that decides between two batches for one version only when it
+  folds them implements `HostStoreFactory::fold_now`, so the conflict row
+  sees what its loads and listings show once it folded.
+- To lift a quarantine, repair the scope in your store (keep one of the two
+  batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines
+  the scope again.
+
+### The downgrade cycle of store-owned identities
+
+A release before 0.9.9 does not read a mob's rows of schema version 2 and
+later: the rows of store-owned identities (present, pending their host's
+preparation or archived) and the tombstones of removed names
+(`IdentityRecordCensus::created_rows`, and the `identity-store-rows`
+finding of `rkat storage doctor`). A downgrade of a mob that holds any to
+such a release is supported through this cycle only, and a host's downgrade
+tooling refuses while the census counts any row. A downgrade to 0.9.9 or
+0.9.10 needs no cycle: they read the rows.
+
+1. Hold the mob's identity changes (`MobHandle::set_identity_changes_held`).
+2. Settle every identity awaiting its host's preparation
+   (`preparations_open`) and every held construction (`constructions_held`),
+   or remove the identity.
+3. Bring each stale seat up to date (`seats_stale`), or remove its identity.
+4. Export the set: `MobHandle::export_created_identities` answers a
+   `CreatedIdentitySetExport` (schema `meerkat.identity.created_set.v1`)
+   that holds every row as sealed, with each identity's session reference
+   (its member's session, or its archived session), sealed with a digest.
+   Keep it: the import needs it. Session contents, memory and decisions are
+   not in it.
+5. Purge: `MobHandle::purge_created_identities` with the export's digest,
+   as the host operator. One store transaction removes every row of the
+   set, and nothing else (no session, journal row or host-adopted intent),
+   only while the rows are still the export's. The mob then refuses every
+   identity change (`purged`) until it restarts. A purge or an import
+   commits at most 256 identities (`IDENTITY_CHANGE_BATCH_MAX`, tombstones
+   included): a mob with more rows is refused `batch_too_large`, with
+   nothing removed, and has no supported downgrade below 0.9.9 in this
+   release.
+6. Downgrade.
+7. After the roll-forward, import the export:
+   `MobHandle::import_created_identities`, as the host operator, under
+   imported consent. A retry of its operation replays it.
+
+Under the older release, after the purge, an adopted identity that its
+host's roster still lists is a roster identity again, on its session. The
+other store-owned members are plain members: its roster pass, a
+`retire_stale` reconcile or a former spawner's retirement may retire them,
+archiving their sessions. The names of removed identities are free there,
+and a roster may seat one.
+
+Rolled forward, a start reads each store-owned identity whose row was purged
+as unreadable: its name is reserved, nothing acts on it and nothing seats it
+until the import restores its row. The import re-creates each record and
+re-binds its session: a member seated under its name is bound in place, on
+its session, a plain member only when it is bound to the session the record
+names (a member on another session, a new worker the older release seated
+or the identity's own on a session the export does not name, is reported
+`name_taken_meanwhile` and left as it is: adopt it to take it into store
+custody); an identity with no member is seated again, Dormant, on its
+archived session, or on a fresh session with the history unavailable notice
+when the session store no longer holds it; pending, archived and removed
+names are restored as recorded; and an adopted identity whose roster
+declared it again returns to store custody by the adoption's step. A name
+another holder keeps (a roster or a member seated on it meanwhile, or
+another row) is left as that holder has it, and the import's receipt reports
+it (`name_taken_meanwhile`). A re-import under a new operation reports a
+record whose restored row differs from it (the import left out an owned edge
+another identity held, or the identity changed since) as
+`name_taken_meanwhile` too: the identity is store-owned already, its row is
+left as it is, and a retry under the import's own operation replays its
+receipt.
+
+### Machine schemas: CI samples for an input field of any type
+
+In `meerkat-machine-schema`, `InputFieldDomainKind` gains `CiSamples`, the
+values the CI profile samples for an input field of any type (the Deep
+profile and every composition explore the field's whole domain), and
+`InputFieldDomainError` gains `SampleTypeMismatch { index }`, which refuses
+a sample that is not a value of the field's type. Both are appended last.
+
+**Do:** add the new arm to each exhaustive match on either enum.
+
+### Upgrade the SDKs with the server
+
+A Python, TypeScript or Web SDK of 0.9.10 or earlier refuses the new
+`requested_compaction_skipped` event type, as it does any event type newer
+than its contract. A session publishes it when a host's compaction request
+(`session/compact`, `mob/compact_member`) is consumed by a check that has
+nothing to compact.
+
+**Do:** upgrade the SDKs together with the server, before any host asks a
+session to compact.
+
+### Tool grant run scopes and grant requests
+
+A grant can be scoped to one run of its subject (a session, or the session a
+member identity's member holds), and a person can approve a
+grant that a host (`tool_grants/request`) or a gated session's agent
+(`request_tool_grant`) asked for. Both write grant rows a 0.9.10 binary
+cannot read: it reads a run-scoped grant, and the grant an approved request
+issued (its id is a version 5 UUID), as unreadable, so it opens nothing there
+and lists it under `unreadable`. A 0.9.10 client decodes the status
+`run_ended`, the expiry drivers `run` and `recovery` and the audit event
+`run_ended` as `unknown`, reads the statuses `requested` and `declined` as
+they are (they exist since 0.9.9), and ignores a grant's `scope`.
+
+`rkat-rpc` runs the executor of `tool_grant.issue` decisions on its store and
+claims that kind: another process's loop of the kind executes none of them
+while it runs. Every grant-gated build mounts `request_tool_grant`, and a
+host that takes no grant requests answers its calls with a tool error.
+
+**Do:**
+
+- Upgrade every host that serves gated sessions, and every process that
+  executes decisions on their store, before relying on run scopes or
+  requests.
+- A client that compares a session's tools with its build's gate allows for
+  `request_tool_grant`.
+- Before rolling back to 0.9.10, revoke the grants approved requests issued,
+  or let them expire: 0.9.10 can neither read nor revoke them, and one still
+  within its window comes back live on the next upgrade. 0.9.10 executes no
+  grant request, so open and approved requests wait for the next upgrade.
+
+### Rolling back to 0.9.10
+
+0.9.10 reads what 0.9.11 writes, with the exceptions below. Roll back Core,
+Meta and Connect together, with every process that shares a realm, a store
+or a mob, and the SDKs with their servers.
+
+#### Configuration a 0.9.10 process refuses to load
+
+- `[governance.decisions]`: 0.9.10 refuses a `[governance]` section with a
+  `decisions` key and fails to load the realm's configuration document as a
+  whole. Remove the section before a rollback.
+
+- Meta access rules that name `schedule.manage`: an access configuration
+  saved by 0.9.11 names it wherever a rule grants `agent.send`, and Meta
+  0.9.10 refuses to load a configuration that names it. Remove
+  `schedule.manage` from the rules, or restore the configuration saved
+  before the upgrade.
+
+- Meta access rules that name `audit.view`: refused by earlier releases
+  (unknown action). Keep it out of a configuration a 0.9.10 gateway may
+  load.
+
+- Meta access rules that name `decisions.view`, `decisions.decide`,
+  `decisions.admin` or `decisions.*`, and an approver id whose only holders
+  are `ingress_subjects` or `people` entries: Meta 0.9.10 refuses to start
+  with that configuration. Remove those actions from the rules and give each
+  such approver id its `subjects` or `groups`, or restore the configuration
+  saved before the upgrade. An `rpc_gateway` 0.9.10 also refuses to start
+  with `runtime_options.decisions` (`unsupported runtime_options fields:
+  decisions`): leave it out of the launch.
+
+#### Records 0.9.10 reads as unreadable, one by one
+
+Nothing acts on such a record; everything else loads.
+
+- Durable decisions decided in a login on 0.9.11: 0.9.10 (and 0.9.9) reads
+  them as torn, lists them as unreadable, never executes them and leaves the
+  rows as stored. Back on 0.9.11 they read again and execute before their
+  deadline. A decision decided with no login, and every decision decided
+  before the upgrade, reads as before.
+
+- A decision whose row records a cleanup or a reply (an executed
+  `grant.child` decision): unreadable. Before a rollback, let the approval
+  branches end and their cleanups settle.
+
+- A decision row that holds a linked presentation (recorded, or in a
+  decided decision's evidence): unreadable. Rows without a link read as
+  before.
+
+- A scoped tool grant whose issuer carries a `decision_ref`: unreadable; it
+  opens nothing. Revoke it, or let it expire, before a rollback.
+
+- A scoped tool grant 0.9.11 ended with its identity (`subject_ended` in its
+  row): listed as unreadable; it opens and blocks nothing.
+
+- A scoped tool grant of an MCP server: unreadable; it opens nothing. Revoke
+  it, or let it expire, before a rollback.
+
+- A run-scoped tool grant, and its `granted` and `run_ended` audit rows:
+  unreadable; it opens nothing.
+
+- A grant an approved request issued (its id is a version 5 UUID), window
+  grants included: unreadable, listed under `unreadable`, and
+  `tool_grants/revoke` answers not found. One still within its window comes
+  back live at the next upgrade.
+
+- Identity-change receipts: an adoption's receipt (kind `adopt`) and a
+  purge's or an import's receipt read as unreadable, so a replay of that
+  operation there reads its receipt as unreadable.
+
+#### Identities refused one by one (the mob still loads)
+
+- Every identity 0.9.11 adopts records `profile_source` in its desired
+  material, which 0.9.10 cannot read; over time that is most identities.
+  Under 0.9.10 each such identity's intent row reads as malformed and the
+  identity as `RepairBlocked`; a write that needs its authority is refused
+  `IdentityAuthorityBlocked`, and a new adoption of it is refused too. The
+  mob still loads, and its other identities run. Recover by upgrading
+  again.
+
+#### Stores and owners 0.9.10 refuses as a whole
+
+- A grant journal that holds a grant issued under a child rule, an
+  approval-carried child or a spent use: 0.9.10's reader refuses the
+  journal, so that grant owner is unavailable there. Before a rollback,
+  revoke the approval-carried grants or let them expire. A journal of plain
+  grants reads on both releases.
+
+- A retained work whose basis selects a lineage for a hold of a decision
+  (`GrantTarget::DecisionHold`, the calling work of an access offer): 0.9.10
+  cannot decode it. Before a rollback, let such works end.
+
+- Connect: a Connect without the governed peer delivery change refuses to
+  open a source store that holds such a delivery's row (the row records the
+  sending work's requester, agent and works). Rows written before the
+  upgrade read as before.
+
+#### Members and servers that do not start
+
+- A member built by 0.9.11 records its grant gate in its session; a 0.9.10
+  member build names no gate, so its resume restores the recorded one: a
+  recorded family whose switch the profile leaves off fails the resume
+  (`FamilyDisabled`), and a recorded tool name nothing mounts fails it
+  (`UnknownTool`). The member is not resumed: it fails closed. Recover by
+  upgrading again, or respawn the member on 0.9.10, which starts it on a
+  fresh session with no recorded gate.
+
+- An MCP service-secret value stored by 0.9.11 (stored with its write
+  identity): 0.9.10 reports the slot as not stored and refuses the server's
+  launch. After a rollback, set the value again with 0.9.10. Values stored
+  by earlier versions launch as before.
+
+#### Protections 0.9.10 does not apply
+
+- Console sign-outs: 0.9.11 keeps them in the console session fence record
+  (`console-session-fences.json`); a 0.9.10 gateway keeps them in the file
+  but does not enforce them while it runs, so a login signed out on 0.9.11
+  is accepted there again while its tokens are valid. They apply again
+  after the upgrade.
+
+- Grant gates: 0.9.10 drops `tools.grant_gated` (leave a gated family's
+  switch off and 0.9.10 keeps the family off) and the role gate (a member
+  whose own profile switches on a family its role gates runs that family
+  with no grant there).
+
+- MCP server gates: 0.9.10 drops a gate's `mcp_servers` and
+  `unconfigured_mcp_servers`, so the servers they gate run ungated and a
+  gated server a profile configures starts at every build. Take the server
+  gates out, or the servers they gate, before a rollback.
+
+- Private replies: a rollback leaves the attention items stored and unread,
+  and shows a private reply in a person's side chat as a runtime event to
+  whoever may view that side chat; 0.9.10 has no private side chats, so
+  that is everyone who may view the agent it was forked from.
+
+- Private side chats: 0.9.10 does not read the `console.private_to` label
+  that 0.9.11 writes on a private side chat and on each member the side
+  chat created. It decides a side chat as the agent it was forked from, and
+  each member the side chat created by its spawn lineage (`spawned_by`), so
+  everyone who may view that agent sees them; on a console that enforces no
+  access configuration, everyone does. Before a rollback, close the private
+  side chats (**Close side chat** retires one) and retire the members they
+  created.
+
+- Personal accounts on MCP servers: 0.9.10 reads no account modes. A
+  `meta_gateway` 0.9.10 does not read `config/mcp_accounts.toml`, so a server
+  marked personal is an ordinary server there: every member whose profile
+  declares it gets it, with the installation's own credential for that
+  server if one is stored, and never a person's (the per-person credentials
+  stay stored, unread). An `rpc_gateway` 0.9.10 refuses a launch whose
+  `runtime_options` name `mcp_accounts` ("unsupported runtime_options
+  fields"). Before a rollback, remove `runtime_options.mcp_accounts` from
+  `rpc_gateway` launches, and take the personal servers out of the profiles,
+  or decide which installation credential they act with there.
+
+- Operator memory: where `agent_memory.operator_scope = "provisional"` is
+  set, 0.9.11 keys a person's operator memory by their caller scope
+  (`console-caller:v1:` keys) and recalls it only in that person's own
+  turns. 0.9.10 keys it by the console principal that last spoke to an
+  agent: it recalls none of the records 0.9.11 wrote (they stay stored, and
+  the next upgrade recalls them again), and it recalls the records written
+  before 0.9.11 under that principal in every turn of the agent, whoever
+  asks, until another principal speaks to it. What it writes uses those
+  older keys, which 0.9.11 no longer recalls. Before a rollback, set
+  `operator_scope` to `"off"` if a person's operator memory must not reach
+  other people's turns.
+
+#### Data 0.9.10 drops (it stays dropped after a re-upgrade)
+
+- Consent rows: Core 0.9.10 reads every row (it ignores
+  `consent.approver.authentication_scope_digest`), but `FileApprovalStore`
+  rewrites every row on each write, so its first write drops the login
+  digests recorded until then.
+
+- Requesters of stored inputs and transcript rows: an older Core drops the
+  field, so the input and its turn have no requester and nothing acts for
+  that person. A keyed retry, under 0.9.10, of an input 0.9.11 admitted
+  with a requester is refused as an idempotency conflict
+  (`InputIdempotencyConflict`), not deduplicated.
+
+- Detached jobs: an older Core that reads a stored job drops its requester;
+  one that writes it (a claim, a heartbeat, its completion) removes the
+  field for good. After upgrading again, the job's attempts name no
+  requester (a person-scoped tool refuses them), and a replay of the
+  submitting call is refused `DetachedJobError::SubmissionConflict`. A Meta
+  gateway rolled back while such a callback job runs does the same.
+
+#### State 0.9.10 reads its own way (one step, or none)
+
+- Held-completion marks and identity rotation records: Meta 0.9.11 still
+  writes them, with the contents 0.9.10 writes, for a rollback only. Nothing
+  to do.
+
+- Store-owned identities: 0.9.10 reads their owned edges as plain wiring (a
+  plain unwire ends one there; the next 0.9.11 start owns them again), and
+  an adopted identity as the store-owned identity its row records: its
+  roster keeps the member's former spawner, and retiring that spawner there
+  retires the adopted member and owes the identity its seat again.
+
+- Governed Console sends: Meta 0.9.10 reads a frame's `submitted` status as
+  `completed`, so a send in flight at the rollback shows completed even if
+  it then fails; nothing is sent twice.
+
+- Member continuations committed as external work: 0.9.10 ignores the
+  refusal mark on the committed row and admits the row as before.
+
+- Compactions: a compaction a 0.9.11 process staged and a 0.9.10 process
+  commits reports `CompactionCompleted` without the operator-instruction
+  snapshot observation (`OperatorInstructionsApplied`); 0.9.10 ignores the
+  intent's new field.
+
+- Gating state that `rpc_gateway` keeps in its `persistent_state`
+  directory: Meta 0.9.10 does not read it (it keeps gating in memory), so
+  after a rollback the pending approvals and the gating audit are missing
+  there, and a later start of 0.9.11 restores the state stored before the
+  rollback. Decide pending approvals before rolling back.
+
+- Memory records that name the console person who wrote them
+  (`"author": "operator"` with a `principal`): Meta 0.9.10 reads them as
+  written by the operator and shows no name; the record keeps the name.
+  Nothing to do first.
+
+- Credential directories stay owner-only (`0700`), which 0.9.10 reads as
+  the same user.
+
+- Forge: a rollback to a package an earlier Forge built leaves
+  `.mobkit/console-access.toml` as it is, but that package's console reads
+  `config/access.toml`, so administrators added in the console are missing
+  there and access fails closed. Do not add them again in that console (it
+  would rewrite `config/access.toml`, and Forge would then refuse to start,
+  change or update the installation); update forward instead.
+
+#### Mixed versions while processes roll back
+
+- Decision executors on one store: a 0.9.10 executor is refused at start
+  beside a running 0.9.11 loop (`ExecutorHeld`), and a 0.9.11 loop beside a
+  0.9.10 executor executes nothing until that executor ends. Roll back every
+  process that executes decisions on one store together.
+
+- `tool_grant.issue` decisions: 0.9.10 has no executor of the kind, so open
+  and approved requests, and the notices of ended ones, wait for the next
+  upgrade, where a request past its deadline expires. `rkat-rpc` 0.9.10
+  refuses a `tool_grants/grant` that names a `scope` (invalid params).
+
+- SDKs and servers: the Python and TypeScript SDKs through 0.9.10 fail a
+  member status read that carries `store_refused` with `INVALID_RESPONSE`,
+  so keep the SDKs at 0.9.11 while a 0.9.11 server runs. The 0.9.11 SDKs'
+  decision methods against a 0.9.10 server answer method not found
+  (`-32601`), and a 0.9.10 client reads any new status, audit event or
+  expiry driver as `unknown`.
+
+- Placed members: a placed member whose member host runs a release before
+  0.9.11 answers `member_host_unsupported` (blocked) until its host runs
+  0.9.11 and a write selects it again or it is seated again; a member placed
+  on such a host is not born with its mob's operator-instruction snapshot,
+  so its first turn runs without them.
+
+- Forge with a Meta console that predates `meta/console/whoami` (Meta
+  0.9.10 and earlier): the controller review goes to the first person who
+  signs in, administrator or not, and only that sign-in sees and answers
+  it. If that sign-in ends early, the review stays open but nobody can read
+  or answer it, and a new one starts only after the application restarts.
+
+#### Core: identities a host adopted
+
+0.9.10 does not know the cause `HostAdopted`: it replays that retirement as
+one the seal did not start, so it reads the identity a host took over as
+the declared entry again, seated by the member the host's intent
+materialized. The member keeps serving, and a declaration naming the
+identity is refused `HostAdopted`. But a complete roster that does not list
+the identity unlists the entry and retires the member once, and once the
+member retires for any other reason, Core refuses the host's spawn of the
+identity (`IdentityMember`) while the entry stands.
+
+**Do:** after rolling Core back to 0.9.10, unlist each identity that 0.9.10
+reads as a declared entry while a host's identity intent row names it
+(`MemberBindingHistory::identity_management` answers `IntentManaged`), with
+`MobHandle::unlist_declared_identity`: its member retires once (cause
+`Unlisted`), the entry ends, and the host's intent materializes the member
+again, as no entry.
+
+#### Meta: declared identities Core holds unseated
+
+Meta 0.9.10 reads what Meta 0.9.11 writes, with one boundary: an identity
+Core holds declared but unseated (its member retired by a seal or by a host,
+its session archived) stays unseated under 0.9.10, whose seat step is
+refused for it typed (`IdentityMember`) and writes nothing, so the identity
+is not served until it is seated again.
+
+**Do:** before rolling back, deliver to or warm (`meta/identity/warm`) each
+identity the roster lists that Core holds unseated, so that Core seats it;
+an identity left unseated is seated again by the first roster pass after the
+next upgrade.
+
+#### Below 0.9.10
+
+- The 0.9.9 exceptions are the ones above that name 0.9.9 (durable
+  decisions decided in a login), then the 0.9.10 notes' "Downgrading to
+  0.9.9" below.
+
+- Below 0.9.9: a mob that holds identity-store rows of schema version 2 or
+  later is downgraded through the downgrade cycle only (hold the identity
+  changes, settle the pending preparations, bring the stale seats up to
+  date, export, purge, downgrade, import after the roll-forward). A purge or
+  an import commits at most 256 identities, so a mob with more has no
+  supported downgrade below 0.9.9 in this release. 0.9.9 and 0.9.10 read
+  the rows themselves and need no cycle.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in
@@ -365,6 +878,54 @@ compiling. A Meta probe that must keep the earlier rule checks
   Forge 0.3.0 and earlier stay in `lukacf/meerkat-meta`. **Do:** an
   application that Forge 0.3.0 prepared with its Connect gateway is prepared
   again at its next install step.
+
+### Connect 0.9.10
+
+Connect 0.9.10 is the first Connect release from this repository: GitHub
+release `connect-v0.9.10` in `lukacf/meerkat`, a prerelease that is never the
+repository's latest. Earlier releases (0.9.0 and 0.9.4, and the Linux
+component prereleases 0.9.5 and 0.9.6) stay in `lukacf/meerkat-connect`.
+Connect's version moves to 0.9.10 to match Core and Meta; there are no
+Connect 0.9.7 to 0.9.9 releases.
+
+- **Paired-host names.** Connect's paired-host contract no longer names one
+  host product. Options, tools, fields and stored names say `paired-host` or
+  `paired_host` (for example `--paired-host`, `--paired-host-memory-only`,
+  the `paired_host_*` tools, the cookies `paired_host_pair` and
+  `paired_host_device`, the digest prefix `paired-host-change-v1:sha256:`,
+  the keyring service id `ai.rkat.meerkat-connect.paired-host-device.v1` and
+  the Python extra `paired-host-live`). **Do:** pair each device again,
+  prepare again any change prepared before the upgrade, install the
+  `paired-host-live` extra, and update host and agent configuration that
+  names the earlier options, tools or fields.
+- **Build from the repository root.** Connect's six crates are members of
+  the root Cargo workspace (Rust 1.97.0) and take Core and Meta at the
+  workspace's exact pins (`=0.9.10`). Build with, for example,
+  `./scripts/repo-cargo build -p meerkat-connect`.
+- **SDK packages.** The Python SDK `meerkat-toolkit` 0.9.10 (its
+  `native-host` extra requires `meerkat-meta==0.9.10`) and the TypeScript
+  package `@rkat/toolkit` 0.9.10 (development and optional peer dependencies
+  `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10) are release assets, not
+  PyPI or npm packages.
+- **Bundled discovery catalog** revision `discovery-2026-10-28.1`: the
+  Telegram recipe is a generic bot frontend built on the Python SDK's public
+  frontend modules.
+- **Setup check fix.** When a setup check answered again for a validation it
+  had already accepted, with something that is not a valid proposal (for
+  example a file list that names both a declaration and an activation
+  document), the check was refused but the selection made from the earlier
+  proposal stayed in force. Such an answer now withdraws the earlier
+  proposal, so a selection made from it no longer applies.
+- **Private approval files.** The files Connect keeps through Core's file
+  approval store (its approval store and `native-decisions.json`) are
+  created owner-only (`0600`) whatever the umask (see
+  [Changes to check](#changes-to-check)).
+- **Going back.** A Connect built on Core 0.9.8 or older (Connect 0.9.0 to
+  0.9.6) can refuse sessions written at session envelope 5 and mob journals
+  at mob event schema 10, which Connect 0.9.10 can write. Before such a
+  rollback, run `rkat storage doctor` and handle what it lists under
+  `operator-instruction-envelope` and `operator-instruction-mob-events` as
+  [Downgrading to 0.9.8](#downgrading-to-0-9-8) describes.
 
 ### Downgrading to 0.9.9
 
@@ -1065,7 +1626,8 @@ store-owned identity's pending preparation, so the paragraph above applies to
 every mob that holds one. This release has no step that deletes these rows:
 a removal writes the name's tombstone and an archive keeps its row, so a mob
 that holds any (`IdentityRecordCensus::created_rows` above zero) has no
-supported downgrade before the export and purge steps.
+supported downgrade before the export and purge steps, which 0.9.11 adds
+([the downgrade cycle](#the-downgrade-cycle-of-store-owned-identities)).
 `MobHandle::identity_record_census()` counts the rows and what a downgrade
 must settle first: the mob's rows (`created_rows`, the archived ones, the
 tombstones and the unreadable ones), the identities awaiting their host's

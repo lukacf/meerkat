@@ -60,6 +60,8 @@ const MEMBER_PEER_GAP: &str = "member peer registration or migration fold on run
      inputs and signals no Mob parity probe drives";
 const PEER_BOOKKEEPING_GAP: &str = "wiring or external-peer bookkeeping on retire, respawn and \
      repair arms no Mob parity probe triggers";
+const OWNED_EDGE_GAP: &str = "owned identity edge bookkeeping on identity change, removal and \
+     recovery inputs and signals no Mob parity probe drives";
 const COORDINATION_GAP: &str =
     "mob coordination lease predicate on coordination inputs no Mob parity probe drives";
 const MEERKAT_PEER_DIRECTORY_GAP: &str = "MeerkatMachine peer-directory predicate; the oracle \
@@ -246,6 +248,8 @@ pub const KERNEL_UNIMPLEMENTED_NATIVE_HELPERS: &[(&str, &str)] = &[
         "mob_machine_wiring_edges_without_identity",
         PEER_BOOKKEEPING_GAP,
     ),
+    ("mob_machine_wiring_edge_other", OWNED_EDGE_GAP),
+    ("mob_machine_owned_edges_without_identity", OWNED_EDGE_GAP),
     ("mob_machine_run_step_status_after_set", FLOW_REDUCER_GAP),
     (
         "mob_machine_run_step_status_after_cancel_unfinished",

@@ -718,7 +718,9 @@ async fn administer<I: Future<Output = io::Result<()>>>(
                     values[index].expose(),
                 )
                 .await
-                .map(Some),
+                // The written reference this outcome reports: the setter
+                // returns the write's witness, and this is its reference.
+                .map(|witness| Some(witness.reference().clone())),
                 Action::Remove => meerkat::remove_mcp_service_secret(
                     storage,
                     persistence,
@@ -796,6 +798,7 @@ mod tests {
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
             value: &PersistedTokens,
         ) -> Result<(), TokenStoreError> {
@@ -804,7 +807,7 @@ mod tests {
                 self.entered.add_permits(1);
                 self.release.acquire().await.unwrap().forget();
             }
-            self.inner.save(key, value).await?;
+            self.inner.save(fence, key, value).await?;
             if self.lose_next.swap(false, Ordering::SeqCst) {
                 return Err(TokenStoreError::Unavailable(
                     "fixture lost acknowledgement".into(),
@@ -812,13 +815,17 @@ mod tests {
             }
             Ok(())
         }
-        async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+        async fn clear(
+            &self,
+            fence: &meerkat_core::AdmissionGuard,
+            key: &TokenKey,
+        ) -> Result<(), TokenStoreError> {
             self.clears.fetch_add(1, Ordering::SeqCst);
             if self.hold_next.swap(false, Ordering::SeqCst) {
                 self.entered.add_permits(1);
                 self.release.acquire().await.unwrap().forget();
             }
-            self.inner.clear(key).await?;
+            self.inner.clear(fence, key).await?;
             if self.lose_next.swap(false, Ordering::SeqCst) {
                 return Err(TokenStoreError::Unavailable(
                     "fixture lost acknowledgement".into(),
@@ -889,7 +896,9 @@ mod tests {
             let factory = meerkat::AgentFactory::new(root.join("factory"))
                 .with_provider_auth_persistence(ProviderAuthPersistence::new(
                     store.clone(),
-                    Arc::new(FileLockCoordinator::new(root.join("locks"))),
+                    Arc::new(FileLockCoordinator::new(
+                        root.join("credentials").join("refresh-locks"),
+                    )),
                 ));
             Self {
                 storage,

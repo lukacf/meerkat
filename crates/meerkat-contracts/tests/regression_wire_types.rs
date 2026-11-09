@@ -651,6 +651,31 @@ fn agent_event_all_variants_roundtrip() {
             }],
             axis: meerkat_core::ToolResultBoundAxis::RequestBytes,
         },
+        AgentEvent::RequestedCompactionSkipped {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            reason: meerkat_core::RequestedCompactionSkipReason::FirstModelRequest,
+        },
+        AgentEvent::OperatorInstructionsApplied {
+            session_id: SessionId::new(),
+            entry_sequence: 2,
+            kind: meerkat_core::InstructionEntryKind::Delta,
+            run_id: Some(meerkat_core::lifecycle::RunId::new()),
+            active: vec![meerkat_core::InstructionActiveRef {
+                namespace: meerkat_core::InstructionNamespace::new("host").expect("namespace"),
+                key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                revision: meerkat_core::InstructionRevision::new(2).expect("revision"),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body("Be brief."),
+                body_bytes: 9,
+            }],
+            changes: vec![meerkat_core::InstructionChange::Activate {
+                namespace: meerkat_core::InstructionNamespace::new("host").expect("namespace"),
+                key: meerkat_core::InstructionKey::new("tone").expect("key"),
+                revision: meerkat_core::InstructionRevision::new(2).expect("revision"),
+                supersedes: Some(meerkat_core::InstructionRevision::new(1).expect("revision")),
+                content_sha256: meerkat_core::InstructionContentDigest::for_body("Be brief."),
+                body_bytes: 9,
+            }],
+        },
     ];
 
     for event in &direct_variants {
@@ -985,6 +1010,18 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 total_bytes: 600_000,
             }],
             axis: meerkat_core::ToolResultBoundAxis::ContextWindow,
+        },
+        AgentEvent::RequestedCompactionSkipped {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            reason: meerkat_core::RequestedCompactionSkipReason::NothingToFold,
+        },
+        AgentEvent::OperatorInstructionsApplied {
+            session_id: SessionId::new(),
+            entry_sequence: 1,
+            kind: meerkat_core::InstructionEntryKind::Delta,
+            run_id: Some(meerkat_core::lifecycle::RunId::new()),
+            active: Vec::new(),
+            changes: Vec::new(),
         },
     ];
 
@@ -1348,8 +1385,9 @@ fn external_event_and_member_send_schemas_name_the_optional_key() {
 fn tool_grant_results_pin_their_field_names() {
     use meerkat_contracts::{
         ListToolGrantsResult, RevokeToolGrantResult, ToolGrantAuditResult, WireToolGrant,
-        WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantIssuer, WireToolGrantStatus,
-        WireToolGrantSubject, WireToolGrantTarget, WireUnreadableToolGrantAuditRow,
+        WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantIssuer, WireToolGrantScope,
+        WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
+        WireUnreadableToolGrantAuditRow,
     };
     let grant = WireToolGrant {
         grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
@@ -1360,12 +1398,16 @@ fn tool_grant_results_pin_their_field_names() {
             family: "shell".to_string(),
             names: vec!["shell".to_string()],
         },
-        issuer: WireToolGrantIssuer::Operator { caller: None },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
         reason: None,
         status: WireToolGrantStatus::Active,
         issued_at_ms: 1_000,
         expires_at_ms: 61_000,
         ended_at_ms: None,
+        scope: WireToolGrantScope::Window,
     };
     let revoked = serde_json::to_value(RevokeToolGrantResult {
         grant: grant.clone(),
@@ -1383,6 +1425,7 @@ fn tool_grant_results_pin_their_field_names() {
                 "status": "active",
                 "issued_at_ms": 1000,
                 "expires_at_ms": 61000,
+                "scope": {"kind": "window"},
             },
             "changed": true,
         })
@@ -1391,10 +1434,12 @@ fn tool_grant_results_pin_their_field_names() {
     let listed = serde_json::to_value(ListToolGrantsResult {
         grants: vec![grant],
         unreadable: Vec::new(),
+        gate: None,
     })
     .expect("serialize");
     assert_eq!(listed["grants"].as_array().map(Vec::len), Some(1));
     assert!(listed.get("unreadable").is_none(), "{listed}");
+    assert!(listed.get("gate").is_none(), "{listed}");
 
     let page = serde_json::to_value(ToolGrantAuditResult {
         rows: vec![WireToolGrantAuditRow {
@@ -1598,6 +1643,128 @@ fn a_session_create_grant_gate_refuses_an_unknown_field() {
     );
 }
 
+/// A gate names MCP servers and the unconfigured-servers mode, which convert
+/// to the build's gate and are omitted when unset; a grant request targets
+/// an MCP server, optionally narrowed to its tools, as a record does; an
+/// identity grant answers `applies` and a list answers the member's `gate`,
+/// each omitted for a session subject.
+#[test]
+fn tool_grant_server_targets_and_member_gates_pin_their_field_names() {
+    use meerkat_contracts::{
+        GrantToolResult, ListToolGrantsResult, ToolGrantTargetRequest, WireGrantGatedTools,
+        WireMemberToolGrantGate, WireToolGrant, WireToolGrantApplies, WireToolGrantGateEntries,
+        WireToolGrantGateView, WireToolGrantIssuer, WireToolGrantScope, WireToolGrantStatus,
+        WireToolGrantSubject, WireToolGrantTarget,
+    };
+    let gate: WireGrantGatedTools = serde_json::from_value(serde_json::json!({
+        "mcp_servers": ["tickets"],
+        "unconfigured_mcp_servers": true,
+    }))
+    .expect("a server gate parses");
+    assert_eq!(
+        meerkat_core::tool_grant::GrantGatedTools::from(gate.clone()),
+        meerkat_core::tool_grant::GrantGatedTools::default()
+            .with_mcp_server("tickets")
+            .with_unconfigured_mcp_servers()
+    );
+    assert!(!gate.is_empty());
+    assert_eq!(
+        serde_json::to_value(WireGrantGatedTools {
+            families: vec!["shell".to_string()],
+            ..WireGrantGatedTools::default()
+        })
+        .expect("serialize"),
+        serde_json::json!({"families": ["shell"]}),
+        "no servers and an unset mode are omitted"
+    );
+
+    let narrowed: ToolGrantTargetRequest = serde_json::from_value(serde_json::json!({
+        "kind": "mcp_server",
+        "server": "tickets",
+        "tools": ["open_ticket"],
+    }))
+    .expect("a server target parses");
+    assert_eq!(
+        narrowed,
+        ToolGrantTargetRequest::McpServer {
+            server: "tickets".to_string(),
+            tools: Some(vec!["open_ticket".to_string()]),
+        }
+    );
+    assert!(
+        serde_json::from_value::<ToolGrantTargetRequest>(serde_json::json!({
+            "kind": "mcp_server",
+            "server": "tickets",
+            "names": ["open_ticket"],
+        }))
+        .is_err(),
+        "a server target refuses a field it does not know"
+    );
+
+    let grant = WireToolGrant {
+        grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
+        subject: WireToolGrantSubject::Session {
+            session_id: "session-1".to_string(),
+        },
+        target: WireToolGrantTarget::McpServer {
+            server: "tickets".to_string(),
+            tools: None,
+        },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
+        reason: None,
+        status: WireToolGrantStatus::Active,
+        issued_at_ms: 1_000,
+        expires_at_ms: 61_000,
+        ended_at_ms: None,
+        scope: WireToolGrantScope::Window,
+    };
+    let granted = serde_json::to_value(GrantToolResult {
+        grant: grant.clone(),
+        applies: Some(WireToolGrantApplies::AtNextBuild),
+    })
+    .expect("serialize");
+    assert_eq!(
+        granted["grant"]["target"],
+        serde_json::json!({"kind": "mcp_server", "server": "tickets"})
+    );
+    assert_eq!(granted["applies"], "at_next_build");
+    let session_grant = serde_json::to_value(GrantToolResult {
+        grant: grant.clone(),
+        applies: None,
+    })
+    .expect("serialize");
+    assert!(session_grant.get("applies").is_none(), "{session_grant}");
+
+    let listed = serde_json::to_value(ListToolGrantsResult {
+        grants: vec![grant],
+        unreadable: Vec::new(),
+        gate: Some(WireMemberToolGrantGate {
+            running: None,
+            next_build: WireToolGrantGateView {
+                gated: WireToolGrantGateEntries {
+                    mcp_servers: vec!["tickets".to_string()],
+                    ..WireToolGrantGateEntries::default()
+                },
+                not_mounted: WireToolGrantGateEntries::default(),
+            },
+        }),
+    })
+    .expect("serialize");
+    assert_eq!(
+        listed["gate"],
+        serde_json::json!({
+            "running": null,
+            "next_build": {"gated": {"mcp_servers": ["tickets"]}, "not_mounted": {}},
+        })
+    );
+    let unknown: WireToolGrantApplies =
+        serde_json::from_value(serde_json::json!("later")).expect("a later value decodes");
+    assert_eq!(unknown, WireToolGrantApplies::Unknown);
+}
+
 /// The `tool_grants/*` params schemas require only what a request must
 /// carry: the window, the reason and the paging fields stay optional.
 #[cfg(feature = "schema")]
@@ -1638,5 +1805,177 @@ fn tool_grant_params_schemas_require_only_their_subject_target_or_id() {
             meerkat_contracts::ToolGrantAuditParams
         )),
         ["subject"]
+    );
+}
+
+/// What a 0.9.10 client reads of a later server's run-scoped grant: the
+/// `run_ended` status and the `run_ended` audit event read as `unknown`, and
+/// the grant's `scope` is ignored, so a list or an audit page never fails on
+/// them. A window grant's parameters name no scope, so a 0.9.10 server
+/// still takes them; a `current_run` grant is refused there, never widened.
+#[test]
+fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
+    use meerkat_contracts::{
+        GrantToolParams, ListToolGrantsResult, ToolGrantAuditResult, ToolGrantScopeRequest,
+        ToolGrantSubjectRequest, ToolGrantTargetRequest, WireToolGrant, WireToolGrantAuditEvent,
+        WireToolGrantAuditRow, WireToolGrantExpiryDriver, WireToolGrantIssuer, WireToolGrantScope,
+        WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
+    };
+
+    /// The 0.9.10 result shapes, frozen: what a released client decodes.
+    /// Their fields are decoded, not read: a required one that is missing
+    /// fails the decode.
+    #[allow(dead_code)]
+    mod v0910 {
+        use serde::Deserialize;
+
+        #[derive(Debug, PartialEq, Eq, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum WireToolGrantStatus {
+            Active,
+            Expired,
+            Revoked,
+            Requested,
+            Declined,
+            #[serde(other)]
+            Unknown,
+        }
+
+        #[derive(Debug, Deserialize)]
+        pub struct WireToolGrant {
+            pub grant_id: String,
+            pub subject: serde_json::Value,
+            pub target: serde_json::Value,
+            pub issuer: serde_json::Value,
+            #[serde(default)]
+            pub reason: Option<String>,
+            pub status: WireToolGrantStatus,
+            pub issued_at_ms: u64,
+            pub expires_at_ms: u64,
+            #[serde(default)]
+            pub ended_at_ms: Option<u64>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        pub struct ListToolGrantsResult {
+            pub grants: Vec<WireToolGrant>,
+        }
+
+        #[derive(Debug, PartialEq, Eq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        pub enum WireToolGrantAuditEvent {
+            Granted {},
+            Expired {},
+            Revoked {},
+            Refused {},
+            #[serde(other)]
+            Unknown,
+        }
+
+        #[derive(Debug, Deserialize)]
+        pub struct WireToolGrantAuditRow {
+            pub sequence: u64,
+            pub at_ms: u64,
+            pub event: WireToolGrantAuditEvent,
+        }
+
+        #[derive(Debug, Deserialize)]
+        pub struct ToolGrantAuditResult {
+            pub rows: Vec<WireToolGrantAuditRow>,
+        }
+    }
+
+    let grant = WireToolGrant {
+        grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
+        subject: WireToolGrantSubject::Session {
+            session_id: "session-1".to_string(),
+        },
+        target: WireToolGrantTarget::Tool {
+            name: "deploy".to_string(),
+        },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
+        reason: None,
+        status: WireToolGrantStatus::RunEnded,
+        issued_at_ms: 1_000,
+        expires_at_ms: 61_000,
+        ended_at_ms: Some(2_000),
+        scope: WireToolGrantScope::CurrentRun {
+            run_id: "run-1".to_string(),
+        },
+    };
+    let listed = serde_json::to_value(ListToolGrantsResult {
+        grants: vec![grant],
+        unreadable: Vec::new(),
+        gate: None,
+    })
+    .expect("serialize");
+    assert_eq!(listed["grants"][0]["status"], "run_ended", "{listed}");
+    assert_eq!(
+        listed["grants"][0]["scope"],
+        serde_json::json!({"kind": "current_run", "run_id": "run-1"})
+    );
+    let old: v0910::ListToolGrantsResult =
+        serde_json::from_value(listed).expect("a 0.9.10 client decodes the list");
+    assert_eq!(old.grants[0].status, v0910::WireToolGrantStatus::Unknown);
+    assert_eq!(old.grants[0].ended_at_ms, Some(2_000));
+
+    let page = serde_json::to_value(ToolGrantAuditResult {
+        rows: vec![WireToolGrantAuditRow {
+            sequence: 1,
+            at_ms: 2_000,
+            event: WireToolGrantAuditEvent::RunEnded {
+                grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
+                run_id: "run-1".to_string(),
+                observed_at_ms: 2_000,
+                driver: WireToolGrantExpiryDriver::Run,
+            },
+        }],
+        unreadable: Vec::new(),
+        next_sequence: None,
+    })
+    .expect("serialize");
+    assert_eq!(page["rows"][0]["event"]["kind"], "run_ended", "{page}");
+    let old: v0910::ToolGrantAuditResult =
+        serde_json::from_value(page).expect("a 0.9.10 client decodes the page");
+    assert_eq!(old.rows[0].event, v0910::WireToolGrantAuditEvent::Unknown);
+    assert_eq!((old.rows[0].sequence, old.rows[0].at_ms), (1, 2_000));
+
+    // A window grant's parameters carry no scope, so a 0.9.10 server, which
+    // refuses an unknown field, still takes them.
+    let window = serde_json::to_value(GrantToolParams {
+        subject: ToolGrantSubjectRequest::Session {
+            session_id: "session-1".to_string(),
+        },
+        target: ToolGrantTargetRequest::Tool {
+            name: "deploy".to_string(),
+        },
+        expires_at_ms: None,
+        duration_ms: Some(60_000),
+        reason: None,
+        scope: None,
+        decision_ref: None,
+    })
+    .expect("serialize");
+    assert!(window.get("scope").is_none(), "{window}");
+    let current_run = serde_json::to_value(GrantToolParams {
+        subject: ToolGrantSubjectRequest::Session {
+            session_id: "session-1".to_string(),
+        },
+        target: ToolGrantTargetRequest::Tool {
+            name: "deploy".to_string(),
+        },
+        expires_at_ms: None,
+        duration_ms: Some(60_000),
+        reason: None,
+        scope: Some(ToolGrantScopeRequest::CurrentRun {}),
+        decision_ref: None,
+    })
+    .expect("serialize");
+    assert_eq!(
+        current_run["scope"],
+        serde_json::json!({"kind": "current_run"})
     );
 }

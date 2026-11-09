@@ -1370,6 +1370,16 @@ async fn init_project_config() -> anyhow::Result<()> {
 
     if !global_path.exists() {
         let _ = meerkat_core::FileConfigStore::global(meerkat_models::canonical()).await?;
+        // The store creates the document only while its admission fence and
+        // custody are free: a holder leaves it missing.
+        if !global_path.exists() {
+            anyhow::bail!(
+                "The user configuration at {} could not be created now: an admission or \
+                 another writer holds it, or its admission fence cannot be used. Nothing was \
+                 written; retry later (an admission's hold may last until its process restarts).",
+                global_path.display()
+            );
+        }
     }
 
     let project_config = rkat_dir.join("config.toml");
@@ -2522,6 +2532,31 @@ enum StorageCommands {
         #[arg(long = "root", value_name = "PATH")]
         roots: Vec<PathBuf>,
     },
+
+    /// Report whether each directory's filesystem can host an admission fence
+    ///
+    /// Runs, in this process's own view of the filesystem, the one predicate
+    /// that admission fence writers, holders and verifiers use
+    /// (`meerkat_core::realm_admission::directory_hosts_fences`), and prints
+    /// one JSON object per directory, one per line, in argument order, and
+    /// nothing else on stdout: `{"dir": PATH, "hosts": true|false}`, or
+    /// `{"dir": PATH, "unavailable": {"kind": KIND, "cause": TEXT}}` when the
+    /// directory's filesystem could not be inspected (a directory that does
+    /// not exist, for one). KIND is a stable snake_case name; TEXT is for
+    /// people. PATH is the argument as given (lossy UTF-8).
+    ///
+    /// It runs before any realm, state, config or auth initialization and
+    /// reads and writes nothing but the directories' filesystem facts; it
+    /// takes no global option.
+    ///
+    /// Exit codes: 0 = every directory was evaluated, whatever the answers;
+    /// 1 = the report could not be written; 2 = usage error, or the process
+    /// could not start at all (as for every command).
+    HostsFences {
+        /// The directories to evaluate.
+        #[arg(value_name = "DIR", required = true)]
+        directories: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2755,24 +2790,29 @@ fn read_connector_client_secret(
     Ok(secret)
 }
 
-/// The realm's own (unfolded) config document store: connector client writes
-/// never flatten inherited entries into it.
-async fn cli_realm_doc_store(
+/// The scope's realm config documents, for the guarded connector-client
+/// writes: they write `realm`'s own (unfolded) document, never flattening
+/// inherited entries into it, and take its admission fences. The writers
+/// read and patch the document through a store of their own, which prints
+/// nothing, so the document is first read once here through the CLI warning
+/// sink (`report_cli_config_warnings`).
+async fn cli_realm_documents(
     scope: &RuntimeScope,
     realm: &meerkat_core::connection::RealmId,
-) -> anyhow::Result<Arc<dyn ConfigStore>> {
-    let source = cli_filesystem_realm_config_source(scope);
-    let config_path = source.config_doc_path(realm);
-    if let Some(parent) = config_path.parent() {
+) -> anyhow::Result<Arc<meerkat_store::FilesystemRealmConfigSource>> {
+    let source = Arc::new(cli_filesystem_realm_config_source(scope));
+    let document = source.config_doc_path(realm);
+    if let Some(parent) = document.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create realm config directory: {e}"))?;
     }
-    Ok(Arc::new(CliConfigDocStore::new(
-        config_path,
-        realm.clone(),
-        Arc::new(source),
-    )))
+    // Only the warnings matter here: a document that does not load is the
+    // writer's to refuse, with its own typed error.
+    let _ = CliConfigDocStore::new(document, realm.clone(), source.clone())
+        .get_with_warnings()
+        .await;
+    Ok(source)
 }
 
 async fn handle_connector_client_command(
@@ -2830,15 +2870,16 @@ async fn handle_connector_client_command(
             } else {
                 meerkat::ConnectorClientSecretUpdate::Keep
             };
-            let store = cli_realm_doc_store(scope, &realm).await?;
-            meerkat::put_connector_client(store, &persistence, &realm, &id, config, secret).await?;
+            let documents = cli_realm_documents(scope, &realm).await?;
+            meerkat::put_connector_client(documents, &persistence, &realm, &id, config, secret)
+                .await?;
             println!("Connector client '{id}' configured in realm '{realm}'.");
         }
         ConnectorClientCommands::RotateSecret { id } => {
             let untrusted = cli_scope_launch_guard(scope).await;
             let secret = read_connector_client_secret(untrusted.as_deref())?;
-            let store = cli_realm_doc_store(scope, &realm).await?;
-            meerkat::rotate_connector_client_secret(store, &persistence, &realm, &id, &secret)
+            let documents = cli_realm_documents(scope, &realm).await?;
+            meerkat::rotate_connector_client_secret(documents, &persistence, &realm, &id, &secret)
                 .await?;
             println!("Connector client '{id}' secret replaced in realm '{realm}'.");
         }
@@ -2875,8 +2916,8 @@ async fn handle_connector_client_command(
             }
         }
         ConnectorClientCommands::Remove { id } => {
-            let store = cli_realm_doc_store(scope, &realm).await?;
-            meerkat::remove_connector_client(store, &persistence, &realm, &id).await?;
+            let documents = cli_realm_documents(scope, &realm).await?;
+            meerkat::remove_connector_client(documents, &persistence, &realm, &id).await?;
             println!("Connector client '{id}' removed from realm '{realm}'.");
         }
     }
@@ -4411,6 +4452,18 @@ fn main() -> anyhow::Result<ExitCode> {
 #[allow(clippy::large_futures)]
 async fn cli_main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse_from(normalize_cli_args(std::env::args_os()));
+    // `rkat storage hosts-fences` answers from its directory arguments
+    // alone, before tracing and before any realm, state, config, auth or
+    // migration step: a qualification probe is never a first state open.
+    if let Some(Commands::Storage {
+        command: StorageCommands::HostsFences { directories },
+    }) = &cli.command
+    {
+        return Ok(storage_hosts_fences(
+            directories,
+            normalize_cli_args(std::env::args_os()),
+        ));
+    }
     let auth_config_realm = if matches!(&cli.command, Some(Commands::Auth { .. })) {
         cli.realm.clone()
     } else {
@@ -5968,7 +6021,8 @@ static CLI_REPORTED_CONFIG_WARNINGS: std::sync::Mutex<
 /// filter is off by default, so every CLI path that loads or rewrites a
 /// persisted config document reports here: `load_config`, the mob deploy
 /// loader, and every [`CliConfigDocStore`] read/patch (`config get/set/patch`,
-/// `auth login`, the credential-read bootstrap).
+/// `auth login`, the credential-read bootstrap, and the read before each
+/// `auth connector-client` write).
 fn report_cli_config_warnings(
     doc: &Path,
     realm: &meerkat_core::connection::RealmId,
@@ -6086,6 +6140,38 @@ impl ConfigStore for CliConfigDocStore {
         delta: ConfigDelta,
     ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
         let (config, warnings) = self.inner.patch_with_warnings(delta).await?;
+        self.report(&warnings);
+        Ok((config, warnings))
+    }
+
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.inner.admission_fence()
+    }
+
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), meerkat_core::config::ConfigError> {
+        self.inner.set_held(guard, config).await
+    }
+
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, meerkat_core::config::ConfigError> {
+        self.patch_held_with_warnings(guard, delta)
+            .await
+            .map(|(config, _)| config)
+    }
+
+    async fn patch_held_with_warnings(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<meerkat_core::ConfigWarning>), meerkat_core::config::ConfigError> {
+        let (config, warnings) = self.inner.patch_held_with_warnings(guard, delta).await?;
         self.report(&warnings);
         Ok((config, warnings))
     }
@@ -6245,7 +6331,7 @@ async fn handle_config_set(
     let snapshot = runtime
         .set(config, expected_generation)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+        .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to persist config: {e}")))?;
     println!("generation={}", snapshot.generation);
     Ok(())
 }
@@ -6301,7 +6387,9 @@ async fn handle_set_default_model(model: &str, scope: &RuntimeScope) -> anyhow::
             None,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist default model: {e}"))?;
+        .map_err(|e| {
+            exit_status::typed_failure(e, |e| format!("Failed to persist default model: {e}"))
+        })?;
     println!(
         "Default model set to {model} ({}) [generation {}]",
         provider.as_str(),
@@ -6335,7 +6423,7 @@ async fn handle_config_patch(
     let snapshot = runtime
         .patch(ConfigDelta(patch_value), expected_generation)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to patch config: {e}"))?;
+        .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to patch config: {e}")))?;
     println!("generation={}", snapshot.generation);
     Ok(())
 }
@@ -6983,7 +7071,7 @@ async fn refresh_auth_profile(
         .refresh_coordinator()
         .with_exclusive_mutation(
             key.clone(),
-            Box::new(move || {
+            Box::new(move |fence| {
                 Box::pin(async move {
                     use meerkat_providers::auth_store::{
                         CredentialMutationError, CredentialMutationOutcome,
@@ -7022,6 +7110,7 @@ async fn refresh_auth_profile(
                     .map_err(|error| CredentialMutationError::AuthLifecycle(error.to_string()))?;
                     mutation_store
                         .save_for(
+                            &fence,
                             &mutation_key,
                             &committed,
                             meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -8232,10 +8321,11 @@ async fn noninteractive_copilot_login(
         }
     };
     if config_changed {
-        config_store
-            .set(config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write the GitHub Copilot routes: {e}"))?;
+        config_store.set(config).await.map_err(|e| {
+            exit_status::typed_failure(e, |e| {
+                format!("Failed to write the GitHub Copilot routes: {e}")
+            })
+        })?;
     }
     let routes = meerkat_copilot::CopilotProviderRoute::ALL
         .map(|route| format!("global:{}", route.binding_id()))
@@ -8462,7 +8552,7 @@ async fn migrate_one_legacy_login_credential(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             dev_key.clone(),
-            Box::new(move || {
+            Box::new(move |_fence| {
                 Box::pin(async move {
                     // Lock order is permanently source `dev` then target
                     // `global`; every migration follows this one-way order.
@@ -8485,7 +8575,7 @@ async fn migrate_one_legacy_login_credential(
                     target_coordinator
                         .with_exclusive_mutation(
                             global_key,
-                            Box::new(move || {
+                            Box::new(move |fence| {
                                 Box::pin(async move {
                                     if let Some(existing) = target_store
                                         .load_for(&target_key, meerkat_providers::auth_store::TokenStoreAccess::Unattended)
@@ -8532,7 +8622,7 @@ async fn migrate_one_legacy_login_credential(
                                         }
                                     };
                                     if let Err(error) = target_store
-                                        .save_for(&target_key, &committed, meerkat_providers::auth_store::TokenStoreAccess::Unattended)
+                                        .save_for(&fence, &target_key, &committed, meerkat_providers::auth_store::TokenStoreAccess::Unattended)
                                         .await
                                     {
                                         let _ = target_auth_lease
@@ -8761,6 +8851,7 @@ async fn prepare_cli_token_commit_unlocked(
 /// proof-of-acquisition marker or does not exist.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -8794,7 +8885,7 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         previous_lifecycle_restore,
         lifecycle_transition: transition,
     };
-    save_marked_cli_token_commit_unlocked(store, auth_lease, &commit, tokens, "").await?;
+    save_marked_cli_token_commit_unlocked(fence, store, auth_lease, &commit, tokens, "").await?;
     Ok(commit)
 }
 
@@ -8802,9 +8893,11 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
 /// transition and perform the single durable token write. If the marker
 /// handoff or the durable save fails, the freshly acquired lease is rolled
 /// back via [`rollback_cli_token_commit`] (release + previous
-/// credential/lifecycle restore) so no half-state survives.
+/// credential/lifecycle restore) so no half-state survives. Every write takes
+/// `fence`, the coordinator's credential-fence guard for the commit.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_marked_cli_token_commit_unlocked(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &CliTokenCommitSnapshot,
@@ -8817,7 +8910,7 @@ async fn save_marked_cli_token_commit_unlocked(
         &commit.lifecycle_transition,
     ) {
         Ok(committed_tokens) => committed_tokens,
-        Err(e) => match rollback_cli_token_commit(store, auth_lease, commit).await {
+        Err(e) => match rollback_cli_token_commit(fence, store, auth_lease, commit).await {
             Ok(()) => anyhow::bail!(
                 "AuthMachine lifecycle marker handoff failed{failure_context}: {e}; acquired lease rolled back"
             ),
@@ -8828,13 +8921,14 @@ async fn save_marked_cli_token_commit_unlocked(
     };
     if let Err(e) = store
         .save_for(
+            fence,
             &commit.key,
             &committed_tokens,
             meerkat_providers::auth_store::TokenStoreAccess::Interactive,
         )
         .await
     {
-        match rollback_cli_token_commit(store, auth_lease, commit).await {
+        match rollback_cli_token_commit(fence, store, auth_lease, commit).await {
             Ok(()) => anyhow::bail!(
                 "TokenStore save failed{failure_context}: {e}; acquired lease rolled back"
             ),
@@ -8848,6 +8942,7 @@ async fn save_marked_cli_token_commit_unlocked(
 
 #[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     auth_binding: &AuthBindingRef,
@@ -8870,6 +8965,7 @@ async fn save_prepared_cli_tokens_after_terminal_consume_unlocked(
         lifecycle_transition: transition,
     };
     save_marked_cli_token_commit_unlocked(
+        fence,
         store,
         auth_lease,
         &commit,
@@ -8895,12 +8991,13 @@ async fn save_cli_tokens_and_publish_lifecycle(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
                     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
                     let commit = save_cli_tokens_and_publish_lifecycle_commit_unlocked(
+                        &fence,
                         store.as_ref(),
                         &auth_lease,
                         &auth_binding,
@@ -8934,8 +9031,10 @@ async fn save_cli_tokens_and_publish_lifecycle(
 /// here re-assert the previous record and re-stamp its marker from the
 /// restored transition. The lease release always runs first: even if the
 /// durable restore fails, no freshly acquired lease survives a failed commit.
+/// The restore writes take `fence`, the commit's credential-fence guard.
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn rollback_cli_token_commit(
+    fence: &meerkat_core::AdmissionGuard,
     store: &dyn meerkat_providers::auth_store::TokenStore,
     auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
     commit: &CliTokenCommitSnapshot,
@@ -8948,6 +9047,7 @@ async fn rollback_cli_token_commit(
                     .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
                 store
                     .save_for(
+                        fence,
                         &commit.key,
                         previous,
                         meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -8969,6 +9069,7 @@ async fn rollback_cli_token_commit(
                         .map_err(|e| format!("AuthMachine rollback marker handoff failed: {e}"))?;
                     store
                         .save_for(
+                            fence,
                             &commit.key,
                             &restored_previous,
                             meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -8983,6 +9084,7 @@ async fn rollback_cli_token_commit(
                     .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
                 store
                     .save_for(
+                        fence,
                         &commit.key,
                         previous,
                         meerkat_providers::auth_store::TokenStoreAccess::Interactive,
@@ -8997,6 +9099,7 @@ async fn rollback_cli_token_commit(
                 .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
             store
                 .clear_for(
+                    fence,
                     &commit.key,
                     meerkat_providers::auth_store::TokenStoreAccess::Interactive,
                 )
@@ -9044,7 +9147,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
@@ -9070,6 +9173,7 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
                             CredentialMutationError::AuthLifecycle(error.to_string())
                         })?;
                     save_prepared_cli_tokens_after_terminal_consume_unlocked(
+                        &fence,
                         store.as_ref(),
                         &auth_lease,
                         &auth_binding,
@@ -9263,10 +9367,11 @@ async fn interactive_login(
     let config_changed = ensure_cli_interactive_oauth_config(provider, &mut config)?;
     let target = resolve_configured_cli_interactive_oauth_target(provider, &config)?;
     if config_changed {
-        config_store
-            .set(config.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to persist OAuth login target config: {e}"))?;
+        config_store.set(config.clone()).await.map_err(|e| {
+            exit_status::typed_failure(e, |e| {
+                format!("Failed to persist OAuth login target config: {e}")
+            })
+        })?;
     }
     tracing::debug!(
         realm = %target.auth_binding.realm.as_str(),
@@ -10139,6 +10244,104 @@ async fn handle_storage_command(command: &StorageCommands, cli: &Cli) -> anyhow:
             json,
             roots,
         } => handle_storage_prune(cli, *apply, *older_than_days, *json, roots).await,
+        // Dispatched first thing in `cli_main`, before any of this.
+        StorageCommands::HostsFences { .. } => Err(anyhow::anyhow!(
+            "`rkat storage hosts-fences` is dispatched before any other step"
+        )),
+    }
+}
+
+/// `rkat storage hosts-fences`: one JSON line per directory, in argument
+/// order ([`StorageHostsFencesLine`]), and nothing else on stdout. It takes
+/// no global option: each names state this command never reads, so `args`
+/// (the command line) giving one is a usage error.
+fn storage_hosts_fences(directories: &[PathBuf], args: Vec<std::ffi::OsString>) -> ExitCode {
+    use std::io::Write as _;
+    let given = storage_hosts_fences_global_options(args);
+    if !given.is_empty() {
+        eprintln!(
+            "error: `rkat storage hosts-fences` takes only its directories, not {}",
+            given.join(", ")
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let mut stdout = std::io::stdout().lock();
+    for directory in directories {
+        let written = serde_json::to_string(&StorageHostsFencesLine::of(directory))
+            .map_err(std::io::Error::other)
+            .and_then(|line| writeln!(stdout, "{line}"));
+        if let Err(error) = written {
+            eprintln!("error: the hosts-fences report could not be written: {error}");
+            return ExitCode::from(EXIT_ERROR);
+        }
+    }
+    if let Err(error) = stdout.flush() {
+        eprintln!("error: the hosts-fences report could not be written: {error}");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    ExitCode::from(EXIT_SUCCESS)
+}
+
+/// The global options the command line `args` gives explicitly, as their
+/// long names. A command line that does not parse again counts as giving
+/// one (it parsed once already, so this does not happen).
+fn storage_hosts_fences_global_options(args: Vec<std::ffi::OsString>) -> Vec<String> {
+    let command = <Cli as clap::CommandFactory>::command();
+    let Ok(matches) = command.clone().try_get_matches_from(args) else {
+        return vec!["an option".to_string()];
+    };
+    command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .filter(|arg| {
+            matches.value_source(arg.get_id().as_str())
+                == Some(clap::parser::ValueSource::CommandLine)
+        })
+        .map(|arg| {
+            arg.get_long()
+                .map_or_else(|| arg.get_id().to_string(), |long| format!("--{long}"))
+        })
+        .collect()
+}
+
+/// One line of `rkat storage hosts-fences`: a directory and the answer of
+/// `meerkat_core::realm_admission::directory_hosts_fences` for it, or the
+/// typed reason there is none. Its fields serialize in this order.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum StorageHostsFencesLine {
+    Answered {
+        dir: String,
+        hosts: bool,
+    },
+    Unavailable {
+        dir: String,
+        unavailable: StorageHostsFencesUnavailable,
+    },
+}
+
+/// Why `directory_hosts_fences` has no answer for a directory.
+#[derive(Debug, serde::Serialize)]
+struct StorageHostsFencesUnavailable {
+    /// The cause's stable snake_case kind.
+    kind: &'static str,
+    /// The cause, for people.
+    cause: String,
+}
+
+impl StorageHostsFencesLine {
+    fn of(directory: &Path) -> Self {
+        let dir = directory.to_string_lossy().into_owned();
+        match meerkat_core::realm_admission::directory_hosts_fences(directory) {
+            Ok(hosts) => Self::Answered { dir, hosts },
+            Err(unavailable) => Self::Unavailable {
+                dir,
+                unavailable: StorageHostsFencesUnavailable {
+                    kind: unavailable.cause.kind(),
+                    cause: unavailable.cause.to_string(),
+                },
+            },
+        }
     }
 }
 
@@ -10272,8 +10475,9 @@ async fn with_identity_store_rows(
                      the rows of store-owned identities and the tombstones of removed names. A \
                      release before 0.9.9 does not read them (Core 0.9.8 reads each such \
                      identity as unreadable and refuses every new identity-first adoption in \
-                     the mob), and this release has no step that deletes them, so a downgrade \
-                     of this mob to such a release is not supported while any remain"
+                     the mob), so a downgrade of this mob to such a release is supported only \
+                     through the downgrade cycle (export, purge, and import after the \
+                     roll-forward), and not while any remain"
                 )
             }
             Err(error) => format!(
@@ -11350,6 +11554,14 @@ async fn delete_realm(
     realm_id: &str,
     force: bool,
 ) -> anyhow::Result<()> {
+    // The realm's admission fence first, without waiting and before the
+    // lease check: an admission's hold refuses the delete whatever --force
+    // says (it overrides heartbeat leases only). It is held through the
+    // removal: only delete, prune and the migration archive remove a live
+    // admission.lock, and only while they hold it.
+    let _fence = realm_removal_fence(state_root, realm_id).map_err(|refusal| {
+        anyhow::Error::new(refusal).context(format!("Failed to delete realm '{realm_id}'"))
+    })?;
     let children = realms_naming_parent(state_root, realm_id).await?;
     if !children.is_empty() {
         return Err(RealmIsParent {
@@ -11376,6 +11588,27 @@ async fn delete_realm(
         .map_err(|e| anyhow::anyhow!("Failed to delete realm '{realm_id}': {e}"))?;
     println!("Deleted realm '{realm_id}'");
     Ok(())
+}
+
+/// R, the admission fence of `realm_id` under `state_root`, taken EXCLUSIVE
+/// without waiting for a removal of the realm's directory: held by an
+/// admission or another fenced operation, it refuses
+/// ([`meerkat_core::AdmissionRefusal::InProgress`]).
+fn realm_removal_fence(
+    state_root: &std::path::Path,
+    realm_id: &str,
+) -> Result<Arc<meerkat_core::AdmissionGuard>, meerkat_core::AdmissionRefusal> {
+    let realm = meerkat_core::connection::RealmId::parse(realm_id).map_err(|_| {
+        meerkat_core::AdmissionRefusal::Unavailable(meerkat_core::FenceUnavailable {
+            path: state_root
+                .join(meerkat_core::sanitize_realm_id(realm_id))
+                .join(meerkat_core::realm_admission::ADMISSION_LOCK_FILE),
+            cause: meerkat_core::FenceUnavailableCause::InvalidName,
+        })
+    })?;
+    meerkat_core::AdmissionGuard::try_acquire(vec![meerkat_core::AdmissionFence::realm(
+        state_root, &realm,
+    )?])
 }
 
 async fn remove_realm_root_with_retries(
@@ -11486,6 +11719,22 @@ async fn prune_realms_inner(
             continue;
         }
 
+        // The realm's admission fence first, without waiting and before the
+        // lease check, held through the removal: a realm an admission holds
+        // is kept as an active one, whatever --force says.
+        let _fence = match realm_removal_fence(state_root, manifest.realm.as_str()) {
+            Ok(fence) => fence,
+            Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                outcome.skipped_active += 1;
+                continue;
+            }
+            Err(refusal) => {
+                outcome
+                    .leftovers
+                    .push(format!("{} ({refusal})", manifest.realm));
+                continue;
+            }
+        };
         let lease_status =
             meerkat_store::inspect_realm_leases_in(state_root, manifest.realm.as_str(), true)
                 .await
@@ -11712,6 +11961,11 @@ async fn grant_realm_agent(
         Err(StockGrantError::Refused(error)) => {
             anyhow::bail!("nothing was issued, selected or revoked: {error}")
         }
+        // Typed in the chain: the exit status reads the fence's code.
+        Err(
+            error @ (StockGrantError::AdmissionInProgress
+            | StockGrantError::AdmissionFenceUnavailable(_)),
+        ) => return Err(error.into()),
         Err(StockGrantError::SelectionUncertain {
             issued, previous, ..
         }) => {
@@ -12150,6 +12404,15 @@ impl meerkat_mcp::McpAuthResolver for CliMcpHostAuthResolver {
         // The native authority's own selection: the CLI selects none of its
         // own, and a target without a Known selection states none.
         meerkat_mcp::McpAuthResolver::selected_account(&self.authority, target)
+    }
+
+    /// The native authority's lease publication: the credential the CLI's
+    /// requests read is the authority's own.
+    fn credential_publication(
+        &self,
+        target: &meerkat::McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        meerkat_mcp::McpAuthResolver::credential_publication(&self.authority, target)
     }
 }
 
@@ -13107,6 +13370,25 @@ impl meerkat::surface::PreDequeueHostRuntimeCheck for CliSessionHostRuntimeCheck
     }
 }
 
+/// The CLI runtime executor's answer to the runtime loop's executor-wide
+/// boundary cancel, for either session service it holds (the persistent one
+/// `rkat run`, `rkat resume` and the scheduled-session host use, or the
+/// plain one). A cancel that finds no run active is a no-op: the loop applies
+/// it only between runs, and an error would stop the loop and the session
+/// with it. Any other refusal fails the cancel.
+fn cli_executor_wide_boundary_cancel_result(
+    result: Result<(), meerkat::SessionError>,
+) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+    match result {
+        Ok(()) | Err(meerkat::SessionError::NotRunning { .. }) => Ok(()),
+        Err(err) => Err(
+            meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                err.to_string(),
+            ),
+        ),
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     /// Every turn forwards the primitive's native work context into the
@@ -13503,32 +13785,28 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             )
     }
 
+    /// With no run active the cancel is a no-op: the runtime loop applies an
+    /// executor-wide cancel only between runs, and an error here would stop
+    /// the loop and the session with it. Both session services answer through
+    /// `cli_executor_wide_boundary_cancel_result`.
     async fn cancel_after_boundary(
         &mut self,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         #[cfg(feature = "session-store")]
         if let Some(persistent) = self.persistent_service.as_ref() {
-            return persistent
-                .cancel_current_after_boundary_with_machine_authority(
-                    &self.session_id,
-                    self.runtime_adapter.session_control_authority(),
-                )
-                .await
-                .map_err(|err| {
-                    meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
-                        err.to_string(),
+            return cli_executor_wide_boundary_cancel_result(
+                persistent
+                    .cancel_current_after_boundary_with_machine_authority(
+                        &self.session_id,
+                        self.runtime_adapter.session_control_authority(),
                     )
-                });
+                    .await,
+            );
         }
-        self.service
-            .cancel_after_boundary(&self.session_id)
-            .await
-            .map_err(|err| {
-                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
-                    err.to_string(),
-                )
-            })
+        cli_executor_wide_boundary_cancel_result(
+            self.service.cancel_after_boundary(&self.session_id).await,
+        )
     }
 
     async fn stop_runtime_executor(
@@ -13999,6 +14277,20 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         session_id: &SessionId,
     ) -> Result<meerkat_mob::ColdStartTailSettlement, meerkat_core::service::SessionError> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    // Forwarded: this wrapper reports the persistent-session contract, so the
+    // trait default would refuse the settle; the wrapped in-memory service
+    // has no compaction outbox and owes nothing.
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat::OwedCompactionSettlement, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_owed_compaction_projections(
             &self.inner,
             session_id,
         )
@@ -15525,6 +15817,7 @@ async fn run_agent(
             refused_mcp_servers: governed_refused_mcp,
             recoverable_tool_defs: None,
             llm_client_override: None,
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: Default::default(),
@@ -15599,6 +15892,7 @@ async fn run_agent(
             mob_member_binding: None,
             mob_incarnation: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -17375,6 +17669,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             system_prompts: dispatch.system_prompt.into_iter().collect(),
             transient_turn_context: dispatch.transient_turn_context,
             transient_turn_context_appends: Vec::new(),
+            request_only_context: Vec::new(),
             model: None,
             provider: None,
             self_hosted_server_id: None,
@@ -17454,6 +17749,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 )),
                 supersession_key: None,
                 correlation_id: Some(schedule_runtime_correlation_id(identity)?),
+                requester: None,
             },
             event_type: dispatch.event_type,
             payload: dispatch.payload,
@@ -17985,6 +18281,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<meerkat_mob::ColdStartTailSettlement, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat::OwedCompactionSettlement, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_owed_compaction_projections(
             &self.inner,
             session_id,
         )
@@ -20091,7 +20398,7 @@ async fn patch_cli_skills(
             Some(generation),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist config: {e}"))?;
+        .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to persist config: {e}")))?;
     Ok(())
 }
 
@@ -25850,13 +26157,18 @@ mod tests {
 
             async fn save(
                 &self,
+                _fence: &meerkat_core::AdmissionGuard,
                 _key: &TokenKey,
                 _tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
                 Err(TokenStoreError::Io("durable save refused".into()))
             }
 
-            async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            async fn clear(
+                &self,
+                _fence: &meerkat_core::AdmissionGuard,
+                _key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
                 Ok(())
             }
 
@@ -26827,7 +27139,11 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let auth_lease = new_cli_auth_handles().0;
         let dev_key = TokenKey::parse("dev", "default_openai").expect("dev key");
         store
-            .save(&dev_key, &openai_oauth_tokens())
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &dev_key,
+                &openai_oauth_tokens(),
+            )
             .await
             .expect("seed dev token");
 
@@ -26857,7 +27173,10 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         // No-clobber: an existing global credential is never overwritten.
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
-        store.save(&global_key, &owned).await.expect("seed global");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &global_key, &owned)
+            .await
+            .expect("seed global");
         let _ = migrate_legacy_login_credentials_to_global(persistence, auth_lease)
             .await
             .expect("migrate no-clobber");
@@ -26916,6 +27235,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
@@ -26928,6 +27248,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn clear(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             self.entries
@@ -26968,7 +27289,11 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         // and confirm the store genuinely cannot enumerate it.
         let dev_key = TokenKey::parse("dev", "anthropic_oauth").expect("dev key");
         store
-            .save(&dev_key, &openai_oauth_tokens())
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &dev_key,
+                &openai_oauth_tokens(),
+            )
             .await
             .expect("seed keyring-resident dev token");
         assert!(
@@ -27008,7 +27333,10 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         // when discovered only via the per-binding probe.
         let mut owned = openai_oauth_tokens();
         owned.primary_secret = Some("global-owned-secret".to_string());
-        store.save(&global_key, &owned).await.expect("seed global");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &global_key, &owned)
+            .await
+            .expect("seed global");
         let _ = migrate_legacy_login_credentials_to_global(persistence, auth_lease)
             .await
             .expect("migrate no-clobber");
@@ -27043,7 +27371,11 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let persistence = test_provider_auth_persistence(Arc::clone(&store));
         let dev_key = TokenKey::parse("dev", "openai_oauth").expect("legacy token key");
         store
-            .save(&dev_key, &openai_oauth_tokens())
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &dev_key,
+                &openai_oauth_tokens(),
+            )
             .await
             .expect("seed legacy token");
         assert!(
@@ -27179,6 +27511,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let store: Arc<dyn TokenStore> = Arc::new(NonEnumerableTokenStore::new());
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::parse("global", "openai_oauth").expect("token key"),
                 &openai_oauth_tokens(),
             )
@@ -27246,17 +27579,19 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -27368,6 +27703,7 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
         let tokens = openai_oauth_tokens();
         store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &mark_tokens_lifecycle_published_for_test(&auth_binding, &tokens, 1, None),
             )
@@ -27435,7 +27771,10 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
             &transition,
         )
         .expect("account lifecycle marker");
-        store.save(&key, &marked).await.expect("save account token");
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .expect("save account token");
 
         let projection = project_cli_auth_status(
             &auth_lease,
@@ -27709,19 +28048,21 @@ source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             self.save_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -27987,6 +28328,401 @@ default_model = "gemma"
             result.is_ok(),
             "doctor must resolve self-hosted credentials through realm auth: {result:?}"
         );
+    }
+
+    /// A session service for the boundary-cancel rows. Its first turn parks
+    /// until the row releases it and every later turn completes at once. Its
+    /// session-wide boundary cancel reports `NotRunning` when no turn runs,
+    /// as the CLI's own session services do; its exact-run cancel accepts.
+    struct BoundaryCancelTurnService {
+        session_id: SessionId,
+        turns: std::sync::atomic::AtomicUsize,
+        running: std::sync::atomic::AtomicBool,
+        turn_started: Arc<tokio::sync::Notify>,
+        allow_turn: Arc<tokio::sync::Notify>,
+    }
+
+    impl BoundaryCancelTurnService {
+        fn new(session_id: SessionId) -> Self {
+            Self {
+                session_id,
+                turns: std::sync::atomic::AtomicUsize::new(0),
+                running: std::sync::atomic::AtomicBool::new(false),
+                turn_started: Arc::new(tokio::sync::Notify::new()),
+                allow_turn: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+
+        fn run_result(&self, text: &str, turns: u32) -> RunResult {
+            RunResult {
+                text: text.to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionService for BoundaryCancelTurnService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            Ok(self.run_result("", 0))
+        }
+
+        async fn start_turn(
+            &self,
+            id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            let first = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            self.running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if first {
+                let allowed = self.allow_turn.notified();
+                self.turn_started.notify_one();
+                allowed.await;
+            }
+            self.running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.run_result("done", 1))
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+            if self.running.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(SessionError::NotRunning { id: id.clone() })
+            }
+        }
+
+        async fn cancel_after_boundary_for_run(
+            &self,
+            _id: &SessionId,
+            _expected_run_id: &meerkat_core::RunId,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
+            if id != &self.session_id {
+                return Err(SessionError::NotFound { id: id.clone() });
+            }
+            Ok(SessionView {
+                state: SessionInfo {
+                    session_id: id.clone(),
+                    created_at: std::time::SystemTime::now(),
+                    updated_at: std::time::SystemTime::now(),
+                    message_count: 0,
+                    is_active: false,
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    last_assistant_text: None,
+                    labels: Default::default(),
+                },
+                billing: SessionUsage {
+                    total_tokens: 0,
+                    usage: Usage::default(),
+                },
+            })
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            Ok(Vec::new())
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    /// Register a session served by the CLI runtime executor over a
+    /// [`BoundaryCancelTurnService`].
+    async fn a_cli_served_boundary_cancel_session() -> (
+        Arc<meerkat_runtime::MeerkatMachine>,
+        SessionId,
+        Arc<BoundaryCancelTurnService>,
+    ) {
+        let session_id = SessionId::new();
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let service = Arc::new(BoundaryCancelTurnService::new(session_id.clone()));
+        let executor = Box::new(CliRuntimeExecutor {
+            service: Arc::clone(&service) as Arc<dyn meerkat_core::service::SessionService>,
+            #[cfg(feature = "session-store")]
+            persistent_service: None,
+            #[cfg(feature = "session-store")]
+            publication_actor_witness: None,
+            session_id: session_id.clone(),
+            runtime_adapter: Arc::clone(&runtime_adapter),
+            workgraph_service: None,
+            event_tx: None,
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await
+            .expect("the CLI runtime executor registers");
+        (runtime_adapter, session_id, service)
+    }
+
+    /// Admit a prompt on a CLI-served session and return its completion.
+    async fn admit_cli_prompt(
+        runtime_adapter: &meerkat_runtime::MeerkatMachine,
+        session_id: &SessionId,
+        text: &str,
+        context: &str,
+    ) -> meerkat_runtime::completion::CompletionHandle {
+        let (outcome, completion) = runtime_adapter
+            .accept_input_with_completion(
+                session_id,
+                meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(text, None)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{context}: the session admits the prompt: {error:?}"));
+        assert!(outcome.is_accepted(), "{context}: {outcome:?}");
+        completion.unwrap_or_else(|| panic!("{context}: the admitted prompt has a completion"))
+    }
+
+    /// Wait for a prompt's completion (hang guard only) and require that it
+    /// completed.
+    async fn expect_cli_prompt_completed(
+        completion: meerkat_runtime::completion::CompletionHandle,
+        context: &str,
+    ) {
+        let outcome = tokio::time::timeout(Duration::from_secs(30), completion.wait())
+            .await
+            .unwrap_or_else(|_| panic!("{context}: the prompt's completion arrives"))
+            .unwrap_or_else(|error| panic!("{context}: the prompt completes: {error:?}"));
+        assert!(
+            matches!(
+                outcome,
+                meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                    | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
+            ),
+            "{context}: the prompt completes: {outcome:?}"
+        );
+    }
+
+    /// The supervisor bridge paths into a session the CLI runtime executor
+    /// serves (an external mob member started by `rkat run
+    /// --comms-listen-tcp`): a cancel taken while its turn runs leaves the
+    /// session serving its next input. `exact_run` takes the HoldRunStarts
+    /// path (`cancel_after_boundary_run_if_current`), otherwise the
+    /// InterruptMember path (`cancel_after_boundary_for_optional_member_incarnation`).
+    async fn a_supervisor_cancel_leaves_the_cli_session_serving(exact_run: bool) {
+        let (runtime_adapter, session_id, service) = a_cli_served_boundary_cancel_session().await;
+        let started = service.turn_started.notified();
+        let first = admit_cli_prompt(
+            &runtime_adapter,
+            &session_id,
+            "a turn to cancel",
+            "first prompt",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(30), started)
+            .await
+            .expect("the first turn starts");
+        if exact_run {
+            let run_id = runtime_adapter
+                .current_run(&session_id)
+                .await
+                .expect("the parked turn's run is current");
+            let admitted = runtime_adapter
+                .cancel_after_boundary_run_if_current(&session_id, &run_id)
+                .await
+                .expect("the held run's cancel");
+            assert!(admitted, "the parked run is current");
+        } else {
+            runtime_adapter
+                .cancel_after_boundary_for_optional_member_incarnation(&session_id, None)
+                .await
+                .expect("the interrupt's boundary cancel");
+        }
+        service.allow_turn.notify_one();
+        expect_cli_prompt_completed(first, "the cancelled turn").await;
+
+        let next = admit_cli_prompt(
+            &runtime_adapter,
+            &session_id,
+            "the next turn",
+            "after the cancel",
+        )
+        .await;
+        expect_cli_prompt_completed(next, "after the cancel").await;
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_interrupt_leaves_a_cli_served_session_serving() {
+        a_supervisor_cancel_leaves_the_cli_session_serving(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_held_run_cancel_leaves_a_cli_served_session_serving() {
+        a_supervisor_cancel_leaves_the_cli_session_serving(true).await;
+    }
+
+    /// The executor contract for the CLI runtime executor: a boundary cancel
+    /// the runtime loop applies while no run is active is a no-op.
+    #[tokio::test]
+    async fn cli_runtime_executor_idle_boundary_cancel_conformance() {
+        let (runtime_adapter, session_id, service) = a_cli_served_boundary_cancel_session().await;
+        // The check's prompt is the session's first turn: let it run.
+        service.allow_turn.notify_one();
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime_adapter,
+            &session_id,
+        )
+        .await;
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
+    /// Register a session served by the CLI runtime executor over a real
+    /// persistent session service, as `rkat run` builds and registers one: a
+    /// deferred create under the session's own runtime bindings, then the
+    /// executor holding the service and the session's live actor witness.
+    /// Its turns run on a scripted model that answers at once.
+    #[cfg(feature = "session-store")]
+    async fn a_persistent_cli_served_session(
+        temp: &tempfile::TempDir,
+    ) -> (Arc<meerkat_runtime::MeerkatMachine>, SessionId) {
+        let store = sqlite_session_store(temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        )
+        .expect("construct runtime authority");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(store)
+            .builtins(false)
+            .shell(false);
+        let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+            None,
+        )
+        .expect("compose the CLI runtime-backed service");
+        let llm: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare the session's runtime bindings");
+        service
+            .create_session(CreateSessionRequest {
+                injected_context: Vec::new(),
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                system_prompt: meerkat::SystemPromptOverride::Inherit,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(session),
+                    resume_session_intent: meerkat_core::SessionBuildIntent::Mint,
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(llm)),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("create the session with its first turn deferred");
+        let publication_actor_witness = service
+            .live_session_actor_witness(&session_id)
+            .await
+            .expect("the created session has a live actor");
+        let executor = Box::new(CliRuntimeExecutor {
+            service: Arc::clone(&service) as Arc<dyn meerkat_core::service::SessionService>,
+            persistent_service: Some(Arc::clone(&service)),
+            publication_actor_witness: Some(publication_actor_witness),
+            session_id: session_id.clone(),
+            runtime_adapter: Arc::clone(&runtime_adapter),
+            workgraph_service: None,
+            event_tx: None,
+        });
+        runtime_adapter
+            .register_session_with_executor(session_id.clone(), executor)
+            .await
+            .expect("the CLI runtime executor registers");
+        (runtime_adapter, session_id)
+    }
+
+    /// The executor contract for the CLI runtime executor as `rkat run`,
+    /// `rkat resume` and the scheduled-session host build it, over a
+    /// persistent session service: a boundary cancel the runtime loop applies
+    /// while no run is active is a no-op.
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn cli_runtime_executor_over_a_persistent_service_idle_boundary_cancel_conformance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (runtime_adapter, session_id) = a_persistent_cli_served_session(&temp).await;
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime_adapter,
+            &session_id,
+        )
+        .await;
+        unregister_cli_runtime_session(&runtime_adapter, &session_id)
+            .await
+            .expect("test runtime cleanup");
+    }
+
+    /// A supervisor interrupt (the InterruptMember path) that reaches an idle
+    /// session `rkat run` serves over its persistent session service, as an
+    /// external mob member started with `--comms-listen-tcp` is, leaves the
+    /// session serving its next input.
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn an_idle_supervisor_interrupt_leaves_a_persistent_cli_session_serving() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (runtime_adapter, session_id) = a_persistent_cli_served_session(&temp).await;
+        runtime_adapter
+            .cancel_after_boundary_for_optional_member_incarnation(&session_id, None)
+            .await
+            .expect("the idle interrupt's boundary cancel");
+        let next = admit_cli_prompt(
+            &runtime_adapter,
+            &session_id,
+            "the next turn",
+            "after the idle interrupt",
+        )
+        .await;
+        expect_cli_prompt_completed(next, "after the idle interrupt").await;
+        unregister_cli_runtime_session(&runtime_adapter, &session_id)
+            .await
+            .expect("test runtime cleanup");
     }
 
     #[tokio::test]
@@ -38466,6 +39202,98 @@ supports_reasoning = true
         assert!(forced.is_ok(), "delete --force should proceed");
     }
 
+    /// An admission's hold of the realm's fence refuses `rkat realm delete`,
+    /// with or without `--force` (which overrides heartbeat leases only),
+    /// typed (exit 58) and before the lease check: the realm and its
+    /// `admission.lock` stay. Once the hold ends, the delete proceeds.
+    #[tokio::test]
+    async fn realm_delete_force_refuses_while_the_fence_is_held_and_keeps_admission_lock() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        let realm_id = "held-realm";
+        meerkat_store::ensure_realm_manifest_in(
+            &state_root,
+            realm_id,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            Some(meerkat_store::RealmOrigin::Generated),
+        )
+        .await
+        .expect("create manifest");
+        let fence = meerkat_core::AdmissionFence::realm(
+            &state_root,
+            &meerkat_core::connection::RealmId::parse(realm_id).expect("realm id"),
+        )
+        .expect("the realm's fence");
+        fence.ensure_exists().expect("the fence a holder needs");
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+            .expect("an admission holds the realm's fence");
+        let paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+        for force in [false, true] {
+            let refused = delete_realm(&state_root, realm_id, force)
+                .await
+                .expect_err("an admission's hold refuses the delete");
+            assert_eq!(
+                crate::exit_status::failure_exit_status(&refused),
+                58,
+                "force {force}: {refused:#}"
+            );
+            assert!(fence.path().exists(), "force {force}: admission.lock stays");
+            assert!(
+                paths.manifest_path.exists(),
+                "force {force}: the realm stays"
+            );
+        }
+        hold.release();
+        delete_realm(&state_root, realm_id, false)
+            .await
+            .expect("deleted once the hold ended");
+        assert!(!paths.root.exists());
+    }
+
+    /// Prune keeps a realm an admission holds, counted as active whatever
+    /// `--force` says, with its `admission.lock`, and removes the free one.
+    #[tokio::test]
+    async fn realm_prune_skips_a_held_realm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("realms");
+        for realm_id in ["held", "free"] {
+            meerkat_store::ensure_realm_manifest_in(
+                &state_root,
+                realm_id,
+                Some(meerkat_store::RealmBackend::Sqlite),
+                Some(meerkat_store::RealmOrigin::Generated),
+            )
+            .await
+            .expect("create manifest");
+        }
+        let fence = meerkat_core::AdmissionFence::realm(
+            &state_root,
+            &meerkat_core::connection::RealmId::parse("held").expect("realm id"),
+        )
+        .expect("the realm's fence");
+        fence.ensure_exists().expect("the fence a holder needs");
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence.clone()])
+            .expect("an admission holds the realm's fence");
+        let outcome = prune_realms_inner(&state_root, true, 0, true)
+            .await
+            .expect("prune");
+        hold.release();
+        assert_eq!(outcome.removed, 1, "{outcome:?}");
+        assert_eq!(outcome.skipped_active, 1, "{outcome:?}");
+        assert!(outcome.leftovers.is_empty(), "{outcome:?}");
+        assert!(fence.path().exists(), "the held realm keeps admission.lock");
+        assert!(
+            meerkat_store::realm_paths_in(&state_root, "held")
+                .manifest_path
+                .exists()
+        );
+        assert!(
+            !meerkat_store::realm_paths_in(&state_root, "free")
+                .root
+                .exists()
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_prune_inner_reports_leftovers_on_partial_failure() {
@@ -39015,6 +39843,47 @@ supports_reasoning = true
         );
     }
 
+    /// A config writer the realm's admission fence refuses keeps the typed
+    /// error in the chain: `rkat skill add` under a held fence exits 58
+    /// (`ADMISSION_IN_PROGRESS`), with the realm's document unchanged.
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn skill_add_under_a_held_realm_fence_exits_58() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = test_scope(dir.path().to_path_buf(), "child");
+        let source = dir.path().join("child-skills");
+        tokio::fs::create_dir_all(&source)
+            .await
+            .expect("create skill source dir");
+        write_policy_parent_and_child_realm_docs(dir.path(), "").await;
+        let (before, _) = realm_doc(dir.path(), "child").await;
+        let fence = meerkat_core::AdmissionFence::realm(
+            dir.path(),
+            &meerkat_core::connection::RealmId::parse("child").expect("realm id"),
+        )
+        .expect("the realm's fence");
+        fence.ensure_exists().expect("the fence a holder needs");
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![fence])
+            .expect("an admission holds the realm's fence");
+        let error = handle_skills_command(
+            SkillsCommands::Add {
+                path: source.display().to_string(),
+                name: Some("child-src".to_string()),
+            },
+            &scope,
+        )
+        .await
+        .expect_err("a held fence refuses the write");
+        hold.release();
+        assert_eq!(
+            crate::exit_status::failure_exit_status(&error),
+            58,
+            "{error:#}"
+        );
+        let (after, _) = realm_doc(dir.path(), "child").await;
+        assert_eq!(after, before, "nothing was written");
+    }
+
     async fn config_generation(scope: &RuntimeScope) -> u64 {
         let (store, base_dir) = resolve_config_store(scope).await.expect("config store");
         meerkat_core::ConfigRuntime::new(store, base_dir.join("config_state.json"))
@@ -39227,6 +40096,8 @@ supports_reasoning = true
         )
         .await
         .expect("write user document");
+        let refusal =
+            meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource.to_string();
         for selection in [
             None,
             Some(meerkat_core::McpServerSource::File(McpScope::Project)),
@@ -39235,7 +40106,7 @@ supports_reasoning = true
                 .await
                 .expect_err("a server only an untrusted mcp.toml defines is refused");
             assert!(
-                format!("{refused:#}").contains("confined process"),
+                format!("{refused:#}").contains(&refusal),
                 "{selection:?}: {refused:#}"
             );
         }
@@ -40228,5 +41099,116 @@ mod cli_mcp_host_auth_resolver_tests {
                 .is_some_and(|bound| bound.same_profile(&profile)),
             "the CLI resolver must report the authority's bound egress profile"
         );
+    }
+
+    /// The CLI host resolver states its native authority's lease publication
+    /// for a target, as the RPC and REST resolvers (the authority itself)
+    /// do: none while the target's lease in the authority's realm holds no
+    /// credential, the lease's current publication once one is published,
+    /// and none again once the lease is released.
+    #[tokio::test]
+    async fn cli_resolver_forwards_the_authoritys_credential_publication() {
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let realm = meerkat_core::connection::RealmId::parse("team-alpha").unwrap();
+        let service = meerkat::HostAuthService::new(
+            meerkat_providers::auth_store::ProviderAuthPersistence::new(
+                Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+                Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+            ),
+            runtime.provider_auth_runtime_authority(),
+        )
+        .with_mcp_realm(realm.clone());
+        let authority = service.mcp_oauth_authority().unwrap().stored_only();
+        let resolver = CliMcpHostAuthResolver {
+            service,
+            authority: authority.clone(),
+            mode: CliMcpAuthMode::Stored,
+            untrusted: None,
+        };
+        let target =
+            meerkat::McpServerIdentity::from_server_config("remote", "https://mcp.example.com/mcp");
+        let lease = target.clone().in_realm(realm).lease_key().unwrap();
+        let leases = runtime.auth_lease_handle();
+
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&authority, &target),
+            None,
+            "no credential is published to the target's lease yet"
+        );
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&resolver, &target),
+            None
+        );
+
+        leases.acquire_lease(&lease, 1_800_000_000).unwrap();
+        let published = meerkat_core::handles::CredentialLeasePublication::of(
+            lease.clone(),
+            &leases.snapshot(&lease),
+        );
+        assert!(published.is_some(), "the lease holds a credential");
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&authority, &target),
+            published,
+            "the authority states its lease's current publication"
+        );
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&resolver, &target),
+            published,
+            "the CLI resolver forwards the authority's publication"
+        );
+
+        leases.release_credential_lifecycle(&lease).unwrap();
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&authority, &target),
+            None,
+            "a released lease names no publication"
+        );
+        assert_eq!(
+            meerkat_mcp::McpAuthResolver::credential_publication(&resolver, &target),
+            None
+        );
+    }
+}
+
+/// Both CLI `MobSessionService` wrappers forward the cold settle of a member
+/// session's owed compaction projections to the service they wrap. The
+/// trait default refuses it for a service that keeps durable sessions, so a
+/// wrapper without the forward compiles and leaves a dormant member's owed
+/// compaction unsettled when its mob rotates it.
+#[cfg(test)]
+mod owed_compaction_forward_guard {
+    /// The `MobSessionService` impl block of `wrapper` in `source`, up to
+    /// its closing brace, whatever form its header takes (the trait's path
+    /// with or without a leading `::`, or an imported name). Only the source
+    /// before this module is read, so the guard's own text never stands for
+    /// a wrapper's.
+    fn wrapper_impl<'a>(source: &'a str, wrapper: &str) -> Option<&'a str> {
+        let source = &source[..source
+            .find("mod owed_compaction_forward_guard")
+            .unwrap_or(source.len())];
+        let at = source.find(&format!("MobSessionService for {wrapper} {{"))?;
+        let line = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if !source[line..at].trim_start().starts_with("impl") {
+            return None;
+        }
+        let body = &source[at..];
+        Some(&body[..body.find("\n}\n")?])
+    }
+
+    #[test]
+    fn both_cli_wrappers_forward_the_owed_compaction_settle() {
+        let source = include_str!("main.rs");
+        for wrapper in ["RunMobSessionService", "MobCliSessionService"] {
+            let block = wrapper_impl(source, wrapper);
+            assert!(
+                block.is_some(),
+                "the MobSessionService impl for {wrapper} is in the CLI's source"
+            );
+            assert!(
+                block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
+                "the MobSessionService impl for {wrapper} forwards the owed compaction settle to \
+                 the service it wraps"
+            );
+        }
     }
 }

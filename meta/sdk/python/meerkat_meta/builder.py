@@ -43,6 +43,8 @@ class MetaBuilderConfig:
     # ``runtime_options.mob_announcements``, sent as given; ``None`` sends nothing.
     mob_announcements: dict[str, Any] | None = None
     fork_instruction_policy: str | None = None
+    # ``runtime_options.decisions`` ingresses; ``None`` sends nothing.
+    decision_ingresses: list[dict[str, Any]] | None = None
     routing_config_path: str | None = None
     host_runnables: list[str] = field(default_factory=list)
     installed_artifacts: list[ToolArtifactRef] | None = None
@@ -474,6 +476,21 @@ class MetaBuilder:
                 "'reactivate_inherited' or 'refuse'"
             )
         self._config.fork_instruction_policy = policy
+        return self
+
+    def decision_ingresses(self, ingresses: Sequence[Mapping[str, Any]]) -> MetaBuilder:
+        """Declare the decision ingresses the host attests people through.
+
+        Emitted as ``runtime_options.decisions`` (``{"ingresses": [...]}``).
+        Each entry names its ``ingress`` (1 to 64 of ``a-z``, ``0-9``,
+        ``.``, ``_`` and ``-``; never ``operator``, the built-in stdio
+        operator), ``attests`` (``"person"``) and ``max_clock_skew_ms``, how
+        far ahead of the gateway's clock an attested event's time may be, at
+        most one hour (``3_600_000``). The gateway refuses the init when an
+        entry is malformed or the access configuration's approver map names
+        an ingress not declared here.
+        """
+        self._config.decision_ingresses = [dict(entry) for entry in ingresses]
         return self
 
     def routing(self, config_path: str) -> MetaBuilder:

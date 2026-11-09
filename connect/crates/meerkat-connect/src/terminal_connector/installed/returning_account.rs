@@ -296,7 +296,9 @@ async fn account_review_scenarios() {
     let tokens = Arc::new(FileTokenStore::new(root.path().join("credentials")));
     let persistence = ProviderAuthPersistence::new(
         tokens.clone(),
-        Arc::new(FileLockCoordinator::new(root.path().join("locks"))),
+        Arc::new(FileLockCoordinator::new(
+            root.path().join("credentials").join("refresh-locks"),
+        )),
     );
     let mut prior_decision: Option<String> = None;
     for invalidate_during_review in [false, true] {
@@ -317,6 +319,7 @@ async fn account_review_scenarios() {
         assert_eq!(result["available_setup_tools"].as_array().unwrap().len(), 1);
         assert!(selected.secret_slots().is_err());
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage: package.storage.clone(),
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.path().join("factory"))

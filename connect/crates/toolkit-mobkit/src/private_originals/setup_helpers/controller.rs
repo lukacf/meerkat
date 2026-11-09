@@ -17,10 +17,11 @@ use meerkat_toolkit::host_lifetime::{
 impl PrivateOriginals {
     pub(crate) async fn issue_or_reconcile_setup_helper_grants(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
         context: &ToolDispatchContext,
+        entered: &meerkat_core::EnteredDispatchOperation,
         preparation: &meerkat_toolkit::setup::NativeWorkPreparation,
         prepared: &PreparedHelperController,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<(Vec<GrantLineageRef>, WorkAuthorityBasis), PrivateOriginalError> {
         if !prepared
             .source
@@ -35,8 +36,15 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        // Before the intent write and before issuance, a source collection
+        // held by another owner's short section is waited out within Core's
+        // owner-change bound (from here), holding nothing; neither effect is
+        // ever made again.
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
         self.owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         let selected = prepared.admitted.selection();
@@ -64,67 +72,54 @@ impl PrivateOriginals {
         // actual session, model, route or intent refuses the existing row.
         let (intent, report_intent, account_intent, public_intent, catalog_intent) = self
             .owner
-            .retain_helper_operation_intents(self.store.as_ref(), &prepared.admitted, candidate)
+            .retain_helper_operation_intents(
+                self.store.as_ref(),
+                &prepared.admitted,
+                candidate,
+                contended_until,
+            )
             .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         let logins = self.helper_controller_logins(&prepared.admitted)?;
-        let issuance = GovernedHelperChildIssuance::from_dispatch(
-            call,
-            context,
+        let issuance = GovernedHelperChildIssuance::from_entered(
+            entered,
             self.owner.clone(),
             prepared.admitted.qualified_contributors(),
             intent,
-        )
-        .map_err(child_error)?;
-        let report_issuance = report_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
-        let account_issuance = account_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
-        let public_issuance = public_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
-        let catalog_issuance = catalog_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
+        );
+        let report_issuance = report_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
+        let account_issuance = account_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
+        let public_issuance = public_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
+        let catalog_issuance = catalog_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
         let report_capability = selected.helper.report_capability.clone();
         let catalog_capability = selected.helper.catalog_capability.clone();
         let configured_basis = selected.helper.operation_basis.clone();
@@ -139,11 +134,14 @@ impl PrivateOriginals {
         // Native owns the synchronous append/reconciliation. Retain the exact
         // client, source and same logins in that writer if the caller is lost.
         // No source-store mutation guard crosses this native reservation.
+        let entered = entered.clone();
         let result = tokio::task::spawn_blocking(move || {
+            let _entered = entered;
+            let _review = review;
             let _controller = controller;
             source
                 .owner
-                .check_admitted_helper(&admitted)
+                .check_admitted_helper_blocking_until(&admitted, contended_until.into_std())
                 .map_err(helper_error)?;
             lifetime
                 .validate_current_selection()
@@ -158,6 +156,10 @@ impl PrivateOriginals {
             // append. Activation/component close uses this same publication.
             with_helper_logins(&logins, || {
                 let controller = issuance.issue_or_recover()?;
+                #[cfg(test)]
+                if let Some(observe) = source.helper_controller_appended.get() {
+                    observe(controller.lineage());
+                }
                 // Each append uses the actual operation's own current native
                 // publication reservation. A known controller result never
                 // implies that the separate report append settled.
@@ -273,7 +275,7 @@ impl PrivateOriginals {
                 }
                 continue;
             }
-            let route = self.route(&held.reference.route)?;
+            let route = &self.route(&held.reference.route)?;
             let compiled = native
                 .routes
                 .iter()
@@ -335,9 +337,9 @@ fn with_helper_logins<T>(
 fn child_error(refusal: HelperChildIssuanceRefusal) -> PrivateOriginalError {
     match refusal {
         HelperChildIssuanceRefusal::Denied => PrivateOriginalError::Denied,
-        HelperChildIssuanceRefusal::Unavailable | HelperChildIssuanceRefusal::Uncertain => {
-            PrivateOriginalError::Unavailable
-        }
+        HelperChildIssuanceRefusal::Unavailable
+        | HelperChildIssuanceRefusal::AdmissionInProgress
+        | HelperChildIssuanceRefusal::Uncertain => PrivateOriginalError::Unavailable,
     }
 }
 

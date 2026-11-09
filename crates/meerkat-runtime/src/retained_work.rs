@@ -261,11 +261,14 @@ pub(crate) enum RetainedClientReacquisition {
     /// The host cannot say now: any other readiness failure, or a policy
     /// observation it must refresh. The machine holds the row
     /// (`HoldInputController`): it is not staged, keeps its attempts, and a
-    /// run marked resumable that it is bound to does not resume. The runtime
-    /// asks again once per [`CONTROLLER_HOLD_RETRY_DELAY`]; this answer alone
-    /// never refuses the row, but a row still unanswered once
-    /// [`CONTROLLER_HOLD_BUDGET`] from its first such answer ran out ends as
-    /// a refused resume.
+    /// run marked resumable that it is bound to does not resume. For a resume
+    /// of retained work the runtime asks again once per
+    /// [`CONTROLLER_HOLD_RETRY_DELAY`]; this answer alone never refuses the
+    /// row, but a row still unanswered once [`CONTROLLER_HOLD_BUDGET`] from
+    /// its first such answer ran out ends as a refused resume. A kept
+    /// governed input admitted under its own association is asked again at
+    /// each wake of the runtime loop and at the session's next registration
+    /// instead, and is never refused for its time.
     NotReady(crate::traits::ControllerReadinessFailure),
 }
 
@@ -281,10 +284,21 @@ pub(crate) fn classify_reacquired_client(
     identity: &RetainedWorkIdentity,
     answer: Result<meerkat_core::ControllerModelClient, RetainedResumeError>,
 ) -> RetainedClientReacquisition {
+    classify_reacquired_selection(identity.controller(), answer)
+}
+
+/// Classify a host's answer for a kept input whose client must be for
+/// `expected`, the selection its row recorded: a kept retained-resume row's
+/// identity's ([`classify_reacquired_client`]), or a kept governed input's
+/// stored association's `controller_model`. The same classes for both kinds.
+pub(crate) fn classify_reacquired_selection(
+    expected: Option<&meerkat_core::ControllerModelSelection>,
+    answer: Result<meerkat_core::ControllerModelClient, RetainedResumeError>,
+) -> RetainedClientReacquisition {
     use crate::traits::ControllerReadinessFailure;
     use meerkat_core::OperationRefusalKind;
     match answer {
-        Ok(client) if identity.controller() == Some(client.selection()) => {
+        Ok(client) if expected == Some(client.selection()) => {
             RetainedClientReacquisition::Pinned(client)
         }
         Ok(_) => RetainedClientReacquisition::Refused,
@@ -354,6 +368,14 @@ pub(crate) struct KeptResumeControllerAsks {
     /// The run marked resumable, when a row bound to it was refused or ran
     /// out of budget: the run settles as a refused resume.
     pub(crate) refused_run: Option<meerkat_core::lifecycle::RunId>,
+    /// Queued kept governed inputs (admitted under their own association)
+    /// the host refused definitely: each ends as a refused kept governed
+    /// input, with that termination reason, and none stages.
+    pub(crate) refused_kept: Vec<meerkat_core::lifecycle::InputId>,
+    /// The run marked resumable, when a kept governed input bound to it was
+    /// refused definitely: the run settles as a refused resume of kept
+    /// governed work.
+    pub(crate) refused_kept_run: Option<meerkat_core::lifecycle::RunId>,
     /// A hold was released (its host supplied the client): the loop plans
     /// again.
     pub(crate) released: bool,

@@ -1,0 +1,508 @@
+# HostStoreWriterFenceMachine Mapping Note
+
+<!-- GENERATED_COVERAGE_START -->
+## Generated Coverage
+This section is generated from the Rust machine catalog. Do not edit it by hand.
+
+### Machine
+- `HostStoreWriterFenceMachine`
+
+### Code Anchors
+- `host_store_writer_fence` (machine `HostStoreWriterFenceMachine`): `crates/meerkat-runtime/src/store/spi/writer_fence.rs` — HostStoreWriterFenceMachine owns the writer fence of one host store realm: the writer's phase, the token it commits with, the grant it has not installed, the acquires it gave up on, the holder it waits out, and why it stopped or lost the realm
+
+### Scenarios
+- `writer_fence_open` — host_store_writer_fence_machine.rs::an_open_installs_its_grant_once makes the writer live under the open's token, whatever token the store answered, and refuses a second open in every later phase
+- `writer_fence_stop` — host_store_writer_fence_machine.rs::a_live_writer_stops_on_a_failed_renew_or_a_closed_window anchors the window on a renew that started inside it, and stops the writer on a failed or timed-out renew, a renew that started after the window closed, or a window seen closed
+- `writer_fence_renew_answers` — host_store_writer_fence_machine.rs::renew_answers_never_resume_a_stopped_writer ignores a renew that answers once the writer stopped and a fenced-out answer naming the writer's own newer token, loses the realm to any other fenced-out answer, and refuses a renew answer where no renew can be in flight
+- `writer_fence_resume` — host_store_writer_fence_machine.rs::a_stopped_writer_resumes_only_through_a_proved_grant re-acquires from Stopped alone, takes its own recorded lease over, proves the grant with a clean listing, installs its token and resumes on its first renew, and refuses a re-acquire while live, in flight, unopened or lost
+- `writer_fence_failed_attempts` — host_store_writer_fence_machine.rs::a_failed_attempt_leaves_the_writer_stopped returns a failed, timed-out or held takeover acquire, a failed listing and a failed resume renew to Stopped, counts a timed-out acquire, and keeps a grant whose listing failed as the writer's own lease, which the next attempt takes over
+- `writer_fence_open_listing_failed` — host_store_writer_fence_machine.rs::a_realm_whose_open_listing_failed_never_reacquires records that the open's listing failed in every opened phase, refuses it unopened or lost, and refuses every later re-acquire of the stopped writer, changing nothing
+- `writer_fence_scope_classification` — host_store_writer_fence_machine.rs::a_quarantine_records_each_conflicted_incarnation_under_its_key, a_recorded_incarnation_quarantines_a_new_key_and_keeps_its_record, a_scope_poison_keeps_its_first_cause, a_scope_is_quarantined_or_poisoned_never_both, scope_classifications_survive_a_stop_a_reacquire_and_a_resume and scope_classifications_are_refused_unopened_or_lost record a key and each conflicted incarnation once, add the key a recorded incarnation is met for without touching its record, keep the first poison cause, refuse a second classification, keep both through a stop, a re-acquire and a resume, and refuse both unopened or lost, in every opened phase
+- `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, loses the realm when the same holder still holds the fence with its lease moved later, and waits out again one whose lease did not move
+- `writer_fence_loss` — host_store_writer_fence_machine.rs::the_realm_is_lost_once_and_for_good loses the realm to a foreign batch, a fenced-out resume renew, a grant at or below the installed token and a poison, keeps the first cause, and refuses every later input and every answer the writer did not ask for
+
+### Transitions
+- `Open`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenAgainLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenAgainStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenAgainAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenAgainProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenAgainResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenAgainWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `OpenLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `WindowClosedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedNotLiveStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedNotLiveAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedNotLiveProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedNotLiveResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedNotLiveWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WindowClosedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `RenewedInWindow`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `RenewedAfterTheWindow`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `RenewStaleLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewFencedOutLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewFailedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `RenewTimedOutLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `RenewAnsweredStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewStaleStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewFencedOutStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `ResumeRenewed`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `ResumeFencedOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ResumeRenewFailed`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `ResumeRenewTimedOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `RenewAnsweredNoRenewUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewAnsweredNoRenewAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewAnsweredNoRenewProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewAnsweredNoRenewWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RenewAnsweredLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `BeginReacquire`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `BeginReacquireAfterFailedOpen`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `BeginReacquireLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `BeginReacquireInFlightAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `BeginReacquireInFlightProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `BeginReacquireInFlightResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `BeginReacquireWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `BeginReacquireUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `BeginReacquireLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `AcquireGranted`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `AcquireGrantedOutOfOrder`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireHeldByOwnLease`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`, `writer_fence_failed_attempts`
+- `AcquireHeldByAnother`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `AcquireHeldByRenewedHolder`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `AcquireHeldByUnrenewedHolder`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `AcquireHeldByPossibleLateGrant`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `AcquireHeldAtTakeover`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `AcquireFailed`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `AcquireTimedOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `AcquireAnsweredNotAcquiringUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireAnsweredNotAcquiringLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireAnsweredNotAcquiringStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireAnsweredNotAcquiringProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireAnsweredNotAcquiringResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireAnsweredNotAcquiringWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `AcquireAnsweredLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `LeaseEnded`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedNotWaitingOutUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedNotWaitingOutLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedNotWaitingOutStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedNotWaitingOutAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedNotWaitingOutProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedNotWaitingOutResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `LeaseEndedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `ListingClean`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `ListingForeign`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingFailed`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `ListingOtherGrant`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedNotProvingUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedNotProvingLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedNotProvingStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedNotProvingAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedNotProvingResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedNotProvingWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `ListingCheckedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `Poison`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `PoisonUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `PoisonLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_loss`
+- `OpenListingFailedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `OpenListingFailedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
+- `ScopeQuarantinedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedNewKeyLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedNewKeyStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedNewKeyAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedNewKeyProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedNewKeyResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedNewKeyWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+
+### Effects
+- `WriterOpened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`
+- `WindowAnchored`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `WriterStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`, `writer_fence_failed_attempts`
+- `AcquireRequested`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`, `writer_fence_failed_attempts`
+- `GrantReceived`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `TokenInstalled`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `WriterResumed`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `HolderWaitedOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `RealmLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`, `writer_fence_unknown_holders`, `writer_fence_loss`
+- `RenewIgnored`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_renew_answers`
+- `RequestRefused`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`, `writer_fence_stop`, `writer_fence_renew_answers`, `writer_fence_resume`, `writer_fence_open_listing_failed`, `writer_fence_scope_classification`, `writer_fence_unknown_holders`, `writer_fence_loss`
+- `ScopeQuarantineRecorded`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonRecorded`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+
+### Invariants
+- `unopened_holds_nothing`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open`, `writer_fence_scope_classification`
+- `no_scope_is_quarantined_and_poisoned`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `quarantine_records_are_whole`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `live_writer_is_not_stopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `stopped_and_attempting_writer_is_stopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_stop`
+- `proving_and_resuming_carry_their_grant`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `grant_carried_only_while_proving_or_resuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_resume`
+- `own_grant_is_above_the_token`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_failed_attempts`
+- `waiting_out_follows_a_timed_out_acquire`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `waited_holder_needs_a_timed_out_acquire`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+
+
+<!-- GENERATED_COVERAGE_END -->

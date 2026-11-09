@@ -364,6 +364,9 @@ fn auth_error_from_wire(error: meerkat_contracts::WireAuthError) -> meerkat_core
         meerkat_contracts::WireAuthError::CredentialStoreUnavailable { detail } => {
             meerkat_core::AuthError::CredentialStoreUnavailable(detail)
         }
+        meerkat_contracts::WireAuthError::SourceUnavailable { detail } => {
+            meerkat_core::AuthError::SourceUnavailable { reason: detail }
+        }
     }
 }
 

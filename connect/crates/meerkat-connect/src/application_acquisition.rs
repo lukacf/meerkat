@@ -1,8 +1,6 @@
 //! Trusted first-party acquisition selection from the activated application bundle.
 //! This composes existing installed owners; it opens no runtime or WorkGraph store.
-use crate::application_setup::{
-    ApplicationSetupDefinition, ApplicationSetupTools, PreparedApplicationSetup,
-};
+use crate::application_setup::{ApplicationSetupTools, PreparedApplicationSetup};
 use meerkat_toolkit::{
     authority::Ceiling,
     host_lifetime::{
@@ -24,6 +22,7 @@ use toolkit_mobkit::{
 use toolkit_package::Id;
 
 pub mod selected_policy;
+pub mod workflow;
 use selected_policy::{SelectedPolicyBinding, StandingPolicySelection};
 
 // This is only a configuration refusal. A present enrollment owner does not
@@ -175,17 +174,81 @@ impl SelectedApplicationAcquisition {
     pub(crate) fn helper_selection(
         &self,
     ) -> &toolkit_mobkit::installed_host::acquisition::InstalledSetupSelection {
-        &self.prepared.helper
+        self.prepared
+            .helper
+            .as_ref()
+            .expect("validated acquisition has its helper")
     }
 }
 
 /// Both the installer and gateway walk the same typed artifact closure. The
 /// installer retains every pinned read in its candidate; the gateway reads it
 /// through the selected manifest. Referenced bytes are never regenerated.
+/// Application-only carrier in the existing native_host.setup slot. It does
+/// not select an acquisition backend, presenter, helper or output audience.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationOnlySelection {
+    pub schema: u32,
+    pub prepared_application_setup: CompiledArtifactReference,
+}
+
+pub(crate) struct SelectedApplicationOnly {
+    reference: CompiledArtifactReference,
+    prepared: PreparedApplicationSetup,
+    bytes: Vec<u8>,
+}
+impl SelectedApplicationOnly {
+    pub(crate) fn matches_preparation(
+        &self,
+        completed: &PreparedApplicationSetup,
+    ) -> Result<bool, HostLifetimeError> {
+        Ok(toolkit_package::canonical_json(completed)
+            .map_err(|_| HostLifetimeError::InvalidSelection)?
+            == self.bytes)
+    }
+    fn into_application(self) -> Result<PreparedSetupApplication, HostLifetimeError> {
+        let definition = self.prepared.definition.clone();
+        PreparedSetupApplication::from_verified_artifact(
+            self.reference,
+            self.bytes,
+            definition.clone(),
+            Arc::new(PreparedApplicationRoster::new(self.prepared, definition)),
+        )
+    }
+}
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returned once and unpacked at once; both variants are large"
+)]
+enum SelectedApplication {
+    Acquisition(SelectedApplicationAcquisition),
+    ApplicationOnly(SelectedApplicationOnly),
+}
+
 pub(crate) fn read_application_acquisition(
     native: &CompiledNativeHost,
-    mut read: impl FnMut(&CompiledArtifactReference) -> Result<Vec<u8>, HostLifetimeError>,
+    read: impl FnMut(&CompiledArtifactReference) -> Result<Vec<u8>, HostLifetimeError>,
 ) -> Result<Option<SelectedApplicationAcquisition>, HostLifetimeError> {
+    Ok(match read_selected_application(native, read)? {
+        Some(SelectedApplication::Acquisition(selected)) => Some(selected),
+        _ => None,
+    })
+}
+pub(crate) fn read_application_only(
+    native: &CompiledNativeHost,
+    read: impl FnMut(&CompiledArtifactReference) -> Result<Vec<u8>, HostLifetimeError>,
+) -> Result<Option<SelectedApplicationOnly>, HostLifetimeError> {
+    Ok(match read_selected_application(native, read)? {
+        Some(SelectedApplication::ApplicationOnly(selected)) => Some(selected),
+        _ => None,
+    })
+}
+
+fn read_selected_application(
+    native: &CompiledNativeHost,
+    mut read: impl FnMut(&CompiledArtifactReference) -> Result<Vec<u8>, HostLifetimeError>,
+) -> Result<Option<SelectedApplication>, HostLifetimeError> {
     let Some(reference) = &native.setup else {
         return Ok(None);
     };
@@ -197,19 +260,38 @@ pub(crate) fn read_application_acquisition(
         }
         Ok(bytes)
     };
-    let config: ApplicationAcquisitionSelection = serde_json::from_slice(&checked(reference)?)
-        .map_err(|_| HostLifetimeError::InvalidSelection)?;
-    config.validate()?;
-    // Keep the exact bytes for the SDK comparison at runtime, not a re-encoding.
-    let prepared_bytes = checked(&config.prepared_application_setup)?;
+    let carrier = checked(reference)?;
+    let schema = serde_json::from_slice::<serde_json::Value>(&carrier)
+        .map_err(|_| HostLifetimeError::InvalidSelection)?
+        .get("schema")
+        .and_then(|row| row.as_u64())
+        .ok_or(HostLifetimeError::InvalidSelection)?;
+    let (config, setup_reference) = match schema {
+        1 => {
+            let config: ApplicationAcquisitionSelection = serde_json::from_slice(&carrier)
+                .map_err(|_| HostLifetimeError::InvalidSelection)?;
+            config.validate()?;
+            let reference = config.prepared_application_setup.clone();
+            (Some(config), reference)
+        }
+        2 => {
+            let selected: ApplicationOnlySelection = serde_json::from_slice(&carrier)
+                .map_err(|_| HostLifetimeError::InvalidSelection)?;
+            selected.prepared_application_setup.validate()?;
+            (None, selected.prepared_application_setup)
+        }
+        _ => return Err(HostLifetimeError::InvalidSelection),
+    };
+    let prepared_bytes = checked(&setup_reference)?;
     let prepared: PreparedApplicationSetup =
         serde_json::from_slice(&prepared_bytes).map_err(|_| HostLifetimeError::InvalidSelection)?;
-    if config.standing_policy.is_some() && !prepared.helper_tools.requires_software_review() {
-        return Err(HostLifetimeError::InvalidSelection);
-    }
     if prepared.realm.realm_id != native.realm.as_str()
         || prepared.native_members != native.members
         || prepared.application_tool_policy != native.application_tool_policy
+        || prepared
+            .native_owner
+            .as_ref()
+            .is_some_and(|owner| owner.native_host != native.preparation())
     {
         return Err(HostLifetimeError::InvalidSelection);
     }
@@ -217,15 +299,53 @@ pub(crate) fn read_application_acquisition(
         &prepared.application_tool_policy,
     )?)
     .map_err(|_| HostLifetimeError::InvalidSelection)?;
-    let helper = prepared
-        .helper_projection_for_policy(&policy)
-        .map_err(|_| HostLifetimeError::InvalidSelection)?;
-    Ok(Some(SelectedApplicationAcquisition {
-        config,
-        prepared,
-        prepared_bytes,
-        helper,
-    }))
+    match config {
+        Some(config) => {
+            if config.standing_policy.is_some()
+                && !prepared
+                    .helper_tools
+                    .is_some_and(|tools| tools.requires_software_review())
+            {
+                return Err(HostLifetimeError::InvalidSelection);
+            }
+            let helper = prepared
+                .helper_projection_for_policy(&policy)
+                .map_err(|_| HostLifetimeError::InvalidSelection)?;
+            Ok(Some(SelectedApplication::Acquisition(
+                SelectedApplicationAcquisition {
+                    config,
+                    prepared,
+                    prepared_bytes,
+                    helper,
+                },
+            )))
+        }
+        None => {
+            prepared
+                .validate_helperless()
+                .map_err(|_| HostLifetimeError::InvalidSelection)?;
+            crate::application_setup::compilation::validate_final_artifacts_with(
+                &prepared,
+                |name| {
+                    let reference = prepared
+                        .native_members
+                        .iter()
+                        .map(|row| &row.initial_surface)
+                        .find(|row| row.name == name)
+                        .ok_or("unselected native surface")?;
+                    checked(reference).map_err(|error| error.to_string())
+                },
+            )
+            .map_err(|_| HostLifetimeError::InvalidSelection)?;
+            Ok(Some(SelectedApplication::ApplicationOnly(
+                SelectedApplicationOnly {
+                    reference: setup_reference,
+                    prepared,
+                    bytes: prepared_bytes,
+                },
+            )))
+        }
+    }
 }
 
 /// Kept by the actual gateway factory until it composes the existing host. The
@@ -245,8 +365,85 @@ pub struct PreparedGatewayAcquisition {
     // Ordinary completed-bundle startup creates this from authenticated output.
     // A held driver already retains the original resource participant/provider.
     resource: Option<Arc<crate::application_setup::resource::SetupResourceSelection>>,
+    local_round: Option<Arc<RestoredLocalRound>>,
+    workflow: Option<Arc<workflow::InstalledWorkflowComposition>>,
 }
+
+/// Retained by the ordinary gateway until native transport shutdown and this
+/// exact round's cleanup have joined. It contains no saved native authority.
+pub struct RestoredLocalRound {
+    attempts: Arc<crate::resources::LocalRoundAttempts>,
+    guards: meerkat_mcp::McpAttemptGuards,
+    cleanup: tokio::sync::Mutex<crate::application_driver::local_round::LocalRoundCleanup>,
+}
+impl RestoredLocalRound {
+    fn new(
+        attempts: Arc<crate::resources::LocalRoundAttempts>,
+        workflow: Option<&Arc<crate::installed_service_review::composer::LiveSharedSetup>>,
+    ) -> Result<Self, HostLifetimeError> {
+        let bounds = meerkat_mcp::McpAttemptGuardBounds::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+        )
+        .map_err(|_| HostLifetimeError::InvalidSelection)?;
+        let factory: Arc<dyn meerkat_mcp::McpAttemptGuardFactory> = match workflow {
+            Some(workflow) => workflow.guards(attempts.clone()),
+            None => attempts.clone(),
+        };
+        Ok(Self {
+            guards: meerkat_mcp::McpAttemptGuards::new(factory, bounds),
+            attempts,
+            cleanup: tokio::sync::Mutex::new(Default::default()),
+        })
+    }
+
+    /// Call after the existing native gateway has closed its transports, on
+    /// every exit, before stopping Tokio. Cancellation retains the cleanup state.
+    pub async fn join_after_native_close(
+        &self,
+    ) -> Result<(), meerkat_mobkit::rpc_gateway::GatewayHostError> {
+        self.cleanup
+            .lock()
+            .await
+            .join_until_settled(&self.attempts, &self.guards)
+            .await
+    }
+}
+
+fn round_composition(
+    composition: meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
+    round: &Option<Arc<RestoredLocalRound>>,
+) -> meerkat_mobkit::rpc_gateway::GatewayMcpComposition {
+    match round {
+        Some(round) => composition.with_attempt_guards(round.guards.clone()),
+        None => composition,
+    }
+}
+
+// Preparation-only hosts have no software-review composer. Keep their native
+// dispatcher unchanged while installing the same exact resource attempt guards.
+struct LocalRoundComposer;
+impl meerkat::McpAdapterComposer for LocalRoundComposer {
+    fn compose(
+        &self,
+        adapter: &Arc<meerkat::McpRouterAdapter>,
+        _session: &meerkat_core::SessionId,
+        _member: Option<&meerkat_core::MobMemberBinding>,
+    ) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, meerkat::McpAdapterComposeRefusal> {
+        Ok(adapter.clone())
+    }
+}
+
 impl PreparedGatewayAcquisition {
+    pub fn restored_local_round(&self) -> Option<Arc<RestoredLocalRound>> {
+        self.local_round.clone()
+    }
+    /// Retain the selected installed workflow participant before consuming
+    /// this acquisition in its factory composition.
+    pub fn installed_workflow(&self) -> Option<Arc<workflow::InstalledWorkflowComposition>> {
+        self.workflow.clone()
+    }
     /// Final adoption for a factory already composed by the held driver. Its
     /// existing channel and weak task source are retained, not recreated.
     pub(crate) fn compose_prepared_factory(
@@ -285,6 +482,10 @@ impl PreparedGatewayAcquisition {
         // retains this same enrollment owner through final adoption. Install
         // the prepared setup application before attaching its Console routes.
         let host = self.compose_resources(host)?;
+        let host = match presenters.filter(|presenter| presenter.has_console()) {
+            Some(presenter) => host.with_member_mcp_presenter(Arc::new(presenter.clone()))?,
+            None => host,
+        };
         match console {
             Some(panel) => host.with_console_routes(Arc::new(move |viewer| {
                 panel
@@ -334,6 +535,7 @@ impl PreparedGatewayAcquisition {
             }
         };
         let approvals = approvals.with_console(panel.clone());
+        let host = host.with_member_mcp_presenter(Arc::new(approvals.clone()))?;
         let host = self.compose_with_local_setup(host, approvals)?;
         let host = host.with_console_routes(Arc::new(move |viewer| {
             panel
@@ -379,6 +581,9 @@ impl PreparedGatewayAcquisition {
         HostLifetimeError,
     > {
         let Some(selection) = self.standing_policy else {
+            if self.workflow.is_some() {
+                return Err(HostLifetimeError::InvalidSelection);
+            }
             return self.compose_with_presenters(host, local, artifact_parent);
         };
         let native = owner
@@ -387,7 +592,7 @@ impl PreparedGatewayAcquisition {
             .as_ref()
             .ok_or(HostLifetimeError::InvalidSelection)?;
         let binding = self.selected_policy.clone().unwrap_or_else(|| {
-            SelectedPolicyBinding::new(
+            SelectedPolicyBinding::new_with_member_classes(
                 selection,
                 native.grant_administrator.clone(),
                 owner.selected_policy().deployment.clone(),
@@ -397,6 +602,7 @@ impl PreparedGatewayAcquisition {
                     .iter()
                     .map(|row| row.member.member.clone())
                     .collect(),
+                native.member_classes.clone(),
             )
         });
         binding.bind_with_service_parent(
@@ -428,6 +634,16 @@ impl PreparedGatewayAcquisition {
         };
         let member = self.helper_member.clone();
         let realm = self.realm.clone();
+        let local_round = self.local_round.clone();
+        let workflow = self.workflow.clone();
+        if let Some(workflow) = &workflow {
+            workflow.bind_review(
+                binding.clone(),
+                presenters
+                    .clone()
+                    .ok_or(HostLifetimeError::InvalidSelection)?,
+            )?;
+        }
         let host = self.compose_resources(host)?;
         let host = match console {
             Some(panel) => host.with_console_routes(Arc::new(move |viewer| {
@@ -437,20 +653,13 @@ impl PreparedGatewayAcquisition {
             }))?,
             None => host,
         };
-        let host = host.with_setup_member_factory_for_owner(
-            &owner,
-            Arc::new(move |construction, tasks| {
-                crate::installed_service_review::composer::gateway_selected_policy_composition(
-                    construction,
-                    member.clone(),
-                    realm.clone(),
-                    binding.clone(),
-                    presenters.clone(),
-                    artifact_parent.clone(),
-                    tasks,
-                )
-            }),
-        )?;
+        let host = host.with_setup_member_factory_for_owner(&owner, Arc::new(move |construction, tasks| {
+            if let Some(workflow) = &workflow { workflow.capture_tasks(tasks.clone())?; }
+            crate::installed_service_review::composer::gateway_selected_policy_composition_with_workflows(construction,
+                member.clone(), realm.clone(), binding.clone(), presenters.clone(), artifact_parent.clone(), tasks,
+                workflow.as_ref().map(|workflow| workflow.resources.clone()))
+                .map(|composition| round_composition(composition, &local_round))
+        }))?;
         Ok((host, reviews))
     }
 
@@ -488,6 +697,7 @@ impl PreparedGatewayAcquisition {
         let selected = self.helper_member.clone();
         let realm = self.realm.clone();
         let owner = installation.lifetime().clone();
+        let local_round = self.local_round.clone();
         let host = self.compose_resources(host)?;
         let host = match console {
             Some(panel) => host.with_console_routes(Arc::new(move |viewer| {
@@ -509,6 +719,7 @@ impl PreparedGatewayAcquisition {
                     artifact_parent.clone(),
                     tasks,
                 )
+                .map(|composition| round_composition(composition, &local_round))
             }),
         )
     }
@@ -518,7 +729,19 @@ impl PreparedGatewayAcquisition {
         host: ToolkitGatewayHost,
     ) -> Result<ToolkitGatewayHost, HostLifetimeError> {
         require_setup_review(self.helper_tools, None)?;
-        self.compose_resources(host)
+        let local_round = self.local_round.clone();
+        let host = self.compose_resources(host)?;
+        match local_round {
+            Some(round) => host.with_setup_member_factory(Arc::new(move |_, _| {
+                Ok(
+                    meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(Arc::new(
+                        LocalRoundComposer,
+                    ))
+                    .with_attempt_guards(round.guards.clone()),
+                )
+            })),
+            None => Ok(host),
+        }
     }
 
     fn compose_resources(
@@ -534,19 +757,34 @@ impl PreparedGatewayAcquisition {
         match self.resource {
             Some(resource) => {
                 let participant = resource.clone();
+                let workflow = self.workflow.clone();
+                let workflow_participant = self.workflow.clone();
                 host.with_configured_mcp_resource(
                     move |installed| {
-                        Arc::new(
+                        let provider: Arc<
+                            dyn meerkat_runtime::meerkat_machine::ConfiguredMcpAttachmentProvider,
+                        > = Arc::new(
                             crate::application_setup::resource::SetupResourceProvider::new(
                                 resource, installed,
                             ),
-                        )
+                        );
+                        match workflow {
+                            Some(workflow) => workflow.resources.configured(Some(provider)),
+                            None => provider,
+                        }
                     },
                     Arc::new(move |identity, destination| {
-                        participant.selected_destination(identity, destination)
+                        participant.selected_destination(identity, destination)?;
+                        if let Some(workflow) = &workflow_participant {
+                            workflow
+                                .resources
+                                .selected_destination(identity, destination)?;
+                        }
+                        Ok(())
                     }),
                 )
             }
+            None if self.workflow.is_some() => Err(HostLifetimeError::InvalidSelection),
             None => Ok(host),
         }
     }
@@ -565,6 +803,7 @@ impl PreparedGatewayAcquisition {
         require_setup_review(self.helper_tools, Some(&presenters))?;
         let selected = self.helper_member.clone();
         let realm = self.realm.clone();
+        let local_round = self.local_round.clone();
         let host = self.compose_resources(host)?;
         host.with_setup_member_factory(Arc::new(move |construction, tasks| {
             crate::installed_service_review::composer::gateway_account_composition(
@@ -574,6 +813,7 @@ impl PreparedGatewayAcquisition {
                 presenters.clone(),
                 tasks,
             )
+            .map(|composition| round_composition(composition, &local_round))
         }))
     }
 }
@@ -592,15 +832,70 @@ pub async fn open_gateway_acquisition(
     ),
     HostLifetimeError,
 > {
+    open_gateway_acquisition_selected(selection, startup, None).await
+}
+
+/// Ordinary installed Restore with the existing workflow participant. Physical
+/// reconstruction refuses missing, consumed or unsettled owner observations;
+/// native capture and source recovery recheck the exact historical G selection.
+pub async fn open_gateway_acquisition_with_workflows(
+    selection: HostBootstrapSelection,
+    launch: Arc<dyn workflow::ApplicationWorkflowLaunchOwner>,
+) -> Result<
+    (
+        meerkat_toolkit::host_lifetime::NativeHostLifetime,
+        InstalledToolkitHost,
+        Option<PreparedGatewayAcquisition>,
+    ),
+    HostLifetimeError,
+> {
+    open_gateway_acquisition_selected(
+        selection,
+        toolkit_mobkit::installed_host::NativeOwnerStartup::Restore,
+        Some(launch),
+    )
+    .await
+}
+
+async fn open_gateway_acquisition_selected(
+    selection: HostBootstrapSelection,
+    startup: toolkit_mobkit::installed_host::NativeOwnerStartup,
+    launch: Option<Arc<dyn workflow::ApplicationWorkflowLaunchOwner>>,
+) -> Result<
+    (
+        meerkat_toolkit::host_lifetime::NativeHostLifetime,
+        InstalledToolkitHost,
+        Option<PreparedGatewayAcquisition>,
+    ),
+    HostLifetimeError,
+> {
     let (owner, installed, participant) = open_gateway_owner(selection.clone(), startup).await?;
     let native = owner
         .selected_policy()
         .native_host
         .as_ref()
         .ok_or(HostLifetimeError::InvalidSelection)?;
-    let (installed, mut acquisition) = prepare_gateway_acquisition(&selection, native, installed)?;
+    let (installed, mut acquisition) = prepare_gateway_acquisition_selected(
+        &selection, native, installed, None, None, None, launch,
+    )?;
     if let Some(acquisition) = &mut acquisition {
         acquisition.selected_policy = participant;
+        if startup == toolkit_mobkit::installed_host::NativeOwnerStartup::Restore
+            && let Some(resource) = &acquisition.resource
+        {
+            let attempts = resource
+                .restore_local_round()
+                .map_err(|_| HostLifetimeError::Unavailable)?;
+            let round = RestoredLocalRound::new(
+                attempts,
+                acquisition.workflow.as_ref().map(|row| &row.resources),
+            )?;
+            let round = Arc::new(round);
+            if let Some(workflow) = &acquisition.workflow {
+                workflow.bind_round(round.clone())?;
+            }
+            acquisition.local_round = Some(round);
+        }
     }
     Ok((owner, installed, acquisition))
 }
@@ -629,7 +924,7 @@ pub(crate) async fn open_gateway_owner(
         .as_ref()
         .and_then(|row| row.config.standing_policy)
         .map(|choices| {
-            SelectedPolicyBinding::new(
+            SelectedPolicyBinding::new_with_member_classes(
                 choices,
                 native.grant_administrator.clone(),
                 selected.deployment.clone(),
@@ -639,27 +934,31 @@ pub(crate) async fn open_gateway_owner(
                     .iter()
                     .map(|row| row.member.member.clone())
                     .collect(),
+                native.member_classes.clone(),
             )
         });
     let recovery_participant = participant
         .as_ref()
         .map(|binding| binding.participant())
         .or_else(|| {
-            acquisition
-                .as_ref()
-                .filter(|row| row.prepared.helper_tools.requires_software_review())
-                .map(|_| {
-                    SelectedPolicyBinding::human_review_participant(
-                        native.grant_administrator.clone(),
-                        selected.deployment.clone(),
-                        native.realm.clone(),
-                        native
-                            .members
-                            .iter()
-                            .map(|row| row.member.member.clone())
-                            .collect(),
-                    )
-                })
+            (acquisition.as_ref().is_some_and(|row| {
+                row.prepared
+                    .helper_tools
+                    .is_some_and(|tools| tools.requires_software_review())
+            }) || !native.member_classes.is_empty())
+            .then(|| {
+                SelectedPolicyBinding::human_review_participant_with_member_classes(
+                    native.grant_administrator.clone(),
+                    selected.deployment.clone(),
+                    native.realm.clone(),
+                    native
+                        .members
+                        .iter()
+                        .map(|row| row.member.member.clone())
+                        .collect(),
+                    native.member_classes.clone(),
+                )
+            })
         });
     let (owner, installed) = match recovery_participant {
         Some(recovery_participant) => {
@@ -697,7 +996,28 @@ pub(crate) fn prepare_gateway_acquisition_with_retained(
         Arc<InstalledNativeContinuation>,
     )>,
 ) -> Result<(InstalledToolkitHost, Option<PreparedGatewayAcquisition>), HostLifetimeError> {
-    prepare_gateway_acquisition_selected(selection, native, installed, retained, None)
+    prepare_gateway_acquisition_selected(selection, native, installed, retained, None, None, None)
+}
+
+pub(crate) fn prepare_gateway_acquisition_with_workflow(
+    selection: &HostBootstrapSelection,
+    native: &CompiledNativeHost,
+    installed: InstalledToolkitHost,
+    retained: (
+        toolkit_mobkit::installed_host::acquisition::InstalledAcquisitionTools,
+        Arc<InstalledNativeContinuation>,
+    ),
+    workflow: Arc<workflow::ApplicationWorkflowCommissioner>,
+) -> Result<(InstalledToolkitHost, Option<PreparedGatewayAcquisition>), HostLifetimeError> {
+    prepare_gateway_acquisition_selected(
+        selection,
+        native,
+        installed,
+        Some(retained),
+        None,
+        Some(workflow),
+        None,
+    )
 }
 
 pub(crate) fn prepare_gateway_acquisition_update(
@@ -707,8 +1027,15 @@ pub(crate) fn prepare_gateway_acquisition_update(
     update: &crate::application_update::ValidatedReplacementStartup,
     participant: Option<Arc<SelectedPolicyBinding>>,
 ) -> Result<(InstalledToolkitHost, Option<PreparedGatewayAcquisition>), HostLifetimeError> {
-    let (installed, mut acquisition) =
-        prepare_gateway_acquisition_selected(selection, native, installed, None, Some(update))?;
+    let (installed, mut acquisition) = prepare_gateway_acquisition_selected(
+        selection,
+        native,
+        installed,
+        None,
+        Some(update),
+        None,
+        None,
+    )?;
     if let Some(acquisition) = &mut acquisition {
         acquisition.selected_policy = participant;
     }
@@ -724,6 +1051,8 @@ fn prepare_gateway_acquisition_selected(
         Arc<InstalledNativeContinuation>,
     )>,
     update: Option<&crate::application_update::ValidatedReplacementStartup>,
+    workflow: Option<Arc<workflow::ApplicationWorkflowCommissioner>>,
+    installed_launch: Option<Arc<dyn workflow::ApplicationWorkflowLaunchOwner>>,
 ) -> Result<(InstalledToolkitHost, Option<PreparedGatewayAcquisition>), HostLifetimeError> {
     let Some(SelectedApplicationAcquisition {
         config,
@@ -734,19 +1063,42 @@ fn prepare_gateway_acquisition_selected(
         read_bundle_artifact(selection, reference)
     })?
     else {
-        if retained.is_some() || update.is_some() {
+        if retained.is_some()
+            || update.is_some()
+            || workflow.is_some()
+            || installed_launch.is_some()
+        {
             return Err(HostLifetimeError::InvalidSelection);
         }
+        let installed = match read_application_only(native, |reference| {
+            read_bundle_artifact(selection, reference)
+        })? {
+            Some(application) => {
+                installed.with_prepared_application(application.into_application()?)?
+            }
+            None => installed,
+        };
         return Ok((installed, None));
     };
     let resource = if retained.is_none() && prepared.schema == 4 {
         Some(Arc::new(
-            crate::application_setup::resource::SetupResourceSelection::from_completed(&prepared)
-                .map_err(|_| HostLifetimeError::InvalidSelection)?,
+            crate::application_setup::resource::SetupResourceSelection::from_completed(
+                &prepared,
+                installed.prepared_tool_policy(),
+            )
+            .map_err(|_| HostLifetimeError::InvalidSelection)?,
         ))
     } else {
         None
     };
+    if installed_launch.is_some()
+        && (resource.is_none()
+            || config.standing_policy.is_none()
+            || workflow.is_some()
+            || update.is_some())
+    {
+        return Err(HostLifetimeError::InvalidSelection);
+    }
     let storage = prepared
         .realm
         .resolve()
@@ -754,11 +1106,12 @@ fn prepare_gateway_acquisition_selected(
     let expected_state_root = storage.layout.state_root().to_path_buf();
     let realm = storage.locator.clone();
     let helper_member = helper.member().clone();
-    let original_definition = match &prepared.definition_source {
-        ApplicationSetupDefinition::Toml { text } => meerkat_mob::MobDefinition::from_toml(text)
-            .map_err(|_| HostLifetimeError::InvalidSelection)?,
-        ApplicationSetupDefinition::Native { definition } => (**definition).clone(),
-    };
+    // The same source read as preparation's, with its refusals: a setup
+    // definition that names a profile auth binding is refused here too.
+    let original_definition = prepared
+        .definition_source
+        .resolve()
+        .map_err(|_| HostLifetimeError::InvalidSelection)?;
     let expected_definition = update
         .map(|row| row.update.definition().clone())
         .unwrap_or_else(|| prepared.definition.clone());
@@ -776,6 +1129,7 @@ fn prepare_gateway_acquisition_selected(
         )),
     )?;
     let replacement = update.is_some();
+    let workflow_definition = expected_definition.clone();
     let projection: SetupBootstrapProjection = Arc::new(move |spec| {
         // Never replace an unrelated incoming definition or resurrect a frozen
         // roster. The early carrier installs PreparedApplicationRoster on the
@@ -801,14 +1155,56 @@ fn prepare_gateway_acquisition_selected(
     let installed = installed.with_service_installation_readback(Arc::new(
         crate::resources::installation_readback::ProductInstallationReadback { storage },
     ))?;
+    // Authenticated host assembly selects private historical reads. This does
+    // not turn the singleton continuation owner into a grouped workflow owner.
+    let context_selector =
+        toolkit_mobkit::installed_host::acquisition::installed_workflow_context_selector(
+            native.realm.clone(),
+            config.backend_generation.clone(),
+            native
+                .members
+                .iter()
+                .map(|row| row.member.clone())
+                .collect(),
+            config.output_audience.clone(),
+        );
     let (continuation, tools) = match retained {
         Some((tools, continuation)) => (continuation, Some(tools)),
-        None => (installed.native_continuation(config.output_audience)?, None),
+        None => (
+            installed.native_continuation(config.output_audience.clone())?,
+            None,
+        ),
     };
+    let installed_workflow = installed_launch.map(|launch| {
+        let resources = crate::installed_service_review::composer::LiveSharedSetup::new(
+            realm.clone(),
+            installed.prepared_tool_policy(),
+            workflow_definition,
+            &native.member_classes,
+        );
+        let commissioner = Arc::new(workflow::ApplicationWorkflowCommissioner::new(
+            launch,
+            installed.originals(),
+            continuation.clone(),
+        ));
+        workflow::InstalledWorkflowComposition::new(
+            commissioner,
+            resources,
+            config.output_audience.clone(),
+            prepared.realm.clone(),
+        )
+    });
     let defaults = InstalledSetupBootstrap {
-        helper: prepared.helper,
+        helper: prepared.helper.ok_or(HostLifetimeError::InvalidSelection)?,
         proposal_ceiling: config.proposal_ceiling,
-        continuation: continuation.clone(),
+        continuation: match workflow.or_else(|| {
+            installed_workflow
+                .as_ref()
+                .map(|row| row.commissioner.clone())
+        }) {
+            Some(workflow) => workflow,
+            None => continuation.clone(),
+        },
         backend_generation: config.backend_generation,
         references: None,
         limits: config.limits,
@@ -823,6 +1219,7 @@ fn prepare_gateway_acquisition_selected(
         Some(tools) => installed.with_enrolled_bootstrap_acquisition(defaults, tools)?,
         None => installed.with_bootstrap_acquisition(defaults)?,
     };
+    let installed = installed.with_workflow_context_recovery(context_selector)?;
     Ok((
         installed,
         Some(PreparedGatewayAcquisition {
@@ -830,7 +1227,9 @@ fn prepare_gateway_acquisition_selected(
             projection,
             application,
             helper_member,
-            helper_tools: prepared.helper_tools,
+            helper_tools: prepared
+                .helper_tools
+                .ok_or(HostLifetimeError::InvalidSelection)?,
             standing_policy: config.standing_policy,
             selected_policy: None,
             acquisition_reference: native
@@ -841,6 +1240,8 @@ fn prepare_gateway_acquisition_selected(
             console_setup: config.console_setup,
             local_operator_recovery: config.local_operator_recovery,
             resource,
+            local_round: None,
+            workflow: installed_workflow,
         }),
     ))
 }
@@ -1117,5 +1518,111 @@ mod tests {
             injected["local_operator_recovery"] = unsupported;
             assert!(serde_json::from_value::<ApplicationAcquisitionSelection>(injected).is_err());
         }
+    }
+
+    #[test]
+    fn helperless_carrier_keeps_exact_application_owner_without_acquisition_fallback() {
+        use crate::application_setup::compilation::tests::helperless_input;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (input, owner) = helperless_input(&root, true);
+        let phase = input.validate().unwrap().prepare_without_helper().unwrap();
+        phase.retain_owner(owner.clone()).unwrap();
+        phase.validate_finished(std::iter::empty()).unwrap();
+        let (prepared, _) = phase.complete_bundle(&root.join("completed")).unwrap();
+        let prepared_bytes = toolkit_package::canonical_json(&prepared).unwrap();
+        let setup = CompiledArtifactReference {
+            name: "application-setup.json".into(),
+            sha256: crate::application_bootstrap::hash(&prepared_bytes),
+        };
+        let carrier = serde_json::to_value(ApplicationOnlySelection {
+            schema: 2,
+            prepared_application_setup: setup.clone(),
+        })
+        .unwrap();
+        let mut artifacts = std::collections::BTreeMap::from([
+            (setup.name.clone(), prepared_bytes),
+            (
+                prepared.application_tool_policy.name.clone(),
+                std::fs::read(
+                    root.join("completed")
+                        .join(&prepared.application_tool_policy.name),
+                )
+                .unwrap(),
+            ),
+        ]);
+        let early = owner.native_host;
+        let mut native = CompiledNativeHost {
+            authentication_domain: None,
+            event_domain: None,
+            realm: early.realm,
+            grant_administrator: early.grant_administrator,
+            remote_operator: early.remote_operator,
+            service_parent_administration: early.service_parent_administration,
+            ingress_domain: early.ingress_domain,
+            application_tool_policy: prepared.application_tool_policy.clone(),
+            setup: None,
+            member_classes: early.member_classes,
+            members: prepared.native_members.clone(),
+            routes: early.routes,
+        };
+        let select = |native: &mut CompiledNativeHost,
+                      artifacts: &mut std::collections::BTreeMap<String, Vec<u8>>,
+                      value: &serde_json::Value| {
+            let bytes = toolkit_package::canonical_json(value).unwrap();
+            native.setup = Some(CompiledArtifactReference {
+                name: "application-only.json".into(),
+                sha256: crate::application_bootstrap::hash(&bytes),
+            });
+            artifacts.insert("application-only.json".into(), bytes);
+        };
+        select(&mut native, &mut artifacts, &carrier);
+        let read = |reference: &CompiledArtifactReference| {
+            artifacts
+                .get(&reference.name)
+                .cloned()
+                .ok_or(HostLifetimeError::InvalidSelection)
+        };
+        assert!(
+            read_application_acquisition(&native, read)
+                .unwrap()
+                .is_none()
+        );
+        let selected = read_application_only(&native, read).unwrap().unwrap();
+        assert!(selected.matches_preparation(&prepared).unwrap());
+        assert!(selected.into_application().is_ok());
+        let mut changed_native = native.clone();
+        changed_native.member_classes[0].factory = id("foreign-factory");
+        assert!(read_application_only(&changed_native, read).is_err());
+        changed_native = native.clone();
+        changed_native.setup.as_mut().unwrap().sha256 = "0".repeat(64);
+        assert!(read_application_only(&changed_native, read).is_err());
+        for changed in [
+            serde_json::json!({"schema":1,"prepared_application_setup":setup}),
+            serde_json::json!({"schema":3,"prepared_application_setup":setup}),
+            serde_json::json!({"schema":2,"prepared_application_setup":setup,"backend_generation":"invented"}),
+            serde_json::json!({"schema":2,"prepared_application_setup":{"name":setup.name,"sha256":"0".repeat(64)}}),
+        ] {
+            select(&mut native, &mut artifacts, &changed);
+            assert!(
+                read_application_only(&native, |reference| artifacts
+                    .get(&reference.name)
+                    .cloned()
+                    .ok_or(HostLifetimeError::InvalidSelection))
+                .is_err()
+            );
+        }
+        select(&mut native, &mut artifacts, &carrier);
+        artifacts.insert(
+            prepared.application_tool_policy.name.clone(),
+            b"{}".to_vec(),
+        );
+        assert!(
+            read_application_only(&native, |reference| artifacts
+                .get(&reference.name)
+                .cloned()
+                .ok_or(HostLifetimeError::InvalidSelection))
+            .is_err()
+        );
     }
 }

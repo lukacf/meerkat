@@ -1,6 +1,191 @@
 //! Closed request and actual checked-selection controls. Package responses are
 //! synthetic; these controls do not execute native persistence or a provider.
 use super::*;
+use std::time::Duration;
+
+// These response-custody controls use the real request rendezvous and reply
+// transport. Typed effect observations are controlled values, not a native
+// installation, grant, provider read or fresh continuation qualification.
+fn observed_credential_reply(entered: bool, published: bool) -> CredentialReply {
+    use outcome::*;
+    CredentialReply {
+        state: if published {
+            CredentialState::Reviewed
+        } else {
+            CredentialState::Incomplete
+        },
+        access_reviewed: true,
+        persistence: PersistenceOutcome {
+            defining_realm: meerkat_core::RealmId::parse("fixture").unwrap(),
+            server_name: "fixture-service".into(),
+            reviewed_configuration_generation: 7,
+            install: InstallOutcome {
+                state: if entered {
+                    WriteState::Installed
+                } else {
+                    WriteState::NotEntered
+                },
+                generation: entered.then_some(8),
+            },
+            secrets: vec![SecretOutcome {
+                slot: "FIXTURE_KEY".into(),
+                state: if published {
+                    WriteState::Stored
+                } else {
+                    WriteState::NotEntered
+                },
+            }],
+        },
+        grant_issued: published,
+        fresh_instruction_retained: published,
+        ready: false,
+        task_publication: if published {
+            PublicationState::Retained
+        } else {
+            PublicationState::NotEntered
+        },
+    }
+}
+
+fn publication_changed() -> ToolError {
+    ToolError::AuthorizationRefused {
+        refusal: meerkat_core::OperationRefused::new(
+            meerkat_core::OperationRefusalKind::ReprepareRequired,
+        ),
+    }
+}
+
+#[tokio::test]
+async fn credential_reply_joins_known_outcome_after_publication_change_without_later_effects() {
+    use futures_util::FutureExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for published in [false, true] {
+            let (checks, requests) = mpsc::channel(1);
+            let current = CurrentRequest(checks);
+            let (send, receive) = oneshot::channel();
+            let (refused, refusal_seen) = oneshot::channel();
+            let (release, wait_release) = oneshot::channel();
+            let still_current = Arc::new(AtomicBool::new(true));
+            let owner_current = still_current.clone();
+            let entered = Arc::new(AtomicUsize::new(0));
+            let owner_entered = entered.clone();
+            let joined = Arc::new(AtomicBool::new(false));
+            let owner_joined = joined.clone();
+            let expected =
+                serde_json::to_value(observed_credential_reply(true, published)).unwrap();
+            let owner = tokio::spawn(async move {
+                assert!(current.check().await);
+                owner_entered.fetch_add(1, Ordering::SeqCst);
+                let reply = observed_credential_reply(true, published);
+                owner_current.store(false, Ordering::SeqCst);
+                assert!(!current.check().await);
+                // The receiver must be closed after refusal, so a later
+                // effect check cannot hang or reuse the preceding true answer.
+                assert!(!current.check().await);
+                refused.send(()).unwrap();
+                wait_release.await.unwrap();
+                owner_joined.store(true, Ordering::SeqCst);
+                assert!(send.send(reply).is_ok());
+            });
+            let reply = receive_reply(requests, receive, || {
+                if still_current.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(publication_changed())
+                }
+            });
+            tokio::pin!(reply);
+            tokio::select! {
+                result = refusal_seen => result.unwrap(),
+                _ = reply.as_mut() => panic!("currentness refusal must join the entered owner"),
+            }
+            assert!(reply.as_mut().now_or_never().is_none());
+            assert!(!joined.load(Ordering::SeqCst));
+            assert_eq!(entered.load(Ordering::SeqCst), 1);
+            release.send(()).unwrap();
+            let observed = reply.await.unwrap();
+            assert!(joined.load(Ordering::SeqCst));
+            assert_eq!(serde_json::to_value(observed).unwrap(), expected);
+            owner.await.unwrap();
+        }
+    })
+    .await
+    .expect("credential result custody did not settle");
+}
+
+#[tokio::test]
+async fn credential_reply_refusal_before_effect_preserves_not_entered_outcome() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (checks, requests) = mpsc::channel(1);
+        let current = CurrentRequest(checks);
+        let (send, receive) = oneshot::channel();
+        let owner = async {
+            let entered = current.check().await;
+            assert!(
+                !entered,
+                "a refused checkpoint cannot enter the first effect"
+            );
+            assert!(!current.check().await);
+            assert!(send.send(observed_credential_reply(entered, false)).is_ok());
+        };
+        let (result, ()) = tokio::join!(
+            receive_reply(requests, receive, || Err(publication_changed())),
+            owner
+        );
+        assert_eq!(
+            serde_json::to_value(result.unwrap()).unwrap(),
+            serde_json::to_value(observed_credential_reply(false, false)).unwrap()
+        );
+    })
+    .await
+    .expect("refused credential owner did not report its outcome");
+}
+
+#[tokio::test]
+async fn credential_reply_owner_loss_preserves_original_refusal_or_unavailability() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (checks, requests) = mpsc::channel(1);
+        let current = CurrentRequest(checks);
+        let (send, receive) = oneshot::channel();
+        let owner = async {
+            assert!(!current.check().await);
+            assert!(!current.check().await);
+            drop(send);
+        };
+        let (result, ()) = tokio::join!(
+            receive_reply(requests, receive, || Err(publication_changed())),
+            owner
+        );
+        assert!(
+            matches!(result, Err(ToolError::AuthorizationRefused { refusal })
+            if refusal.kind() == meerkat_core::OperationRefusalKind::ReprepareRequired)
+        );
+        let (checks, requests) = mpsc::channel(1);
+        let (send, receive) = oneshot::channel();
+        drop(send);
+        assert!(matches!(
+            receive_reply(requests, receive, || panic!("no checkpoint requested")).await,
+            Err(ToolError::Unavailable { .. })
+        ));
+        drop(checks);
+        let (checks, requests) = mpsc::channel(1);
+        let (send, receive) = oneshot::channel();
+        assert!(send.send(observed_credential_reply(true, true)).is_ok());
+        let result = receive_reply(requests, receive, || {
+            panic!("a joined outcome must not trigger another authorization check")
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::to_value(observed_credential_reply(true, true)).unwrap()
+        );
+        drop(checks);
+    })
+    .await
+    .expect("closed credential owner left the dispatcher parked");
+}
 
 #[test]
 fn credential_request_refuses_values_authority_and_mixed_oauth_without_changing_legacy_parser() {
@@ -334,6 +519,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for CredentialR
             )
             .into());
         }
+        Ok(())
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
         Ok(())
     }
 }

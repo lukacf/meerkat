@@ -11,16 +11,21 @@
 //! creating it. Each call opens its own connection under the realm's
 //! maintenance fence. Every write is one `BEGIN IMMEDIATE` transaction on a
 //! connection with a zero busy timeout, conditional on the row it expects:
-//! a database another writer holds is [`ApprovalStoreError::Contended`],
-//! never a wait.
+//! a database another process holds is [`ApprovalStoreError::Contended`],
+//! never a wait. The calls of one process take turns on the file, from a
+//! connection's open to its close, so they never refuse each other: a
+//! connection that opened while another closed (and checkpointed the
+//! write-ahead log) would answer busy at once under the zero timeout.
 //!
 //! A row keeps its whole JSON beside the columns its queries read. The
 //! owed, due, count and filtered list queries read their indexes; a row
 //! whose JSON does not decode is answered unreadable for that decision
 //! only.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use meerkat_core::approval::ApprovalStoreError;
@@ -150,10 +155,71 @@ const DUE_SQL: &str = "SELECT decision_id, row_json FROM approval_decisions \
     AND decision_id > ?2 ORDER BY decision_id LIMIT ?3";
 
 /// One operation's connection; the fence guard lives exactly as long as the
-/// connection it admits.
+/// connection it admits, and the process's turn on the file outlives both
+/// (fields drop in order: the connection closes first).
 struct DecisionConnection {
     conn: Connection,
     _guard: meerkat_sqlite::OperationGuard,
+    _turn: Turn,
+}
+
+/// The turn the calls of one process take on a decision file: a call holds
+/// it from its connection's open to its close, so the process's calls never
+/// overlap on the file. Another process's connections take no turn.
+struct Turnstile {
+    busy: Mutex<bool>,
+    freed: Condvar,
+}
+
+impl std::fmt::Debug for Turnstile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Turnstile").finish_non_exhaustive()
+    }
+}
+
+/// A held turn; dropping it lets the next call in.
+struct Turn(Arc<Turnstile>);
+
+impl Turnstile {
+    /// The turnstile of the file at `path`, shared by every store of this
+    /// process that opens that path.
+    fn of(path: &Path) -> Arc<Self> {
+        static TURNSTILES: OnceLock<Mutex<HashMap<PathBuf, Weak<Turnstile>>>> = OnceLock::new();
+        let mut turnstiles = TURNSTILES
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(turnstile) = turnstiles.get(path).and_then(Weak::upgrade) {
+            return turnstile;
+        }
+        turnstiles.retain(|_, turnstile| turnstile.strong_count() > 0);
+        let turnstile = Arc::new(Self {
+            busy: Mutex::new(false),
+            freed: Condvar::new(),
+        });
+        turnstiles.insert(path.to_path_buf(), Arc::downgrade(&turnstile));
+        turnstile
+    }
+
+    /// Wait for the file's turn and take it.
+    fn enter(self: &Arc<Self>) -> Turn {
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        while *busy {
+            busy = self
+                .freed
+                .wait(busy)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *busy = true;
+        Turn(Arc::clone(self))
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *self.0.busy.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        self.0.freed.notify_one();
+    }
 }
 
 fn open_error(error: meerkat_sqlite::SqliteStoreError) -> ApprovalStoreError {
@@ -205,8 +271,9 @@ fn decode(decision_id: String, bytes: &[u8]) -> DecisionRow {
     }
 }
 
-/// The `column = ?n` clauses of `filter`, numbered after `bound` earlier
-/// parameters, with their values.
+/// The `column = ?n` clauses of `filter`, and `deadline_at_ms >= ?n` for its
+/// deadline bound, numbered after `bound` earlier parameters, with their
+/// values.
 fn filter_clauses(filter: &DecisionListFilter, bound: usize) -> (Vec<String>, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -225,6 +292,12 @@ fn filter_clauses(filter: &DecisionListFilter, bound: usize) -> (Vec<String>, Ve
     }
     if let Some(requester) = &filter.requester {
         push("requester_key", requester.as_str());
+    }
+    if let Some(deadline_from_ms) = filter.deadline_from_ms {
+        values.push(Value::Integer(
+            i64::try_from(deadline_from_ms).unwrap_or(i64::MAX),
+        ));
+        clauses.push(format!("deadline_at_ms >= ?{}", bound + values.len()));
     }
     (clauses, values)
 }
@@ -307,13 +380,16 @@ fn read_page(
 #[derive(Debug, Clone)]
 pub struct SqliteDecisionStore {
     path: PathBuf,
+    turnstile: Arc<Turnstile>,
 }
 
 impl SqliteDecisionStore {
     /// The store of the database file at `path`. Opening touches nothing.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        let path = path.into();
+        let turnstile = Turnstile::of(&path);
+        Self { path, turnstile }
     }
 
     /// The store of a host's durable decisions: `approval_decisions.sqlite3`
@@ -383,10 +459,12 @@ impl SqliteDecisionStore {
         }
     }
 
-    /// A connection to the file, created when `create` is set. Every open
-    /// checks the domain's ledger before anything else: a file a newer
-    /// binary migrated is refused, never read.
+    /// A connection to the file, created when `create` is set, in this
+    /// process's turn on the file. Every open checks the domain's ledger
+    /// before anything else: a file a newer binary migrated is refused,
+    /// never read.
     fn connect(&self, create: bool) -> Result<DecisionConnection, ApprovalStoreError> {
+        let turn = self.turnstile.enter();
         let guard = meerkat_sqlite::OperationGuard::for_database(&self.path).map_err(open_error)?;
         let mut conn = meerkat_sqlite::open_with(
             &self.path,
@@ -402,6 +480,7 @@ impl SqliteDecisionStore {
         Ok(DecisionConnection {
             conn,
             _guard: guard,
+            _turn: turn,
         })
     }
 

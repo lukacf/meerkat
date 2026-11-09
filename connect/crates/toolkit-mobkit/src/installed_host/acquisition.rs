@@ -9,25 +9,34 @@ mod enrollment;
 pub(crate) use enrollment::AcquisitionToolBinding;
 pub use enrollment::InstalledAcquisitionTools;
 mod task_approval;
-pub use task_approval::InstalledServiceTaskSource;
+mod workflow_calls;
+pub use task_approval::{InstalledServiceTaskSource, ServiceTaskError};
 pub(crate) mod recovery;
 mod results;
+#[cfg(feature = "test-support")]
+pub use recovery::{AcquisitionRecoveryObservation, AcquisitionRecoveryTaskObservation};
 pub use results::setup_report_definition;
+pub(crate) mod context_recovery;
+pub use context_recovery::{
+    InstalledWorkflowContextRead, InstalledWorkflowContextSelector,
+    installed_workflow_context_selector,
+};
 mod bootstrap;
 pub(crate) use bootstrap::AcquisitionBootstrap;
 pub use bootstrap::{
     AcquisitionBootstrapStatus, AcquisitionDisabledReason, InstalledSetupBootstrap,
 };
 mod admission;
+pub(crate) use admission::installed_invocation_correlation;
 mod continuation;
 pub use admission::{
-    InstalledOriginalInvocation, InstalledOriginalTaskOwner, InstalledSetupDefaults,
-    InstalledSetupLimits, InstalledSetupPreparer,
+    InstalledOriginalInvocation, InstalledOriginalTaskBinding, InstalledOriginalTaskOwner,
+    InstalledSetupDefaults, InstalledSetupLimits, InstalledSetupPreparer,
 };
 pub use continuation::InstalledNativeContinuation;
 #[cfg(test)]
 pub(crate) use continuation::owner_tests::{ContextProbe, ProbeProvider};
-pub(crate) use coordinator::SetupWorkerObservation;
+pub(crate) use coordinator::{SetupAdvanceError, SetupWorkerObservation};
 
 use crate::{
     FindAndInstallTool, HostToolAdmission, SetupToolHost, ToolAdmissionError,
@@ -178,6 +187,10 @@ pub(crate) struct InstalledAcquisition {
     continuation: Arc<dyn SetupContinuationDelivery>,
     work_step: WorkAdmissionStepOptions,
     tools: InstalledAcquisitionTools,
+    // Same stop boundary as the existing joined worker. No worker means no
+    // context-transfer attempt can enter through this acquisition.
+    transfer_recovery: std::sync::Mutex<Option<std::sync::Weak<recovery::RecoveryControl>>>,
+    context_recovery: std::sync::OnceLock<InstalledWorkflowContextSelector>,
 }
 
 impl InstalledAcquisition {
@@ -247,6 +260,8 @@ impl InstalledAcquisition {
             continuation: owners.continuation,
             work_step: owners.work_step,
             tools,
+            transfer_recovery: std::sync::Mutex::new(None),
+            context_recovery: std::sync::OnceLock::new(),
         })
     }
 
@@ -324,10 +339,16 @@ fn host_admission_error(error: ToolAdmissionError) -> SetupError {
     }
 }
 
+/// A source owner's answer as a tool admission's: its refusal is a denial.
+/// Its unavailability, and a conflict in its facts (contention, which the
+/// admission's reads wait out through Core's owner-change waiter first), are
+/// retryable, never a denial.
 fn source_admission_error(error: PrivateOriginalError) -> ToolAdmissionError {
     match error {
-        PrivateOriginalError::Unavailable => ToolAdmissionError::Unavailable,
-        PrivateOriginalError::Denied | PrivateOriginalError::Conflict => ToolAdmissionError::Denied,
+        PrivateOriginalError::Denied => ToolAdmissionError::Denied,
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => {
+            ToolAdmissionError::Unavailable
+        }
     }
 }
 
@@ -396,11 +417,17 @@ impl SetupToolHost for CanonicalSetupHost {
         context: &ToolDispatchContext,
     ) -> Result<HostToolAdmission, ToolAdmissionError> {
         let original = self
-            .originals
             .acquisition_original(context)
             .await
-            .map_err(source_admission_error)?;
-        let admission = self.inner.admit_invocation(call_id, context).await?;
+            .map_err(source_admission_error)
+            .inspect_err(|error| crate::aa1_admission_failure("canonical.original", error))?;
+        let admission = self
+            .inner
+            .admit_invocation(call_id, context)
+            .await
+            .inspect_err(|error| {
+                crate::aa1_admission_failure("canonical.inner_admission", error)
+            })?;
         #[cfg(test)]
         let pause = self.recheck_pause.lock().unwrap().take();
         #[cfg(test)]
@@ -408,7 +435,10 @@ impl SetupToolHost for CanonicalSetupHost {
             pause.entered.notify_one();
             pause.release.acquire().await.unwrap().forget();
         }
-        let result = self.recheck_admission(context, &original, admission).await;
+        let result = self
+            .recheck_admission(context, &original, admission)
+            .await
+            .inspect_err(|error| crate::aa1_admission_failure("canonical.recheck", error));
         #[cfg(test)]
         if let Some(pause) = pause {
             *pause.result.lock().unwrap() = Some(match &result {
@@ -423,6 +453,23 @@ impl SetupToolHost for CanonicalSetupHost {
 }
 
 impl CanonicalSetupHost {
+    /// The call's acquisition original, read through Core's owner-change
+    /// waiter with a fresh churn of the call, within Core's bound from now.
+    async fn acquisition_original(
+        &self,
+        context: &ToolDispatchContext,
+    ) -> Result<crate::private_originals::acquisition::AcquisitionOriginal, PrivateOriginalError>
+    {
+        let churn = tokio::sync::Mutex::new(context.owner_change_churn());
+        self.originals
+            .acquisition_original_through_waiter(
+                context,
+                &churn,
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
+            .await
+    }
+
     async fn recheck_admission(
         &self,
         context: &ToolDispatchContext,
@@ -442,7 +489,6 @@ impl CanonicalSetupHost {
         // source change. Re-open the exact native-held original and canonical
         // row; neither a self-consistent digest nor a route alias is custody.
         let current = self
-            .originals
             .acquisition_original(context)
             .await
             .map_err(source_admission_error)?;
@@ -492,6 +538,7 @@ mod tests {
         let controller = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("setup-controller").unwrap(),
                 principal("setup-agent"),
@@ -502,6 +549,7 @@ mod tests {
         let operation = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("setup-operation").unwrap(),
                 principal("setup-agent"),
@@ -528,6 +576,12 @@ mod tests {
     fn unavailable_source_and_host_remain_unavailable_not_denied() {
         assert!(matches!(
             source_admission_error(PrivateOriginalError::Unavailable),
+            ToolAdmissionError::Unavailable
+        ));
+        // A conflict in the source's facts is contention: retryable, never a
+        // denial.
+        assert!(matches!(
+            source_admission_error(PrivateOriginalError::Conflict),
             ToolAdmissionError::Unavailable
         ));
         assert!(matches!(

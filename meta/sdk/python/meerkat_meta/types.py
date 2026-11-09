@@ -2430,9 +2430,12 @@ class ErrorEvent:
             runtime_id = context.get("agent_runtime_id", "")
             effect = context.get("effect", "")
             attempts = context.get("attempts", 0)
+            # A compaction harvest's error says itself whether a fallback
+            # harvest follows; any other side effect is not run again.
+            settled = "" if effect == "compaction_harvest" else ", and is not run again"
             message = (
                 f"the {effect} of {identity} ({runtime_id}) failed after {attempts} "
-                f"attempts, and is not run again: {error}"
+                f"attempts{settled}: {error}"
             )
         elif category == ErrorCategory.LIFECYCLE_PROJECTION_OFF:
             message = str(context.get("detail", ""))

@@ -2,6 +2,7 @@ import * as React from "react";
 import { approvalAudience } from "../../../console-core/src/pending-approvals";
 import type { ApprovalAction, ApprovalAudience, ApprovalDecisionState, ApprovalViewer, DepartedApproval, PendingApproval, PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 import type { HostAttentionItem, HostAttentionSourceConfig, HostDecideLink } from "../../../console-core/src/host-attention";
+import type { ConsoleAttentionItem } from "../../../console-core/src/console-attention";
 import {
   AgentAvatar,
   AgentName,
@@ -11,6 +12,7 @@ import {
   KitGlyph,
   MiniBar,
   Notice,
+  RelativeTime,
   TechnicalId,
   agentDisplayName,
   countdownTone,
@@ -442,27 +444,94 @@ export function HostAttentionCard({ item }: { item: HostAttentionItem }) {
   );
 }
 
-export function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }: {
+/** A reply meant for the signed-in person alone (`meta/console/attention`),
+ * in the approval card's family: which agent answered, when, and the text,
+ * or that a payload policy hid its content when the policy left no text.
+ * The chat it answers opens from here when the host can open agents.
+ * Dismiss takes it off the person's list (the reply stays delivered); a
+ * read-only console passes no `onDismiss` and offers none. */
+export function PrivateReplyCard({ item, onDismiss }: {
+  item: ConsoleAttentionItem;
+  onDismiss?: (item: ConsoleAttentionItem) => void;
+}) {
+  const directory = useAgentDirectory();
+  const navigation = useConsoleNavigation();
+  const identity = item.origin.identity;
+  const name = agentDisplayName(identity, directory) || identity;
+  const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
+  return (
+    <article
+      className="cc-approval cc-private-reply"
+      data-kind="private-reply"
+      data-redacted={item.redacted ? "true" : undefined}
+      data-testid={`console-attention:${item.id}`}
+    >
+      <header className="cc-approval__header">
+        <div className="cc-approval__heading">
+          <strong className="cc-approval__title">{`Reply from ${name}`}</strong>
+        </div>
+        <Chip className="cc-private-reply__audience" title="Only you can see this reply">Only you</Chip>
+      </header>
+      {item.text === null ? (
+        <p className="cc-private-reply__text cc-private-reply__text--hidden">Content hidden by policy</p>
+      ) : (
+        <p className="cc-private-reply__text">{item.text}</p>
+      )}
+      <p className="cc-approval__asked">
+        <RelativeTime value={item.createdAtMs} prefix="Answered" />
+      </p>
+      {openChat || onDismiss ? (
+        <div className="cc-approval__actions">
+          {openChat ? (
+            <Button
+              size="sm"
+              onClick={openChat}
+              aria-label={`Open ${name}'s chat`}
+              data-testid={`console-attention-open:${item.id}`}
+            >
+              Open the chat
+            </Button>
+          ) : null}
+          {onDismiss ? (
+            <Button
+              size="sm"
+              onClick={() => onDismiss(item)}
+              aria-label={`Dismiss the reply from ${name}`}
+              data-testid={`console-attention-dismiss:${item.id}`}
+            >
+              Dismiss
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+export function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0 }: {
   snapshot?: PendingApprovalSnapshot;
   onOpen(pendingId?: string): void;
   /** Host-provided attention items, counted with the approvals. */
   hostItems?: number;
+  /** Replies meant for the signed-in person alone, counted with them too. */
+  replies?: number;
 }) {
-  // Approvals count only where the connection can show them; host items
-  // count on any connection, so an aggregate console still names them.
+  // Approvals count only where the connection can show them; host items and
+  // replies count on any connection, so an aggregate console still names them.
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
   // A request routed to an approver the viewer does not hold waits for
   // someone else: it does not need this viewer.
   const viewer = useApprovalViewer();
-  if (!approvalsShown && hostItems === 0) return null;
+  if (!approvalsShown && hostItems === 0 && replies === 0) return null;
   const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending"
     && snapshot.decisions[request.pendingId]?.phase !== "settled"
     && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? `${requests.length} pending approval${requests.length === 1 ? "" : "s"}` : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
   const hostStatus = hostItems ? `${hostItems} item${hostItems === 1 ? "" : "s"} from the host` : "";
-  const status = [approvalStatus, hostStatus].filter(Boolean).join(", ");
-  const count = requests.length + hostItems;
+  const replyStatus = replies ? `${replies} ${replies === 1 ? "reply" : "replies"} for you` : "";
+  const status = [approvalStatus, hostStatus, replyStatus].filter(Boolean).join(", ");
+  const count = requests.length + hostItems + replies;
   return (
     <section className="cc-approval-attention" aria-label="Needs you" data-testid="approval-attention" data-state={approvalsShown ? snapshot?.status : "ready"} data-pending={ready && count > 0}>
       <button className="cc-approval-attention__open" type="button" aria-label={`Needs you, ${status}`} title={status}

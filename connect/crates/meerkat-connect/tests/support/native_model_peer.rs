@@ -32,6 +32,7 @@ struct PeerState {
     model: String,
     handler: Handler,
     failures: Arc<Mutex<Vec<&'static str>>>,
+    received: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub struct ModelPeer {
@@ -44,6 +45,47 @@ pub struct ModelPeer {
 impl ModelPeer {
     pub async fn open(model: &str, handler: Handler) -> io::Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        Self::from_listener(model, handler, listener)
+    }
+
+    /// This exact address comes from this peer's actual bound listener.
+    #[cfg(feature = "console")]
+    pub fn address(&self) -> io::Result<std::net::SocketAddr> {
+        self.state.authority.parse().map_err(io::Error::other)
+    }
+
+    /// Every HTTP request, including requests refused before the scenario.
+    #[cfg(feature = "console")]
+    pub fn request_count(&self) -> usize {
+        self.state
+            .received
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A process-loss control reuses its recorded loopback endpoint only after
+    /// the previous process was reaped. Refusal never chooses a different port
+    /// or changes the selected provider configuration.
+    #[cfg(feature = "console")]
+    pub async fn reopen_exact(
+        model: &str,
+        handler: Handler,
+        address: std::net::SocketAddr,
+    ) -> io::Result<Self> {
+        if !address.ip().is_loopback() || address.port() == 0 {
+            return Err(io::Error::other("Exact nonzero loopback endpoint required"));
+        }
+        let listener = tokio::net::TcpListener::bind(address).await?;
+        if listener.local_addr()? != address {
+            return Err(io::Error::other("Exact endpoint changed"));
+        }
+        Self::from_listener(model, handler, listener)
+    }
+
+    fn from_listener(
+        model: &str,
+        handler: Handler,
+        listener: tokio::net::TcpListener,
+    ) -> io::Result<Self> {
         let authority = listener.local_addr()?.to_string();
         let origin = format!("http://{authority}");
         let state = PeerState {
@@ -51,6 +93,7 @@ impl ModelPeer {
             model: model.into(),
             handler,
             failures: Default::default(),
+            received: Default::default(),
         };
         let app = Router::new().fallback(http).with_state(state.clone());
         let (stop, stopped) = oneshot::channel();
@@ -156,6 +199,9 @@ async fn http(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    state
+        .received
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let refused = |stage| {
         state.failures.lock().unwrap().push(stage);
         (

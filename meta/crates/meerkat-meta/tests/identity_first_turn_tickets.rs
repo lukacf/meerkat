@@ -47,6 +47,8 @@ use serde_json::{Value, json};
 
 #[path = "support/core_members.rs"]
 mod core_members;
+#[path = "support/declared_apply.rs"]
+mod declared_apply;
 #[path = "support/llm_usage.rs"]
 mod llm_usage;
 
@@ -337,6 +339,16 @@ impl SessionBridge for TicketBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -430,6 +442,18 @@ impl SessionBridge for TicketBridge {
             peer_reachable_count: 0,
         })
     }
+
+    /// Core's declared apply through this double's own seat
+    /// ([`declared_apply::apply_through_seats`]).
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        declared_apply::apply_through_seats(self, &roster, None).await
+    }
 }
 
 fn make_runtime(bridge: Option<Arc<dyn SessionBridge>>) -> Arc<IdentityRuntime> {
@@ -462,7 +486,10 @@ async fn register_spec(
             .core
             .bind_live_at_fence(&identity, &spec.profile, 0, Some(session.clone()), 1);
     }
-    runtime.register(spec).await;
+    runtime
+        .register(spec)
+        .await
+        .expect("the identity registers");
     identity
 }
 
@@ -1717,12 +1744,16 @@ async fn a_live_redispatch_reads_the_original_reply_or_no_own_result() {
 /// - spawned `turn_driven`, then the profile table says `autonomous_host`
 ///   (no respawn): the member still runs turn_driven, so the send is tracked
 ///   and reports its own reply;
-/// - a same-profile `runtime_mode_override` hot reload from autonomous_host to
-///   turn_driven (roster change plus `meta/reconcile_identity`, which swaps
-///   the spec without a respawn): delivered once, untracked;
-/// - a delivery-repair-shaped respawn (role, labels and `Resume` only, which
-///   drops the override): the member comes back `autonomous_host` although
-///   its spec pins turn_driven, and the send is delivered once, untracked.
+/// - a same-profile `runtime_mode_override` reload from autonomous_host to
+///   turn_driven (roster change plus `meta/reconcile_identity`): the
+///   declaration moves the member to the declared mode (a memory-only
+///   session onto a fresh one), so the send is tracked and reports its own
+///   reply;
+/// - a member spawned with the turn_driven override of an autonomous_host
+///   profile runs turn_driven, so its send is tracked; a host's raw repair
+///   respawn of it (a retire, then a spawn of its name that drops the
+///   override) is refused (`IdentityMember`): the name is a declared
+///   identity's, so the live mode cannot drift from the spec that way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trackability_follows_the_live_runtime_mode() {
     use meerkat_mob::MobRuntimeMode::{AutonomousHost, TurnDriven};
@@ -1792,7 +1823,11 @@ async fn trackability_follows_the_live_runtime_mode() {
     );
     live.runtime.shutdown().await;
 
-    // Same-profile override hot reload, autonomous_host -> turn_driven.
+    // Same-profile override reload, autonomous_host -> turn_driven: the
+    // roster change plus `meta/reconcile_identity` declares the new spec, and
+    // Core's declared apply moves the member to the declared mode (this
+    // runtime's sessions live in memory only, so onto a fresh session), so
+    // the next send is tracked.
     let client = NamedReplyClient::default();
     let live = live_runtime_with(AutonomousHost, None, &client).await;
     let first = rpc(
@@ -1816,21 +1851,31 @@ async fn trackability_follows_the_live_runtime_mode() {
     .await;
     assert_eq!(
         live.live_member().await.runtime_mode,
-        AutonomousHost,
-        "the hot reload swapped the spec without respawning"
+        TurnDriven,
+        "the reconcile moves the member to the declared mode"
     );
-    let sent = rpc(
+    let tracked = rpc(
         &live.runtime,
         &live.ctx,
         "meta/send",
         json!({"identity": "keeper", "content": "alpha", "track_turn": true}),
     )
     .await;
-    assert_delivered_once_untracked(&client, &sent, "alpha", "autonomous_host").await;
+    let ticket = tracked["turn"]["ticket"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the restamped member is tracked: {tracked}"))
+        .to_string();
+    assert_eq!(
+        await_turn(&live.runtime, &live.ctx, &ticket).await["output"],
+        "reply to: alpha"
+    );
     live.runtime.shutdown().await;
 
-    // A repair-shaped respawn drops the override. The profile declares
-    // autonomous_host; only the spec override pins turn_driven.
+    // A member spawned with the turn_driven override (the profile declares
+    // autonomous_host) runs turn_driven, so its send is tracked. A host's
+    // raw repair respawn of it (a retire, then a spawn of its name that
+    // drops the override) is refused: the name is a declared identity's,
+    // and the spawn carries no entry custody.
     let client = NamedReplyClient::default();
     let live = live_runtime_with(AutonomousHost, Some(TurnDriven), &client).await;
     let tracked = rpc(
@@ -1860,20 +1905,15 @@ async fn trackability_follows_the_live_runtime_mode() {
         bridge_session_id: session,
         resume_from_role: None,
     };
-    handle.spawn_spec(respawn).await.expect("repair respawn");
-    assert_eq!(
-        live.live_member().await.runtime_mode,
-        AutonomousHost,
-        "the repair-shaped respawn dropped the override"
+    let refused = handle.spawn_spec(respawn).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(meerkat_mob::MobError::IdentityMember { member_id }) if *member_id == member.identity
+        ),
+        "the raw repair respawn is refused: {:?}",
+        refused.as_ref().err()
     );
-    let sent = rpc(
-        &live.runtime,
-        &live.ctx,
-        "meta/send",
-        json!({"identity": "keeper", "content": "alpha", "track_turn": true}),
-    )
-    .await;
-    assert_delivered_once_untracked(&client, &sent, "alpha", "autonomous_host").await;
     live.runtime.shutdown().await;
 }
 
@@ -2380,7 +2420,9 @@ async fn a_send_naming_a_superseded_registered_row_is_refused_before_delivery() 
 /// superseded registered row: the row is checked in the lifecycle-owned
 /// admission decision, under the identity's lifecycle lock, so the refusal
 /// seats, builds or resumes nothing and leaves the identity's readiness
-/// untouched. The current row seats it and is delivered.
+/// untouched. The current row seats it and is delivered. The registration's
+/// declaration seats the identity, so Core retires that member first, as a
+/// host's retire does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_superseded_row_does_not_wake_a_dormant_identity() {
     let session = meerkat_core::types::SessionId::new();
@@ -2388,7 +2430,10 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
     let runtime = make_runtime(Some(bridge.clone()));
     let spec = make_spec("sleeper");
     let identity = spec.identity.clone();
-    runtime.register(spec.clone()).await;
+    runtime
+        .register(spec.clone())
+        .await
+        .expect("the identity registers");
     let stale = runtime
         .registered_spec(&identity)
         .await
@@ -2399,6 +2444,16 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
         .update_spec(changed.clone())
         .await
         .expect("the row change commits");
+    let seated = bridge
+        .core
+        .live_member(&identity)
+        .expect("Core's member read")
+        .expect("the registration seated the identity")
+        .agent_runtime_id;
+    bridge.core.retire(&seated);
+    let dormant = runtime.status(&identity).await.expect("status");
+    assert_eq!(dormant.state, IdentityLifecycleState::Dormant);
+    let materialized = bridge.materializations.load(Ordering::SeqCst);
 
     let error = runtime
         .send_expecting_registered_spec(
@@ -2428,13 +2483,13 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
         status.agent_runtime_id.is_none(),
         "the refusal spawned no member"
     );
-    assert!(
-        status.session_id.is_none(),
+    assert_eq!(
+        status.session_id, dormant.session_id,
         "the refusal created no session"
     );
     assert_eq!(
         bridge.materializations.load(Ordering::SeqCst),
-        0,
+        materialized,
         "the refusal seated, built and resumed nothing"
     );
     assert!(bridge.ingress.lock().unwrap().is_empty());
@@ -2460,7 +2515,10 @@ async fn a_superseded_row_does_not_wake_a_dormant_identity() {
         runtime.status(&identity).await.expect("status").state,
         IdentityLifecycleState::Active
     );
-    assert_eq!(bridge.materializations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        bridge.materializations.load(Ordering::SeqCst),
+        materialized + 1
+    );
     assert_eq!(
         bridge.ingress.lock().unwrap().len() + bridge.tracked.lock().unwrap().len(),
         1,

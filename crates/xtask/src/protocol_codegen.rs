@@ -802,6 +802,7 @@ fn emit_auth_lease_transition_authority_helper(
     writeln!(out, "    expires_at: Option<u64>,")?;
     writeln!(out, "    credential_generation: u64,")?;
     writeln!(out, "    credential_published_at_millis: Option<u64>,")?;
+    writeln!(out, "    adopted_marker_generation: Option<u64>,")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
     writeln!(out, "impl AuthLeaseLifecyclePublicationScope {{")?;
@@ -824,6 +825,10 @@ fn emit_auth_lease_transition_authority_helper(
     writeln!(
         out,
         "            credential_published_at_millis: state.credential_published_at_millis,"
+    )?;
+    writeln!(
+        out,
+        "            adopted_marker_generation: state.adopted_marker_generation,"
     )?;
     writeln!(out, "        }}")?;
     writeln!(out, "    }}")?;
@@ -921,7 +926,7 @@ fn emit_auth_lease_transition_authority_helper(
     writeln!(out, "        unsafe extern \"Rust\" {{")?;
     writeln!(
         out,
-        "            #[link_name = concat!(\"__meerkat_core_runtime_generated_auth_lease_transition_build_v1_\", env!(\"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX\"))]"
+        "            #[link_name = concat!(\"__meerkat_core_runtime_generated_auth_lease_transition_build_v2_\", env!(\"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX\"))]"
     )?;
     writeln!(
         out,
@@ -947,6 +952,10 @@ fn emit_auth_lease_transition_authority_helper(
     )?;
     writeln!(
         out,
+        "                adopted_marker_generation: Option<u64>,"
+    )?;
+    writeln!(
+        out,
         "            ) -> Result<meerkat_core::handles::AuthLeaseTransition, String>;"
     )?;
     writeln!(out, "        }}")?;
@@ -962,6 +971,7 @@ fn emit_auth_lease_transition_authority_helper(
     writeln!(out, "                self.expires_at.unwrap_or(u64::MAX),")?;
     writeln!(out, "                self.credential_generation,")?;
     writeln!(out, "                self.credential_published_at_millis,")?;
+    writeln!(out, "                scope.adopted_marker_generation,")?;
     writeln!(out, "            )")?;
     writeln!(out, "        }}")?;
     writeln!(out, "    }}")?;
@@ -3319,9 +3329,12 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         "// Composition: {}, Producer: {}, Protocol: {}",
         composition.name, protocol.producer_instance, protocol.name
     )?;
+    // The marker's generation is the lease's marker generation: the adopted
+    // marker generation when the lease records one, else the lifecycle
+    // event's field the contract binds.
     writeln!(
         &mut out,
-        "// Durable marker source fields: {}->{}, {}->{}, {}->{}, {}->{}, identity fields: {}, {}, {}, {}, {}",
+        "// Durable marker source fields: {}->{}, {}->{}, {}->adopted_marker_generation (else {}), {}->{}, identity fields: {}, {}, {}, {}, {}",
         contract.phase.marker_field,
         contract.phase.obligation_field,
         contract.expires_at.marker_field,
@@ -3698,9 +3711,23 @@ pub fn marker_relation_for_tokens_and_snapshot(
         return AuthLeaseDurableMarkerRelation::Invalid;
     }
     if !snapshot.credential_present {
-        return AuthLeaseDurableMarkerRelation::TokenStale;
+        // A lease that withdrew its credential takes a record published
+        // strictly after the withdrawn publication (a later login elsewhere);
+        // a record published at or before it, or any record while the lease
+        // knows no withdrawn publication, is stale.
+        return match snapshot.released_publication_at_millis {
+            Some(released_at) if marker.credential_published_at_millis > released_at => {
+                AuthLeaseDurableMarkerRelation::TokenNewer
+            }
+            _ => AuthLeaseDurableMarkerRelation::TokenStale,
+        };
     }
-    let generation_matches = marker.generation == snapshot.generation;
+    // The equal branches compare the record with the generation the lease
+    // records for its current publication's marker: the marker generation of
+    // a publication it adopted from a record published at a lower generation,
+    // else its own generation (which never goes back).
+    let generation_matches =
+        marker.generation == snapshot.adopted_marker_generation.unwrap_or(snapshot.generation);
     let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
 
     if let Some(snapshot_published_at) = snapshot.credential_published_at_millis {

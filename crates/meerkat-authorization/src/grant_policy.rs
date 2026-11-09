@@ -37,6 +37,60 @@ pub fn single_tool_operation_target(
     plan.single_operation_target()
 }
 
+/// The exact operation a dispatched MCP call makes, as a grant that binds
+/// one exact operation states it ([`crate::grants::mcp_operation_binding`]):
+/// the call's grant target (its server, or the checked route to it), its raw
+/// operation, and the digest of its exact request that the call's owner
+/// states with its target. `None` for every other operation, for a delegate's
+/// operation, for a plan whose owners name more than one target, and for an
+/// MCP call whose owner states no digest: such a use never matches a grant
+/// bound to one exact operation, and changes nothing for any other grant.
+#[must_use]
+pub fn operation_request_binding(
+    binding: &PreparedAuthorizationBinding,
+) -> Option<crate::grants::GrantOperationBinding> {
+    if binding.delegate_attribution().is_some() {
+        return None;
+    }
+    let AuthorizationOperation::Tool(tool) = &binding.facts().operation else {
+        return None;
+    };
+    let ToolAuthorizationTarget::Dispatcher(plan) = &tool.target else {
+        return None;
+    };
+    let (target, raw_operation) = match plan.single_operation_target().ok()?? {
+        ToolOperationTarget::McpServerOperation {
+            server,
+            raw_operation,
+            ..
+        } => (
+            GrantTarget::McpServer {
+                server: server.clone(),
+            },
+            raw_operation,
+        ),
+        ToolOperationTarget::CheckedMcpServerOperation {
+            route,
+            server,
+            raw_operation,
+            ..
+        } => (
+            GrantTarget::CheckedMcpRoute {
+                route: route.clone(),
+                server: server.clone(),
+            },
+            raw_operation,
+        ),
+        _ => return None,
+    };
+    let digest = plan.single_operation_request_digest().ok()??;
+    Some(crate::grants::mcp_operation_binding(
+        target,
+        raw_operation,
+        digest.clone(),
+    ))
+}
+
 /// The typed target an operation's grant lineage is selected by: the single
 /// MCP server a dispatched tool operates on, the exact checked route to that
 /// server it was reached through, the exact registered tool bundle operation
@@ -124,8 +178,142 @@ pub fn operation_grant_target(
                 operation: *operation,
             }))
         }
+        // A hold of a decision uses only the lineage selected for exactly
+        // the approver id it asks: never the base, and never another
+        // approver's.
+        Some(ToolOperationTarget::DecisionHold { approver_id }) => {
+            Ok(Some(GrantTarget::DecisionHold {
+                approver_id: approver_id.clone(),
+            }))
+        }
+        // A reply to the requester selects no lineage: no basis names one,
+        // so wherever a lineage is selected for it the operation is denied.
+        // Its authority is Core's rule of an approval-carried work
+        // ([`GrantBackedWorkPolicy`]).
+        Some(ToolOperationTarget::RequesterReply) => Ok(Some(GrantTarget::RequesterReply)),
         // Any other target kind selects nothing: unavailable.
         Some(_) => Err(meerkat_core::OperationAuthorizationError::Unavailable),
+    }
+}
+
+/// The feature of the action of a reply of an approval-carried work to its
+/// own requester ([`requester_reply_values`]).
+pub const REQUESTER_REPLY_FEATURE: &str = "decisions";
+/// The action of a reply of an approval-carried work to its own requester.
+pub const REQUESTER_REPLY_ACTION: &str = "reply_to_requester";
+
+/// The operation values of a reply of the work `association` to its own
+/// requester, as Core's rule states them: the action
+/// [`REQUESTER_REPLY_FEATURE`]/[`REQUESTER_REPLY_ACTION`] into the ingress
+/// domain the work was bound in, processed by the work's executor, for its
+/// requester. The host's work owner bounds them as it bounds every value of
+/// the work.
+#[must_use]
+pub fn requester_reply_values(association: &InputAuthorityAssociation) -> LocalOperationValues {
+    let candidate = association.candidate();
+    LocalOperationValues {
+        action: meerkat_authorization_contracts::constraints::ActionRef {
+            feature: REQUESTER_REPLY_FEATURE.to_string(),
+            action: REQUESTER_REPLY_ACTION.to_string(),
+        },
+        resource_domain: candidate.ingress_namespace.ingress.clone(),
+        processor: meerkat_authorization_contracts::constraints::ProcessorRef::Principal {
+            principal: candidate.logical_executor.clone(),
+        },
+        audience: meerkat_authorization_contracts::constraints::AudienceRef::Principal {
+            principal: candidate.requester.clone(),
+        },
+    }
+}
+
+/// Whether `binding` is a reply of a work to its own requester: a tool
+/// operation (never a delegate's) whose owner states the
+/// [`ToolOperationTarget::RequesterReply`] target.
+fn is_requester_reply(binding: &PreparedAuthorizationBinding) -> bool {
+    if binding.delegate_attribution().is_some() {
+        return false;
+    }
+    let AuthorizationOperation::Tool(tool) = &binding.facts().operation else {
+        return false;
+    };
+    let ToolAuthorizationTarget::Dispatcher(plan) = &tool.target else {
+        return false;
+    };
+    matches!(
+        plan.single_operation_target(),
+        Ok(Some(ToolOperationTarget::RequesterReply))
+    )
+}
+
+/// The one use an operation's entry spends of the approval-carried grant
+/// its lineage ends at: the lineage, the executor and represented subject it
+/// was resolved for, and the use's requester, work and operation. Built
+/// only by [`GrantBackedWorkPolicy`] while it prepares the operation, under
+/// the same publication as its permission; spent once at the operation's
+/// entry ([`meerkat_core::PreparedOperationAuthorization::spend_at_entry`]).
+pub struct GrantUseSpend {
+    grants: Arc<LocalGrantAuthority>,
+    lineage: Vec<meerkat_authorization_contracts::work_association::GrantLineageRef>,
+    executor: meerkat_core::PrincipalRef,
+    represented_subject: Option<meerkat_core::PrincipalRef>,
+    requester: meerkat_core::PrincipalRef,
+    work: OriginalWorkRef,
+    operation: Option<crate::grants::GrantOperationBinding>,
+}
+
+impl std::fmt::Debug for GrantUseSpend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantUseSpend").finish_non_exhaustive()
+    }
+}
+
+impl GrantUseSpend {
+    /// Spend the use at the operation's entry
+    /// ([`LocalGrantAuthority::spend_use_at_entry`]). Every refusal keeps the
+    /// operation from entering: a use refused for its own facts, or because
+    /// the person who decided the grant's decision is no longer current, is
+    /// denied with nothing spent; an owner that cannot say now is
+    /// unavailable with nothing spent; and a spend whose acknowledgement is
+    /// unknown counts as spent and is unavailable.
+    ///
+    /// The spend is appended under the grant log's admission fence, which
+    /// the entry takes without waiting, before anything is decided: while
+    /// an admission (or another fenced write) holds it, the entry refuses to
+    /// rebuild (`ReprepareRequired`) with nothing spent, as a work owner's
+    /// step refuses while another holder holds what it needs, and an entry
+    /// made again once the hold ends spends the use. A fence that cannot be
+    /// taken is unavailable, with nothing spent.
+    pub(crate) fn spend(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        let guard = match meerkat_core::AdmissionGuard::try_acquire(self.grants.admission_fences())
+        {
+            Ok(guard) => guard,
+            Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+            }
+            Err(meerkat_core::AdmissionRefusal::Unavailable(_)) => {
+                return Err(meerkat_core::OperationAuthorizationError::Unavailable);
+            }
+        };
+        self.grants
+            .spend_use_at_entry(
+                &guard,
+                &self.lineage,
+                &self.executor,
+                self.represented_subject.as_ref(),
+                crate::grants::GrantUse {
+                    requester: &self.requester,
+                    work: &self.work,
+                    operation: self.operation.as_ref(),
+                },
+            )
+            .map_err(|refusal| match refusal {
+                crate::grants::ConsumeUseRefusal::Denied
+                | crate::grants::ConsumeUseRefusal::ApproverNotCurrent => denied().into(),
+                crate::grants::ConsumeUseRefusal::Unavailable
+                | crate::grants::ConsumeUseRefusal::Uncertain => {
+                    meerkat_core::OperationAuthorizationError::Unavailable
+                }
+            })
     }
 }
 
@@ -675,10 +863,19 @@ impl GrantBackedWorkPolicy {
                 candidate.represented_subject.as_ref(),
             )
         } else {
-            self.grants.resolve_lineage_observed(
+            // An operation's lineage is resolved for this work's use: a leaf
+            // that carries an approval serves only its own requester and
+            // work, and only the exact operation it binds.
+            let operation = operation_request_binding(binding);
+            self.grants.resolve_lineage_with_use_observed(
                 lineage,
                 &candidate.logical_executor,
                 candidate.represented_subject.as_ref(),
+                crate::grants::GrantUse {
+                    requester: &candidate.requester,
+                    work: &candidate.original_work,
+                    operation: operation.as_ref(),
+                },
             )
         };
         resolved.map(Some).map_err(observed_grant_refusal)
@@ -689,6 +886,94 @@ impl GrantBackedWorkPolicy {
     /// The generated grant owner this policy resolves grants in.
     pub fn grants(&self) -> &Arc<LocalGrantAuthority> {
         &self.grants
+    }
+
+    /// The lineage `association` selects for `binding`'s operation, when its
+    /// basis selects one: its one lineage, or the one selected for the
+    /// operation's typed target. `None` for a host-policy or service-mandate
+    /// basis, and for a target the basis selects no lineage for.
+    fn operation_lineage<'a>(
+        association: &'a InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<
+        Option<&'a [meerkat_authorization_contracts::work_association::GrantLineageRef]>,
+        meerkat_core::OperationAuthorizationError,
+    > {
+        match &association.candidate().authority_basis {
+            WorkAuthorityBasis::HostPolicy { .. } | WorkAuthorityBasis::ServiceMandate { .. } => {
+                Ok(None)
+            }
+            WorkAuthorityBasis::GrantLineage { lineage } => Ok(Some(lineage)),
+            basis @ WorkAuthorityBasis::TargetedGrantLineages { .. } => {
+                let target = operation_grant_target(binding)?;
+                Ok(basis.lineage_for(target.as_ref()))
+            }
+        }
+    }
+
+    /// Core's rule for a reply of an approval-carried work to its own
+    /// requester. The work is approval-carried when its basis selects
+    /// exactly one target, with no base, whose lineage ends at a grant this
+    /// owner retains that carries an approval for exactly this work's
+    /// requester and original work, bound to that target's operation, held
+    /// by this work's executor for its represented subject, and the work
+    /// names no contributor. Its reply needs no grant of its own and no
+    /// operation owner: `owner`, the host's work-owner answer, bounds it,
+    /// and it ends with the approval grant's window. It never resolves or
+    /// spends the approval grant, so the work's one use and its reply never
+    /// compete.
+    fn evaluate_requester_reply(
+        &self,
+        association: &InputAuthorityAssociation,
+        owner: WorkOwnerAllowance,
+        now_ms: u64,
+    ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
+        let candidate = association.candidate();
+        let WorkAuthorityBasis::TargetedGrantLineages {
+            base: None,
+            targets,
+        } = &candidate.authority_basis
+        else {
+            return Err(denied().into());
+        };
+        let [selected] = targets.as_slice() else {
+            return Err(denied().into());
+        };
+        let leaf = selected.lineage.last().ok_or_else(denied)?;
+        let retained = self.grants.retained_grant(leaf).map_err(grant_refusal)?;
+        let approval = retained.approval.ok_or_else(denied)?;
+        if approval.requester.principal() != &candidate.requester
+            || approval.work != candidate.original_work
+            || approval
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.target != selected.target)
+            || retained.grantee != candidate.logical_executor
+            || retained.represented_subject != candidate.represented_subject
+            || !candidate.contributing_work.is_empty()
+        {
+            return Err(denied().into());
+        }
+        let LifetimeBound::Window { expires_at_ms, .. } = retained.restrictions.lifetime.bound()
+        else {
+            return Err(denied().into());
+        };
+        let allowance = LocalPolicyAllowance {
+            operation_values: vec![requester_reply_values(association)],
+            restrictions: owner.restrictions,
+            expires_at_ms: owner.expires_at_ms.min(expires_at_ms),
+            review_tier: meerkat_core::authorization::OperationReviewTier::R1,
+        };
+        if allowance.expires_at_ms <= now_ms {
+            return Err(denied().into());
+        }
+        for values in &allowance.operation_values {
+            allowance
+                .restrictions
+                .check_bounds(values.at(now_ms))
+                .map_err(|_| denied())?;
+        }
+        Ok(allowance)
     }
 
     /// This policy's Operation answer for `binding`, conjoined with each of
@@ -729,6 +1014,41 @@ impl GrantBackedWorkPolicy {
 impl LocalWorkPolicy for GrantBackedWorkPolicy {
     fn grant_backed(self: Arc<Self>) -> Option<Arc<GrantBackedWorkPolicy>> {
         Some(self)
+    }
+
+    /// The use of the approval-carried grant `binding`'s lineage ends at,
+    /// when it ends at one: spent at the operation's entry. Every other
+    /// operation's entry spends nothing.
+    fn entry_spend(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<Option<GrantUseSpend>, meerkat_core::OperationAuthorizationError> {
+        let Some(lineage) = Self::operation_lineage(association, binding)? else {
+            return Ok(None);
+        };
+        let Some(leaf) = lineage.last() else {
+            return Ok(None);
+        };
+        if self
+            .grants
+            .retained_grant(leaf)
+            .map_err(grant_refusal)?
+            .approval
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let candidate = association.candidate();
+        Ok(Some(GrantUseSpend {
+            grants: Arc::clone(&self.grants),
+            lineage: lineage.to_vec(),
+            executor: candidate.logical_executor.clone(),
+            represented_subject: candidate.represented_subject.clone(),
+            requester: candidate.requester.clone(),
+            work: candidate.original_work.clone(),
+            operation: operation_request_binding(binding),
+        }))
     }
 
     fn review_context(
@@ -812,6 +1132,12 @@ impl LocalWorkPolicy for GrantBackedWorkPolicy {
         let owner =
             self.work_owner
                 .authorize_admitted_work(association, binding, purpose, now_ms)?;
+        // A reply to the requester is decided by Core's rule of an
+        // approval-carried work, under the host's work-owner bounds: no grant
+        // and no operation owner answer for it.
+        if purpose == LocalPolicyPurpose::Operation && is_requester_reply(binding) {
+            return self.evaluate_requester_reply(association, owner, now_ms);
+        }
         if purpose == LocalPolicyPurpose::Controller {
             let facts = controller.ok_or_else(denied)?;
             let selected = association
@@ -901,9 +1227,11 @@ fn grant_refusal(refusal: GrantRefusal) -> meerkat_core::OperationAuthorizationE
         // ControllerInUse belongs to administration and is preserved by revoke.
         // Current resolution cannot produce it; never invent policy denial if
         // a future resolver reports an unsupported operational condition.
-        GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
-            meerkat_core::OperationAuthorizationError::Unavailable
-        }
+        // Resolution writes nothing, so it never meets an admission fence.
+        GrantRefusal::ControllerInUse
+        | GrantRefusal::Duplicate
+        | GrantRefusal::Unavailable
+        | GrantRefusal::AdmissionFence => meerkat_core::OperationAuthorizationError::Unavailable,
     }
 }
 
@@ -1072,6 +1400,10 @@ impl meerkat_core::PreparedOperationAuthorization for ToolApplicationDecision {
         observation: meerkat_core::authorization::OperationObservation,
     ) -> Result<(), meerkat_core::authorization::OperationObservationError> {
         self.inner.observe(binding, observation)
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
     }
 }
 

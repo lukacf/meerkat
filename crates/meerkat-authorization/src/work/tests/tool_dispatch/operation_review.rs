@@ -561,6 +561,10 @@ impl PreparedOperationAuthorization for EntryHookDecision {
         }
         self.inner.observe(binding, observation)
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
+    }
 }
 
 /// Entry-hooked context; the edit is armed only once `Allowed` is recorded.
@@ -1055,6 +1059,10 @@ mod approval_owner_lock {
             observation: OperationObservation,
         ) -> Result<(), OperationObservationError> {
             self.inner.observe(binding, observation)
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            self.inner.spend_at_entry()
         }
     }
 

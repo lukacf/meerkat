@@ -331,6 +331,22 @@ test("console contract route and method names stay synchronized with Rust http c
       dispatchedRpcMethods.add(method);
     }
   }
+  // The durable decision methods dispatch by their prefix to the Console's
+  // decision module, which serves the method constants it names. Resolve
+  // those constants while the HTTP dispatcher routes through that module.
+  if (/durable_decisions::DECISIONS_METHOD_PREFIX/.test(rustSource)) {
+    const decisionWireSource = readFileSync(
+      resolve(process.cwd(), "../crates/meerkat-meta/src/durable_decisions/wire.rs"),
+      "utf8",
+    );
+    const decisionConsoleSource = readFileSync(
+      resolve(process.cwd(), "../crates/meerkat-meta/src/durable_decisions/console.rs"),
+      "utf8",
+    );
+    for (const method of parseConsoleDecisionMethods(decisionWireSource, decisionConsoleSource)) {
+      dispatchedRpcMethods.add(method);
+    }
+  }
   // Console-only methods dispatch through named constants of rpc.rs
   // (`request_method == crate::rpc::CONSOLE_WHOAMI_METHOD`); resolve the ones
   // the HTTP dispatcher compares the request method with.
@@ -340,6 +356,13 @@ test("console contract route and method names stay synchronized with Rust http c
   );
   for (const method of parseDispatchedConsoleConstants(rustSource, rpcSource)) {
     dispatchedRpcMethods.add(method);
+  }
+  // The console's own methods dispatch by rpc.rs's named constants
+  // (`request_method == crate::rpc::CONSOLE_..._METHOD`, or a `matches!` of
+  // them): resolve the constants the dispatcher compares the method with.
+  const consoleConstants = parseConsoleMethodDispatchConstants(rustSource);
+  for (const [name, method] of parseMethodConstants(rpcSource)) {
+    if (consoleConstants.has(name)) dispatchedRpcMethods.add(method);
   }
   const contractedRoutes = contractRoutes(schema);
   const frontendRoutes = new Set([
@@ -457,6 +480,24 @@ function parseTopologyMethods(source: string): Set<string> {
   return methods;
 }
 
+/** The decision methods the Console's decision module dispatches: the
+ *  `*_METHOD` constants of its match arms, resolved in the wire module. */
+function parseConsoleDecisionMethods(wireSource: string, consoleSource: string): Set<string> {
+  const values = new Map<string, string>();
+  for (const match of wireSource.matchAll(/const ([A-Z_]+_METHOD): &str = "([^"]+)"/g)) {
+    values.set(match[1]!, match[2]!);
+  }
+  const methods = new Set<string>();
+  const armPattern = /^\s*([A-Z_]+_METHOD(?:\s*\|\s*[A-Z_]+_METHOD)*)(?:\s+if\b[^=]*)?\s*=>/gm;
+  for (const arm of consoleSource.matchAll(armPattern)) {
+    for (const name of arm[1]!.matchAll(/[A-Z_]+_METHOD/g)) {
+      const value = values.get(name[0]);
+      if (value) methods.add(value);
+    }
+  }
+  return methods;
+}
+
 function parseDispatchedConsoleConstants(dispatcher: string, rpcSource: string): Set<string> {
   const methods = new Set<string>();
   const constantPattern = /pub const (CONSOLE_[A-Z_]+_METHOD): &str = "([^"]+)"/g;
@@ -466,6 +507,26 @@ function parseDispatchedConsoleConstants(dispatcher: string, rpcSource: string):
     }
   }
   return methods;
+}
+
+function parseConsoleMethodDispatchConstants(source: string): Set<string> {
+  const names = new Set<string>();
+  const constant = /crate::rpc::(CONSOLE_[A-Z_]+_METHOD)\b/g;
+  for (const match of source.matchAll(/request_method == crate::rpc::(CONSOLE_[A-Z_]+_METHOD)\b/g)) {
+    names.add(match[1]!);
+  }
+  for (const arms of source.matchAll(/matches!\(\s*request_method\.as_str\(\),\s*([^)]*)\)/g)) {
+    for (const match of arms[1]!.matchAll(constant)) names.add(match[1]!);
+  }
+  return names;
+}
+
+function parseMethodConstants(source: string): Map<string, string> {
+  const constants = new Map<string, string>();
+  for (const match of source.matchAll(/pub const ([A-Z_]+_METHOD): &str = "([^"]+)"/g)) {
+    constants.set(match[1]!, match[2]!);
+  }
+  return constants;
 }
 
 function contractRoutes(schema: ContractSchema): Set<string> {

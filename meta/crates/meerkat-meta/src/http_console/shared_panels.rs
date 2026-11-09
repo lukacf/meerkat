@@ -69,6 +69,7 @@ pub(super) async fn dispatch(
     aggregator: &MetaConsoleAggregator,
     request: &JsonRpcRequest,
     access_view: Option<&AccessView>,
+    operator: Option<&str>,
 ) -> Value {
     let id = request.id.clone().unwrap_or(Value::Null);
     let mut params = request.params.clone();
@@ -101,10 +102,19 @@ pub(super) async fn dispatch(
     let caller = MemoryPanelCaller {
         view: access_view,
         namespace: &selected.namespace,
+        operator,
     };
     let stale_id = id.clone();
     let response = match request.method.as_str() {
         "meta/memory/panel/records" => match identity_listing(&request.method, &params) {
+            // A listing of an identity hidden from the caller takes the path
+            // of an identity that holds nothing: it is asked for a name no
+            // identity holds, and its answer spelled with the caller's.
+            Some(identity) if caller.hides_identity(&identity) => {
+                let absent = ConsoleAbsentNames::fresh();
+                params["identity"] = Value::String(absent.absent_spelling(&identity));
+                absent.restore(handle_memory_panel_records(store, caller, &params, id).await)
+            }
             Some(identity) if !memory_panel_identity_visible(caller, &identity) => {
                 memory_panel_identity_denied(id, caller, &identity)
             }

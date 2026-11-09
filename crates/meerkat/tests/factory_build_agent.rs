@@ -6010,7 +6010,7 @@ mod scoped_tool_grants {
     use super::*;
     use meerkat::{GrantGateBuildError, tool_family_names};
     use meerkat_core::tool_grant::{
-        GatedToolTable, GrantGatedTools, SessionToolGrants, ToolGrantIssuer, ToolGrantSubject,
+        GatedToolView, GrantGatedTools, SessionToolGrants, ToolGrantIssuer, ToolGrantSubject,
         ToolGrantTarget,
     };
     use meerkat_core::types::ToolName;
@@ -6064,13 +6064,11 @@ mod scoped_tool_grants {
         (base, visible)
     }
 
-    /// One model-request boundary over the session's grants.
+    /// One model-request boundary over the session's grants: no MCP server
+    /// serves the shell family, so the view is its gated names.
     async fn boundary(agent: &meerkat::DynAgent, grants: &Arc<dyn SessionToolGrants>) {
-        let table = GatedToolTable::new(
-            BTreeMap::from([("shell".to_string(), shell_names())]),
-            BTreeSet::new(),
-        );
-        let open = grants.open_names(&table).await.expect("grants read");
+        let view = GatedToolView::new(shell_names(), BTreeMap::new());
+        let open = grants.open_names(&view, None).await.expect("grants read");
         agent
             .tool_scope()
             .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -6117,21 +6115,98 @@ mod scoped_tool_grants {
 
         // A live grant of the family opens it at the next boundary.
         machine
-            .grant_tool(ToolGrantRequest {
-                subject: ToolGrantSubject::session(session_id),
-                target: ToolGrantTarget::Family {
-                    family: "shell".to_string(),
-                    names: shell_names(),
+            .grant_tool(
+                ToolGrantRequest {
+                    subject: ToolGrantSubject::session(session_id),
+                    target: ToolGrantTarget::Family {
+                        family: "shell".to_string(),
+                        names: shell_names(),
+                    },
+                    issuer: ToolGrantIssuer::operator(),
+                    reason: None,
+                    window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
+                    run_scope: None,
                 },
-                issuer: ToolGrantIssuer::Operator { caller: None },
-                reason: None,
-                window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
-            })
+                None,
+            )
             .await
             .expect("grant");
         boundary(&agent, &grants).await;
         let (_, visible) = names(&agent);
         assert!(visible.contains("shell"), "the grant opens it: {visible:?}");
+    }
+
+    /// A mob member's role entries never refuse its build. A role
+    /// family the build does not mount and a role name the build's tool
+    /// policy refuses are ignored outright; a role tool name nothing mounts
+    /// is installed all the same (it is gated from the moment it appears); a
+    /// role family the build mounts is installed closed. The session records
+    /// its own entries and the role entries the build installed.
+    #[tokio::test]
+    async fn role_entries_never_refuse_the_build_and_install_where_mounted() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let role = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy")
+            .with_tool("refused_by_policy");
+
+        // The shell family stays off (the factory's default), so the role's
+        // shell entry is ignored; `deploy` is installed though nothing mounts
+        // it; the policy refuses `refused_by_policy`, so it is ignored.
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default()),
+        )
+        .await;
+        build.grant_gated_tools_where_mounted = Some(role.clone());
+        build.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["refused_by_policy"].into_iter().collect(),
+        ));
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("role entries never refuse the build");
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(
+            metadata.tooling.grant_gated,
+            GrantGatedTools::default().with_tool("deploy"),
+            "only the installed role entry is recorded"
+        );
+        let (base, _) = names(&agent);
+        assert!(
+            !base.iter().any(|name| name == "shell"),
+            "a role entry never mounts a family: {base:?}"
+        );
+
+        // With its switch on, the role family is mounted, and gated closed.
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default()),
+        )
+        .await;
+        build.override_shell = ToolCategoryOverride::Enable;
+        build.grant_gated_tools_where_mounted = Some(role);
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a mounted role family installs closed");
+        let (base, visible) = names(&agent);
+        assert!(base.iter().any(|name| name == "shell"), "{base:?}");
+        assert!(!visible.contains("shell"), "closed: {visible:?}");
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(
+            metadata.tooling.grant_gated,
+            GrantGatedTools::default()
+                .with_family("shell")
+                .with_tool("deploy")
+                .with_tool("refused_by_policy"),
+        );
     }
 
     /// The session's grants, taken from a runtime-backed build's bindings
@@ -6459,6 +6534,95 @@ mod scoped_tool_grants {
                 .tooling
                 .grant_gated,
             shell_gate()
+        );
+    }
+
+    /// `request_tool_grant` is mounted by every gated build, visible (the
+    /// tool itself is not gated), and by no ungated build.
+    #[tokio::test]
+    async fn request_tool_grant_is_mounted_only_by_a_gated_build() {
+        use meerkat_core::tool_grant::REQUEST_TOOL_GRANT_TOOL;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let on_machine = &machine;
+        let build = move |gate: Option<GrantGatedTools>| {
+            gated_runtime_build(
+                on_machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                gate,
+            )
+        };
+        let mounted = |agent: &meerkat::DynAgent| {
+            let (base, visible) = names(agent);
+            (
+                base.iter().any(|name| name == REQUEST_TOOL_GRANT_TOOL),
+                visible.contains(REQUEST_TOOL_GRANT_TOOL),
+            )
+        };
+
+        let agent = factory
+            .build_agent(build(Some(shell_gate())).await, &Config::default())
+            .await
+            .expect("a gated build builds");
+        assert_eq!(
+            mounted(&agent),
+            (true, true),
+            "a gated build mounts it open"
+        );
+
+        let agent = factory
+            .build_agent(build(None).await, &Config::default())
+            .await
+            .expect("an ungated build builds");
+        assert_eq!(mounted(&agent), (false, false), "nothing is gated");
+    }
+
+    /// A deny list may name a tool no vocabulary declares while the gate
+    /// names an MCP server the build does not configure, or gates every
+    /// server it does not configure: such a server may be attached later and
+    /// provide any name, so the name is enforced by name at call time instead
+    /// of failing the build. Without such a gate the build refuses it.
+    #[tokio::test]
+    async fn a_gated_unconfigured_server_defers_an_unknown_deny_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        for gate in [
+            GrantGatedTools::default().with_mcp_server("tickets"),
+            GrantGatedTools::default().with_unconfigured_mcp_servers(),
+        ] {
+            let mut build = gated_runtime_build(
+                &machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                Some(gate.clone()),
+            )
+            .await;
+            build.declared_tool_restriction = Some(declared_restriction(&["open_ticket"], false));
+            temp_factory(&temp)
+                .build_agent(build, &Config::default())
+                .await
+                .unwrap_or_else(|err| panic!("{gate:?} defers the name: {err:?}"));
+        }
+
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            None,
+        )
+        .await;
+        build.declared_tool_restriction = Some(declared_restriction(&["open_ticket"], false));
+        let err = temp_factory(&temp)
+            .build_agent(build, &Config::default())
+            .await
+            .err()
+            .expect("without a gated unconfigured server the name is unknown");
+        assert!(
+            matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "open_ticket"),
+            "got: {err:?}"
         );
     }
 }

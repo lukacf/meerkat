@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { __accessTest } from "./AccessPanel";
-import { accessActionLabel } from "../lib/access-actions";
+import { accessActionLabel, isKnownAccessAction } from "../lib/access-actions";
 
 const {
   parseListInput,
@@ -107,4 +107,10 @@ test("permissions over team packages read as team packages, not mobpacks", () =>
   for (const action of ["mobpack.author", "mobpack.deploy"]) {
     assert.doesNotMatch(accessActionLabel(action), /mobpack/i, action);
   }
+});
+
+test("the tool grant permission reads in words and joins the agent family", () => {
+  assert.equal(accessActionLabel("agent.tool_grants.manage"), "Grant tools to agents");
+  assert.equal(isKnownAccessAction("agent.tool_grants.manage"), true);
+  assert.equal(accessActionLabel("agent.tool_grants.*"), "All agent tool grant actions");
 });

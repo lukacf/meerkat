@@ -294,6 +294,22 @@ async fn resolve_split_brain(
     let copy_dirs: Vec<PathBuf> = copies.iter().map(|copy| copy.dir.clone()).collect();
     let task_locations = locations.clone();
     let outcome = tokio::task::spawn_blocking(move || {
+        // Each copy's admission fence first, EXCLUSIVE and without waiting,
+        // before its maintenance fence, and held through the archive
+        // renames: an admission's hold of any copy refuses the resolution,
+        // and only the archive moves a live admission.lock, while it holds
+        // it.
+        let mut admission = Vec::with_capacity(copy_dirs.len());
+        for dir in &copy_dirs {
+            match copy_admission_fence(dir) {
+                Ok(guard) => admission.push(guard),
+                Err(reason) => {
+                    let mut split = SplitBrainReport::new(realm, task_locations);
+                    split.resolution = SplitBrainResolution::Refused { reason };
+                    return (split, None);
+                }
+            }
+        }
         // Fence EVERY copy BEFORE the comparison and hold through the
         // archive renames; copies arrive sorted, so two racing migrators
         // acquire in the same global order.
@@ -358,6 +374,7 @@ async fn resolve_split_brain(
             }
         }
         drop(fences);
+        drop(admission);
         // Post-rename hardening/durability warnings are report-only; the
         // report has no separate warning slot, so they ride the split-brain
         // `errors` (which `MigrateReport::has_errors` does not count).
@@ -374,6 +391,37 @@ async fn resolve_split_brain(
         Ok(result) => result,
         Err(join_error) => refused(format!("archive task failed: {join_error}")),
     }
+}
+
+/// R, the admission fence of the realm copy at `dir` (`<state root>/<realm>`),
+/// taken EXCLUSIVE without waiting: the reason it could not be taken, a
+/// held fence included, otherwise.
+fn copy_admission_fence(
+    dir: &Path,
+) -> Result<std::sync::Arc<meerkat_core::AdmissionGuard>, String> {
+    let not_a_realm = || {
+        format!(
+            "{} is not a realm directory under a state root",
+            dir.display()
+        )
+    };
+    let state_root = dir.parent().ok_or_else(not_a_realm)?;
+    let realm = dir
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|name| meerkat_core::connection::RealmId::parse(name).ok())
+        .ok_or_else(not_a_realm)?;
+    let fence = meerkat_core::AdmissionFence::realm(state_root, &realm)
+        .map_err(|refusal| format!("admission fence of {}: {refusal}", dir.display()))?;
+    if fence.directory() != dir {
+        return Err(not_a_realm());
+    }
+    meerkat_core::AdmissionGuard::try_acquire(vec![fence]).map_err(|refusal| {
+        format!(
+            "admission fence of {} not acquirable: {refusal}",
+            dir.display()
+        )
+    })
 }
 
 /// Fold a read-only ledger baseline into the per-realm report: rows become

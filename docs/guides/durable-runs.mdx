@@ -321,10 +321,21 @@ committed. Four steps, per member:
    `MobHandle::reload_member_registration`, which applies the hold again,
    and settle again) or its tail repair failed (after the reload the member
    keeps no run, and the next settle answers `NotRetained`), and
-   `MobError::MemberSessionNotLive` when another writer took the session's
-   store fence, or when an unregister ended the run first (its inputs then
+   `MobError::MemberSessionNotLive` when the session's store realm lost its
+   fence (another writer took it, or the realm stopped itself; see step 4),
+   or when an unregister ended the run first (its inputs then
    end `stopped` when the unregister keeps queued work, as a mob Shutdown
    does by default, whatever their state, and `cancelled` when it stops).
+   On a host store realm, a settlement write whose batch the store refused,
+   or left unsettled, poisons the session's scopes while the realm keeps its
+   fence (see [Failures](#failures)): that member's settle then answers
+   `MemberReloadRequired` every time and its reload fails until the realm is
+   opened again, so reloading and settling again cannot succeed in this
+   process (see step 4).
+   When the registration no longer keeps the run but an input of the run
+   reads no committed terminal yet (the read of its stored row failed, for
+   one), the answer is `MobError::MemberInputTerminalNotYetReadable`: settle
+   again.
 4. **Release the hold on every path that leaves no open run.**
    `MobHandle::release_member_run_starts` with
    `HostRunStartHoldReason::HostRecovery`: after `Settled`, `NotRetained` and
@@ -332,10 +343,36 @@ committed. Four steps, per member:
    hold left staged keeps the member from ever starting a run, even at its
    next wake days later. While the run may still be open
    (`Busy { current_run_id: None }`, or a refusal), keep the hold and settle
-   that member again; releasing it there would let the run continue.
+   that member again; releasing it there would let the run continue. Two
+   refusals answer the same on every round, so the member is done:
+   `MobError::MemberNotFound`, for a member the mob no longer holds (a retire
+   dropped its hold with it), and `MobError::UnsupportedForMode`, for one the
+   hold never applied to (a placed member, or one with no session). A
+   release for a member the mob no longer holds answers `MemberNotFound`
+   too, with nothing left staged. Two cases end the recovery in this
+   process for every member. Once the mob is destroyed or shut down, its
+   actor is gone and every command to it (the wake, the settle and the
+   release among them) answers `MobError::ActorCommandChannelClosed` (a
+   destroyed mob's members are gone with it; a mob shut down is recovered
+   at its next start, under the hold again). Once the host store realm lost
+   its fence (`SpiRealm::realm_poisoned` reads `Some`: another writer took
+   the fence, or the realm stopped itself), every settle is refused
+   `MemberSessionNotLive`: the realm refuses this process's reads and writes
+   until it is opened again, so no wake, reload or cold read here can serve
+   a member, and the realm's next owner recovers the runs (this process
+   recovers them only after it opens the realm again). One case ends a
+   single member's recovery in this process while the realm keeps its
+   fence: a settlement write of that member whose batch the store refused,
+   or left unsettled, poisoned its session's scopes (`SpiRealm::poisoned_scopes`
+   lists them). Its settle answers `MemberReloadRequired` every time, and its
+   reload fails until the realm is opened again. The member stays held and
+   nothing of its run runs; opening the realm again (in a new process, or
+   with a new open of the realm in this one) lifts the poison, and a start
+   over the reopened realm, under the hold again, recovers it.
 
 ```rust
-use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobHandle};
+use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobError, MobHandle};
+use meerkat_runtime::store::spi::SpiRealm;
 use meerkat_runtime::{MeerkatMachine, RetainedRunSettlement, SessionWorkState};
 
 /// What a member's recovery leaves.
@@ -344,6 +381,8 @@ enum Recovered {
     Done,
     /// The run may still be open: keep the hold, settle again later.
     StillOpen,
+    /// The mob's actor is gone: no command to it answers again.
+    MobGone,
 }
 
 async fn recover(
@@ -359,42 +398,88 @@ async fn recover(
         if machine.session_work_state(&session_id).await? == SessionWorkState::Idle {
             return Ok(Recovered::Done);
         }
-        handle.ensure_member_live(identity).await?;
+        if let Err(error) = handle.ensure_member_live(identity).await {
+            return final_refusal(error);
+        }
     }
-    Ok(match handle.settle_member_retained_run(identity).await? {
-        RetainedRunSettlement::Busy { current_run_id: None } => Recovered::StillOpen,
+    match handle.settle_member_retained_run(identity).await {
+        Ok(RetainedRunSettlement::Busy { current_run_id: None }) => Ok(Recovered::StillOpen),
         // Settled, NotRetained, or a run is current.
-        _ => Recovered::Done,
-    })
+        Ok(_) => Ok(Recovered::Done),
+        Err(error) => final_refusal(error),
+    }
 }
 
-// `machine` is the MeerkatMachine the mob's session service runs on.
+/// The refusals that answer the same at every call. The mob no longer holds
+/// the member (a retire dropped its hold with it), or the hold never applied
+/// to it (a placed member, or one with no session): that member is done. The
+/// mob's actor is gone (a destroy or a shutdown): the recovery is over. Any
+/// other refusal keeps the hold for a later round.
+fn final_refusal(error: MobError) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
+    match error {
+        MobError::MemberNotFound(_) | MobError::UnsupportedForMode { .. } => Ok(Recovered::Done),
+        MobError::ActorCommandChannelClosed => Ok(Recovered::MobGone),
+        error => Err(error.into()),
+    }
+}
+
+/// One round over `members`: the members to settle again in a later round,
+/// none when nothing in this process can recover a member any more.
+async fn recover_round(
+    handle: &MobHandle,
+    machine: &MeerkatMachine,
+    realm: Option<&SpiRealm>,
+    members: &[AgentIdentity],
+) -> Vec<AgentIdentity> {
+    let mut settle_again = Vec::new();
+    for identity in members {
+        if realm.is_some_and(|realm| realm.realm_poisoned().is_some()) {
+            // The realm lost its fence: its next owner recovers the runs.
+            return Vec::new();
+        }
+        match recover(handle, machine, identity).await {
+            Ok(Recovered::Done) => {
+                match handle
+                    .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
+                    .await
+                {
+                    // Released, or the mob no longer holds the member:
+                    // nothing stays staged for it.
+                    Ok(()) | Err(MobError::MemberNotFound(_)) => {}
+                    Err(MobError::ActorCommandChannelClosed) => return Vec::new(),
+                    Err(_) => settle_again.push(identity.clone()),
+                }
+            }
+            Ok(Recovered::MobGone) => return Vec::new(),
+            // The run may still be open, or the member needs a reload first:
+            // the hold keeps the run from continuing until a later round.
+            Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
+        }
+    }
+    settle_again
+}
+
+// `machine` is the MeerkatMachine the mob's session service runs on, and
+// `realm` the host store realm it writes through (`None` on a `sqlite` or
+// `jsonl` realm, which has no fence to lose).
 let handle = MobBuilder::for_resume(storage)
     .with_session_service(service)
     .hold_restored_member_run_starts(HostRunStartHoldReason::HostRecovery, members.clone())
     .resume()
     .await?;
-let mut settle_again = Vec::new();
-for identity in &members {
-    match recover(&handle, &machine, identity).await {
-        Ok(Recovered::Done) => {
-            let released = handle
-                .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
-                .await;
-            if released.is_err() {
-                settle_again.push(identity.clone());
-            }
-        }
-        // The run may still be open, or the member needs a reload first:
-        // the hold keeps the run from continuing until a later round.
-        Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
-    }
-}
+let mut settle_again = recover_round(&handle, &machine, realm.as_deref(), &members).await;
 ```
 
-Run the loop again over `settle_again` (after reloading a member refused
-`MemberReloadRequired`) until it is empty: each round either settles the run
-or finds none kept, and then releases the hold.
+Run `recover_round` again over `settle_again` (after reloading a member
+refused `MemberReloadRequired`) until it is empty. A member leaves it once
+its run is settled or none is kept and its hold is released, or once the mob
+no longer holds it or the hold never applied to it; and a round leaves none
+when the mob's actor is gone or the realm lost its fence, which ends the
+recovery in this process (see step 4). On a host store realm, a member whose
+settlement write the store refused, or left unsettled, never leaves it in
+this process: the loop does not empty for that member until the realm is
+opened again (see step 4), so stop settling it once
+`SpiRealm::poisoned_scopes` lists a scope of its session, and keep its hold.
 
 A retry is safe. A settle that arrives while an earlier one is still
 settling the same run joins it and gets the same answer. A retry after the
@@ -412,7 +497,17 @@ standing, answers `RuntimeDriverError::RecoveryRepairBlocked`: reload the
 registration (`recover_or_discard_reload_required_registration_if_current`),
 which applies the staged hold again, and settle again (after a failed tail
 repair the reloaded registration keeps no run, so that settle answers
-`NotRetained`).
+`NotRetained`). On a host store realm, a settlement write whose batch the
+store refused, or left unsettled, poisons the session's scopes while the
+realm keeps its fence: the settle then answers `RecoveryRepairBlocked` every
+time and the reload fails until the realm is opened again, so the session
+stays held, and nothing of its run runs, until the realm's next open. A
+writer whose host store realm lost its fence (another
+writer took it, or the realm stopped itself) is refused as a session that
+leaves this process at every settle, `RuntimeDriverError::StaleAuthority`:
+the realm refuses that writer's reads and writes until it is opened again,
+so no reload here can serve the session, and the realm's next owner
+recovers the run.
 
 ## Tools That Run Again
 
@@ -510,12 +605,12 @@ This applies to:
   cannot resume or repeat work.
 
 Process custody still stops the earlier process before the agent is rebuilt.
-A foreground shell call is answered by its `outcome_uncertain` result,
-whether the run continues or is closed as interrupted, so the transcript
-gets no `tool_process_interrupted` block for it. A background shell job, a
-monitor or a command hook the run started keeps its tool-process recovery
-notice: its process outlives the call that started it, so that call's
-result does not say how the process ended.
+A foreground shell call answered this way, whether the run continues or is
+closed as interrupted, gets no `tool_process_interrupted` block: its
+`outcome_uncertain` result is the record. A background shell job, a monitor
+or a command hook the run started keeps its tool-process recovery notice:
+its process outlives the call that started it, so that call's result does
+not say how the process ended.
 
 Meerkat does not provide exactly-once external effects. A tool whose effect
 must not happen twice deduplicates on the key above.
@@ -562,13 +657,16 @@ The gate answers with a `DurableResumeVerdict`:
 |---------|--------|
 | `Continue` | The run continues |
 | `Superseded { reason }` | The run is settled at once, like a stop: its bound inputs are abandoned as refused resumes, the run ends failed, and it is closed as interrupted with its committed rounds kept |
-| `Unavailable { reason }` | Meerkat asks again, up to 3 attempts in about 30 seconds, then settles the run like `Superseded` |
+| `Unavailable { reason }` | Meerkat asks again, up to 3 attempts in about 30 seconds. When every attempt answers `Unavailable` (or takes too long), the run is neither resumed nor settled: it stays marked, with its inputs bound and none ended, and no other run of the session starts. Meerkat asks again at the next wake of the worker's runtime loop (a new input, for example) or at the next registration of its session, such as the next start, and never on a timer |
 
 Each attempt has 8 seconds. An attempt that takes longer is cancelled and
 counts as `Unavailable`, so a gate must be safe to cancel and must answer the
 same way when asked again for the same run. It maps its own failures to
-`Unavailable`, never to `Continue`. A host that keys work by owner gets a
-worker's owner key with `lower_agent_identity_owner_key`.
+`Unavailable`, never to `Continue`. A gate that can never decide keeps the run
+waiting: answer `Superseded`, or stop the run, to end it. A host that keys
+work by owner gets a worker's owner key with `lower_agent_identity_owner_key`.
+`MeerkatMachine::resumed_run_admission_held` names a run that waits on its
+gate this way.
 
 Without a gate, the run continues. Other members' runs continue without
 asking.
@@ -633,8 +731,8 @@ fence:
   the stopped holder waits and suspends the run the same way (the commit
   is written again, once, when the acquire succeeds within the wait); the
   round it was writing is done again on resume, as after a crash. A commit
-  whose batch was already sent and is still unsettled when the holder's
-  window closes stops there instead: it fails typed, its scopes are
+  whose batch is not settled, or not yet sent, when the holder's window
+  closes stops there instead: it fails typed, its scopes are
   poisoned, and writing them again is refused until the realm is opened
   again (see Failures below). A
   closing save (the write after the run's final answer) waits and is
@@ -728,7 +826,13 @@ lists every read and the re-base rule.
   a failed batch; the realm keeps its fence. While renews fail, the retry
   budget is cut at the window.
 - **Failed batch.** A batch the store refuses, or whose outcome stays unknown
-  past the retry budget, poisons every scope it touched. Those scopes refuse
+  past the retry budget (typed: `RuntimeStoreError::UnsettledPastRetryBudget`),
+  poisons every scope it touched. A round commit or closing save stopped so,
+  or at its fence window, may or may not have landed: the session answers
+  the teardown class, so its live actor is reloaded from what the store
+  holds instead of the run failing as an internal error, and the waiters of
+  its kept inputs are told they stay queued (`RequeuedAcrossStop`) for the
+  next start. Those scopes refuse
   every later call that needs them, with a typed refusal, until the realm is
   opened again, which reloads them from your store. Everything else keeps
   serving: other sessions and mobs, and the reads across sessions, which
@@ -736,6 +840,15 @@ lists every read and the re-base rule.
   unavailable. Only the session listing, the controller custody of governed
   administration and the delivery backlog total refuse while a session's
   scope is poisoned.
+- **Conflicted scope.** If your store ends up holding two batches at one
+  version of a scope (a batch that reached it outside the contract) and
+  fails the scope's load with a typed conflict, Core quarantines that scope
+  and serves the rest of the realm. The scope refuses every call that needs
+  it, typed, naming the conflict and the repair, and the reads across
+  sessions count it as they count a poisoned scope. Repair it in your
+  store, then open the realm again: a reopen alone quarantines it again.
+  The [Host Store SPI reference](/reference/host-store-spi#a-conflicted-scope)
+  describes the repair.
 - **Lost fence.** Losing the fence poisons the whole realm.
 
 ### Limits And Exceptions

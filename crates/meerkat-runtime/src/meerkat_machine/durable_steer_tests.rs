@@ -23,6 +23,9 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 
 use crate::input_state::InputLifecycleState;
 
+mod request_only_context;
+mod requester;
+
 /// How long a test makes the runner's append record lag the boundary take.
 const APPEND_RECORD_LAG: Duration = Duration::from_millis(150);
 
@@ -101,6 +104,18 @@ struct RunnerScript {
     /// carries, in preparation order.
     prepared_reply_capabilities:
         std::sync::Mutex<Vec<Vec<meerkat_core::comms::PeerReplyCapability>>>,
+    /// The request-only context each prepared durable boundary delivery
+    /// carries, in preparation order.
+    prepared_request_only_context:
+        std::sync::Mutex<Vec<Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>>>,
+    /// Each applied primitive's contributors and turn metadata, in apply
+    /// order.
+    primitive_metadata: std::sync::Mutex<
+        Vec<(
+            Vec<InputId>,
+            Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+        )>,
+    >,
 }
 
 impl RunnerScript {
@@ -129,6 +144,8 @@ impl RunnerScript {
             interrupts: AtomicUsize::new(0),
             interrupt_fails: AtomicBool::new(false),
             prepared_reply_capabilities: std::sync::Mutex::new(Vec::new()),
+            prepared_request_only_context: std::sync::Mutex::new(Vec::new()),
+            primitive_metadata: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -172,6 +189,21 @@ impl RunnerScript {
     fn prepared_reply_capabilities(&self) -> Vec<Vec<meerkat_core::comms::PeerReplyCapability>> {
         self.prepared_reply_capabilities.lock().unwrap().clone()
     }
+
+    fn prepared_request_only_context(
+        &self,
+    ) -> Vec<Vec<meerkat_core::lifecycle::run_primitive::TurnRequestContext>> {
+        self.prepared_request_only_context.lock().unwrap().clone()
+    }
+
+    fn primitive_metadata(
+        &self,
+    ) -> Vec<(
+        Vec<InputId>,
+        Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    )> {
+        self.primitive_metadata.lock().unwrap().clone()
+    }
 }
 
 struct DurableSteerBoundaryHandle {
@@ -203,6 +235,11 @@ impl CoreExecutorBoundaryHandle for DurableSteerBoundaryHandle {
                 .lock()
                 .unwrap()
                 .push(appends.peer_reply_capabilities().to_vec());
+            self.script
+                .prepared_request_only_context
+                .lock()
+                .unwrap()
+                .push(appends.request_only_context().to_vec());
         }
         let prepared = self
             .state
@@ -361,6 +398,11 @@ impl CoreExecutor for DurableSteerExecutor {
             .lock()
             .unwrap()
             .push(contributors.clone());
+        self.script
+            .primitive_metadata
+            .lock()
+            .unwrap()
+            .push((contributors.clone(), primitive.turn_metadata().cloned()));
         let run_guard = self
             .state
             .begin_boundary_run_for_test(run_id.clone())
@@ -727,6 +769,7 @@ fn steer_header(source: crate::input::InputOrigin) -> crate::input::InputHeader 
         idempotency_key: None,
         supersession_key: None,
         correlation_id: None,
+        requester: None,
     }
 }
 

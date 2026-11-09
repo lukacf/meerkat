@@ -6,8 +6,9 @@ use super::*;
 use async_trait::async_trait;
 use meerkat_core::{ControllerModelClient, SessionId};
 use meerkat_mobkit::identity_first::{
-    BoundGovernedInput, GovernedBindContext, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, IdentityRuntimeError,
+    BoundGovernedInput, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedBindRefusalKind, GovernedInputBinder, GovernedInputError, GovernedSettlement,
+    GovernedWaitBudget, IdentityRuntimeError,
 };
 use meerkat_runtime::{Input, PromptInput};
 
@@ -22,6 +23,18 @@ pub struct LocalControllerSetup {
 }
 
 impl LocalControllerSetup {
+    pub(in crate::private_originals) fn from_console_bind(
+        source: &Arc<PrivateOriginals>,
+        original: PrivateOriginalRef,
+        context: &GovernedBindContext,
+    ) -> Self {
+        Self {
+            source_owner: Arc::downgrade(source),
+            original,
+            session_id: context.session_id.clone(),
+            controller: context.controller.clone(),
+        }
+    }
     pub(crate) fn source_owner(&self) -> Option<Arc<PrivateOriginals>> {
         self.source_owner.upgrade()
     }
@@ -70,7 +83,7 @@ impl PrivateOriginals {
         self: &Arc<Self>,
         submission: PrivateOriginalSubmit,
     ) -> Result<LocalControllerSetup, PrivateOriginalError> {
-        let route = self.route(&submission.original.route)?;
+        let route = &self.route(&submission.original.route)?;
         let event = self.event(&submission.original).await?;
         if digest(submission.content.as_bytes()) != event.content_sha256 {
             return Err(PrivateOriginalError::Conflict);
@@ -104,14 +117,13 @@ impl PrivateOriginals {
                 binder.clone(),
             )
             .await;
-        // The native Bind variant precedes any input submission. The retained
-        // typed capture establishes our preparation result; no error text or
-        // ticket is interpreted as an admission observation.
+        // The binder's withheld refusal precedes any input submission. The
+        // retained typed capture establishes our preparation result; no error
+        // text or ticket is interpreted as an admission observation.
         if !matches!(
-            result,
-            Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Bind(_)
-            ))
+            &result,
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                if refusal.kind == GovernedBindRefusalKind::Withheld
         ) {
             return Err(PrivateOriginalError::Unavailable);
         }
@@ -132,17 +144,19 @@ struct ControllerSetupBinder {
 
 #[async_trait]
 impl GovernedInputBinder for ControllerSetupBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         _input: Input,
-    ) -> Result<BoundGovernedInput, String> {
-        let mut captured = self
-            .captured
-            .lock()
-            .map_err(|_| "Toolkit local controller preparation is unavailable".to_owned())?;
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        let mut captured = self.captured.lock().map_err(|_| {
+            GovernedBindRefusal::unavailable("Toolkit local controller preparation is unavailable")
+        })?;
         if captured.is_some() {
-            return Err("Toolkit local controller preparation was already captured".into());
+            return Err(GovernedBindRefusal::denied(
+                "Toolkit local controller preparation was already captured",
+            )
+            .into());
         }
         *captured = Some(LocalControllerSetup {
             source_owner: self.source_owner.clone(),
@@ -150,7 +164,16 @@ impl GovernedInputBinder for ControllerSetupBinder {
             session_id: context.session_id.clone(),
             controller: context.controller.clone(),
         });
-        Err("Toolkit local controller review precedes input submission".into())
+        // Captured: this preparation binds nothing by design.
+        Err(GovernedBindRefusal::withheld(
+            "Toolkit local controller review precedes input submission",
+        )
+        .into())
+    }
+
+    /// A capture never waits: it answers at once.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        GovernedWaitBudget::None
     }
 
     fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {

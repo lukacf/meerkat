@@ -664,6 +664,33 @@ impl SurfaceOwner {
         }
     }
 
+    /// The gated twin of [`Self::apply`]'s add stage: stage `surface_id` as
+    /// a grant-time live attach does (`SurfaceStageGatedAdd`), which the
+    /// machine admits only for a server the build's scoped tool grant gate
+    /// gates, and record the stage's lineage in the held lineages, as `apply`
+    /// does, under the same handle read lock.
+    fn apply_gated_add(
+        &self,
+        surface_id: SurfaceId,
+    ) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
+        match self {
+            Self::Runtime {
+                handle_slot, held, ..
+            } => {
+                let handle = handle_slot
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                handle
+                    .stage_gated_add(surface_id.0, McpRouter::now_ms())
+                    .map(|transition| {
+                        record_stage_lineages(held, &transition);
+                        runtime_transition_from_core("StageGatedAdd", transition, None)
+                    })
+                    .map_err(|error| runtime_surface_error("StageGatedAdd", error))
+            }
+        }
+    }
+
     fn apply_runtime(
         handle: &dyn ExternalToolSurfaceHandle,
         held: &HeldSurfaceLineages,
@@ -888,6 +915,32 @@ impl SurfaceOwner {
             }
         }
     }
+}
+
+/// The digest of `call`'s exact request on the MCP operation `target`
+/// resolves it to ([`meerkat_core::mcp_request_digest`] over the target's
+/// server, its raw operation and the call's arguments), or `None` for a
+/// target of no MCP server, and for arguments that are not JSON or have no
+/// canonical form.
+pub(crate) fn call_request_digest(
+    target: &meerkat_core::ToolOperationTarget,
+    call: ToolCallView<'_>,
+) -> Option<meerkat_core::approval::decision::Sha256Digest> {
+    let (meerkat_core::ToolOperationTarget::McpServerOperation {
+        server,
+        raw_operation,
+        ..
+    }
+    | meerkat_core::ToolOperationTarget::CheckedMcpServerOperation {
+        server,
+        raw_operation,
+        ..
+    }) = target
+    else {
+        return None;
+    };
+    let arguments: Value = serde_json::from_str(call.args.get()).ok()?;
+    meerkat_core::mcp_request_digest(server, raw_operation, &arguments)
 }
 
 /// Release exactly `held`'s lineages on `handle`. The surface clears
@@ -1748,6 +1801,7 @@ impl McpRouter {
                         account: binding.account.clone(),
                     }
                 }),
+                service_secret_launch: connection.service_secret_launch().cloned(),
             };
         }
         let Some(snapshot) = self.surface_owner.surface_snapshot(server) else {
@@ -2370,6 +2424,44 @@ impl McpRouter {
         // A governed name changes only under a new control.
         self.refuse_ungoverned_change(&config.name)?;
         self.stage_add_payload(config)
+    }
+
+    /// Stage a server add for the next boundary apply as a grant-time live
+    /// attach of a gated server stages it: the ordinary add, admitted only
+    /// for a server the build's scoped tool grant gate gates
+    /// (`SurfaceStageGatedAdd`). It is the live attach's check, and its
+    /// caller lands with the live attach; a build stages its configured
+    /// servers with [`Self::stage_add`] or [`Self::stage_add_governed`], and
+    /// whether it stages a gated one (lazy residency) is the factory's
+    /// build-composition filter. A governed name is refused and the payload
+    /// validated as [`Self::stage_add`] does. The stage's lineage is this
+    /// router's, so the construction that staged it releases it when it ends.
+    ///
+    /// # Errors
+    /// The surface's refusal when the gate does not gate the server, and the
+    /// refusals of [`Self::stage_add`].
+    pub fn stage_add_gated(&mut self, config: McpServerConfig) -> Result<(), McpError> {
+        self.refuse_ungoverned_change(&config.name)?;
+        Self::validate_tool_names(&config)?;
+        let server_name = config.name.clone();
+        // A new payload replaces any refused one staged under the name.
+        self.refused_payloads.remove(&server_name);
+        let sid = SurfaceId::from(server_name.as_str());
+        match self.surface_owner.apply_gated_add(sid) {
+            Ok(_) => {
+                self.notify_lifecycle_connect_pending(&server_name)?;
+                self.staged_payloads.insert(server_name, config);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    server = %server_name,
+                    error = %error,
+                    "Surface owner rejected the gated StageAdd"
+                );
+                Err(error.into())
+            }
+        }
     }
 
     /// Stage a governed server add under its prepared attachment control.
@@ -4670,10 +4762,15 @@ impl McpRouter {
             &self.progress,
         );
         let result = async {
+            // One reading for the whole read: every target it states names the
+            // same publication.
+            let credential_publication = connection.credential_publication();
             let target = || crate::McpResourceTarget {
                 config: connection.config(),
                 connection_id: connection.connection_id(),
                 uri,
+                service_secret_launch: connection.service_secret_launch(),
+                credential_publication: credential_publication.clone(),
             };
             let prepared = if let Some(work) = context.work_authorization() {
                 let target = self
@@ -4893,6 +4990,8 @@ impl McpRouter {
                                 connection_id: conn.connection_id(),
                                 raw_operation: &route.raw_operation,
                                 origin: &origin,
+                                service_secret_launch: conn.service_secret_launch(),
+                                credential_publication: conn.credential_publication(),
                             },
                             call,
                             context,

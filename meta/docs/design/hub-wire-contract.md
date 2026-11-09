@@ -51,7 +51,7 @@ isolation (per-realm SQLite files today). Scope kinds project as:
 | `Operator { operator }` | space records with `subject_allowlist = [operator-principal]` — see below |
 
 **Operator scope (resolves the roadmap's friction point).** The shipped
-keying (meta #227) is the console auth principal, and operator-scope
+keying is the person's caller scope (since 0.9.11), and operator-scope
 records are **realm-keyed in v1** — the coordinator only ever composes scopes
 within its own realm. Therefore F1/F2 need **no cross-space query and no
 dedicated operator space**: operator records live in each realm's space,

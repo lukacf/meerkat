@@ -36,6 +36,24 @@ fn k(realm: &str, binding: &str) -> TokenKey {
     TokenKey::parse(realm, binding).expect("valid slugs in test fixture")
 }
 
+/// A guard over the credential fences of every realm these tests write
+/// under `root`, as a persisted store's coordinator hands one operation.
+fn covering(root: &std::path::Path) -> std::sync::Arc<meerkat_core::AdmissionGuard> {
+    meerkat_core::AdmissionGuard::try_acquire(
+        ["dev", "prod"]
+            .into_iter()
+            .map(|realm| {
+                meerkat_core::AdmissionFence::credentials(
+                    root,
+                    &meerkat_core::RealmId::parse(realm).unwrap(),
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
 fn kp(realm: &str, binding: &str, profile: &str) -> TokenKey {
     TokenKey::parse_with_profile(realm, binding, Some(profile))
         .expect("valid slugs in test fixture")
@@ -50,7 +68,7 @@ async fn ephemeral_round_trip_api_key() {
     let tokens = sample_api_key();
 
     store
-        .save(&key, &tokens)
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
         .await
         .expect("ephemeral save should succeed");
     let loaded = store
@@ -66,7 +84,10 @@ async fn ephemeral_round_trip_oauth_with_metadata() {
     let key = k("dev", "managed_chatgpt");
     let tokens = sample_oauth();
 
-    store.save(&key, &tokens).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+        .await
+        .unwrap();
     let loaded = store.load(&key).await.unwrap();
     assert_eq!(loaded, Some(tokens));
 }
@@ -75,17 +96,38 @@ async fn ephemeral_round_trip_oauth_with_metadata() {
 async fn ephemeral_clear_removes_entry() {
     let store = EphemeralTokenStore::new();
     let key = k("dev", "x");
-    store.save(&key, &sample_api_key()).await.unwrap();
-    store.clear(&key).await.unwrap();
+    store
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &key,
+            &sample_api_key(),
+        )
+        .await
+        .unwrap();
+    store
+        .clear(&meerkat_core::AdmissionGuard::none(), &key)
+        .await
+        .unwrap();
     assert_eq!(store.load(&key).await.unwrap(), None);
 }
 
 #[tokio::test]
 async fn ephemeral_list_returns_saved_keys() {
     let store = EphemeralTokenStore::new();
-    store.save(&k("dev", "a"), &sample_api_key()).await.unwrap();
     store
-        .save(&k("prod", "b"), &sample_api_key())
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &k("dev", "a"),
+            &sample_api_key(),
+        )
+        .await
+        .unwrap();
+    store
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &k("prod", "b"),
+            &sample_api_key(),
+        )
         .await
         .unwrap();
     let mut keys = store.list().await.unwrap();
@@ -100,11 +142,19 @@ async fn ephemeral_profile_override_does_not_collide_with_default_binding() {
     let work_key = kp("dev", "default_openai", "work");
 
     store
-        .save(&default_key, &PersistedTokens::api_key("sk-default"))
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &default_key,
+            &PersistedTokens::api_key("sk-default"),
+        )
         .await
         .unwrap();
     store
-        .save(&work_key, &PersistedTokens::api_key("sk-work"))
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &work_key,
+            &PersistedTokens::api_key("sk-work"),
+        )
         .await
         .unwrap();
 
@@ -141,7 +191,10 @@ async fn file_round_trip_api_key() {
     let key = k("dev", "default_openai");
     let tokens = sample_api_key();
 
-    store.save(&key, &tokens).await.expect("file save");
+    store
+        .save(&covering(temp.path()), &key, &tokens)
+        .await
+        .expect("file save");
     let loaded = store.load(&key).await.expect("file load");
     assert_eq!(loaded, Some(tokens));
 }
@@ -153,7 +206,10 @@ async fn file_round_trip_oauth_with_metadata() {
     let key = k("dev", "managed_chatgpt");
     let tokens = sample_oauth();
 
-    store.save(&key, &tokens).await.unwrap();
+    store
+        .save(&covering(temp.path()), &key, &tokens)
+        .await
+        .unwrap();
     let loaded = store.load(&key).await.unwrap();
     assert_eq!(loaded, Some(tokens));
 }
@@ -166,11 +222,19 @@ async fn file_profile_override_does_not_collide_with_default_binding() {
     let work_key = kp("dev", "default_openai", "work");
 
     store
-        .save(&default_key, &PersistedTokens::api_key("sk-default"))
+        .save(
+            &covering(temp.path()),
+            &default_key,
+            &PersistedTokens::api_key("sk-default"),
+        )
         .await
         .unwrap();
     store
-        .save(&work_key, &PersistedTokens::api_key("sk-work"))
+        .save(
+            &covering(temp.path()),
+            &work_key,
+            &PersistedTokens::api_key("sk-work"),
+        )
         .await
         .unwrap();
 
@@ -189,21 +253,30 @@ async fn file_clear_removes_entry_and_parent_survives() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileTokenStore::new(temp.path().to_path_buf());
     let key = k("dev", "x");
-    store.save(&key, &sample_api_key()).await.unwrap();
-    store.clear(&key).await.unwrap();
+    store
+        .save(&covering(temp.path()), &key, &sample_api_key())
+        .await
+        .unwrap();
+    store.clear(&covering(temp.path()), &key).await.unwrap();
     assert_eq!(store.load(&key).await.unwrap(), None);
     // Second clear is idempotent.
-    store.clear(&key).await.unwrap();
+    store.clear(&covering(temp.path()), &key).await.unwrap();
 }
 
 #[tokio::test]
 async fn file_list_returns_all_realms_and_bindings() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileTokenStore::new(temp.path().to_path_buf());
-    store.save(&k("dev", "a"), &sample_api_key()).await.unwrap();
-    store.save(&k("dev", "b"), &sample_api_key()).await.unwrap();
     store
-        .save(&k("prod", "c"), &sample_api_key())
+        .save(&covering(temp.path()), &k("dev", "a"), &sample_api_key())
+        .await
+        .unwrap();
+    store
+        .save(&covering(temp.path()), &k("dev", "b"), &sample_api_key())
+        .await
+        .unwrap();
+    store
+        .save(&covering(temp.path()), &k("prod", "c"), &sample_api_key())
         .await
         .unwrap();
     let mut keys = store.list().await.unwrap();
@@ -219,11 +292,19 @@ async fn file_overwrite_is_atomic() {
     let store = FileTokenStore::new(temp.path().to_path_buf());
     let key = k("dev", "x");
     store
-        .save(&key, &PersistedTokens::api_key("first"))
+        .save(
+            &covering(temp.path()),
+            &key,
+            &PersistedTokens::api_key("first"),
+        )
         .await
         .unwrap();
     store
-        .save(&key, &PersistedTokens::api_key("second"))
+        .save(
+            &covering(temp.path()),
+            &key,
+            &PersistedTokens::api_key("second"),
+        )
         .await
         .unwrap();
     let loaded = store.load(&key).await.unwrap().unwrap();
@@ -237,7 +318,10 @@ async fn file_save_sets_0o600_perms() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileTokenStore::new(temp.path().to_path_buf());
     let key = k("dev", "perms");
-    store.save(&key, &sample_api_key()).await.unwrap();
+    store
+        .save(&covering(temp.path()), &key, &sample_api_key())
+        .await
+        .unwrap();
     let path = temp.path().join("dev").join("perms.json");
     let meta = std::fs::metadata(&path).unwrap();
     let mode = meta.permissions().mode() & 0o777;
@@ -270,7 +354,10 @@ async fn auto_round_trip_falls_back_to_file() {
     let key = k("dev", "default_openai");
     let tokens = sample_api_key();
 
-    store.save(&key, &tokens).await.expect("auto save");
+    store
+        .save(&covering(temp.path()), &key, &tokens)
+        .await
+        .expect("auto save");
     let loaded = store.load(&key).await.expect("auto load");
     assert_eq!(loaded, Some(tokens));
 }

@@ -819,3 +819,126 @@ async fn compare_and_swap_cannot_rewrite_terminal_application() {
         );
     }
 }
+
+/// A person in an OIDC issuer's trust domain, as a host names a requester it
+/// authenticated.
+fn person(subject: &str) -> meerkat_core::PrincipalRef {
+    meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject,
+        meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+            .expect("trust domain"),
+    )
+    .expect("qualified requester")
+}
+
+/// A job keeps the requester of the run that submitted it: the sqlite store
+/// keeps it across a reopen, both stores read it back, and no
+/// compare-and-swap may rewrite it after submit.
+#[tokio::test]
+async fn a_job_keeps_its_requester_through_the_store() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.sqlite3");
+    let requester = meerkat_core::TurnRequester::carried(person("alice"));
+    let admitted =
+        spec("requester-reopen", RestartClass::Adoptable).with_requester(Some(requester.clone()));
+    let job_id = {
+        let store = Arc::new(SqliteDetachedJobStore::open(&path).expect("open"));
+        DetachedJobService::new(store)
+            .submit(admitted.clone())
+            .await
+            .expect("submit")
+            .job_id
+    };
+    let reopened = Arc::new(SqliteDetachedJobStore::open(&path).expect("reopen"));
+    assert_eq!(
+        reopened
+            .get(&job_id)
+            .await
+            .expect("read")
+            .expect("job survives reopen")
+            .spec
+            .requester,
+        Some(requester.clone()),
+        "the reopened store names the submitting run's requester"
+    );
+
+    let stores: Vec<Arc<dyn DetachedJobStore>> =
+        vec![Arc::new(MemoryDetachedJobStore::new()), reopened];
+    for (index, store) in stores.into_iter().enumerate() {
+        let job_id = DetachedJobService::new(store.clone())
+            .submit(
+                spec(&format!("requester-cas-{index}"), RestartClass::Adoptable)
+                    .with_requester(Some(requester.clone())),
+            )
+            .await
+            .expect("submit")
+            .job_id;
+        let read = store.get(&job_id).await.expect("read").expect("job");
+        assert_eq!(
+            read.spec.requester,
+            Some(requester.clone()),
+            "store {index}"
+        );
+        let mut rewritten = read;
+        rewritten.spec.requester = Some(meerkat_core::TurnRequester::direct(person("mallory")));
+        let expected_revision = rewritten.revision;
+        assert!(
+            store
+                .compare_and_swap(expected_revision, rewritten)
+                .await
+                .is_err(),
+            "store {index}: a compare-and-swap cannot change whom the job serves"
+        );
+        assert_eq!(
+            store
+                .get(&job_id)
+                .await
+                .expect("reread")
+                .expect("job")
+                .spec
+                .requester,
+            Some(requester.clone()),
+            "store {index}"
+        );
+    }
+}
+
+/// The requester is part of a submission's replay identity: under one
+/// submission key, a replay for another requester, a carried one or none is
+/// a submission conflict in either store, and only the same requester
+/// replays the admitted job.
+#[tokio::test]
+async fn a_replay_for_another_requester_conflicts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let stores: Vec<Arc<dyn DetachedJobStore>> = vec![
+        Arc::new(MemoryDetachedJobStore::new()),
+        Arc::new(SqliteDetachedJobStore::open(temp.path().join("jobs.sqlite3")).expect("open")),
+    ];
+    for (index, store) in stores.into_iter().enumerate() {
+        let service = DetachedJobService::new(store);
+        let admitted = spec("requester-replay", RestartClass::Adoptable)
+            .with_requester(Some(meerkat_core::TurnRequester::direct(person("alice"))));
+        let first = service.submit(admitted.clone()).await.expect("submit");
+        for other in [
+            Some(meerkat_core::TurnRequester::direct(person("mallory"))),
+            Some(meerkat_core::TurnRequester::carried(person("alice"))),
+            None,
+        ] {
+            let error = service
+                .submit(admitted.clone().with_requester(other.clone()))
+                .await
+                .expect_err("a replay for another requester is another submission");
+            assert!(
+                matches!(error, meerkat_jobs::DetachedJobError::SubmissionConflict),
+                "store {index}, requester {other:?}: {error:?}"
+            );
+        }
+        let replay = service
+            .submit(admitted)
+            .await
+            .expect("the same requester replays");
+        assert!(replay.deduplicated, "store {index}");
+        assert_eq!(replay.job_id, first.job_id, "store {index}");
+    }
+}

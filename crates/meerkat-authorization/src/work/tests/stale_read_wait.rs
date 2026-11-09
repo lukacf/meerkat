@@ -38,11 +38,19 @@ impl GrantOwnerStore for HeldAppends {
         self.inner.load()
     }
 
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
-        self.inner.create(identity)
+    fn create(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
+        self.inner.create(guard, identity)
     }
 
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
         if self.holding.load(Ordering::SeqCst) {
             self.entered
                 .send(())
@@ -53,7 +61,7 @@ impl GrantOwnerStore for HeldAppends {
                 .recv()
                 .expect("the test releases the held append");
         }
-        self.inner.append(change)
+        self.inner.append(guard, change)
     }
 
     fn release(&self) {
@@ -130,6 +138,7 @@ impl World {
         let clock = Arc::new(ReleasingClock::default());
         let grants = Arc::new(
             LocalGrantAuthority::new_durable(
+                &meerkat_core::AdmissionGuard::none(),
                 LocalGrantConfiguration {
                     root: principal("grant-root"),
                     namespace: id("grants"),
@@ -144,6 +153,7 @@ impl World {
         let root = |name: &str, grantee: &str| {
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("grant-root"),
                     id(name),
                     principal(grantee),
@@ -181,6 +191,7 @@ impl World {
         std::thread::spawn(move || {
             grants
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("issuer"),
                     &parent,
                     id(child),

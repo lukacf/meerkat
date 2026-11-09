@@ -92,6 +92,98 @@ async def test_grant_tool_sends_a_tool_target_with_an_absolute_deadline() -> Non
 
 
 @pytest.mark.asyncio
+async def test_grant_tool_sends_a_scope_only_when_asked() -> None:
+    client, calls = fake_client({"tool_grants/grant": {"grant": GRANT}})
+
+    await client.grant_tool(
+        SESSION_ID, tool="deploy", duration_ms=60_000, scope="current_run"
+    )
+    await client.grant_tool(SESSION_ID, tool="deploy", duration_ms=60_000, scope="window")
+
+    assert calls == [
+        (
+            "tool_grants/grant",
+            {
+                "subject": SUBJECT,
+                "target": {"kind": "tool", "name": "deploy"},
+                "duration_ms": 60_000,
+                "scope": {"kind": "current_run"},
+            },
+        ),
+        (
+            "tool_grants/grant",
+            {
+                "subject": SUBJECT,
+                "target": {"kind": "tool", "name": "deploy"},
+                "duration_ms": 60_000,
+                "scope": {"kind": "window"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_grant_tool_refuses_a_scope_it_does_not_know() -> None:
+    client, calls = fake_client({})
+    with pytest.raises(ValueError):
+        await client.grant_tool(SESSION_ID, tool="deploy", duration_ms=1, scope="turn")
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_tool_grant_sends_its_target_duration_and_scope() -> None:
+    requested = {"grant": GRANT, "decision": {"decision_id": "decision:1"}}
+    client, calls = fake_client({"tool_grants/request": requested})
+
+    result = await client.request_tool_grant(
+        SESSION_ID,
+        family="shell",
+        duration_ms=600_000,
+        scope="current_run",
+        reason="rotate the logs",
+    )
+    await client.request_tool_grant(SESSION_ID, tool="deploy", duration_ms=60_000)
+
+    assert calls == [
+        (
+            "tool_grants/request",
+            {
+                "subject": SUBJECT,
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 600_000,
+                "scope": {"kind": "current_run"},
+                "reason": "rotate the logs",
+            },
+        ),
+        (
+            "tool_grants/request",
+            {
+                "subject": SUBJECT,
+                "target": {"kind": "tool", "name": "deploy"},
+                "duration_ms": 60_000,
+            },
+        ),
+    ]
+    assert result == requested
+
+
+@pytest.mark.asyncio
+async def test_request_tool_grant_needs_exactly_one_target_and_a_known_scope() -> None:
+    client, calls = fake_client({})
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(SESSION_ID, duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(
+            SESSION_ID, tool="deploy", family="shell", duration_ms=1
+        )
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(
+            SESSION_ID, tool="deploy", duration_ms=1, scope="turn"
+        )
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_grant_tool_needs_exactly_one_of_tool_and_family() -> None:
     client, calls = fake_client({})
     with pytest.raises(ValueError):
@@ -100,7 +192,33 @@ async def test_grant_tool_needs_exactly_one_of_tool_and_family() -> None:
         await client.grant_tool(
             SESSION_ID, tool="deploy", family="shell", duration_ms=1
         )
+    with pytest.raises(ValueError):
+        await client.grant_tool(
+            SESSION_ID, tool="deploy", mcp_server="tickets", duration_ms=1
+        )
+    with pytest.raises(ValueError):
+        await client.grant_tool(
+            SESSION_ID, tool="deploy", server_tools=["open_ticket"], duration_ms=1
+        )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_grant_tool_sends_an_mcp_server_target_narrowed_to_its_tools() -> None:
+    client, calls = fake_client({"tool_grants/grant": {"grant": GRANT}})
+
+    await client.grant_tool(SESSION_ID, mcp_server="tickets", duration_ms=60_000)
+    await client.grant_tool(
+        SESSION_ID,
+        mcp_server="tickets",
+        server_tools=["open_ticket"],
+        duration_ms=60_000,
+    )
+
+    assert [params["target"] for _, params in calls] == [
+        {"kind": "mcp_server", "server": "tickets"},
+        {"kind": "mcp_server", "server": "tickets", "tools": ["open_ticket"]},
+    ]
 
 
 @pytest.mark.asyncio
@@ -228,3 +346,88 @@ def test_a_streaming_create_refuses_a_grant_gate_on_an_older_server() -> None:
     # A streaming create that names no gate is unaffected.
     client.create_session_streaming("hello")
     client._dispatcher.subscribe_pending_stream.assert_called_once()
+
+
+MEMBER = {"kind": "identity", "mob_id": "mob-1", "identity": "worker-1"}
+
+
+@pytest.mark.asyncio
+async def test_the_grant_wrappers_name_a_member_identity_and_a_decision_ref() -> None:
+    client, calls = fake_client(
+        {
+            "tool_grants/grant": {"grant": GRANT},
+            "tool_grants/list": {"grants": []},
+            "tool_grants/audit": {"rows": []},
+        }
+    )
+
+    await client.grant_tool(
+        mob_id="mob-1",
+        identity="worker-1",
+        family="shell",
+        duration_ms=60_000,
+        decision_ref="approval-7",
+    )
+    await client.list_tool_grants(mob_id="mob-1", identity="worker-1", include_ended=True)
+    await client.tool_grant_audit(mob_id="mob-1", identity="worker-1", limit=10)
+
+    assert calls == [
+        (
+            "tool_grants/grant",
+            {
+                "subject": MEMBER,
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 60_000,
+                "decision_ref": "approval-7",
+            },
+        ),
+        ("tool_grants/list", {"subject": MEMBER, "include_ended": True}),
+        ("tool_grants/audit", {"subject": MEMBER, "limit": 10}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_grant_subject_is_a_session_or_a_member_never_both() -> None:
+    client, calls = fake_client({})
+    with pytest.raises(ValueError):
+        await client.grant_tool(family="shell", duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.grant_tool(mob_id="mob-1", family="shell", duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.list_tool_grants(
+            SESSION_ID, mob_id="mob-1", identity="worker-1"
+        )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_tool_grant_names_a_member_identity() -> None:
+    requested = {"grant": GRANT, "decision": {"decision_id": "decision:1"}}
+    client, calls = fake_client({"tool_grants/request": requested})
+
+    result = await client.request_tool_grant(
+        mob_id="mob-1",
+        identity="worker-1",
+        family="shell",
+        duration_ms=600_000,
+        scope="current_run",
+    )
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(family="shell", duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(
+            SESSION_ID, mob_id="mob-1", identity="worker-1", family="shell", duration_ms=1
+        )
+
+    assert calls == [
+        (
+            "tool_grants/request",
+            {
+                "subject": MEMBER,
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 600_000,
+                "scope": {"kind": "current_run"},
+            },
+        ),
+    ]
+    assert result == requested

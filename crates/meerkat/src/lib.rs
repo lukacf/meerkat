@@ -464,11 +464,13 @@ pub use factory::{
     GrantGateBuildError, LlmIdentityPreflightError, PreparedAgent, PreparedCatalogEntry,
     PreparedToolCatalog, PreparedToolSurface, decode_llm_client_override_from_service,
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
-    resolve_create_session_model, resolve_provider_catalog_default_model, tool_family_names,
+    resolve_create_session_model, resolve_grant_target, resolve_provider_catalog_default_model,
+    tool_family_names,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use factory::{
     McpAdapterComposeRefusal, McpAdapterComposer, McpAdapterCustody, McpAdapterCustodyClosed,
+    decode_mcp_auth_resolver_override_from_service, encode_mcp_auth_resolver_override_for_service,
 };
 // The untrusted MCP target resolvers stay exported, deprecated.
 #[cfg(not(target_arch = "wasm32"))]
@@ -500,7 +502,7 @@ pub use meerkat_providers::connector_login::{
     ConnectorClientAuthProfile, ConnectorClientAuthSource, ConnectorClientSecret,
     ConnectorLoginComplete, ConnectorLoginError, ConnectorLoginStart, ConnectorOAuthAuthority,
     ConnectorOAuthCallback, ConnectorOAuthTarget, ConnectorStrategies, ConnectorVerifiedAccount,
-    clear_connector_client_secret, load_connector_client_secret, save_connector_client_secret,
+    load_connector_client_secret,
 };
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]
@@ -628,8 +630,8 @@ pub use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 pub use meerkat_session::{
-    EphemeralSessionService, LiveSessionActorWitness, RuntimeContextAdmissionGuard, SessionAgent,
-    SessionAgentBuilder,
+    EphemeralSessionService, LiveSessionActorWitness, OwedCompactionSettlement,
+    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SettledCompactionProjection,
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that
 // refuses agent construction, composed with the persistent service to drive

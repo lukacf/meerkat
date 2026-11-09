@@ -9,14 +9,20 @@
 //! save writes `<stem>.json.tmp` and renames it onto the target.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
+//!
+//! Every write is fenced: `save` and `clear` refuse a guard that does not
+//! cover the credential fence C(r), `<root>/<realm_id>/admission.lock`, of
+//! the written credential's realm, before any byte is written
+//! ([`TokenStoreError::AdmissionFence`]).
 
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
+use meerkat_core::AdmissionGuard;
 use meerkat_core::auth::token_store::TokenStoreObservation;
 
-use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
+use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError, require_credential_fence};
 
 pub struct FileTokenStore {
     root: PathBuf,
@@ -39,6 +45,46 @@ impl FileTokenStore {
         let stem = key.storage_stem();
         self.realm_dir(key.realm().as_str())
             .join(format!("{stem}.json"))
+    }
+
+    /// Refuse a write `guard` does not cover: the fence of `key`'s realm
+    /// under this store's root.
+    pub(crate) fn require_fence(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
+        require_credential_fence(guard, Some(&self.root), key)
+    }
+
+    /// Write `key`'s file, for a caller that already required its fence.
+    pub(crate) async fn write(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        let dir = self.realm_dir(key.realm().as_str());
+        create_owner_only_dir(&dir).await?;
+        let final_path = self.path_for(key);
+        let tmp_path = final_path.with_extension("json.tmp");
+
+        let mut bytes = serde_json::to_vec_pretty(tokens)?;
+        bytes.push(b'\n');
+
+        write_file_with_mode(&tmp_path, &bytes).await?;
+        tokio::fs::rename(&tmp_path, &final_path).await?;
+        Ok(())
+    }
+
+    /// Remove `key`'s file, for a caller that already required its fence. A
+    /// missing file is already clean.
+    pub(crate) async fn remove(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+        let path = self.path_for(key);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(TokenStoreError::from(e)),
+        }
     }
 
     /// Remove `key`'s file synchronously, for cleanup that runs on a thread
@@ -71,27 +117,19 @@ impl TokenStore for FileTokenStore {
         Ok(Some(tokens))
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        let dir = self.realm_dir(key.realm().as_str());
-        create_owner_only_dir(&dir).await?;
-        let final_path = self.path_for(key);
-        let tmp_path = final_path.with_extension("json.tmp");
-
-        let mut bytes = serde_json::to_vec_pretty(tokens)?;
-        bytes.push(b'\n');
-
-        write_file_with_mode(&tmp_path, &bytes).await?;
-        tokio::fs::rename(&tmp_path, &final_path).await?;
-        Ok(())
+    async fn save(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        self.require_fence(guard, key)?;
+        self.write(key, tokens).await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        let path = self.path_for(key);
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(TokenStoreError::from(e)),
-        }
+    async fn clear(&self, guard: &AdmissionGuard, key: &TokenKey) -> Result<(), TokenStoreError> {
+        self.require_fence(guard, key)?;
+        self.remove(key).await
     }
 
     /// A file read never raises operating-system UI: status reads the file.
@@ -282,16 +320,27 @@ mod tests {
         }
     }
 
+    /// A guard over the credential fence of `realm` under `root`, as the
+    /// coordinator hands its closures.
+    fn covering(root: &Path, realm: &str) -> std::sync::Arc<AdmissionGuard> {
+        AdmissionGuard::try_acquire(vec![
+            meerkat_core::AdmissionFence::credentials(root, &RealmId::parse(realm).unwrap())
+                .unwrap(),
+        ])
+        .unwrap()
+    }
+
     // RCT-19: the on-disk layout is keyed by the OWNING realm.
     #[tokio::test]
     async fn file_token_store_path_for_uses_owning_realm() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileTokenStore::new(dir.path());
+        let guard = covering(dir.path(), "global");
         let key = TokenKey::new(
             RealmId::parse("global").unwrap(),
             BindingId::parse("anthropic").unwrap(),
         );
-        store.save(&key, &token("sek")).await.unwrap();
+        store.save(&guard, &key, &token("sek")).await.unwrap();
         let expected = dir.path().join("global").join("anthropic.json");
         assert!(
             expected.exists(),
@@ -313,8 +362,22 @@ mod tests {
             BindingId::parse("account").unwrap(),
         );
 
-        store.save(&account_key, &token("github")).await.unwrap();
-        store.save(&binding_key, &token("binding")).await.unwrap();
+        store
+            .save(
+                &covering(dir.path(), "global"),
+                &account_key,
+                &token("github"),
+            )
+            .await
+            .unwrap();
+        store
+            .save(
+                &covering(dir.path(), "global"),
+                &binding_key,
+                &token("binding"),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(
             store
@@ -351,11 +414,12 @@ mod tests {
             BindingId::parse("connector-client").unwrap(),
             Some(meerkat_core::connection::ProfileId::parse("desktop").unwrap()),
         );
+        let guard = covering(dir.path(), "global");
         store
-            .save(&secret_key, &token("client-secret"))
+            .save(&guard, &secret_key, &token("client-secret"))
             .await
             .unwrap();
-        store.save(&legacy, &token("legacy")).await.unwrap();
+        store.save(&guard, &legacy, &token("legacy")).await.unwrap();
         assert_eq!(
             store
                 .load(&legacy)
@@ -377,11 +441,15 @@ mod tests {
         let binding = BindingId::parse("remote-AbC123dEf456GhI7").unwrap();
         let client_key = TokenKey::mcp_oauth_client(realm.clone(), binding.clone());
         let credential_key = TokenKey::new(realm, binding);
+        let guard = covering(dir.path(), "mcp-oauth");
         store
-            .save(&client_key, &token("client-secret"))
+            .save(&guard, &client_key, &token("client-secret"))
             .await
             .unwrap();
-        store.save(&credential_key, &token("access")).await.unwrap();
+        store
+            .save(&guard, &credential_key, &token("access"))
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .load(&client_key)
@@ -421,7 +489,14 @@ mod tests {
         let key = TokenKey::from_auth_binding(&owner);
         assert_eq!(key.realm().as_str(), "global");
 
-        store.save(&key, &token("owner-secret")).await.unwrap();
+        store
+            .save(
+                &covering(dir.path(), "global"),
+                &key,
+                &token("owner-secret"),
+            )
+            .await
+            .unwrap();
         let loaded = store.load(&key).await.unwrap().expect("found at owner");
         assert_eq!(loaded.primary_secret.as_deref(), Some("owner-secret"));
 
@@ -466,8 +541,11 @@ mod tests {
                         RealmId::parse("global").unwrap(),
                         BindingId::parse("anthropic").unwrap(),
                     );
+                    // The save's guard takes the realm's credential fence,
+                    // whose acquisition creates the realm directory first.
+                    let guard = covering(&root, "global");
                     runtime
-                        .block_on(store.save(&key, &token("sek")))
+                        .block_on(store.save(&guard, &key, &token("sek")))
                         .expect("the save");
                     let realm_dir = root.join("global");
                     assert_eq!(
@@ -498,7 +576,11 @@ mod tests {
                 RealmId::parse("global").unwrap(),
                 BindingId::parse("anthropic").unwrap(),
             );
-            store.save(&key, &token("sek")).await.expect("the save");
+            let guard = covering(dir.path(), "global");
+            store
+                .save(&guard, &key, &token("sek"))
+                .await
+                .expect("the save");
             assert_eq!(mode_bits(&realm_dir), 0o750);
             assert_eq!(mode_bits(&realm_dir.join("anthropic.json")), 0o600);
         }

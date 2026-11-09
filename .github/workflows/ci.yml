@@ -1062,10 +1062,15 @@ jobs:
     runs-on: ubuntu-24.04
     # On a pull request a shard past about 17.5 minutes fails the execution
     # budget anyway (CI_MAX_EXEC_SECONDS, 1080 s, less about 30 s of change
-    # classification); 20 leaves headroom over a shard's at most about 13
-    # minutes (776 s, the longest shard of this assignment on the 0.9.9
-    # release runs).
-    timeout-minutes: 20
+    # classification), but a budget failure is reported while a cancelled
+    # shard is a failed lane. A shard is sized to about 13 minutes hosted
+    # (776 s, the longest shard of this assignment on the 0.9.9 release
+    # runs), but one audit cannot be split across shards: in 0.9.11
+    # audits-s takes 1109 s locally with 4 TLC workers, 756 s of it the
+    # AuthMachine source-credential publication audit alone, so about
+    # 2000-2400 s at the 1.8-2.15x hosted factor of its run class, past 30
+    # minutes. 60 leaves headroom.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -1101,9 +1106,16 @@ jobs:
     # its 170 test targets, and took 39m41s of its 40 minutes on main push
     # 41608949055, where meerkat-mob's change also left the chain below it
     # uncached; meerkat-rpc's row took 29-37 minutes on recent pushes
-    # (37m26s on main push 41217791146). A push gets 60 minutes, as the
-    # feature-check rows do; a pull request keeps 40.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
+    # (37m26s on main push 41217791146). Connect's row needs more cold: on
+    # main push 42497143053 and release-branch push 42321043843 it reached
+    # meerkat-connect after 40 minutes and was cancelled at the old 60, and
+    # meerkat-connect alone takes 28 minutes (40m55s for the whole row with
+    # its dependencies cached, on that push's second attempt), so about 70
+    # minutes cold, as after a release version bump. A push gets 120 minutes.
+    # A pull request that invalidates meerkat-mob's build leaves the products'
+    # rows to the push, and its own rows took at most 18m38s cold (pull
+    # request run 42485928170); it gets 60.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1185,7 +1197,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}
@@ -1344,6 +1356,20 @@ jobs:
           # its standard library only, and refuse to guess an interpreter.
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -1662,10 +1688,11 @@ jobs:
     # cold. On dispatch 39211283488, whose cache is read-only so every lane
     # compiled alone, the rpc-configured-turn-limit row was cancelled at 30
     # minutes with meerkat-rpc still compiling (it started 22m44s in), and
-    # gpt-live-replay took 28m52s there and 29m29s on main push 39213218053.
-    # A push or dispatch gets 50 minutes; a pull request runs only the suites
+    # gpt-live-replay took 28m52s there and 29m29s on main push 39213218053,
+    # then 37m44s and 40m28s on main pushes 42497143053 and 42463179911.
+    # A push or dispatch gets 70 minutes; a pull request runs only the suites
     # outside the chain and keeps 30.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 50 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 70 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.integration_matrix) }}
@@ -1770,10 +1797,13 @@ jobs:
     if: ${{ needs.changes.result == 'success' && needs.changes.outputs.closure_test_first_count != '0' }}
     runs-on: ubuntu-24.04
     # A cold row (no reusable units, as after a release version bump) builds
-    # for about 22 min before its tests run. The nested-Cargo canaries'
+    # for about 22 min before its tests run; Connect's rows build longer:
+    # tests connect 1/2 took 54m17s on main push 42497143053, and both
+    # Connect rows were cancelled at the old 60 minutes on release-branch
+    # push 42321043843. The nested-Cargo canaries'
     # binary has rows of its own, one count partition per canary, so the
     # canaries run side by side on separate runners instead of one at a time.
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_test_matrix) }}
@@ -1894,7 +1924,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.result == 'success' && needs.changes.outputs.closure_test_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_test_rest_matrix) }}
@@ -1997,7 +2027,16 @@ jobs:
     # branch can measure the main lanes before it merges.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_unit_first_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Connect's rows compile the longest: cold, as after a release version
+    # bump, the connect[console] and toolkit-mobkit[native-host] rows were
+    # cancelled at the old 60 minutes on main push 42497143053 and
+    # release-branch push 42321043843. On the first they reached
+    # meerkat-connect after 50 minutes (native-host), and meerkat-connect's
+    # test build alone took 42-44 minutes with every dependency cached (the
+    # second attempt of 42321043843: 47m40s and 52m49s for the rows' steps),
+    # so about 100-105 minutes cold. The hung-test kill of the ci-pr nextest
+    # profile bounds the test run; this cap bounds the build.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.main_unit_shard_matrix) }}
@@ -2085,6 +2124,20 @@ jobs:
           # its standard library only, and refuse to guess an interpreter.
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -2122,7 +2175,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.main_unit_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.main_unit_rest_shard_matrix) }}
@@ -2203,6 +2256,20 @@ jobs:
           # its standard library only, and refuse to guess an interpreter.
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -2408,9 +2475,12 @@ jobs:
     # scripts/ci-cargo-lanes.mjs), in parallel, with the first wave: as one
     # job that checked the parts in turn it was a workspace push's longest
     # job (51m49s on main push 41608949055) and waited for the stagger job.
+    # Connect's part is the longest: 52m56s on release-branch push
+    # 42321043843 and 59m21s of the old 60 on main push 42497143053. It
+    # gets 90 minutes, on a pull request too (whose plan holds no part).
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}
@@ -2786,7 +2856,11 @@ jobs:
     # the Rust build.
     if: ${{ (github.event_name == 'push' && (needs.changes.outputs.core_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A push builds meerkat-rpc first, cold after a change below it, as
+    # after a release version bump: 34m55s on main push 42463179911, and
+    # 38m12s on main push 42497143053, which the old 40 minutes cancelled
+    # 32 s into the suites (the whole job 3m41s-4m31s warm). 75 minutes.
+    timeout-minutes: 75
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2900,8 +2974,10 @@ jobs:
     # caps it first: run 38931641220's cold lane took 842 s. A push or a
     # dispatch builds the wasm cold after a change below the runtime: 22m15s
     # on dispatch 39211283488 and 22m23s on main push 39213218053 (wasm build
-    # 19m21s), so they get 35 minutes, about 55% above those.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 35 }}
+    # 19m21s), and 29m07s and 30m24s on main pushes 42497143053 and
+    # 42463179911 (wasm build 25m54s and 27m13s), so they get 50 minutes,
+    # about 65% above those.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 50 }}
     env:
       RUSTC_WRAPPER: sccache
       # The suites need a working runtime, not a size-optimized one: skip
@@ -3049,7 +3125,9 @@ jobs:
     # opt-level 0 on pull request 39209102985).
     if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true' && needs.changes.outputs.core_paths_changed == 'true') || needs.changes.outputs.example_web_wasm == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Cold on a push: 17m44s and 18m46s of the old 20 minutes on main pushes
+    # 42418024252 and 42497143053.
+    timeout-minutes: 40
     env:
       RUSTC_WRAPPER: sccache
       CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
@@ -3238,12 +3316,19 @@ jobs:
           retention-days: 7
 
   connect-checks:
-    name: Connect packaging, Console panel and docs
+    name: Connect packaging, host adapters, SDK, Console panel and docs
     needs: [changes, stagger]
-    # Meerkat Connect's non-Rust checks (its former checks.yml): the
-    # packaging scripts' unit tests, the docs check and the embedded Console
-    # panel's Node test. Every change under connect/ selects them (the
-    # plan's product lane connect_checks).
+    # Meerkat Connect's non-Rust checks (its former checks.yml): the build
+    # receipt, packaging, library release, candidate and installed-acceptance
+    # script tests, the product and starter preparation tests, the immutable
+    # preparation and product readback tests, the hosted MCP callback
+    # tests, the docs check and the TypeScript SDK suite with the embedded
+    # Console panel test. None of them builds native code or needs an
+    # account. Every change under connect/ selects them (the plan's product
+    # lane connect_checks). Connect's standalone repo-cargo wrapper test is
+    # not run here: the monorepo builds with the root scripts/repo-cargo.
+    # Meta's Python SDK comes from this tree (../meta/sdk/python), not from
+    # a meerkat-meta release on PyPI.
     if: ${{ needs.changes.outputs.connect_checks == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -3263,27 +3348,89 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check inert package construction and validation
+      - name: Check build receipts and qualification cleanup without native builds
         run: >-
-          python3 -m unittest -v
-          scripts.test_package_connect_resources
-          scripts.test_assemble_connect_product
-          scripts.test_release_payload_privacy_scan
+          python3 -B -m unittest -v
+          scripts.test_verify_local
+          scripts.test_qualify_connect_cli
+
+      - name: Check historical artifact bindings without native builds
+        run: >-
+          python3 -B -m unittest discover -s scripts/fixtures
+          -p 'test_historical_g_current_binding.py' -v
+
+      - name: Check inert package construction and validation
+        run: |
+          python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
+          python3 -B -m unittest -v scripts.test_assemble_connect_product
+          python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+          python3 -B -m unittest -v scripts.test_release_payload_privacy_scan
+
+      - name: Install candidate and preparation test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0
+
+      - name: Check candidate producer and publication contracts without native builds
+        run: >-
+          python3 -B -m pytest -q -p no:cacheprovider
+          scripts/test_connect_candidate_cli.py
+          scripts/test_connect_candidate_publication.py
 
       - name: Check documentation
         run: python3 scripts/check-docs.py
+
+      - name: Check installed acceptance contracts without accounts or native builds
+        # The shared workflow controls import Connect's Python SDK
+        # (meerkat_toolkit) and Meta's (meerkat_meta), both from this tree.
+        env:
+          PYTHONPATH: scripts:sdk/python/src:../meta/sdk/python
+        run: >-
+          python3 -B -m unittest -v
+          scripts.test_verify_installed_github
+          scripts.test_native_fixture_stack
+          scripts.test_console_reopen_status
+          scripts.test_verify_supplied_shared_workflow.HelperlessRestoreControls
+          scripts.test_verify_supplied_shared_workflow.ColdSharedRestoreControls
+          scripts.test_verify_supplied_shared_workflow.BothSelectedSuccessControls
+
+      - name: Check product and starter preparation
+        run: |
+          python3 -B -m unittest discover -s sdk/consumer-setup/tests -p 'test_start.py'
+          python3 -B -m unittest discover -s scripts/tests -p 'test_export_setup_starter.py'
+
+      - name: Check immutable preparation and product readback
+        # The official GitHub readback of the selected-reads profile is left
+        # out by name: its fixture bundle is the macOS arm64 build, which the
+        # official installer refuses on this Linux runner ("official setup
+        # supports macOS arm64 only"). The two Enterprise readbacks (Linux
+        # x86_64 bundles) run.
+        env:
+          PYTHONPATH: sdk/consumer-setup/tests
+        run: >-
+          python3 -B -m unittest -v
+          test_product_local_session test_immutable_release
+          test_product_official_readback.OfficialProductTests.test_enterprise_readback_preserves_selected_host_profile_and_operation_subset
+          test_product_official_readback.OfficialProductTests.test_enterprise_identity_readback_preserves_protected_account_selection
+
+      - name: Check hosted MCP callback transport and lifecycle
+        env:
+          PYTHONPATH: sdk/python/src:sdk/python/tests
+        run: >-
+          python3 -m unittest -v
+          test_mcp_auth_https test_mcp_auth_custody
+          test_mcp_auth_host test_hosted_mcp_endpoint_adversarial
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
 
-      - name: Install locked panel test dependencies
+      - name: Install locked SDK and panel test dependencies
         working-directory: connect/sdk/typescript
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Test the embedded Console panel
-        run: node --test sdk/typescript/tests/console-setup-panel.test.mjs
+      - name: Test the TypeScript SDK and embedded Console panel
+        working-directory: connect/sdk/typescript
+        run: npm test
 
   gate:
     name: CI gate

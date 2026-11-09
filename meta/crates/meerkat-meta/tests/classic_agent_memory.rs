@@ -190,7 +190,7 @@ async fn seed_identity_record(
                 evidence: vec![],
                 verification: None,
             },
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("seed memory record");
@@ -787,7 +787,7 @@ async fn builder_full_memory_stack_installs_engines_and_panel() {
                 evidence: Vec::new(),
                 verification: None,
             },
-            meerkat_meta::memory::records::MemoryAuthor::Operator,
+            meerkat_meta::memory::records::MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("write through the stack store");
@@ -832,4 +832,225 @@ async fn gate_still_rejects_invalid_memory_combinations() {
     )
     .await;
     assert!(err.contains("roster_provider"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// A console side chat's memory stays its own: its `memory` writes land in the
+// side chat's own identity scope, never in the scope of the agent it was
+// forked from, whose per-spawn tools it inherits.
+// ---------------------------------------------------------------------------
+
+/// The one definition of the normalized-provider-accounting contract every
+/// Meta LLM double must satisfy.
+#[path = "support/llm_usage.rs"]
+mod llm_usage;
+
+/// Turn-driven workers whose sessions persist, as a durable fork needs.
+fn side_chat_memory_definition() -> MobDefinition {
+    MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "classic-memory-side-chat-{}"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+"#,
+        NEXT_TEST_MOB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+    .expect("parse side chat memory definition")
+}
+
+const REMEMBER_ASK: &str = "Please remember the code word.";
+const SIDE_NOTE_TITLE: &str = "Side chat note";
+
+/// LLM stub: a turn whose newest message asks it to remember calls the
+/// `memory` tool once; every other request is answered in text.
+#[derive(Clone, Default)]
+struct RememberingClient;
+
+impl LlmClient for RememberingClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let asks = request
+            .messages
+            .last()
+            .and_then(|message| serde_json::to_string(message).ok())
+            .is_some_and(|message| message.contains(REMEMBER_ASK));
+        let provider = LlmClient::provider(self);
+        let [tool_usage, tool_done] =
+            llm_usage::usage_then_done(request, provider, StopReason::ToolUse);
+        let [text_usage, text_done] =
+            llm_usage::usage_then_done(request, provider, StopReason::EndTurn);
+        Box::pin(async_stream::stream! {
+            if asks {
+                yield Ok(LlmEvent::ToolCallComplete {
+                    id: "side-chat-memory-call".to_string(),
+                    name: "memory".to_string(),
+                    args: json!({
+                        "action": "remember",
+                        "kind": "fact",
+                        "title": SIDE_NOTE_TITLE,
+                        "description": "a note made in a side chat",
+                        "body": "The code word is heron.",
+                        "tags": [],
+                    }),
+                    meta: None,
+                });
+                yield Ok(tool_usage);
+                yield Ok(tool_done);
+            } else {
+                yield Ok(LlmEvent::TextDelta { delta: "noted".to_string(), meta: None });
+                yield Ok(text_usage);
+                yield Ok(text_done);
+            }
+        })
+    }
+
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// The titles of the records `identity`'s scope holds in `realm`.
+async fn identity_titles(
+    store: &SqliteAgentMemoryStore,
+    realm: &str,
+    identity: &str,
+) -> Vec<String> {
+    store
+        .manifest(
+            &[MemoryScope::Identity {
+                realm: realm.to_string(),
+                identity: identity.to_string(),
+            }],
+            meerkat_meta::ManifestTier::Full,
+        )
+        .await
+        .expect("manifest")
+        .into_iter()
+        .map(|record| record.title)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn side_chat_memory_writes_never_reach_the_source_identity() {
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let state_dir = tempfile::tempdir().expect("state dir");
+    let store = SqliteAgentMemoryStore::open(memory_dir.path()).expect("sqlite store");
+    let config = AgentMemoryConfig::default();
+    let realm = config.realm.clone();
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .definition(side_chat_memory_definition())
+            .persistent_state(state_dir.path())
+            .agent_memory(Arc::new(store.clone()), config)
+            .default_llm_client(Arc::new(RememberingClient))
+            .build(),
+    )
+    .await
+    .expect("classic runtime with agent memory and persistent sessions");
+
+    runtime
+        .spawn_many(vec![SpawnMemberSpec::from_wire(
+            "worker".to_string(),
+            "alpha".to_string(),
+            None,
+            None,
+            None,
+        )])
+        .await
+        .expect("spawn the source");
+    let source = runtime
+        .mob_handle()
+        .member(&meerkat_mob::AgentIdentity::from("alpha"))
+        .await
+        .expect("the source's handle");
+    source
+        .start_turn(
+            meerkat_core::types::ContentInput::Text("hello".to_string()),
+            meerkat_core::types::HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await
+        .expect("the source's turn starts")
+        .wait()
+        .await
+        .expect("the source's turn completes");
+
+    let app = runtime.build_reference_app_router(decision_state());
+    let mut forked = Value::Null;
+    for _ in 0..50 {
+        forked = rpc(
+            &app,
+            "meta/fork_member",
+            json!({ "source_member_id": "alpha", "agent_identity": "alpha-side" }),
+        )
+        .await;
+        let busy = forked["error"]["data"]["cause"] == json!("running");
+        if !busy {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        forked["error"].is_null(),
+        "the side chat is forked: {forked:#}"
+    );
+
+    let side_chat = runtime
+        .mob_handle()
+        .member(&meerkat_mob::AgentIdentity::from("alpha-side"))
+        .await
+        .expect("the side chat's handle");
+    side_chat
+        .start_turn(
+            meerkat_core::types::ContentInput::Text(REMEMBER_ASK.to_string()),
+            meerkat_core::types::HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await
+        .expect("the side chat's turn starts")
+        .wait()
+        .await
+        .expect("the side chat's turn completes");
+
+    assert!(
+        !identity_titles(&store, &realm, "alpha")
+            .await
+            .contains(&SIDE_NOTE_TITLE.to_string()),
+        "a side chat's memory write never reaches the agent it was forked from"
+    );
+    assert!(
+        identity_titles(&store, &realm, "alpha-side")
+            .await
+            .contains(&SIDE_NOTE_TITLE.to_string()),
+        "a side chat's memory write lands in its own scope"
+    );
+    runtime.mob_handle().stop().await.expect("stop");
 }

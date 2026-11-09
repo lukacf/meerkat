@@ -304,3 +304,21 @@ fn final_status_disclosure_preserves_unavailable_without_authorizing_a_response(
         );
     }
 }
+
+#[test]
+fn active_task_status_preserves_unavailable_without_relaxing_denial() {
+    use toolkit_mobkit::private_originals::PrivateOriginalError;
+    // These are the current-task errors from the mounted status GET. An
+    // unavailable observation remains a failed read, never visibility or an
+    // approval. Actual denial and conflicting custody remain forbidden.
+    for (error, expected) in [
+        (
+            PrivateOriginalError::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (PrivateOriginalError::Denied, StatusCode::FORBIDDEN),
+        (PrivateOriginalError::Conflict, StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(http::task_status_failure(error), expected);
+    }
+}

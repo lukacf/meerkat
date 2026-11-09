@@ -10,6 +10,19 @@
     "./": [
       {
         "package": "meerkat",
+        "target": "test:admission_fence_sites",
+        "scope": "target",
+        "tests": [
+          "bound_store_write_primitives_all_take_an_admission_guard",
+          "fence_acquisition_sites_are_exactly_the_listed_outermost_entries",
+          "raw_held_writes_are_called_only_from_config_runtime"
+        ],
+        "sources": [
+          "crates/meerkat/tests/admission_fence_sites.rs"
+        ]
+      },
+      {
+        "package": "meerkat",
         "target": "test:host_launch_sites",
         "scope": "target",
         "tests": [
@@ -741,13 +754,167 @@
         ]
       }
     ],
+    "connect/crates/toolkit-package/tests/fixtures/python-install/activation.json": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/service_install/read_only/selected_python/tests.rs"
+        ]
+      }
+    ],
     "connect/crates/toolkit-package/tests/fixtures/python-install/package.json": [
       {
         "package": "meerkat-connect",
         "target": "lib",
         "scope": "target",
         "sources": [
+          "connect/crates/meerkat-connect/src/service_install/read_only/selected_python/tests.rs",
           "connect/crates/meerkat-connect/src/stdio_tests.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_driver/late_adoption_tests.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/current_g_receiptful_predecessor.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/current_g_receiptful_capture.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/current_g_receiptful_recovery.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/current_g_receiptful_recovery.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/r5_canonical_g_predecessor.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/canonical_g_capture.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/r5_canonical_g_recovery.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/canonical_g_recovery.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/r5_historical_g_recovery.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/historical_g_recovery.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/r5_routable_predecessor.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/consent_transfer_tests/cold_capture.rs"
+        ]
+      }
+    ],
+    "connect/scripts/fixtures/registered_consent_transfer.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/application_installed/consent_transfer_tests.rs"
+        ]
+      }
+    ],
+    "connect/sdk/consumer-setup/": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/resources/shared_setup/attempt/tests.rs",
+          "connect/crates/meerkat-connect/src/resources/shared_setup/native_case.rs",
+          "connect/crates/meerkat-connect/src/resources/tests/shared_preparation_startup.rs"
+        ]
+      }
+    ],
+    "connect/sdk/consumer-setup/local_session.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/resources/shared_setup/native_case.rs",
+          "connect/crates/meerkat-connect/src/resources/shared_setup/physical/tests.rs"
+        ]
+      }
+    ],
+    "connect/sdk/consumer-setup/tests/physical_fence_process.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/resources/shared_setup/physical/tests.rs"
+        ]
+      }
+    ],
+    "connect/sdk/consumer-setup/tests/shared_missing_member.py": [
+      {
+        "package": "meerkat-toolkit",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-toolkit/src/setup/tests/shared_preparation_missing.rs"
+        ]
+      }
+    ],
+    "connect/sdk/consumer-setup/tests/shared_native_owner.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/resources/shared_setup/native_case.rs"
+        ]
+      }
+    ],
+    "connect/sdk/consumer-setup/tests/shared_preparation_startup.py": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/resources/tests/shared_preparation_startup.rs"
         ]
       }
     ],
@@ -800,6 +967,16 @@
         ],
         "sources": [
           "connect/crates/toolkit-package/tests/frontend_catalog_resource.rs"
+        ]
+      }
+    ],
+    "connect/sdk/python/src/meerkat_toolkit/member_classes.py": [
+      {
+        "package": "toolkit-mobkit",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/toolkit-mobkit/src/private_host.rs"
         ]
       }
     ],

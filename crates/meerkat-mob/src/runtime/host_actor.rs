@@ -73,11 +73,11 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeMaterializedResponse, BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec,
     BridgePeerTrustPayload, BridgePromptContextFork, BridgeProtocolVersion, BridgeRejectionCause,
     BridgeReleasePayload, BridgeReply, BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck,
-    BridgeTurnOutcomeRecord, HOST_FEATURE_ADOPTED_FIRST_TURN, HOST_FEATURE_PROMPT_CONTEXT_FORK,
-    MaterializeLaunchMode, MaterializeLaunchOutcome,
-    MemberSessionDisposal as WireMemberSessionDisposal, RuntimeReleaseCause, WireFlowTurnOutcome,
-    WireHostBindingDescriptor, WireHostBindingDescriptorKind, canonicalize_bridge_address,
-    decode_bridge_command,
+    BridgeTurnOutcomeRecord, HOST_FEATURE_ADOPTED_FIRST_TURN,
+    HOST_FEATURE_INSTRUCTION_TARGET_BIRTH, HOST_FEATURE_PROMPT_CONTEXT_FORK, MaterializeLaunchMode,
+    MaterializeLaunchOutcome, MemberSessionDisposal as WireMemberSessionDisposal,
+    RuntimeReleaseCause, WireFlowTurnOutcome, WireHostBindingDescriptor,
+    WireHostBindingDescriptorKind, canonicalize_bridge_address, decode_bridge_command,
 };
 use meerkat_contracts::wire::{
     PortableMemberSpec, WireAuthBindingRef, portable_member_spec_digest,
@@ -128,6 +128,8 @@ use meerkat_runtime::meerkat_machine::PeerEndpointStageError;
 pub use crate::runtime::host_materialize::HostMemberSubstrate;
 
 use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
+
+mod instruction_targets;
 
 async fn commit_revived_member_publication(
     outcome: &mut RevivedMemberOutcome,
@@ -6134,6 +6136,11 @@ pub struct MobHostActor {
     /// the first uncertain write's own error, which every later refusal
     /// names.
     durable_uncertainty_fail_stop: UncertainDurabilityFailStop<MobHostActorError>,
+    /// A placed member's operator-instruction writes (V7
+    /// `RecordMemberInstructionTarget`, `ReleaseMemberInstructionTarget`):
+    /// admitted on the responder turn, served off it, one at a time per
+    /// member session.
+    instruction_writes: instruction_targets::InstructionWriteLanes,
 }
 
 /// Prepare one validated durable snapshot, publish the initial descriptor,
@@ -6310,6 +6317,7 @@ pub async fn spawn_mob_host_actor(
         generation_start_seqs,
         registered_member_incarnations: HashMap::new(),
         durable_uncertainty_fail_stop: Default::default(),
+        instruction_writes: Default::default(),
     };
 
     // COMMIT: reserve the exact owner + identity without making it resolvable,
@@ -6411,9 +6419,19 @@ async fn run_host_responder(
     mut observation_ack_rx: mpsc::Receiver<HostTurnOutcomeAckRequest>,
     forked_participant_sweep_interval: Duration,
 ) {
+    use futures::FutureExt as _;
+    use futures::StreamExt as _;
+
     let notify = actor.host_runtime.inbox_notify();
     let mut forked_participant_tick = tokio::time::interval(forked_participant_sweep_interval);
     forked_participant_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A placed member's operator-instruction writes, served off the
+    // responder turn: each answers its request when it finishes, and the
+    // ones still running when the responder stops are dropped (a write a
+    // member session had already taken still lands; the controller retries
+    // the rest).
+    let mut instruction_writes =
+        futures::stream::FuturesUnordered::<instruction_targets::InstructionWriteFuture>::new();
     'responder: loop {
         let notified = notify.notified();
         tokio::pin!(notified);
@@ -6465,6 +6483,10 @@ async fn run_host_responder(
                     continue;
                 }
                 () = &mut notified => continue,
+                Some(done) = instruction_writes.next(), if !instruction_writes.is_empty() => {
+                    actor.finish_instruction_write(done).await;
+                    continue;
+                }
                 request = observation_pending_rx.recv() => {
                     match request {
                         Some(request) => {
@@ -6499,6 +6521,18 @@ async fn run_host_responder(
         }
         for candidate in &candidates {
             actor.serve_candidate(candidate).await;
+        }
+        // The operator-instruction writes this batch admitted run off the
+        // responder turn; answer the ones that already finished.
+        instruction_writes.extend(
+            actor
+                .instruction_writes
+                .take_admitted()
+                .into_iter()
+                .map(instruction_targets::AdmittedInstructionWrite::run),
+        );
+        while let Some(Some(done)) = instruction_writes.next().now_or_never() {
+            actor.finish_instruction_write(done).await;
         }
         // Residency may have changed (materialize / release / revoke):
         // reconcile the observation projection + journal registrations.
@@ -7456,6 +7490,14 @@ impl MobHostActor {
             BridgeCommand::HostFeatures(payload) => {
                 self.serve_host_features_candidate(candidate, payload).await;
             }
+            BridgeCommand::RecordMemberInstructionTarget(payload) => {
+                self.serve_record_member_instruction_target(candidate, payload)
+                    .await;
+            }
+            BridgeCommand::ReleaseMemberInstructionTarget(payload) => {
+                self.serve_release_member_instruction_target(candidate, payload)
+                    .await;
+            }
             BridgeCommand::IssueHostBindingDescriptor(payload) => {
                 self.serve_issue_host_binding_descriptor_candidate(candidate, payload)
                     .await;
@@ -8327,6 +8369,33 @@ impl MobHostActor {
             return;
         }
 
+        // V7: an operator-instruction snapshot the Fresh launch carries (the
+        // decode refused it on any other launch) is recorded in the session
+        // it mints. A governed member host records none without prepared
+        // authorization, as it refuses a record, and does not list the
+        // feature: a carried one is refused before any effect.
+        if payload.instruction_target.is_some()
+            && self.materializer.as_ref().is_some_and(|materializer| {
+                materializer
+                    .substrate()
+                    .runtime_adapter
+                    .has_native_work_authorization_host()
+            })
+        {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::InstructionTargetRefused {
+                    code: meerkat_core::InstructionSetErrorCode::PreparedAuthorizationRequired,
+                },
+                "materialize member rejected: the member host's runtime is governed, so the \
+                 member cannot be born with its operator-instruction snapshot (it needs \
+                 prepared authorization, which this release does not provide)",
+                Some(reply_address.as_str()),
+            )
+            .await;
+            return;
+        }
+
         let member_key = MemberKey::new(
             AuthorityMobId::from(payload.spec.mob_id.as_str()),
             AuthorityAgentIdentity::from(payload.spec.agent_identity.as_str()),
@@ -8764,6 +8833,14 @@ impl MobHostActor {
                                 seed,
                                 source: &fork.source,
                             }),
+                        // The member's mob and identity own the snapshot:
+                        // the digest-covered spec names them.
+                        instruction_target: payload.instruction_target.clone().map(|target| {
+                            target.into_record(
+                                payload.spec.mob_id.clone(),
+                                payload.spec.agent_identity.clone(),
+                            )
+                        }),
                     },
                 )
                 .await
@@ -10469,13 +10546,25 @@ impl MobHostActor {
         }
         // A prompt-context fork child and a resumed member are member
         // builds: only a host composed with a member substrate serves them.
-        let features = if self.materializer.is_some() {
-            vec![
-                HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
-                HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
-            ]
-        } else {
-            Vec::new()
+        // So is a member born with its operator-instruction snapshot, except
+        // on a governed member host, which records no snapshot without
+        // prepared authorization.
+        let features = match self.materializer.as_ref() {
+            Some(materializer) => {
+                let mut features = vec![
+                    HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
+                    HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
+                ];
+                if !materializer
+                    .substrate()
+                    .runtime_adapter
+                    .has_native_work_authorization_host()
+                {
+                    features.push(HOST_FEATURE_INSTRUCTION_TARGET_BIRTH.to_string());
+                }
+                features
+            }
+            None => Vec::new(),
         };
         self.send_reply(
             candidate,

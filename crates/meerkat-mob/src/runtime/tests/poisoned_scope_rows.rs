@@ -2,8 +2,10 @@
 //! serving: a lazy boot plans only the poisoned member as holding work, the
 //! delivery owner drains every healthy runtime, a status read answers a
 //! refused member from its recorded refusal, and a wait on it ends with the
-//! refusal. The runtime store is the host store adapter over the reference
-//! in-memory host store, whose commits a row can refuse.
+//! refusal. A quarantined scope (the store reports a conflict for it) leaves
+//! the same serving, its runtime named or not. The runtime store is the host
+//! store adapter over the reference in-memory host store, whose commits a
+//! row can refuse and whose scopes a row can make load as a conflict.
 
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -23,16 +25,58 @@ use meerkat_store_conformance::InMemoryHostStore;
 const EVENT_GUARD: Duration = Duration::from_secs(10);
 
 /// The reference in-memory host store, whose next commits a row refuses:
-/// a refused batch poisons the scopes it would have changed.
+/// a refused batch poisons the scopes it would have changed. A row can also
+/// make a scope load as a typed conflict, listed per scope.
 #[derive(Default)]
 struct PoisonableHost {
     inner: InMemoryHostStore,
     refused_commits: AtomicU32,
+    /// Scopes the host loads as a typed conflict at their version, as a
+    /// store that met obligation 4 at load does.
+    conflicted: std::sync::Mutex<BTreeMap<ScopeRef, meerkat_core::host_store::ScopeVersion>>,
 }
 
 impl PoisonableHost {
     fn refuse_next_commit(&self) {
         self.refused_commits.fetch_add(1, AtomicOrdering::SeqCst);
+    }
+
+    /// Make the only runtime scope whose store name starts with `prefix`
+    /// load as a typed conflict at its version from now on: a superseded
+    /// writer's late batch was folded at that version. Answers its name.
+    async fn conflict(&self, prefix: &str) -> String {
+        let listed = self
+            .inner
+            .list_heads(ScopeKind::Session, None, usize::MAX)
+            .await
+            .expect("the host lists its runtime scopes");
+        let matching: Vec<_> = listed
+            .heads
+            .iter()
+            .filter(|entry| entry.name.as_str().starts_with(prefix))
+            .collect();
+        let [entry] = matching.as_slice() else {
+            panic!("exactly one runtime scope starts with {prefix}: {matching:?}");
+        };
+        self.conflicted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                ScopeRef::new(ScopeKind::Session, entry.name.clone()),
+                entry.head.version,
+            );
+        entry.name.as_str().to_string()
+    }
+
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.conflicted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(scope)
+            .map(|version| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(*version),
+            })
     }
 }
 
@@ -51,7 +95,10 @@ impl HostStore for PoisonableHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
-        self.inner.load_head(scope).await
+        match self.conflict_of(scope) {
+            Some(conflict) => Err(conflict),
+            None => self.inner.load_head(scope).await,
+        }
     }
 
     async fn list_heads(
@@ -60,7 +107,25 @@ impl HostStore for PoisonableHost {
         after: Option<&ScopeName>,
         limit: usize,
     ) -> Result<HeadPage, HostStoreError> {
-        self.inner.list_heads(kind, after, limit).await
+        let page = self.inner.list_heads(kind, after, limit).await?;
+        let conflicted = self
+            .conflicted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut heads = Vec::new();
+        let mut conflicts = Vec::new();
+        for entry in page.heads {
+            match conflicted.get(&ScopeRef::new(kind, entry.name.clone())) {
+                Some(version) => conflicts.push(meerkat_core::host_store::ScopeConflict::new(
+                    entry.name,
+                    *version,
+                    Vec::new(),
+                )),
+                None => heads.push(entry),
+            }
+        }
+        Ok(HeadPage::new(heads, page.next).with_conflicts(conflicts))
     }
 
     async fn read_rows(
@@ -69,7 +134,10 @@ impl HostStore for PoisonableHost {
         from: RowIndex,
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
-        self.inner.read_rows(scope, from, limit).await
+        match self.conflict_of(scope) {
+            Some(conflict) => Err(conflict),
+            None => self.inner.read_rows(scope, from, limit).await,
+        }
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
@@ -154,6 +222,21 @@ fn poisoned_scope_refusal(session_id: &SessionId) -> RuntimeStoreError {
         cause: "the host refused a batch of this scope".to_string(),
     }
     .into_read()
+}
+
+/// The refusal a host store answers for a read of a session whose scope is
+/// quarantined (the store reports a conflict for it), as the session layer
+/// hands it on.
+fn quarantined_session_read(session_id: &SessionId) -> SessionError {
+    SessionError::Store(Box::new(
+        SpiError::ScopeQuarantined {
+            scope: format!("rt:{}", LogicalRuntimeId::for_session(session_id).0),
+            cause: "conflicted in the store at version 2: repair the scope in the store, then \
+                    reopen the realm"
+                .to_string(),
+        }
+        .into_read(),
+    ))
 }
 
 /// A lazy boot over a realm whose runtime scope of one seated member is
@@ -362,7 +445,7 @@ async fn a_healthy_runtime_backlog_drains_while_another_runtime_scope_is_poisone
         pass.failures
             .iter()
             .any(|failure| failure.contains(&doomed.0)
-                && failure.contains("unavailable until the store is reopened")),
+                && failure.contains("is refused by the store")),
         "the pass names the poisoned runtime's refusal: {pass:?}"
     );
     assert_eq!(
@@ -372,6 +455,171 @@ async fn a_healthy_runtime_backlog_drains_while_another_runtime_scope_is_poisone
             .count(),
         1,
         "no drain of the poisoned runtime was tried, so no other failure names it: {pass:?}"
+    );
+}
+
+/// The runtime store of a realm opened over `host`, as the next process
+/// opens it once the last writer's lease ended.
+async fn reopen_store(host: &Arc<PoisonableHost>) -> Arc<SpiRuntimeStore> {
+    host.inner.lapse_fence_leases();
+    let realm = SpiRealm::open(Arc::clone(host) as _, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens beside a conflicted scope");
+    Arc::new(
+        SpiRuntimeStore::open(realm)
+            .await
+            .expect("the runtime store opens"),
+    )
+}
+
+/// A delivery authority record, written as a delivery to `runtime` would
+/// write it.
+async fn write_delivery_authority(
+    store: &dyn meerkat_runtime::RuntimeStore,
+    runtime: &LogicalRuntimeId,
+) {
+    store
+        .compare_and_swap_runtime_delivery_authority(
+            runtime,
+            None,
+            meerkat_runtime::store::RuntimeDeliveryAuthorityRecord::from_parts(
+                1,
+                br#"{"state":1}"#.to_vec(),
+            ),
+            None,
+        )
+        .await
+        .expect("the delivery authority is written");
+}
+
+/// A lazy boot over a realm where one seated member's runtime scope is
+/// quarantined (the store reports a conflict for it), its runtime id too
+/// long for the store to name it (a member delivery address with a long
+/// identity is hashed in its scope name), stays observed: it plans that
+/// member as holding work, by the store's refusal of the member's runtime,
+/// and leaves the other member dormant. Before, the recovery scan refused
+/// while a quarantined runtime could not be named, so the scan failed and
+/// every seated member was planned as holding work: an eager wake of the
+/// whole mob, again at every start until the repair.
+#[tokio::test]
+async fn a_member_whose_hashed_runtime_scope_is_quarantined_is_planned_as_holding_work_and_the_others_stay_dormant()
+ {
+    let host = Arc::new(PoisonableHost::default());
+    let mob_id = MobId::from("quarantined-scope-boot");
+    let incarnation = meerkat_core::service::MobIncarnationId::mint();
+    let long_identity = "q".repeat(220);
+    let address = LogicalRuntimeId::for_member(&meerkat_runtime::MemberDeliveryAddress {
+        mob_id: mob_id.to_string(),
+        incarnation: Some(incarnation),
+        identity: long_identity.clone(),
+        generation: 1,
+    })
+    .expect("the member's delivery address");
+    {
+        let store = reopen_store(&host).await;
+        write_delivery_authority(store.as_ref(), &address).await;
+    }
+    let name = host.conflict("rt:h").await;
+    let store = reopen_store(&host).await;
+    assert!(
+        meerkat_runtime::RuntimeStore::refuses_runtime_until_reopen(store.as_ref(), &address),
+        "{name} is quarantined"
+    );
+    let adapter = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+            store as Arc<dyn meerkat_runtime::RuntimeStore>,
+        )
+        .expect("construct runtime authority"),
+    );
+    let mut state = mob_dsl::MobMachineState::default();
+    for name in [long_identity.as_str(), "healthy"] {
+        let identity = mob_dsl::AgentIdentity(name.to_string());
+        state.member_session_bindings.insert(
+            identity.clone(),
+            mob_dsl::SessionId(meerkat_core::types::SessionId::new().to_string()),
+        );
+        state.identity_to_runtime.insert(
+            identity.clone(),
+            mob_dsl::AgentRuntimeId(format!("{}-runtime", &name[..1])),
+        );
+        state
+            .identity_runtime_generations
+            .insert(identity, mob_dsl::Generation(1));
+    }
+
+    let obligations = scan_boot_obligations(Some(&adapter), &state, &mob_id, incarnation)
+        .await
+        .expect("the scan never fails the plan");
+    assert_eq!(obligations.basis, MobBootSetBasis::Observed);
+    assert_eq!(
+        obligations.by_member,
+        BTreeMap::from([(
+            mob_dsl::AgentIdentity(long_identity),
+            mob_dsl::MemberRecoveryObligationKind::RuntimeWork,
+        )]),
+        "only the quarantined member is planned as holding work"
+    );
+}
+
+/// The delivery owner drains a healthy runtime's backlog while another
+/// runtime's scope is quarantined, that runtime's id too long for the store
+/// to name it. The healthy session's delivery was committed by an earlier
+/// process, so only this owner's reconcile read finds it. The quarantined
+/// runtime is reported by its scope's name, its rows left pending. Before,
+/// the backlog read refused while a quarantined runtime could not be named,
+/// every reconcile failed, and the delivery stayed pending until the repair.
+#[tokio::test]
+async fn a_healthy_runtime_backlog_drains_while_an_unnamed_runtime_scope_is_quarantined() {
+    let host = Arc::new(PoisonableHost::default());
+    let job_store = Arc::new(meerkat::MemoryDetachedJobStore::new());
+    let jobs = meerkat::DetachedJobService::new(job_store.clone());
+    let session_id = SessionId::new();
+    let long = LogicalRuntimeId::new("d".repeat(250));
+    let job = {
+        let store: Arc<dyn meerkat_runtime::RuntimeStore> = reopen_store(&host).await;
+        let job = completed_job(&jobs, session_id.clone(), "before-the-conflict").await;
+        // An earlier process projected the job's terminal into the inbox.
+        let projected = meerkat::JobOutboxProjector::new(
+            job_store.clone(),
+            RuntimeDeliveryInbox::new(Arc::clone(&store)),
+        )
+        .project_pending(16)
+        .await
+        .expect("the earlier process projects the outbox");
+        assert_eq!(projected.projected.len(), 1, "{projected:?}");
+        write_delivery_authority(store.as_ref(), &long).await;
+        job
+    };
+    let name = host.conflict("rt:h").await;
+    let hashed = name.split('~').next().expect("a store name").to_string();
+    let store: Arc<dyn meerkat_runtime::RuntimeStore> = reopen_store(&host).await;
+
+    let sink = Arc::new(RecordingSink::default());
+    let owner = meerkat::RuntimeDeliveryOwner::new(job_store, RuntimeDeliveryInbox::new(store))
+        .arm(Arc::new(StaticHost { sink: sink.clone() }))
+        .expect("arm the owner");
+    let mut passes = owner.subscribe_passes();
+    tokio::time::timeout(EVENT_GUARD, async {
+        loop {
+            if sink.applied.lock().await.contains(&job) {
+                return;
+            }
+            passes.changed().await.expect("owner pass channel open");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the healthy session's delivery was never applied; last pass: {:?}",
+            passes.borrow()
+        )
+    });
+    let pass = passes.borrow().clone();
+    assert!(
+        pass.failures
+            .iter()
+            .any(|failure| failure.contains(&hashed) && failure.contains(&name)),
+        "the pass names the quarantined runtime by its scope, with its refusal: {pass:?}"
     );
 }
 
@@ -447,6 +695,35 @@ async fn a_refused_member_status_is_answered_from_the_recorded_refusal() {
     );
 }
 
+/// A member whose session read is refused because its scope is quarantined
+/// (the store reports a conflict for it) reads `store_refused`, as a member
+/// whose scope is poisoned does: no later read brings its preview back
+/// before the scope is repaired and the realm reopened.
+#[tokio::test]
+async fn a_quarantined_member_status_reads_store_refused() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member = AgentIdentity::from("quarantined-status");
+    let session_id = handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn")
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    let refused_session = session_id.clone();
+    service.refuse_status_view_reads(&session_id, move || {
+        quarantined_session_read(&refused_session)
+    });
+    for _ in 0..3 {
+        let snapshot = handle.member_status(&member).await.expect("status");
+        assert_eq!(
+            snapshot.preview_unavailable,
+            Some(crate::runtime::handle::MemberPreviewUnavailable::StoreRefused),
+            "a quarantined member's preview reads store_refused"
+        );
+    }
+}
+
 /// A refusal is recorded for the member's projection target it was read
 /// for, and logged once for it: a status read for that target answers from
 /// the record without reading. Once the member is rebound (its fence token
@@ -506,7 +783,8 @@ async fn a_recorded_refusal_answers_only_for_the_target_it_was_read_for() {
             .filter(|fields| {
                 field(fields, "bridge_session_id") == Some(session.as_str())
                     && field(fields, "message").is_some_and(|message| {
-                        message.contains("refused until the host store realm is reopened")
+                        message
+                            .contains("member status session view read refused by the host store")
                     })
             })
             .count()

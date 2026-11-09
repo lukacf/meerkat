@@ -22,6 +22,7 @@ fn access() -> AccessController {
             crate::access::AccessApprover {
                 subjects: vec![BOB.to_string()],
                 groups: Vec::new(),
+                ..crate::access::AccessApprover::default()
             },
         )]),
         ..crate::access::AccessControlConfig::default()

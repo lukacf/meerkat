@@ -32,6 +32,8 @@ use crate::runtime::state::MobCommand;
 mod crash_restart_lease_reclaim;
 #[path = "degraded_retirement.rs"]
 mod degraded_retirement;
+#[path = "degraded_settle.rs"]
+mod degraded_settle;
 #[path = "degraded_shutdown.rs"]
 mod degraded_shutdown;
 #[path = "lift_post_commit_rows.rs"]

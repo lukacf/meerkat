@@ -42,9 +42,10 @@ use meerkat_core::SessionId;
 use meerkat_jobs::DetachedJobStore;
 use meerkat_runtime::{
     ColdDeliveryOwnership, DeliveryGenerationReader, HostingCapability, HostingClaim,
-    HostingRefused, KEPT_DELIVERY_READER_IDLE, LogicalRuntimeId, RetainedNotificationRegistration,
-    RuntimeDeliveryError, RuntimeDeliveryInbox, RuntimeDeliveryKind,
-    RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership, UnavailableRuntime,
+    HostingRefused, KEPT_DELIVERY_READER_IDLE, LogicalRuntimeId, RefusedScope,
+    RetainedNotificationRegistration, RuntimeDeliveryError, RuntimeDeliveryInbox,
+    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
+    UnavailableRuntime,
 };
 use tokio::sync::watch;
 
@@ -160,6 +161,23 @@ pub trait RuntimeDeliveryHost: Send + Sync {
                 crate::AddressObservation::MayServe
             }
         })
+    }
+
+    /// Whether the incarnation behind a continuation delivery address
+    /// refuses, for good, external work a caller committed to it
+    /// ([`crate::ContinuationAddressResolver::external_work_refusal`]). The
+    /// drain asks it for such a row before it reserves or admits anything:
+    /// `Ok(Some(reason))` settles the row refused for `reason`. Hosts with
+    /// bound continuation services delegate to
+    /// [`crate::ContinuationHostBindings::external_work_refusal`]. The
+    /// default refuses nothing. `Err` when it cannot be asked now: the row
+    /// stays blocked.
+    async fn external_work_refusal(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        let _ = address;
+        Ok(None)
     }
 
     /// The sink that admits continuation deliveries into `session_id`, if
@@ -447,6 +465,7 @@ impl RuntimeDeliveryOwner {
             cold,
             awaiting: HashMap::new(),
             unavailable: Vec::new(),
+            unnamed: Vec::new(),
             stop: Some(stop_rx),
             owed_round: None,
         }));
@@ -808,13 +827,18 @@ struct OwnerLoop {
     /// served here, or cold while this process is the cold-delivery owner
     /// (its claim attempt then decides).
     awaiting: HashMap<LogicalRuntimeId, AwaitingWait>,
-    /// Delivery runtimes the store cannot answer for until it is reopened
-    /// (a host store whose scope of the runtime is poisoned), with the
-    /// store's refusal, as the last reconcile read them, by runtime id. No
-    /// drain reaches them: a drain would only meet the refusal. Every pass
-    /// reports them blocked and names the refusal, and the next reconcile
-    /// reads them again.
+    /// Delivery runtimes the store refuses (a host store whose scope of the
+    /// runtime is poisoned or quarantined), with the store's refusal, as the
+    /// last reconcile read them, by runtime id. No drain reaches them: a
+    /// drain would only meet the refusal. Every pass reports them blocked
+    /// and names the refusal, and the next reconcile reads them again.
     unavailable: Vec<UnavailableRuntime>,
+    /// Refused delivery runtime scopes the store cannot name by runtime id
+    /// (a host store's quarantined scope of a runtime whose id its scope
+    /// names hash), by scope, as the last reconcile read them. Their rows
+    /// stay pending in the store; every pass names them, and the next
+    /// reconcile reads them again.
+    unnamed: Vec<RefusedScope>,
     /// The round of the host's owed continuations in progress, if any.
     owed_round: Option<OwedRound>,
 }
@@ -1332,6 +1356,7 @@ async fn run_pass(
                     blocked.remove(&unavailable.runtime_id);
                 }
                 owner.unavailable = backlog.unavailable;
+                owner.unnamed = backlog.unnamed;
                 runtimes.extend(backlog.pending);
             }
             Err(error) => {
@@ -1371,9 +1396,14 @@ async fn run_pass(
     runtimes.retain(|runtime_id| seen.insert(runtime_id.clone()));
     for unavailable in &owner.unavailable {
         pass.failures.push(format!(
-            "delivery runtime {} is unavailable until the store is reopened, and its rows \
-             stay pending: {}",
+            "delivery runtime {} is refused by the store, and its rows stay pending: {}",
             unavailable.runtime_id, unavailable.refusal
+        ));
+    }
+    for unnamed in &owner.unnamed {
+        pass.failures.push(format!(
+            "a delivery runtime the store cannot name by its id is refused, and its rows stay \
+             pending: {unnamed}"
         ));
     }
 

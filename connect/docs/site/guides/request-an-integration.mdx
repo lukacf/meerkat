@@ -79,12 +79,29 @@ old access is not inherited. Without the configured selection, later acquisition
 remains unavailable through this continuation. Installed warm acceptance is
 still pending.
 
-## Set up a service key in the terminal
+## Install a service in the terminal
 
-The terminal can set up library integrations and selected Python/Node stdio packages with declared credential fields. The agent identifies those requirements before the installation review.
+The terminal can install a catalog integration or a selected Python/Node stdio
+package in your chosen realm. Ask for the operations you need, and review
+software installation and agent access separately. A public service such as
+Hacker News needs no service key; integrations with declared credential fields
+use protected prompts.
+
+<Note>
+This is the standalone CLI flow. The application's private Services setup
+conversation remains unreleased and unqualified. Recorded native component
+checks passed, but all four packaged private Services attempts failed. See the
+[host composition contract](/guides/host-composition#private-services-setup-conversation-unreleased)
+and [validation record](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#completed-product-and-component-results)
+before exposing that path in an application.
+</Note>
 
 <Steps>
   <Step title="Choose the realm and describe the task">
+    The command below assumes the extracted Connect archive's `bin` directory
+    is on `PATH`. Otherwise, use the supplied executable's path shown in the
+    [quickstart](/quickstart#standalone-cli).
+
     Run the supplied `meerkat-connect` in an interactive terminal and choose a
     realm, or select it directly:
 
@@ -98,7 +115,9 @@ The terminal can set up library integrations and selected Python/Node stdio pack
     and access review below. Accepted startup changes can remain saved if you
     stop later.
 
-    At `You:`, ask, for example: "Set up Tavily for web search in this realm."
+    Replace `work` with your selected realm. At `You:`, ask, for example:
+    "Set up Hacker News so my ordinary agent can read the top stories in this
+    realm", or "Set up Tavily for web search in this realm."
     The agent chooses and checks the integration, its operations and its
     credential requirements.
   </Step>
@@ -107,15 +126,16 @@ The terminal can set up library integrations and selected Python/Node stdio pack
     or declared environment names, agent, operations and access duration. Approve this selection before
     entering credentials.
   </Step>
-  <Step title="Enter each credential privately">
-    Type or paste each value at its hidden terminal prompt. These values stay
+  <Step title="Enter credentials only when required">
+    A no-sign-in public service skips this step. Otherwise, type or paste each
+    value at its hidden terminal prompt. These values stay
     outside the agent conversation. Use `/quit` to stop before these credentials
     are saved.
   </Step>
   <Step title="Read the saved result">
     Connect closes setup before finalizing the reviewed installation. On success,
-    native owners save the new realm configuration and credentials, then issue
-    the exact reviewed access. Connect reports the result and returns to the
+    native owners save the new realm configuration and any required credentials,
+    then issue the exact reviewed access. Connect reports the result and returns to the
     setup conversation. Read configuration, credential and grant outcomes
     separately; a failed or uncertain result does not prove that nothing was
     saved. The installation can outlive a time-limited grant.
@@ -131,7 +151,8 @@ The terminal can set up library integrations and selected Python/Node stdio pack
     rkat --realm work run --wait-for-mcp --mcp-auth stored "<your complete business request>"
     ```
 
-    Replace the quoted placeholder with the full request. This opens a fresh
+    Replace `work` with the realm selected during setup and the quoted
+    placeholder with the full request. This opens a fresh
     session using the realm's saved configuration and the normal agent's current
     grants. It does not resume the setup conversation or an earlier running
     agent. A successful service call is still needed before treating the service

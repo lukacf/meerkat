@@ -338,6 +338,10 @@ pub struct FinishResult {
 /// other MCP server definition, and a placed member refuses it (a portable
 /// profile cannot carry a working directory).
 ///
+/// So is a profile's member tool grant gate (`tools.grant_gated`), with the
+/// definitions only it brings in, for the same reason: a decision that
+/// carries it anyway is parsed and judged by the member's build.
+///
 /// So is the `12h` OpenAI prompt-cache TTL (`prompt_cache_options.ttl`), for
 /// the same reason: a decision that carries it anyway is parsed and judged by
 /// the member's build like any other request, which accepts it on the models
@@ -362,12 +366,33 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
                 )
         });
     }
-    // Nor the tool bundle opt-in, which the released schema does not carry.
+    // Nor the tool bundle opt-in, which the released schema does not carry,
+    // nor the member tool grant gate and its definition.
     if let Some(properties) = schema
         .pointer_mut("/$defs/ToolConfig/properties")
         .and_then(serde_json::Value::as_object_mut)
     {
         properties.remove("bundles");
+        properties.remove("grant_gated");
+    }
+    if let Some(definitions) = schema
+        .pointer_mut("/$defs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        definitions.remove("GrantGatedTools");
+    }
+    // The gate's tool names were the only reference to the tool name
+    // definitions the released schema does not carry (the set first, since
+    // it references the name).
+    for name in ["ToolNameSet", "ToolName"] {
+        let reference = format!("\"#/$defs/{name}\"");
+        if !schema.to_string().contains(&reference)
+            && let Some(definitions) = schema
+                .pointer_mut("/$defs")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            definitions.remove(name);
+        }
     }
     // Nor a stdio MCP server's working directory, which the released schema
     // does not carry.
@@ -3180,6 +3205,7 @@ fn compile_profiles(
                 inline.as_ref().clone()
             }
         };
+        refuse_layer_profile_auth_binding(name, &profile)?;
         profiles.insert(name.clone(), ProfileBinding::Inline(Box::new(profile)));
     }
     if !profiles.contains_key(&plan.collector.profile) {
@@ -3190,12 +3216,32 @@ fn compile_profiles(
             .ok_or_else(|| {
                 AdaptiveError::MissingProfileTemplate(plan.collector.profile.to_string())
             })?;
+        refuse_layer_profile_auth_binding(&plan.collector.profile, &collector)?;
         profiles.insert(
             plan.collector.profile.clone(),
             ProfileBinding::Inline(Box::new(collector)),
         );
     }
     Ok(profiles)
+}
+
+/// A layer's members resolve their realm's binding for their provider: the
+/// composed policy's auth-binding evidence has no entry for a profile's
+/// binding, so a layer profile that names one is refused, not run on it.
+fn refuse_layer_profile_auth_binding(
+    name: &ProfileName,
+    profile: &Profile,
+) -> Result<(), AdaptiveError> {
+    if profile.auth_binding.is_some() {
+        return Err(AdaptiveError::InvalidAdaptiveIdentity {
+            field: "profile auth_binding",
+            value: name.to_string(),
+            reason: "an adaptive layer profile names no auth binding; its members resolve \
+                     their realm's binding"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn collect_layer_policy_evidence(
@@ -3838,6 +3884,97 @@ mod tests {
         assert!(derived.iter().any(|name| name == "durable"), "{derived:?}");
     }
 
+    /// A profile's auth binding is host-set: neither the pinned nor the
+    /// derived layer-decision schema offers it to a decision.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn layer_decision_schema_offers_no_profile_auth_binding() {
+        let properties = |schema: &serde_json::Value| {
+            schema
+                .pointer("/$defs/Profile/properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("Profile properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let pinned = properties(&layer_decision_schema().expect("canonical schema serializes"));
+        assert!(pinned.iter().any(|name| name == "model"), "{pinned:?}");
+        assert!(
+            !pinned.iter().any(|name| name == "auth_binding"),
+            "{pinned:?}"
+        );
+        let derived = properties(
+            &serde_json::to_value(schemars::schema_for!(LayerDecision)).expect("derived schema"),
+        );
+        assert!(
+            !derived.iter().any(|name| name == "auth_binding"),
+            "{derived:?}"
+        );
+    }
+
+    /// A layer profile that names an auth binding is refused, whether the
+    /// decision carries it inline or a template (the collector's included)
+    /// does: the composed policy holds no evidence for it, so no layer member
+    /// runs on it.
+    #[test]
+    fn an_adaptive_layer_refuses_a_profile_that_names_an_auth_binding() {
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("elsewhere").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let refused_profile = |error: AdaptiveError| match error {
+            AdaptiveError::InvalidAdaptiveIdentity {
+                field: "profile auth_binding",
+                value,
+                ..
+            } => value,
+            other => panic!("expected the auth binding refusal, got {other}"),
+        };
+
+        compile_layer(&layer_plan(), &compile_context(), &compile_policy())
+            .expect("a layer whose profiles name no binding compiles");
+
+        let mut inline = profile();
+        inline.auth_binding = Some(binding.clone());
+        let mut plan = layer_plan();
+        plan.profiles.insert(
+            ProfileName::from("verifier"),
+            LayerProfile::Inline {
+                inline: Box::new(inline),
+            },
+        );
+        let mut policy = compile_policy();
+        policy.allow_inline_profiles = true;
+        let error = compile_layer(&plan, &compile_context(), &policy)
+            .expect_err("an inline profile with a binding is refused");
+        assert_eq!(refused_profile(error), "verifier");
+
+        let mut context = compile_context();
+        context
+            .profile_templates
+            .get_mut(&ProfileName::from("verifier"))
+            .expect("the verifier template")
+            .auth_binding = Some(binding.clone());
+        let error = compile_layer(&layer_plan(), &context, &compile_policy())
+            .expect_err("a template with a binding is refused");
+        assert_eq!(refused_profile(error), "verifier");
+
+        let mut context = compile_context();
+        context
+            .profile_templates
+            .get_mut(&ProfileName::from("collector"))
+            .expect("the collector template")
+            .auth_binding = Some(binding);
+        let mut plan = layer_plan();
+        plan.profiles.remove(&ProfileName::from("collector"));
+        let error = compile_layer(&plan, &context, &compile_policy())
+            .expect_err("a collector template with a binding is refused");
+        assert_eq!(refused_profile(error), "collector");
+    }
+
     /// The 12-hour OpenAI prompt-cache TTL is left out of the pinned schema,
     /// which the released schema does not carry. (Fails-old: the derived
     /// enum value reached the schema and changed the pin.)
@@ -4106,6 +4243,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),

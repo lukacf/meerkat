@@ -33,7 +33,7 @@ use crate::effect_authority::{path_has_pair, push_finding, strip_cfg_test_items}
 /// `host_reply.rs` pattern, DEC-P3F-5) that listed files call through, so
 /// listed files stay `ResponseStatus`-token-free. Files that do not exist
 /// yet are skipped by the gate until their lane lands them.
-const BRIDGE_CLASSIFIER_FILES: [&str; 15] = [
+const BRIDGE_CLASSIFIER_FILES: [&str; 17] = [
     "crates/meerkat-mob/src/runtime/supervisor_bridge.rs",
     "crates/meerkat-mob/src/runtime/local_bridge.rs",
     "crates/meerkat-contracts/src/wire/supervisor_bridge.rs",
@@ -62,6 +62,12 @@ const BRIDGE_CLASSIFIER_FILES: [&str; 15] = [
     // Phase-6b controlling-side live proxy (ADJ-P6B-17 consolidated lead
     // edit): decodes the four member-live BridgeReply shapes.
     "crates/meerkat-mob/src/runtime/member_live_proxy.rs",
+    // A placed member's operator instructions (protocol 7): the
+    // controlling side's record and release sends and reply decode, and
+    // the member host's serving of both (replies through the host_reply
+    // constructor seam).
+    "crates/meerkat-mob/src/runtime/placed_member_instruction.rs",
+    "crates/meerkat-mob/src/runtime/host_actor/instruction_targets.rs",
 ];
 
 const BRIDGE_CLASSIFIER_LABEL: &str = "W2-F violation: bridge code interprets `ResponseStatus` directly - consume the machine-classified `TerminalityClass` (`response_terminality`) instead";

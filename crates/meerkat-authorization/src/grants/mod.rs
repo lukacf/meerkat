@@ -19,23 +19,34 @@ use meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_authorization_contracts::grant::{GrantAuthorityIncarnation, GrantLineageRef};
 use meerkat_core::auth::PrincipalRef;
+use meerkat_core::{AdmissionFence, AdmissionGuard};
 
 use crate::clock::LocalAuthorizationClock;
 use crate::publication::{
     LocalAuthorizationPublication, LocalPublicationGuard, LocalPublicationStamp, PublicationError,
 };
 
+mod approval;
 pub(crate) mod dsl;
 mod durable;
 mod reconstruction;
+pub use approval::{
+    ApprovalChildRefusal, ApprovalUseAnswer, ApprovalUseCurrentness, ConsumeUseRefusal,
+    GrantChildTerms, GrantUse, MCP_OPERATION_FEATURE, RetainedGrant, grant_child_terms_digest,
+    mcp_operation_binding,
+};
+pub use dsl::{
+    ChildApprovalRule, GrantApproval, GrantDecisionAssurance, GrantDecisionTier, GrantDeviceTrust,
+    GrantOperationBinding, GrantPrincipal,
+};
 use dsl::{
     GrantAuthorityEffect, GrantAuthorityInput, GrantAuthorityMachineAuthority,
-    GrantAuthorityMachineMutator, GrantPrincipal, GrantRecord,
+    GrantAuthorityMachineMutator, GrantRecord,
 };
 #[cfg(test)]
 pub(crate) use durable::with_last_issued_restrictions;
 pub use durable::{
-    DurableGrantOwner, FileGrantOwnerStore, GrantDurabilityError, GrantOwnerChange,
+    DurableGrantOwner, FileGrantOwnerStore, GrantDurabilityError, GrantLogFence, GrantOwnerChange,
     GrantOwnerIdentity, GrantOwnerStore, GrantStoreDurability, GrantStoreError,
     InMemoryGrantOwnerStore,
 };
@@ -69,6 +80,13 @@ pub enum GrantRefusal {
     ControllerInUse,
     #[error("grant authority unavailable")]
     Unavailable,
+    /// The operation's admission guard does not hold the fence of this
+    /// owner's store ([`LocalGrantAuthority::admission_fences`]): refused
+    /// before anything was appended.
+    #[error(
+        "grant operation refused: the operation does not hold the grant store's admission fence"
+    )]
+    AdmissionFence,
 }
 
 /// Why an observed lineage resolution has no grant. An owner change
@@ -209,6 +227,10 @@ pub struct LocalGrantAuthority {
     publication: LocalAuthorizationPublication,
     clock: Arc<dyn LocalAuthorizationClock>,
     durable: Option<durable::DurableCustody>,
+    /// The host's currentness owner for the deciders of approval-carried
+    /// grants, asked at each use's spend at entry. Without one, such a
+    /// spend is unavailable.
+    approval_currentness: Option<Arc<dyn ApprovalUseCurrentness>>,
 }
 
 impl std::fmt::Debug for LocalGrantAuthority {
@@ -472,19 +494,51 @@ impl LocalGrantAuthority {
             publication,
             clock,
             durable: None,
+            approval_currentness: None,
         })
     }
 
     /// The caller is supplied by the authenticated administrative owner, never
     /// copied from request JSON. A represented subject is an explicit immutable
     /// root fact and remains unchanged in every child.
+    ///
+    /// `guard` is the operation's admission guard: a durable owner whose
+    /// store has an admission fence appends only while `guard` holds it
+    /// ([`GrantRefusal::AdmissionFence`] otherwise, with nothing appended).
+    /// Every mutation of this owner takes it the same way.
     pub fn issue_root(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         id: EvidenceId,
         grantee: PrincipalRef,
         represented_subject: Option<PrincipalRef>,
         restrictions: ExecutionRestrictions,
+    ) -> Result<GrantLineageRef, GrantRefusal> {
+        self.issue_root_carrying(
+            guard,
+            caller,
+            id,
+            grantee,
+            represented_subject,
+            restrictions,
+            None,
+        )
+    }
+
+    /// [`issue_root`](Self::issue_root) with an optional child rule: every
+    /// child of the root then carries a person's decision for its approver id.
+    /// Its append takes `guard` as [`issue_root`](Self::issue_root)'s does.
+    #[allow(clippy::too_many_arguments)]
+    fn issue_root_carrying(
+        &self,
+        guard: &AdmissionGuard,
+        caller: &PrincipalRef,
+        id: EvidenceId,
+        grantee: PrincipalRef,
+        represented_subject: Option<PrincipalRef>,
+        restrictions: ExecutionRestrictions,
+        child_approval: Option<ChildApprovalRule>,
     ) -> Result<GrantLineageRef, GrantRefusal> {
         let actor = principal(caller.clone())?;
         let grantee = principal(grantee)?;
@@ -498,6 +552,7 @@ impl LocalGrantAuthority {
             .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let may_issue = owner.state().root.as_ref() == Some(&actor);
         let record = GrantRecord {
             id,
@@ -512,10 +567,13 @@ impl LocalGrantAuthority {
                 .checked_add(1)
                 .ok_or(GrantRefusal::Unavailable)?,
             restrictions,
+            child_approval,
+            approval: None,
         };
         self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::IssueRoot {
                 actor,
                 record: record.clone(),
@@ -534,11 +592,34 @@ impl LocalGrantAuthority {
     /// checked mathematical value is bound to the actual retained parent.
     pub fn issue_child(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         parent: &GrantLineageRef,
         id: EvidenceId,
         grantee: PrincipalRef,
         requested: ExecutionRestrictions,
+    ) -> Result<GrantLineageRef, GrantRefusal> {
+        self.issue_child_carrying(guard, caller, parent, id, grantee, requested, None, None)
+    }
+
+    /// [`issue_child`](Self::issue_child) with an optional child rule of its
+    /// own and an optional approval the child carries. The generated owner
+    /// decides both: a child of a grant under a rule must carry a decision
+    /// that meets it, and an approval-carried child needs such a parent,
+    /// terms equal to the approved request's, depth 0, a window, at least
+    /// one use and a decision no other grant carries. Its append takes
+    /// `guard` as [`issue_child`](Self::issue_child)'s does.
+    #[allow(clippy::too_many_arguments)]
+    fn issue_child_carrying(
+        &self,
+        guard: &AdmissionGuard,
+        caller: &PrincipalRef,
+        parent: &GrantLineageRef,
+        id: EvidenceId,
+        grantee: PrincipalRef,
+        requested: ExecutionRestrictions,
+        child_approval: Option<ChildApprovalRule>,
+        approval: Option<GrantApproval>,
     ) -> Result<GrantLineageRef, GrantRefusal> {
         let actor = principal(caller.clone())?;
         let grantee = principal(grantee)?;
@@ -547,6 +628,7 @@ impl LocalGrantAuthority {
             .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let parent = exact_record(&owner, parent)?.clone();
         let may_issue = parent.grantee == actor;
         let chain = chain(&owner, &parent)?;
@@ -588,7 +670,10 @@ impl LocalGrantAuthority {
                 .checked_add(1)
                 .ok_or(GrantRefusal::Unavailable)?,
             restrictions: derived.effective().clone(),
+            child_approval,
+            approval,
         };
+        let terms_digest = approval::issued_terms_digest(&record)?;
         let now_ms = self
             .clock
             .now()
@@ -597,12 +682,14 @@ impl LocalGrantAuthority {
         self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::IssueChild {
                 actor,
                 record: record.clone(),
                 derived,
                 chain,
                 now_ms,
+                terms_digest,
             },
         )
         .map_err(|refusal| issue_refusal(&owner, refusal, &record.id, may_issue))?;
@@ -653,9 +740,13 @@ impl LocalGrantAuthority {
     /// recover with the same intent from the restored owner.
     /// [`ChildGrantRefusal::Unavailable`] when the publication was poisoned
     /// after the reservation and before the pre-append check (always so for
-    /// `originating`'s own poison), with nothing appended.
+    /// `originating`'s own poison), with nothing appended, and when `guard`
+    /// does not hold the fence of this owner's store (the caller takes it
+    /// without waiting, [`AdmissionGuard::try_acquire`] of
+    /// [`Self::admission_fences`]), with nothing appended.
     pub fn issue_or_recover_child_under_exclusion(
         &self,
+        guard: &AdmissionGuard,
         intent: &ChildGrantIntent,
         originating: impl FnOnce() -> Result<ChildGrantValidity, GrantRefusal>,
     ) -> Result<ChildGrantOutcome, ChildGrantRefusal> {
@@ -666,7 +757,7 @@ impl LocalGrantAuthority {
             .publication
             .try_reserve_owner_change()
             .map_err(|_| ChildGrantRefusal::Unavailable)?;
-        self.issue_or_recover_child_reserved(&mut publication, intent, originating)
+        self.issue_or_recover_child_reserved(&mut publication, guard, intent, originating)
     }
 
     /// [`issue_or_recover_child_under_exclusion`](Self::issue_or_recover_child_under_exclusion)
@@ -681,11 +772,14 @@ impl LocalGrantAuthority {
     pub(crate) fn issue_or_recover_child_reserved(
         &self,
         publication: &mut crate::publication::LocalPublicationGuard<'_>,
+        guard: &AdmissionGuard,
         intent: &ChildGrantIntent,
         originating: impl FnOnce() -> Result<ChildGrantValidity, GrantRefusal>,
     ) -> Result<ChildGrantOutcome, ChildGrantRefusal> {
         let refused = |refusal: GrantRefusal| match refusal {
-            GrantRefusal::Unavailable => ChildGrantRefusal::Unavailable,
+            GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => {
+                ChildGrantRefusal::Unavailable
+            }
             GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
                 ChildGrantRefusal::Denied
             }
@@ -722,9 +816,7 @@ impl LocalGrantAuthority {
             .owner
             .lock()
             .map_err(|_| ChildGrantRefusal::Unavailable)?;
-        if let Some(durable) = &self.durable {
-            durable.check_available().map_err(refused)?;
-        }
+        require_custody(&owner).map_err(refused)?;
         let parent = exact_record(&owner, parent_reference)
             .map_err(refused)?
             .clone();
@@ -790,25 +882,29 @@ impl LocalGrantAuthority {
                 .checked_add(1)
                 .ok_or(ChildGrantRefusal::Unavailable)?,
             restrictions: derived.effective().clone(),
+            child_approval: None,
+            approval: None,
         };
+        let terms_digest = approval::issued_terms_digest(&record).map_err(refused)?;
         // The final time check immediately before the mutation: the
         // reservation freezes owner changes, not time.
         let now_ms = self.require_within(validity)?;
         if let Err(refusal) = self.apply_change(
             &mut owner,
             publication,
+            guard,
             GrantAuthorityInput::IssueChild {
                 actor,
                 record: record.clone(),
                 derived,
                 chain,
                 now_ms,
+                terms_digest,
             },
         ) {
-            let uncertain = self
-                .durable
-                .as_ref()
-                .is_some_and(|durable| durable.check_available().is_err());
+            // Custody was required above under this same owner lock, so an
+            // owner now in `Uncertain` recorded this call's own append.
+            let uncertain = owner.state().lifecycle_phase == dsl::GrantAuthorityPhase::Uncertain;
             return Err(if uncertain {
                 ChildGrantRefusal::Uncertain
             } else {
@@ -865,17 +961,39 @@ impl LocalGrantAuthority {
         test_boundary::reached_lookup();
         let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
         // Checked under the owner mutex: an issuance whose append became
-        // uncertain marks custody failed before it releases the mutex, so a
-        // lookup waiting behind it never answers from stale memory.
-        if let Some(durable) = &self.durable {
-            durable.check_available()?;
-        }
+        // uncertain ends the owner's custody before it releases the mutex, so
+        // a lookup waiting behind it never answers from stale memory.
+        require_custody(&owner)?;
         owner
             .state()
             .records
             .get(id)
             .map(|record| lineage_ref(&owner, record))
             .transpose()
+    }
+
+    /// The references of the grants this owner issued and has not revoked
+    /// whose id `select` selects, in id order. The read is of the owner's
+    /// resident state: the owner holds every grant it issued in memory (a
+    /// durable owner restores all of them from its journal when it starts,
+    /// [`Self::restore`]), so it reads no store and wakes nothing. An
+    /// expired grant is listed until it is revoked.
+    ///
+    /// # Errors
+    /// [`GrantRefusal::Unavailable`] when the owner cannot say now.
+    pub fn unrevoked_grants(
+        &self,
+        select: impl Fn(&EvidenceId) -> bool,
+    ) -> Result<Vec<GrantLineageRef>, GrantRefusal> {
+        let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
+        let state = owner.state();
+        state
+            .records
+            .values()
+            .filter(|record| select(&record.id) && !state.revoked.contains(&record.id))
+            .map(|record| lineage_ref(&owner, record))
+            .collect()
     }
 
     /// Revocation never deletes or reuses an issued ID. Either the configured
@@ -887,16 +1005,18 @@ impl LocalGrantAuthority {
     /// a reference that is not an exact retained grant, is `Denied` before
     /// any custody or publication reservation is taken, so a busy
     /// reservation never hides that refusal. Nothing waits: a busy or
-    /// poisoned grant owner is `Unavailable` for every caller, and once
-    /// custody permits mutation, busy or poisoned local publication/grant
-    /// locks return `Unavailable` without waiting, mutation or publication.
+    /// poisoned grant owner, or one whose custody ended, is `Unavailable`
+    /// for every caller, and once custody permits mutation, busy or poisoned
+    /// local publication/grant locks return `Unavailable` without waiting,
+    /// mutation or publication.
     pub fn revoke(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
     ) -> Result<(), GrantRefusal> {
-        self.revoke_reserved(caller, grant, custody, |_| Ok(()))
+        self.revoke_reserved(guard, caller, grant, custody, |_| Ok(()))
     }
 
     /// [`revoke`](Self::revoke) for a caller that decided against
@@ -909,12 +1029,13 @@ impl LocalGrantAuthority {
     /// published. Every other result is that of [`revoke`](Self::revoke).
     pub fn revoke_expecting(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         expected: &LocalPublicationStamp,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
     ) -> Result<(), ExpectedRevokeRefusal> {
-        self.revoke_reserved(caller, grant, custody, |reservation| {
+        self.revoke_reserved(guard, caller, grant, custody, |reservation| {
             if reservation.stamp_is_current(expected) {
                 Ok(())
             } else {
@@ -928,6 +1049,7 @@ impl LocalGrantAuthority {
     /// mutation; its refusal changes and publishes nothing.
     fn revoke_reserved<E: From<GrantRefusal>>(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         custody: &mut impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody,
@@ -937,7 +1059,7 @@ impl LocalGrantAuthority {
         self.check_revoke_authority(caller, grant)?;
         custody
             .with_unreferenced_controller_grant(grant, || {
-                self.revoke_under_native_custody(caller, grant, under_reservation)
+                self.revoke_under_native_custody(guard, caller, grant, under_reservation)
             })
             .map_err(|refusal| {
                 E::from(match refusal {
@@ -950,7 +1072,8 @@ impl LocalGrantAuthority {
     /// Read-only and without waiting: `caller` may revoke the exact retained
     /// `grant` (the configured root or its issuer). The root and issued
     /// records never change, so this answer cannot go stale; the generated
-    /// owner still decides at the mutation itself.
+    /// owner still decides at the mutation itself. An owner whose custody
+    /// ended answers `Unavailable` to every caller.
     fn check_revoke_authority(
         &self,
         caller: &PrincipalRef,
@@ -961,6 +1084,7 @@ impl LocalGrantAuthority {
             .owner
             .try_lock()
             .map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let record = exact_record(&owner, grant)?;
         if owner.state().root.as_ref() == Some(&actor) || record.issuer == actor {
             Ok(())
@@ -971,6 +1095,7 @@ impl LocalGrantAuthority {
 
     fn revoke_under_native_custody<E: From<GrantRefusal>>(
         &self,
+        guard: &AdmissionGuard,
         caller: &PrincipalRef,
         grant: &GrantLineageRef,
         under_reservation: impl FnOnce(&LocalPublicationGuard<'_>) -> Result<(), E>,
@@ -987,11 +1112,13 @@ impl LocalGrantAuthority {
             .owner
             .try_lock()
             .map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let record = exact_record(&owner, grant)?.clone();
         let revision = owner.state().revision;
         self.apply_change(
             &mut owner,
             &mut publication,
+            guard,
             GrantAuthorityInput::Revoke { actor, record },
         )?;
         // RevokeAlready is a canonical successful no-op. Only RevokeNew
@@ -1005,22 +1132,85 @@ impl LocalGrantAuthority {
         Ok(())
     }
 
+    /// End this owner's custody of its retained facts at its host's close,
+    /// after the host's last legitimate change: the generated
+    /// `ReleaseCustody`. From then on every change and every use of this
+    /// owner is refused as [`GrantRefusal::Unavailable`], whoever still holds
+    /// a reference to it, and every earlier observation fails its final
+    /// currentness check. With durable custody the store's lease is handed
+    /// back after any append in flight, so a successor restores the same
+    /// owner at once; nothing retained is lost. A second call changes
+    /// nothing.
+    ///
+    /// Takes this owner's publication writer: do not call it while holding a
+    /// reservation of that publication.
+    ///
+    /// # Errors
+    /// [`GrantRefusal::Unavailable`] when this owner's state lock is
+    /// poisoned: nothing is released, and the lease ends when the last
+    /// reference to the owner drops.
+    pub fn release_custody(&self) -> Result<(), GrantRefusal> {
+        // A poisoned or exhausted publication already refuses every
+        // observation; the custody still ends.
+        let mut publication = self.publication.reserve_owner_change().ok();
+        let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        let transition = owner
+            .apply(GrantAuthorityInput::ReleaseCustody)
+            .map_err(|_| GrantRefusal::Unavailable)?;
+        for effect in transition.effects() {
+            if let GrantAuthorityEffect::CustodyReleased = effect {
+                if let Some(durable) = &self.durable {
+                    durable.release();
+                }
+                if let Some(publication) = publication.as_mut() {
+                    // Poisoned since the reservation, the publication is
+                    // unavailable already, so the result changes nothing.
+                    let _ = publication.publish();
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Apply one accepted administrative change. With durable custody the
     /// change is acknowledged by the store before it is installed; callers
-    /// publish the change only after this returns `Ok`.
+    /// publish the change only after this returns `Ok`. The store refuses a
+    /// `guard` that does not hold its admission fence, with nothing appended.
     fn apply_change(
         &self,
         owner: &mut GrantAuthorityMachineAuthority,
         publication: &mut crate::publication::LocalPublicationGuard<'_>,
+        guard: &AdmissionGuard,
         input: GrantAuthorityInput,
     ) -> Result<(), GrantRefusal> {
+        require_custody(owner)?;
         match &self.durable {
-            Some(durable) => durable.apply(owner, publication, input),
+            Some(durable) => {
+                // The write witness: a durable grant change inside a bind
+                // attempt needs the attempt's effect mark first.
+                meerkat_core::protected_section::assert_effect_marked("grants.change");
+                durable.apply(owner, publication, guard, input)
+            }
             None => owner
                 .apply(input)
                 .map(|_| ())
                 .map_err(|_| GrantRefusal::Denied),
         }
+    }
+
+    /// The admission fences of this owner's writes
+    /// (`meerkat_core::realm_admission`): its durable store's fence, if it
+    /// has one, and none for an owner in memory. An operation takes them,
+    /// EXCLUSIVE, before it mutates the owner, and passes its guard to every
+    /// mutation; a caller that may not wait takes them with
+    /// [`AdmissionGuard::try_acquire`].
+    #[must_use]
+    pub fn admission_fences(&self) -> Vec<AdmissionFence> {
+        self.durable
+            .as_ref()
+            .and_then(durable::DurableCustody::admission_fence)
+            .into_iter()
+            .collect()
     }
 
     /// The owner change in progress on this grant authority's publication,
@@ -1087,6 +1277,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             false,
         )
@@ -1106,6 +1297,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             true,
         )
@@ -1177,6 +1369,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             false,
         )
@@ -1199,6 +1392,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             true,
         )
@@ -1266,17 +1460,21 @@ impl LocalGrantAuthority {
         lineage_use: LineageUse<'_>,
         controller: bool,
     ) -> Result<(ExecutionRestrictions, Vec<ExecutionRestrictions>, u64), GrantRefusal> {
-        if let Some(durable) = &self.durable {
-            durable.check_available()?;
-        }
+        let mut use_facts = approval::UseFacts::none();
         let claimed = match lineage_use {
             LineageUse::Executor {
                 executor,
                 represented_subject,
-            } => Some((
-                principal(executor.clone())?,
-                represented_subject.cloned().map(principal).transpose()?,
-            )),
+                use_facts: facts,
+            } => {
+                if let Some(facts) = facts {
+                    use_facts = approval::UseFacts::of(facts)?;
+                }
+                Some((
+                    principal(executor.clone())?,
+                    represented_subject.cloned().map(principal).transpose()?,
+                ))
+            }
             LineageUse::LeafOwn => None,
         };
         let now_ms = self
@@ -1285,11 +1483,25 @@ impl LocalGrantAuthority {
             .map_err(|_| GrantRefusal::Unavailable)?
             .unix_ms;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        // Retained facts are usable only while the owner holds custody of
+        // them: after its host's close or an uncertain append, memory and
+        // store are no longer known to agree.
+        require_custody(&owner)?;
         let reference = references.last().ok_or(GrantRefusal::Denied)?;
         let leaf = exact_record(&owner, reference)?.clone();
         // A leaf-own use (liveness or a ceiling) names the retained leaf's
         // own identity, read here, under the same owner lock as the
-        // generated use below.
+        // generated use below: for an approval-carried leaf, its own
+        // requester, work and operation too.
+        if claimed.is_none()
+            && let Some(approval) = &leaf.approval
+        {
+            use_facts = approval::UseFacts {
+                requester: Some(approval.requester.clone()),
+                work: Some(approval.work.clone()),
+                operation: approval.operation.clone(),
+            };
+        }
         let (executor, represented_subject) =
             claimed.unwrap_or_else(|| (leaf.grantee.clone(), leaf.represented_subject.clone()));
         let chain = chain(&owner, &leaf)?;
@@ -1332,6 +1544,9 @@ impl LocalGrantAuthority {
                 incarnation: reference.authority_incarnation,
                 executor,
                 represented_subject,
+                requester: use_facts.requester,
+                work: use_facts.work,
+                operation: use_facts.operation,
                 leaf,
                 chain,
                 now_ms,
@@ -1357,11 +1572,25 @@ enum LineageUse<'a> {
     Executor {
         executor: &'a PrincipalRef,
         represented_subject: Option<&'a PrincipalRef>,
+        /// The use's requester, work and operation, for a leaf that carries
+        /// an approval; a use without them never resolves one.
+        use_facts: Option<GrantUse<'a>>,
     },
     /// The retained leaf's own grantee and represented subject, read under
     /// the same owner lock as the use: a liveness check or a ceiling, never
     /// an executor's authority.
     LeafOwn,
+}
+
+/// Only an owner in custody of its retained facts (the generated `Active`)
+/// serves a change or a use. After its host's close (`Released`) or an
+/// uncertain append (`Uncertain`) every one is refused as unavailable.
+fn require_custody(owner: &GrantAuthorityMachineAuthority) -> Result<(), GrantRefusal> {
+    if owner.state().lifecycle_phase == dsl::GrantAuthorityPhase::Active {
+        Ok(())
+    } else {
+        Err(GrantRefusal::Unavailable)
+    }
 }
 
 /// A generated rejection of an issuance the caller may perform, for an id
@@ -1474,6 +1703,8 @@ pub(crate) mod test_boundary {
     }
 }
 
+#[cfg(test)]
+mod approval_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]

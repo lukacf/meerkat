@@ -526,7 +526,8 @@ impl AdmittedWorkPolicyOwner for StockInvocationPolicy {
                 LineageResolutionRefusal::Refused(
                     GrantRefusal::ControllerInUse
                     | GrantRefusal::Duplicate
-                    | GrantRefusal::Unavailable,
+                    | GrantRefusal::Unavailable
+                    | GrantRefusal::AdmissionFence,
                 ) => OperationAuthorizationError::Unavailable,
             })?;
         let bounds = review_bounds_text(
@@ -1151,7 +1152,14 @@ mod tests {
         restrictions: ExecutionRestrictions,
     ) -> GrantLineageRef {
         grants
-            .issue_root(&operator(), id(grant), executor(), None, restrictions)
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &operator(),
+                id(grant),
+                executor(),
+                None,
+                restrictions,
+            )
             .expect("an issued stock grant")
     }
 
@@ -1949,6 +1957,10 @@ mod tests {
             ) -> Result<(), OperationAuthorizationError> {
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
         }
         struct AllowAll;
         impl meerkat_core::authorization::WorkAuthorization for AllowAll {
@@ -2521,7 +2533,12 @@ mod tests {
 
         // Revoking the narrow grant refuses exactly the operations it selects.
         grants
-            .revoke(&operator(), &narrow_lineage, &mut NoController)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &operator(),
+                &narrow_lineage,
+                &mut NoController,
+            )
             .expect("revoked");
         for (label, work, binding) in [
             ("its own work", &narrow, &read),

@@ -7,7 +7,8 @@
 \* and its member invariants hold there only vacuously. This audit keeps the
 \* generated model unchanged and drives the region in two runs, each over a
 \* small, fixed domain and its whole reachable space: a VIEW leaves out the
-\* two counters no guard reads (model_step_count and topology_epoch), and a
+\* four counters no guard reads (model_step_count, topology_epoch and the
+\* identity life marker, identity_life_resets and identity_life_ends), and a
 \* state constraint bounds the mob's generation.
 \*
 \*   write (AuditWriteSpec): two members seated and bound (Dormant) under two
@@ -32,10 +33,11 @@
 \*     recorded a generation the mob has not minted.
 \*   AuditOwedIsSeatedAndUnblocked (invariant): an owed member is seated,
 \*     never blocked, and owed a minted generation.
-\*   AuditDeliversOnlyToBoundLocalBornMembers (invariant, ENABLED form): a
+\*   AuditDeliversOnlyToBoundBornMembers (invariant, ENABLED form): a
 \*     delivery can be prepared only for an owed member that is bound to a
-\*     session, whose session exists (not an unborn seat), and that is not
-\*     placed.
+\*     session and whose session exists (not an unborn seat). A placed
+\*     member is prepared the same way (no arm of the region reads its
+\*     placement); this audit seats no placed member.
 \*   AuditWriteOwesExactlyTheSelected (action property): a committed write
 \*     owes the new generation to exactly the seated members the slot's old
 \*     or new target selects (an independent statement of the selector), and
@@ -67,10 +69,12 @@
 \* operator_instruction_delivery_audit.sh.
 EXTENDS model
 
-\* The positions of model_step_count and topology_epoch in the generated
-\* `vars` tuple (the runner reads them from model.tla), and the generation
-\* bound of each run.
-CONSTANTS AuditStepIndex, AuditEpochIndex, AuditMaxWriteGeneration, AuditMaxSeatGeneration
+\* The positions of model_step_count, topology_epoch and the identity life
+\* marker (identity_life_resets, identity_life_ends) in the generated `vars`
+\* tuple (the runner reads them from model.tla), and the generation bound of
+\* each run.
+CONSTANTS AuditStepIndex, AuditEpochIndex, AuditLifeResetsIndex, AuditLifeEndsIndex,
+          AuditMaxWriteGeneration, AuditMaxSeatGeneration
 
 AuditIds == {"agentidentity_1", "agentidentity_2"}
 AuditSessions == {"sessionid_1", "sessionid_2"}
@@ -283,8 +287,10 @@ AuditSeatSpec == Init /\ [][AuditSeatNext]_vars
 
 AuditSeatConstraint == operator_instruction_generation <= AuditMaxSeatGeneration
 
-\* Every state variable but the two counters (see the header).
-AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads (see the header):
+\* the two above and the identity life marker.
+AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 \* ---------------------------------------------------------------------------
 \* Properties
@@ -340,13 +346,12 @@ AuditOwedIsSeatedAndUnblocked ==
         /\ id \notin DOMAIN member_instruction_blocked
         /\ member_instruction_owed[id] <= operator_instruction_generation
 
-AuditDeliversOnlyToBoundLocalBornMembers ==
+AuditDeliversOnlyToBoundBornMembers ==
     \A id \in AuditIds :
         ENABLED PrepareMemberInstructionDeliveryDeliverRunning(id) =>
             /\ id \in DOMAIN member_instruction_owed
             /\ id \notin member_seat_session_unborn
             /\ id \in DOMAIN member_session_bindings
-            /\ id \notin DOMAIN member_placement
 
 AuditWriteOwesExactlyTheSelected ==
     [][AuditCommittedWrite =>

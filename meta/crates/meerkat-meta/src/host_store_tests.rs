@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use meerkat_core::host_store::{
-    CommitBatch, FenceGrant, HeadPage, HostStoreError, Row, RowIndex, ScopeKind, ScopeName,
-    ScopeRef, ScopeVersion, VersionedHead,
+    CommitBatch, FenceGrant, HeadPage, HostStoreError, Row, RowIndex, ScopeConflict, ScopeKind,
+    ScopeName, ScopeRef, ScopeVersion, VersionedHead,
 };
 use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_runtime::LogicalRuntimeId;
@@ -130,6 +130,11 @@ struct TestHost {
     /// The store's one slow writer: a slowed commit lands only after the
     /// slowed commits before it.
     slow_writer: tokio::sync::Mutex<()>,
+    /// The name prefixes of the scopes this process's store reports
+    /// conflicted (two batches at their visible version, obligation 4 met
+    /// at load): their loads answer `Conflict` at that version, and a
+    /// listing reports them per scope.
+    conflicted: StdMutex<Vec<String>>,
 }
 
 /// Whether `rows` carry `text`.
@@ -171,6 +176,34 @@ impl TestHost {
             slow_session_creations: AtomicUsize::new(0),
             slow_session_creation: StdMutex::new(Duration::ZERO),
             slow_writer: tokio::sync::Mutex::new(()),
+            conflicted: StdMutex::new(Vec::new()),
+        }
+    }
+
+    /// The scopes whose names start with `prefix` are reported conflicted
+    /// from now on.
+    fn conflict(&self, prefix: &str) {
+        lock(&self.conflicted).push(prefix.to_string());
+    }
+
+    fn is_conflicted(&self, name: &ScopeName) -> bool {
+        lock(&self.conflicted)
+            .iter()
+            .any(|prefix| name.as_str().starts_with(prefix.as_str()))
+    }
+
+    /// The typed conflict a load of `scope` answers when it is reported
+    /// conflicted and visible: at its visible version.
+    async fn conflict_of(&self, scope: &ScopeRef) -> Result<(), HostStoreError> {
+        if !self.is_conflicted(&scope.name) {
+            return Ok(());
+        }
+        match self.store.load_head(scope).await? {
+            Some(head) => Err(HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(head.version),
+            }),
+            None => Ok(()),
         }
     }
 
@@ -251,6 +284,7 @@ impl HostStore for TestHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        self.conflict_of(scope).await?;
         self.store.load_head(scope).await
     }
 
@@ -260,7 +294,16 @@ impl HostStore for TestHost {
         after: Option<&ScopeName>,
         limit: usize,
     ) -> Result<HeadPage, HostStoreError> {
-        self.store.list_heads(kind, after, limit).await
+        let page = self.store.list_heads(kind, after, limit).await?;
+        let (conflicted, heads): (Vec<_>, Vec<_>) = page
+            .heads
+            .into_iter()
+            .partition(|scope| self.is_conflicted(&scope.name));
+        let conflicts = conflicted
+            .into_iter()
+            .map(|scope| ScopeConflict::new(scope.name, scope.head.version, Vec::new()))
+            .collect();
+        Ok(HeadPage::new(heads, page.next).with_conflicts(conflicts))
     }
 
     async fn read_rows(
@@ -269,6 +312,7 @@ impl HostStore for TestHost {
         from: RowIndex,
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
+        self.conflict_of(scope).await?;
         self.store.read_rows(scope, from, limit).await
     }
 
@@ -1289,6 +1333,7 @@ fn session_with_compaction_intent() -> (
         messages_after: 1,
         summary_source: None,
         estimated_history_tokens_after: None,
+        instruction_snapshot: None,
     };
     session
         .add_compaction_projection_intent(intent.clone())
@@ -1419,7 +1464,7 @@ async fn a_takeover_of_a_paused_process_fences_it_out_at_its_next_write() {
 #[tokio::test]
 async fn held_completion_marks_survive_a_restart_and_a_failover() {
     use crate::identity_first::held_bootstrap::{
-        clear_host_store_mark, mark_host_store, read_host_store_marks,
+        clear_host_store_mark, mark_host_store, read_host_store_rollback_marks,
     };
     let fixture = Fixture::new();
     let (alice, bob) = (id(ALICE), id(BOB));
@@ -1433,7 +1478,7 @@ async fn held_completion_marks_survive_a_restart_and_a_failover() {
     fixture.lapse();
     {
         let provider = fixture.open(&fixture.process()).await.expect("restart");
-        let marked = read_host_store_marks(provider.realm.documents())
+        let marked = read_host_store_rollback_marks(provider.realm.documents())
             .await
             .expect("read the marks");
         assert_eq!(marked, BTreeSet::from([alice.clone(), bob.clone()]));
@@ -1444,7 +1489,7 @@ async fn held_completion_marks_survive_a_restart_and_a_failover() {
 
     fixture.lapse();
     let provider = fixture.open(&fixture.process()).await.expect("failover");
-    let marked = read_host_store_marks(provider.realm.documents())
+    let marked = read_host_store_rollback_marks(provider.realm.documents())
         .await
         .expect("read the marks");
     assert_eq!(marked, BTreeSet::from([bob]));
@@ -1591,6 +1636,128 @@ async fn settling_detached_writes_lands_the_cursor_writes_in_flight() {
     );
 }
 
+/// Realm documents (the console audit log's pages, a runtime's kept gating
+/// state) are documents of the host store realm: written, listed by prefix
+/// and removed, and read again after a failover.
+#[tokio::test]
+async fn realm_documents_survive_a_failover() {
+    let fixture = Fixture::new();
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+        assert_eq!(
+            metadata.realm_document_retention(),
+            Some(crate::runtime::RecordRetention::Durable)
+        );
+        for (key, document) in [
+            ("console-audit/page/1", "one"),
+            ("console-audit/page/2", "two"),
+            ("gating/state", "gating"),
+        ] {
+            metadata
+                .set_realm_document(key, Some(document))
+                .await
+                .expect("write a realm document");
+        }
+        metadata
+            .set_realm_document("console-audit/page/2", None)
+            .await
+            .expect("remove a realm document");
+    }
+
+    fixture.lapse();
+    let provider = fixture.open(&fixture.process()).await.expect("failover");
+    let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        metadata
+            .realm_document("console-audit/page/1")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("one")
+    );
+    assert_eq!(
+        metadata
+            .realm_document("console-audit/page/2")
+            .await
+            .expect("read"),
+        None
+    );
+    let keys = metadata
+        .realm_document_keys("console-audit/")
+        .await
+        .expect("list");
+    assert!(
+        keys.contains(&"console-audit/page/1".to_string()),
+        "{keys:?}"
+    );
+    assert!(!keys.contains(&"gating/state".to_string()), "{keys:?}");
+    assert_eq!(
+        metadata
+            .realm_document("gating/state")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("gating")
+    );
+}
+
+/// The console audit log's age bound holds on a host store realm as it does
+/// in memory: three full pages, each written a while after the last, under
+/// an age bound shorter than the gap, keep only the third. The realm still
+/// lists the first page's key after the first prune removed it.
+#[tokio::test]
+async fn host_store_audit_log_keeps_its_age_bound() {
+    async fn oldest_after_three_pages(store: Arc<dyn PersistentMetadataStore>) -> Option<u64> {
+        let log = crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::new(20_000, Duration::from_millis(40)),
+        )
+        .expect("the store keeps realm documents");
+        for _page in 0..3 {
+            for _row in 0..64 {
+                let entry = crate::console_audit::ConsoleAuditEntry::answered(
+                    crate::console_audit::ConsoleAuditActor {
+                        kind: "person",
+                        principal: Some("alice@example.test".to_string()),
+                        issuer: None,
+                        subject: None,
+                        assurance: None,
+                        login_scope_digest: None,
+                    },
+                    "meta/mob_labels/set".to_string(),
+                    crate::console_audit::audit_target(&serde_json::json!({})),
+                    &serde_json::json!({ "result": { "accepted": true } }),
+                );
+                log.record(entry).await.expect("a row is written");
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        log.page(None, 500)
+            .await
+            .expect("read")
+            .oldest_available_seq
+    }
+
+    let in_memory =
+        oldest_after_three_pages(Arc::new(crate::runtime::InMemoryMetadataStore::new())).await;
+    let fixture = Fixture::new();
+    let provider = fixture.open(&fixture.process()).await.expect("open");
+    let host_store = oldest_after_three_pages(Arc::new(SpiMetadataStore::new(
+        provider.realm.documents().clone(),
+    )))
+    .await;
+    assert_eq!(
+        in_memory,
+        Some(129),
+        "the in-memory store prunes pages 0 and 1"
+    );
+    assert_eq!(
+        host_store, in_memory,
+        "the host store realm prunes as the in-memory store does"
+    );
+}
+
 /// The host's fence timing shows in the storage census, and a restart waits
 /// at most its lease.
 #[tokio::test]
@@ -1649,10 +1816,15 @@ async fn a_failed_document_batch_refuses_that_document_until_the_realm_reopens()
             .write("cursor/mob-a", Some(b"second".to_vec()))
             .await
             .expect_err("the store fails the batch");
+        // Its outcome stays unknown past the retry budget: the typed stop,
+        // whose last answer is the store's.
         assert!(
             matches!(
                 failed.spi(),
-                Some(SpiError::Host(HostStoreError::Unavailable(_)))
+                Some(SpiError::UnsettledPastRetryBudget {
+                    last: HostStoreError::Unavailable(_),
+                    ..
+                })
             ),
             "{failed}"
         );
@@ -1699,6 +1871,63 @@ async fn a_failed_document_batch_refuses_that_document_until_the_realm_reopens()
         .await
         .expect("the document is written again");
     assert!(provider.readiness().is_ready());
+}
+
+/// A Meta document the store reports conflicted (two batches at one of its
+/// versions) is quarantined at the open: the realm opens, the document
+/// refuses typed, every other document serves, and the readiness probe
+/// names it and stays ready. A reopen alone quarantines it again.
+#[tokio::test]
+async fn a_conflicted_document_is_quarantined_and_named_by_readiness() {
+    let fixture = Fixture::new();
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let documents = provider.realm.documents();
+        for key in ["cursor/mob-a", "cursor/mob-b"] {
+            documents
+                .write(key, Some(b"first".to_vec()))
+                .await
+                .expect("the first write");
+        }
+    }
+
+    for _ in 0..2 {
+        fixture.lapse();
+        let host = fixture.process();
+        host.conflict("mx:rcursor/mob-a~");
+        let provider = fixture
+            .open(&host)
+            .await
+            .expect("the realm opens beside the conflicted document");
+        let documents = provider.realm.documents();
+        let refused = documents
+            .read("cursor/mob-a")
+            .await
+            .expect_err("the quarantined document refuses");
+        assert!(
+            matches!(refused.spi(), Some(SpiError::ScopeQuarantined { .. })),
+            "{refused}"
+        );
+        let other = documents
+            .read("cursor/mob-b")
+            .await
+            .expect("another document reads");
+        assert_eq!(other.as_deref().map(Vec::as_slice), Some(&b"first"[..]));
+        let readiness = provider.readiness();
+        assert!(
+            readiness.is_ready() && !readiness.scope_poisoned,
+            "a quarantined document leaves the realm ready: {readiness:?}"
+        );
+        assert_eq!(
+            readiness
+                .quarantined_scopes
+                .iter()
+                .map(|scope| scope.scope.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mx:cursor/mob-a"],
+            "the probe names the quarantined document: {readiness:?}"
+        );
+    }
 }
 
 /// A realm a newer Meta wrote refuses to open, typed.
@@ -2901,6 +3130,19 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
         "the queue refused the write",
         1_700_000_000_001,
     );
+    // A compaction harvest's failure of the same incarnation: a document of
+    // its own, apart from the other failures' prefix.
+    let harvest_failure = LifecycleEffectFailure::new(
+        mob_id.clone(),
+        "incarnation-1",
+        40,
+        ALICE,
+        3,
+        LifecycleEffectKind::CompactionHarvest,
+        1,
+        "the harvest failed",
+        1_700_000_000_003,
+    );
     {
         let provider = fixture.open(&fixture.process()).await.expect("open");
         let store = SpiMetadataStore::new(provider.realm.documents().clone());
@@ -2927,6 +3169,10 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .record_lifecycle_effect_failure(&failure)
             .await
             .expect("record the failure");
+        store
+            .record_lifecycle_effect_failure(&harvest_failure)
+            .await
+            .expect("record the harvest's failure");
     }
 
     fixture.lapse();
@@ -2988,7 +3234,20 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
             .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
             .await
             .expect("list the failures"),
-        vec![failure]
+        vec![failure.clone(), harvest_failure],
+        "the listing holds the harvest's failure beside the exit interview's"
+    );
+    store
+        .clear_lifecycle_effect_failure(&mob_id, 3, LifecycleEffectKind::CompactionHarvest, ALICE)
+        .await
+        .expect("clear the harvest's failure");
+    assert_eq!(
+        store
+            .lifecycle_effect_failures(&mob_id, 0, usize::MAX)
+            .await
+            .expect("list the failures"),
+        vec![failure],
+        "clearing the harvest's failure keeps the others"
     );
     assert_eq!(
         store
@@ -3012,12 +3271,16 @@ async fn lifecycle_projection_records_round_trip_through_the_realm_documents() {
     );
 }
 
-/// A build on another host's empty cache reads the held-completion marks
-/// the realm keeps: an identity a held pass left owing its host a fresh held
-/// completion is refused a wake outside a held pass, typed, while an
-/// unmarked identity takes its turn.
+/// A build on another host's empty cache never reads the held-completion
+/// marks the realm keeps: they are the mirror written for a rollback to
+/// 0.9.10. Held creation follows the host's hold in each process, and this
+/// build's host holds nothing, so an identity an earlier process's held pass
+/// left unpublished takes its turn as any other.
+///
+/// RED before the marks stopped being read: carol's wake was refused from
+/// the realm's mark (`HeldCompletionOwed`).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failover_build_reads_the_held_completion_marks_the_realm_keeps() {
+async fn a_failover_build_never_reads_the_held_completion_marks_the_realm_keeps() {
     use crate::identity_first::held_bootstrap::mark_host_store;
     let fixture = Fixture::new();
     let mob_id = unique_mob_id("held-marks-failover");
@@ -3044,23 +3307,14 @@ async fn a_failover_build_reads_the_held_completion_marks_the_realm_keeps() {
         .identity_bootstrap_mode(crate::identity_first::IdentityBootstrapMode::LazyMaterialize),
     )
     .await;
-    let before = model.count();
-    match runtime
-        .identity_runtime()
-        .expect("an identity-first runtime")
-        .send(
-            &id(CAROL),
-            &ContentInput::Text("a wake outside a held pass".to_string()),
-        )
-        .await
-    {
-        Err(crate::identity_first::IdentityRuntimeError::HeldCompletionOwed { identity }) => {
-            assert_eq!(identity, id(CAROL));
-        }
-        Err(other) => panic!("carol owes a held completion, not: {other}"),
-        Ok(_) => panic!("carol owes a held completion: her wake must be refused"),
-    }
-    assert_eq!(model.count(), before, "carol's turn reached nothing");
+    send(
+        &runtime,
+        &provider,
+        &model,
+        CAROL,
+        "an identity this build's host does not hold",
+    )
+    .await;
     send(
         &runtime,
         &provider,
@@ -4863,6 +5117,7 @@ async fn host_store_spec(
         None,
         None,
         crate::mob_handle_runtime::PersistentAuthority::HostStore { cache_dir: None },
+        None,
         None,
         None,
     )

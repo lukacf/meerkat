@@ -8,8 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeVersion,
-    VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeVersion, VersionedHead,
 };
 use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig};
 
@@ -40,6 +40,9 @@ struct HostState {
     landed: HashSet<String>,
     batches: Vec<BatchRecord>,
     fail_next_commit: Option<HostStoreError>,
+    /// Scopes the host loads as a typed conflict at their version, as a
+    /// store that met obligation 4 at load does, and lists per scope.
+    conflicted: BTreeMap<ScopeRef, ScopeVersion>,
 }
 
 /// A host store meeting every obligation at commit: versions are checked
@@ -84,6 +87,42 @@ impl MemoryHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = gate;
     }
+
+    /// Make the only scope whose name starts with `prefix` load as a typed
+    /// conflict at its version from now on: a superseded writer's late batch
+    /// was folded at that version. Answers its name.
+    fn conflict(&self, prefix: &str) -> String {
+        let mut state = self.state();
+        let matching: Vec<(ScopeRef, ScopeVersion)> = state
+            .scopes
+            .iter()
+            .filter(|(scope, _)| scope.name.as_str().starts_with(prefix))
+            .map(|(scope, stored)| (scope.clone(), stored.version))
+            .collect();
+        let [(scope, version)] = matching.as_slice() else {
+            panic!("exactly one scope starts with {prefix}: {matching:?}");
+        };
+        state.conflicted.insert(scope.clone(), *version);
+        scope.name.as_str().to_string()
+    }
+
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.state()
+            .conflicted
+            .get(scope)
+            .map(|version| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(*version),
+            })
+    }
+
+    /// The conflict of the scope named `name` is repaired in the store: one
+    /// of its two batches was kept, and the scope loads and lists as usual.
+    fn repair(&self, name: &str) {
+        self.state()
+            .conflicted
+            .retain(|scope, _| scope.name.as_str() != name);
+    }
 }
 
 #[async_trait]
@@ -108,6 +147,9 @@ impl HostStore for MemoryHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         Ok(self.state().scopes.get(scope).map(|stored| VersionedHead {
             version: stored.version,
             commit_id: stored.commit_id.clone(),
@@ -145,7 +187,17 @@ impl HostStore for MemoryHost {
         });
         let next = (heads.len() > limit).then(|| heads[limit - 1].name.clone());
         heads.truncate(limit);
-        Ok(HeadPage { heads, next })
+        let (conflicted, heads): (Vec<ScopeHead>, Vec<ScopeHead>) =
+            heads.into_iter().partition(|entry| {
+                state
+                    .conflicted
+                    .contains_key(&ScopeRef::new(kind, entry.name.clone()))
+            });
+        let conflicts = conflicted
+            .into_iter()
+            .map(|entry| ScopeConflict::new(entry.name, entry.head.version, Vec::new()))
+            .collect();
+        Ok(HeadPage::new(heads, next).with_conflicts(conflicts))
     }
 
     async fn read_rows(
@@ -154,6 +206,9 @@ impl HostStore for MemoryHost {
         from: RowIndex,
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         let state = self.state();
         let Some(stored) = state.scopes.get(scope) else {
             return Ok(Vec::new());
@@ -653,6 +708,183 @@ async fn the_mob_families_are_claimed_once_per_realm() {
     );
 }
 
+// A storage whose mob scope the store reports conflicted is listed by the
+// claim as quarantined, the conflict and the repair in its cause, not as a
+// stored mob with its summary; opening it refuses, and a storage beside it
+// opens.
+#[tokio::test]
+async fn a_storage_whose_scope_is_conflicted_is_listed_quarantined() {
+    let host = Arc::new(MemoryHost::default());
+    for storage_key in ["mob", "neighbour"] {
+        let process = start(&host, storage_key).await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:rmob~");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens beside the conflicted scope");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let quarantined = listed
+        .iter()
+        .find(|stored| stored.storage_key == "mob")
+        .expect("the quarantined storage is listed");
+    assert!(
+        quarantined.quarantined.as_deref().is_some_and(|cause| {
+            cause.contains(&name) && cause.contains("repair the scope in the store")
+        }),
+        "listed as quarantined: {quarantined:?}"
+    );
+    assert_eq!(quarantined.unreadable, None, "{quarantined:?}");
+    assert!(mobs.open("mob").await.is_err(), "opening it refuses");
+    let neighbour = listed
+        .iter()
+        .find(|stored| stored.storage_key == "neighbour")
+        .expect("the neighbour is listed");
+    assert_eq!(neighbour.quarantined, None);
+    mobs.open("neighbour")
+        .await
+        .expect("the storage beside it opens");
+}
+
+// A storage whose mob scope the store reports conflicted is listed
+// quarantined and refuses to open, typed with the quarantine. Once the scope
+// is repaired in the store and the realm reopened, the host finds the
+// storage listed as a stored mob again, and it opens with what it held.
+#[tokio::test]
+async fn a_quarantined_storage_lists_and_opens_again_after_a_repair_and_a_reopen() {
+    let host = Arc::new(MemoryHost::default());
+    {
+        let process = start(&host, "mob").await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:rmob~");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    {
+        let realm = SpiRealm::open(Arc::clone(&dyn_host), SpiRealmConfig::default())
+            .await
+            .expect("the realm opens beside the conflicted scope");
+        let mobs = SpiMobStoreHost::for_realm(&realm)
+            .await
+            .expect("the mob families claim");
+        let listed = mobs.stored_mobs();
+        let stored = listed
+            .iter()
+            .find(|stored| stored.storage_key == "mob")
+            .expect("the storage is listed");
+        assert!(
+            stored.quarantined.is_some(),
+            "listed quarantined: {stored:?}"
+        );
+        match mobs.open("mob").await {
+            Err(MobStoreError::ReadFailed(message)) => assert!(
+                message.contains("quarantined") && message.contains(&name),
+                "opening it refuses with the quarantine: {message}"
+            ),
+            other => panic!("opening a quarantined storage refuses: {:?}", other.err()),
+        }
+    }
+
+    host.repair(&name);
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm reopens after the repair");
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let stored = listed
+        .iter()
+        .find(|stored| stored.storage_key == "mob")
+        .expect("the storage is listed");
+    assert_eq!(stored.quarantined, None, "{stored:?}");
+    assert_eq!(stored.unreadable, None, "{stored:?}");
+    let opened = mobs.open("mob").await.expect("the repaired storage opens");
+    let events = opened
+        .storage()
+        .events
+        .replay_all()
+        .await
+        .expect("its log replays");
+    assert_eq!(events.len(), 1, "it holds what it held: {events:?}");
+}
+
+// A storage key over 200 bytes is hashed in its scope names, so when the
+// store reports its only scope conflicted the realm knows that scope by its
+// store name alone, and no head names the key. The storage is still listed:
+// typed, as quarantined, under that name, the conflict and the repair in its
+// cause, and opening that name refuses with the quarantine instead of
+// creating a storage. The neighbour lists and opens as usual.
+#[tokio::test]
+async fn a_quarantined_storage_whose_key_its_scope_names_hash_is_listed_by_that_name() {
+    let host = Arc::new(MemoryHost::default());
+    let long = "m".repeat(250);
+    for storage_key in [long.as_str(), "neighbour"] {
+        let process = start(&host, storage_key).await;
+        process
+            .stores
+            .storage()
+            .events
+            .append(event(MobEventKind::MobCompleted, None))
+            .await
+            .expect("append");
+    }
+    let name = host.conflict("mb:h");
+    let dyn_host: Arc<dyn HostStore> = Arc::clone(&host) as Arc<dyn HostStore>;
+    let realm = SpiRealm::open(dyn_host, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens beside the conflicted scope");
+    let quarantined = realm.quarantined_scopes();
+    assert_eq!(quarantined.len(), 1, "{name} is quarantined");
+    let scope = quarantined[0].scope.clone();
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("the mob families claim");
+    let listed = mobs.stored_mobs();
+    let stored = listed
+        .iter()
+        .find(|stored| stored.storage_key == scope)
+        .unwrap_or_else(|| {
+            panic!("the hashed storage is listed by its scope's name, not left out: {listed:?}")
+        });
+    assert!(
+        stored.quarantined.as_deref().is_some_and(|cause| {
+            cause.contains(&name) && cause.contains("repair the scope in the store")
+        }),
+        "listed as quarantined: {stored:?}"
+    );
+    match mobs.open(&scope).await {
+        Err(MobStoreError::ReadFailed(message)) => assert!(
+            message.contains("quarantined") && message.contains(&name),
+            "opening it refuses with the quarantine: {message}"
+        ),
+        other => panic!("opening the listed name refuses: {:?}", other.err()),
+    }
+    let neighbour = listed
+        .iter()
+        .find(|stored| stored.storage_key == "neighbour")
+        .expect("the neighbour is listed");
+    assert_eq!(neighbour.quarantined, None);
+    mobs.open("neighbour")
+        .await
+        .expect("the storage beside it opens");
+}
+
 // Unrun until the candidate's validation.
 #[test]
 fn entries_of_an_unknown_format_are_refused() {
@@ -1087,6 +1319,7 @@ async fn a_reopen_keeps_every_replay_only_event_field() {
                     Generation::new(generation.get() + 1),
                     ProfileName::from("lead"),
                 )),
+                identity_ended: true,
             },
         },
         MobEventKind::RespawnTopologyAbandoned {

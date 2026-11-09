@@ -180,6 +180,34 @@ sending agent or a work of the sending work. A delivery over a network carries
 no origin, and Core's binder refuses it (`origin_unverifiable`), as it refuses
 a sending work whose basis narrows nothing (`sender_basis_unbounded`).
 
+An ungoverned input can name its original requester too: an opaque, qualified
+principal that the host supplies from the caller it authenticated
+(`StartTurnRuntimeSemantics::with_requester`, `InputHeader.requester`), never
+one taken from a request body, a tool argument or model output. Core never
+interprets it. It is stored with the admitted input and returned on the input's
+receipt (`InputState::requester`) and on the turn's transcript rows
+(`TranscriptMessageIdentity.requester`), and a tool sees the run's requester in
+its dispatch context (`ToolDispatchContext::requester`). A governed input's
+requester is its work association's, and an input that names a different one
+besides is refused. The requester is direct when the person asked the agent
+itself, and carried when the work reached the agent through a peer hop or an
+approval; `ToolDispatchContext::direct_requester` answers only for a direct
+one, which is the only one a host should act for in that person's name. Inputs
+of different requesters, or of a requester and none, never share a run.
+
+A host tool callback names the run's requester too, typed, so a host can
+refuse a person-scoped tool (one person's mail, documents or accounts) for
+anyone else: the JSON-RPC `tool/execute` request carries it as `requester`,
+and a detached callback job records the requester of the run that submitted
+it and names it on every `callback/job/start`. Only the runtime sets it; a
+`requester` inside a call's arguments is just an argument.
+
+An MCP App's action runs for the requester its host's trusted ingress names
+(`ToolApplicationIngress::requester`), as a direct requester, and never for
+the requester of the model run whose result the app shows. An ingress that
+names no one runs the action without a requester, and one that names an
+unqualified principal is refused.
+
 ## Information handling has an explicit limit
 
 Once an agent reads allowed information into a model context, this system cannot
@@ -239,8 +267,13 @@ owner then executes the held request at most once.
 - **One subject digest.** A decision binds one canonical rendering of the held
   request. Core computes its digest from the rendering, and refuses a
   presentation, decision or review that names another digest. A presentation
-  counts only when it shows every canonical part of the rendering to the party
-  that decides now.
+  counts only when it is complete for the party that decides now: it shows
+  every canonical part of the rendering, or, from a surface with a size
+  limit, it is a summary that says it is shortened with a link to the full
+  presentation, and that link served the whole, unchanged rendering (its
+  digest is the subject digest). A summary without such a link, or whose
+  link served a changed rendering, is `presentation_incomplete`: nothing is
+  decided on a silently truncated presentation.
 - **Attested decisions.** A human decides for the decision's approver id with
   an authenticated decision event and its evidence; the decider's eligibility is
   checked when the decision commits, the requester never decides its own
@@ -257,7 +290,11 @@ owner then executes the held request at most once.
   recorded or carried by the event) is refused as
   `decided_before_presentation`; one observed in the same millisecond is
   accepted. The decision's machine makes this check; with no presentation at
-  all, the decision stays `presentation_incomplete`. The two times come from
+  all, the decision stays `presentation_incomplete`. It also decides whether
+  a presentation the event carries counts: only a complete presentation of
+  the held subject to the approver does (as for a recorded one), any other
+  counts as none, and only a counted one is kept with the decision. The two
+  times come from
   different clocks: the observed time is the ingress's (a provider's message
   timestamp, for example), and a presentation's time is the host's. An
   ingress clock that truncates (to whole seconds, for example) or runs behind
@@ -310,16 +347,20 @@ shows them. The RPC server reads, presents and withdraws them with the
 keeps none answers them capability unavailable (`-32020`). No request body
 names who decides one: a host's trusted adapter decides through
 `MethodRouter::dispatch_with_decision_event`, with the
-`AuthenticatedDecisionEvent` it built from the event it authenticated. The
+`AuthenticatedDecisionEvent` it built from the event it authenticated, and
+learns that a decision opened from the owner's subscription
+(`DurableDecisionService::subscribe_openings`) instead of polling. The
 operator of an `rkat-rpc` stdio connection (Unix builds with local
 authorization) decides with `decision/decide` on that connection, which builds
 the event itself: the operator, device trusted in the connection's own scope.
-When its client lists, the connection presents each listed decision held for
-an approver id `[governance.decisions] operator_approver_ids` names, writing a
+When such a decision opens while the connection is open, and when its client
+lists, the connection presents each decision held for an approver id
+`[governance.decisions] operator_approver_ids` names, writing a
 `decision/notice` before it records the presentation, and only a decision it
 presented, whose approver id is still listed, is eligible
 ([the operator of a stdio connection](/api/rpc#the-operator-of-a-stdio-connection)).
-Elsewhere `decision/decide` is method not found. A host
+Elsewhere no connection is told that a decision opened, and `decision/decide`
+is method not found. A host
 builds its other decision surfaces on the Rust owner,
 `meerkat_runtime::decision::DurableDecisionService`,
 and executes them with `meerkat_runtime::decision::DecisionExecutorLoop`.

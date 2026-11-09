@@ -370,9 +370,10 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Conflict);
         }
         if let (Some(mcp), AccessDecision::Mcp(decision)) = (&record.mcp, &record.decision) {
-            mcp.validate(self.route(&reference.route)?, decision)?;
+            let route = self.route(&reference.route)?;
+            mcp.validate(route.as_ref(), decision)?;
             if let Some(evidence) = &record.application_policy {
-                evidence.validate(self.route(&reference.route)?, decision, &self.scope.owner)?;
+                evidence.validate(route.as_ref(), decision, &self.scope.owner)?;
             }
         }
         if let IssuanceObservation::Issued { lineage } = &record.issuance
@@ -506,7 +507,7 @@ impl PrivateOriginals {
         presented: ServiceOperationCurrent,
         progress: Option<Arc<ServiceOperationProgress>>,
     ) -> Result<PrivateServiceGrantObservation, ServiceOperationError> {
-        let route = self.route(decision.route())?;
+        let route = &self.route(decision.route())?;
         if let Some(evidence) = &application_policy {
             let AccessDecision::Mcp(ref proposal) = decision else {
                 return Err(PrivateOriginalError::Denied.into());
@@ -634,7 +635,7 @@ impl PrivateOriginals {
         let represented = route.represented_subject.clone();
         let mcp_check = match (&record.mcp, &record.decision) {
             (Some(selection), AccessDecision::Mcp(decision)) => {
-                Some((selection.clone(), route.clone(), decision.clone()))
+                Some((selection.clone(), route.as_ref().clone(), decision.clone()))
             }
             _ => None,
         };
@@ -664,7 +665,14 @@ impl PrivateOriginals {
                     progress.entering();
                 }
                 grants
-                    .issue_child(&caller, leaf, grant_id, grantee, bounds)
+                    .issue_child(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &caller,
+                        leaf,
+                        grant_id,
+                        grantee,
+                        bounds,
+                    )
                     .map_err(ServiceIssueError::Native)
             };
             match mcp_lifetime {
@@ -772,7 +780,7 @@ impl PrivateOriginals {
         reference: PrivateServiceGrantRef,
         record: &AccessRecord,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let state = match &record.issuance {
             IssuanceObservation::PendingNativeIssuance => {
                 PrivateServiceGrantState::PendingReconciliation
@@ -892,7 +900,7 @@ impl PrivateOriginals {
         if association.candidate().authority_basis != (meerkat_authorization_contracts::work_association::WorkAuthorityBasis::GrantLineage { lineage }) {
             return Err(PrivateOriginalError::Conflict);
         }
-        let route = self.route(&source.route)?;
+        let route = &self.route(&source.route)?;
         let task_issuer = matches!(
             &decision.decision.lifetime().scope,
             LifetimeScope::Task { .. }
@@ -985,7 +993,7 @@ impl PrivateOriginals {
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_access(&stored, reference)?;
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         if original.authority != route.source_authority
             || matches!(&record.decision.lifetime().scope, LifetimeScope::Task { task }
                 if task.as_str() != original.work.as_str())
@@ -1138,6 +1146,7 @@ pub(crate) mod tests {
         let parent = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &route.grant_caller,
                 EvidenceId::new("application-parent").unwrap(),
                 app(),
@@ -1262,6 +1271,7 @@ pub(crate) mod tests {
             ToolkitOriginalOwner::restore(
                 Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                     path.clone(),
+                    meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
                 )),
                 Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
                 // Same actual source domain retained by the existing fixture.
@@ -1440,6 +1450,7 @@ pub(crate) mod tests {
         owner
             .grants()
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &route.grant_caller,
                 route.application_parent.as_ref().unwrap().last().unwrap(),
                 EvidenceId::new(format!("access-{}", key.id)).unwrap(),
@@ -1521,6 +1532,7 @@ pub(crate) mod tests {
         let replacement = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &operator,
                 EvidenceId::new("replacement-parent").unwrap(),
                 app(),
@@ -1676,6 +1688,7 @@ pub(crate) mod tests {
         owner
             .grants()
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &crate::original_ingress::tests::principal("admin"),
                 &adapter.routes.get().unwrap()[0]
                     .application_parent

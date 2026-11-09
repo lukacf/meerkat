@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .generated.types import CommsSendResult, StopRunResult
+from .generated.types import CommsSendResult, CompactSessionResult, StopRunResult
+from .instructions import SessionInstructionStatus, SessionInstructionWriteResult
 from .types import (
     ContentBlock,
     ForkInstructionPolicy,
@@ -251,6 +252,20 @@ class Session:
         """
         return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
 
+    async def compact(self) -> CompactSessionResult:
+        """Ask this live session's next compaction check to compact.
+
+        The session is not rebuilt and its compaction thresholds do not
+        change: the check before its next model request (in the running turn,
+        or in the next one) compacts. The outcome is ``requested``, or
+        ``already_requested`` when a request no check consumed yet was
+        already recorded. A check that consumes the request and has nothing
+        to compact publishes the ``requested_compaction_skipped`` event with
+        its ``reason`` instead of ``compaction_started``. A session with no
+        live runtime in the server is refused, never loaded or woken.
+        """
+        return await self._client._compact(self._id)  # noqa: SLF001
+
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""
         await self._client._archive(self._id)  # noqa: SLF001
@@ -454,6 +469,39 @@ class Session:
             limit=limit,
         )
 
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        *,
+        content_sha256: str | None = None,
+    ) -> SessionInstructionWriteResult:
+        """Record one operator instruction of this session: the slot's body
+        at a revision, applied at the session's next fresh run start."""
+        return await self._client.set_session_instruction(  # noqa: SLF001
+            self._id,
+            namespace,
+            key,
+            revision,
+            body,
+            content_sha256=content_sha256,
+        )
+
+    async def revoke_instruction(
+        self, namespace: str, key: str, revision: int
+    ) -> SessionInstructionWriteResult:
+        """Revoke one operator instruction of this session at a higher
+        revision."""
+        return await self._client.revoke_session_instruction(  # noqa: SLF001
+            self._id, namespace, key, revision
+        )
+
+    async def instruction_status(self) -> SessionInstructionStatus:
+        """Read this session's committed operator-instruction state."""
+        return await self._client.session_instruction_status(self._id)  # noqa: SLF001
+
     async def subscribe_events(self) -> EventSubscription:
         """Open a standalone session-wide event subscription."""
         return await self._client.subscribe_session_events(self._id)  # noqa: SLF001
@@ -610,6 +658,22 @@ class DeferredSession:
         ``run_id`` returns a ``not_current`` receipt and touches nothing.
         """
         return await self._client._stop_run(self._id, run_id, reason)  # noqa: SLF001
+
+    async def compact(self) -> CompactSessionResult:
+        """Ask this session's next compaction check to compact.
+
+        The session is not rebuilt and its compaction thresholds do not
+        change: the check before its next model request (in the running turn,
+        or in the next one) compacts. The outcome is ``requested``, or
+        ``already_requested`` when a request no check consumed yet was
+        already recorded. A check that consumes the request and has nothing
+        to compact publishes the ``requested_compaction_skipped`` event with
+        its ``reason`` instead of ``compaction_started``. A deferred session
+        has no runtime until its first turn registers it: until then the
+        call is refused with ``-32003`` (session not running), and it never
+        loads or wakes the session.
+        """
+        return await self._client._compact(self._id)  # noqa: SLF001
 
     async def archive(self) -> None:
         """Archive (remove) this session from the server."""

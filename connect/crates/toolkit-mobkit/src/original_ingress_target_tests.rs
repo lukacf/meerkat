@@ -24,6 +24,7 @@ fn targeted(
         owner
             .grants()
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 base,
                 id(&format!("{label}-{suffix}")),
@@ -67,7 +68,7 @@ async fn every_target_child_refuses_standing_or_other_task_reuse_in_both_rebuild
                 &principal("user"),
                 &principal("frontend"),
                 Some(&principal("admin")),
-                |_| async { Ok(None) },
+                |_| async { Ok(CanonicalBindingObservation::Unretained) },
             )
             .await
             .unwrap();
@@ -91,7 +92,7 @@ async fn every_target_child_refuses_standing_or_other_task_reuse_in_both_rebuild
                     &principal("user"),
                     &principal("frontend"),
                     None,
-                    |_| async { Ok(None) }
+                    |_| async { Ok(CanonicalBindingObservation::Unretained) }
                 )
                 .await,
             Err(OriginalWriterError::Conflict)
@@ -126,7 +127,7 @@ async fn every_target_child_refuses_standing_or_other_task_reuse_in_both_rebuild
                 &principal("user"),
                 &principal("frontend"),
                 None,
-                |_| async { Ok(None) },
+                |_| async { Ok(CanonicalBindingObservation::Unretained) },
             )
             .await
             .unwrap();

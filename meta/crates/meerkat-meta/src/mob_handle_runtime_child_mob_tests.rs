@@ -3097,6 +3097,7 @@ async fn governed_bound_lifetime(
         PersistentAuthority::StateDir,
         None,
         None,
+        None,
     )
     .await
     .expect("persistent spec")
@@ -3368,7 +3369,7 @@ async fn fork_side_chat_when_idle(
 ) -> Result<crate::side_chat::SideChatFork, crate::side_chat::SideChatError> {
     for _ in 0..50 {
         match Box::pin(crate::side_chat::fork_side_chat(
-            runtime, None, source, alias, None,
+            runtime, None, source, alias, None, None, None,
         ))
         .await
         {
@@ -3382,7 +3383,7 @@ async fn fork_side_chat_when_idle(
         }
     }
     Box::pin(crate::side_chat::fork_side_chat(
-        runtime, None, source, alias, None,
+        runtime, None, source, alias, None, None, None,
     ))
     .await
 }

@@ -146,7 +146,7 @@ impl HelperControllerIntent {
                 &intent.issuer,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         let expected = parent
             .restrictions()
             .for_child(&intent.requested)
@@ -158,7 +158,7 @@ impl HelperControllerIntent {
                 &intent.grantee,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         if child.restrictions() != &expected || binding.controller_ceiling != expected {
             return Err(OriginalWriterError::Conflict);
         }
@@ -182,6 +182,75 @@ impl HelperControllerIntent {
             .map_err(|_| OriginalWriterError::Unavailable)?;
         Ok(())
     }
+}
+
+/// A lineage resolution's refusal as a binding check's answer: the grant
+/// owner's own refusal denies the operation; an owner that cannot say now
+/// (an owner change in progress, or one published during the resolution,
+/// among them) is unavailable, retryable, never a denial.
+fn lineage_refusal(refusal: meerkat_authorization::grants::GrantRefusal) -> OriginalWriterError {
+    match refusal {
+        meerkat_authorization::grants::GrantRefusal::Unavailable => {
+            OriginalWriterError::Unavailable
+        }
+        _ => OriginalWriterError::OperationDenied,
+    }
+}
+
+/// What the current check of a helper operation's issued lineage reads of a
+/// lineage the grant owner resolved: its restrictions, and whether the owner
+/// facts it was resolved from are still current.
+trait ResolvedLineage {
+    fn restrictions(&self) -> &ExecutionRestrictions;
+    fn check_current(&self) -> Result<(), meerkat_authorization::publication::PublicationError>;
+}
+
+impl ResolvedLineage for meerkat_authorization::grants::ResolvedGrant {
+    fn restrictions(&self) -> &ExecutionRestrictions {
+        meerkat_authorization::grants::ResolvedGrant::restrictions(self)
+    }
+
+    fn check_current(&self) -> Result<(), meerkat_authorization::publication::PublicationError> {
+        meerkat_authorization::grants::ResolvedGrant::check_current(self)
+    }
+}
+
+/// The current check of a helper operation's issued lineage (`lineage`, the
+/// operation's own child grant of `intent`), as `resolve` answers each
+/// lineage resolution for its executor: the parent lineage resolves for the
+/// issuer and the issued lineage for the grantee, the issued lineage carries
+/// exactly the parent's restrictions for the requested child, and both are
+/// still current at the end. A resolution the owner cannot answer now (an
+/// owner change in progress, or one published during it) is unavailable,
+/// retryable ([`lineage_refusal`]); the owner's own refusal, and a request
+/// the parent does not allow, deny; another child is a conflict. The report,
+/// account, public and catalog checks call it with the grant owner's
+/// resolution; it is a pure function of the owner's answers, so each
+/// answer is pinned without a grant owner.
+fn check_issued_lineage<L: ResolvedLineage>(
+    intent: &ChildGrantIntent,
+    lineage: &[GrantLineageRef],
+    resolve: impl Fn(
+        &[GrantLineageRef],
+        &PrincipalRef,
+    ) -> Result<L, meerkat_authorization::grants::GrantRefusal>,
+) -> Result<(), OriginalWriterError> {
+    let parent = resolve(&intent.parent_lineage, &intent.issuer).map_err(lineage_refusal)?;
+    let expected = parent
+        .restrictions()
+        .for_child(&intent.requested)
+        .map_err(|_| OriginalWriterError::OperationDenied)?;
+    let child = resolve(lineage, &intent.grantee).map_err(lineage_refusal)?;
+    if child.restrictions() != &expected {
+        return Err(OriginalWriterError::Conflict);
+    }
+    parent
+        .check_current()
+        .map_err(|_| OriginalWriterError::Unavailable)?;
+    child
+        .check_current()
+        .map_err(|_| OriginalWriterError::Unavailable)?;
+    Ok(())
 }
 
 fn child_id(realm: &str, original: &OriginalWorkRef) -> Result<EvidenceId, OriginalWriterError> {
@@ -217,16 +286,29 @@ impl ToolkitOriginalOwner {
         admitted: &AdmittedHelperWork,
         controller: HelperControllerIntent,
     ) -> Result<(ChildGrantIntent, Option<ChildGrantIntent>), OriginalWriterError> {
-        self.retain_helper_operation_intents(store, admitted, controller)
-            .await
-            .map(|(controller, report, _, _, _)| (controller, report))
+        self.retain_helper_operation_intents(
+            store,
+            admitted,
+            controller,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+        .await
+        .map(|(controller, report, _, _, _)| (controller, report))
     }
 
+    /// Write the helper's grant intents, under the source writer, before any
+    /// native issuance. The issuance's one deadline, `contended_until`,
+    /// bounds every wait here: for the source writer (another writer holds
+    /// it across its own durable write; nothing is held while waiting), and
+    /// for a source collection held by another owner's short section at the
+    /// source check before the intent write and after it (keeping the
+    /// writer). Only the check repeats; the intent write is never made again.
     pub(crate) async fn retain_helper_operation_intents(
         self: &Arc<Self>,
         store: &dyn ToolkitStore,
         admitted: &AdmittedHelperWork,
         controller: HelperControllerIntent,
+        contended_until: tokio::time::Instant,
     ) -> Result<
         (
             ChildGrantIntent,
@@ -242,11 +324,27 @@ impl ToolkitOriginalOwner {
             .capabilities()
             .require_durable_contract()
             .map_err(|_| OriginalWriterError::Unavailable)?;
-        let _mutation = self
-            .mutation
-            .try_lock()
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::IntentsWriter,
+            &admitted.facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_writer_for_test(hold.duration));
+        }
+        let _mutation = tokio::time::timeout_at(contended_until, self.source_writer())
+            .await
             .map_err(|_| OriginalWriterError::Unavailable)?;
-        self.check_admitted_helper(admitted)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::Intents,
+            &admitted.facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
+        self.check_admitted_helper_until(admitted, contended_until)
+            .await?;
         controller.validate(admitted)?;
         let key = admitted.source_key()?;
         let candidate = HelperSourceRecord {
@@ -284,7 +382,17 @@ impl ToolkitOriginalOwner {
         }
         // Cancellation may occur during storage. A retained pending intent is
         // kept for reconciliation, but it is never permission to issue a child.
-        self.check_admitted_helper(admitted)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::IntentsWritten,
+            &admitted.facts.item.to_string(),
+        ) {
+            crate::source_hold_probe::retain(
+                self.hold_sources_for_test(hold.owner_change, hold.duration),
+            );
+        }
+        self.check_admitted_helper_until(admitted, contended_until)
+            .await?;
         let report = retained
             .controller
             .report
@@ -355,6 +463,7 @@ pub(super) async fn stage_fixture_controller(
         None => owner
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &intent.issuer,
                 intent.parent_lineage.last().unwrap(),
                 intent.id,

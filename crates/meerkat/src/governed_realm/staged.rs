@@ -135,7 +135,12 @@ impl StagedIssuanceEffect {
     fn of(outcome: &Result<StockGrantOutcome, StockGrantError>) -> Self {
         match outcome {
             Ok(_) | Err(StockGrantError::NotSelected { .. }) => Self::Committed,
-            Err(StockGrantError::Refused(_)) => Self::NotEntered,
+            // A held or unusable admission fence refuses before any effect.
+            Err(
+                StockGrantError::Refused(_)
+                | StockGrantError::AdmissionInProgress
+                | StockGrantError::AdmissionFenceUnavailable(_),
+            ) => Self::NotEntered,
             Err(
                 StockGrantError::IssuanceUncertain { .. }
                 | StockGrantError::SelectionUncertain { .. }
@@ -460,7 +465,10 @@ impl StagedStockRealm {
     /// Issue `request` as the realm's operator under the stage's own custody
     /// and select it for its target, exactly as
     /// [`crate::governed_realm::stock::issuance::grant_stock_agent`] does under an
-    /// administrative custody (see its outcomes).
+    /// administrative custody (see its outcomes). The realm's admission
+    /// fence is taken first, without waiting since the stage's custody is
+    /// already held: an admission's hold refuses at once with
+    /// [`StockGrantError::AdmissionInProgress`], before any effect.
     ///
     /// The command runs on its owned task. A caller that stops waiting leaves
     /// that exact entered command retained by the stage; this method, and

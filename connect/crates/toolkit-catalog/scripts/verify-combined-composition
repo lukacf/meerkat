@@ -1,0 +1,885 @@
+#!/usr/bin/env python3
+"""Check the combined I1-I13 model: RED legs first, then GREEN.
+
+Usage: verify-combined-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY [BASE_WORKERS]
+Generate with generate-combined-composition first. Every mutant must violate exactly its
+attributed invariant or action property with the intended final state (an owner mutant runs
+its own module, the combined module over the owner with one guard conjunct removed), every row
+must be reachable (its negated end state violated), every liveness mutant must violate its
+property with the intended lasso; then the clean bases must pass, together taking every
+non-fault action (no base takes a fault-only one; each base's coverage is its last, final TLC
+report), every control must pass, and every liveness base must hold its properties. Mutants
+and rows run on one worker (their counts depend on the search order); the bases, controls and
+liveness profiles may run on more. Generic deadlock checking stays on.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+SUMMARY = r'^.*states generated, .*distinct states found, .*states left on queue\.$'
+SHARED = {'stage', 'door', 'initial', 'issued', 'issue_count', 'delivery_record', 'gate', 'gate_moves'}
+TIMEOUT = 21600
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def normalize(name, actions):
+    # A per-task step is printed as its parameterized operator (B_LookupOf).
+    if name.endswith('Of') and name[:-2] in actions:
+        return name[:-2]
+    return name
+
+
+def parse_fields(block):
+    # One state's block: `/\ var = value` lines, values wrapped over several lines; the
+    # block ends at its first blank line.
+    fields, current = {}, None
+    for line in block.splitlines():
+        if not line.strip():
+            if fields:
+                break
+            continue
+        match = re.match(r'^/\\ (\w+) = (.*)$', line)
+        if match:
+            current = match[1]
+            fields[current] = match[2].strip()
+        elif current is not None:
+            fields[current] += ' ' + line.strip()
+    return {name: re.sub(r'\s+', ' ', value) for name, value in fields.items()}
+
+
+def final_state(text, known):
+    states = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+    if not states:
+        states = re.split(r'^Error: Invariant \w+ is violated by the initial state:\n', text,
+                          flags=re.MULTILINE)[1:]
+    if not states:
+        raise ValueError('missing counterexample')
+    fields = parse_fields(states[-1].split('\n\n', 1)[0])
+    actions = [normalize(a, known) for a in re.findall(r'^State \d+: <(\w+)', text, re.MULTILINE)]
+    return fields, actions
+
+
+def records(value):
+    return [dict(re.findall(r'(\w+) \|-> ("[^"]*"|\{[^}]*\}|\w+)', body))
+            for body in re.findall(r'\[([^\]]*)\]', value or '')]
+
+
+def seq(value):
+    inner = (value or '').strip()
+    if not (inner.startswith('<<') and inner.endswith('>>')):
+        return []
+    inner = inner[2:-2].strip()
+    return [item.strip().strip('"') for item in inner.split(',')] if inner else []
+
+
+def counts(value):
+    rows = records(value)
+    return {key: int(number) for key, number in rows[0].items()} if rows else {}
+
+
+def strings(value):
+    return set(re.findall(r'"([^"]*)"', value or ''))
+
+
+def tuples(value):
+    # The elements of a printed set of tuples, each as a list of plain values.
+    return [[item.strip().strip('"') for item in body.split(',')]
+            for body in re.findall(r'<<([^<>]*)>>', value or '')]
+
+
+def after_index(actions, later, earlier):
+    if earlier not in actions:
+        return False
+    return later in actions[actions.index(earlier) + 1:]
+
+
+def q(value):
+    return (value or '').strip('"')
+
+
+def attempt_checks(fields, actions):
+    """The attempt model's predicates, over its variables inside the combined model."""
+    def f(name):
+        return fields.get(name if name in SHARED else 'a_' + name)
+    acts = [a.removeprefix('A_') for a in actions]
+    a_stage = f('stage') == '"A"'
+    first, ended, effect, wrote = seq(f('firstw')), seq(f('ended')), seq(f('effect')), seq(f('wrote'))
+
+    def g3(funnel, site, attempt, door, last, first_site=None):
+        return (a_stage and f('door') == f'"{door}"' and acts[-1] == last
+                and f('witness') == f'{{<<"{funnel}", "{site}", {attempt}>>}}' and f('silent') == '{}'
+                and len(first) >= attempt and first[attempt - 1] == (first_site or site))
+
+    def after(site, attempt_end, door):
+        return (a_stage and f('door') == f'"{door}"' and f('attempt') == '2' and first[1:2] == [site]
+                and ended[:1] == [attempt_end])
+
+    def held(door, site, initial):
+        return (a_stage and f('door') == f'"{door}"' and f('initial') == f'"{initial}"'
+                and fields.get('a_held') == f'"{site}"')
+
+    checks = {
+        'a-drop-controller-mark': g3('grants.change', 'FI:533', 1, 'Find', 'WriterIssue')
+            and [r.get('vis') for r in records(f('bw'))] == ['1'],
+        'a-silent-blocking-writer': a_stage and f('silent') == '{"FI:533"}' and f('witness') == '{}'
+            and acts[-1] == 'WriterIssue' and [r.get('vis') for r in records(f('bw'))] == ['0'],
+        'a-drop-callback-mark': g3('grants.change', 'callbacks.rs:106', 1, 'ClassInput', 'InlineWrite'),
+        'a-drop-service-setup-mark': g3('grants.change', 'service.rs:325', 1, 'BatchSetup', 'InlineWrite'),
+        'a-drop-first-binding-mark': f('initial') == '"Partial"'
+            and g3('toolkit_store.compare_and_swap', 'PO:1610', 1, 'Find', 'InlineWrite'),
+        'a-drop-first-binding-mark-after-drop': f('initial') == '"First"'
+            and g3('toolkit_store.compare_and_swap', 'PO:1610', 2, 'Find', 'InlineWrite') and 'DropBind' in acts,
+        'a-nested-fresh-attempt': a_stage and f('door') == '"Console"' and f('pc') == '"P"' and f('nested') == '2'
+            and effect == ['console.source_record', ''] and f('witness') == '{}' and f('backstop') == 'FALSE',
+        'a-peer-entry-unmarked': a_stage and f('door') == '"Peer"' and f('pc') == '"P"' and f('attempt') == '2'
+            and f('offers') == '2' and effect[:2] == ['peer.operation_grant', ''] and wrote[:2] == ['TRUE', 'TRUE']
+            and first[:2] == ['PI:872-876', ''] and f('witness') == '{}' and f('silent') == '{}'
+            and 'PeerRecord' in acts,
+        'a-spawned-writer': a_stage and f('silent') == '{"spawned_task"}' and f('witness') == '{}'
+            and acts[-1] == 'SpawnedWrite',
+        'a-early-decision': a_stage and f('misplaced') == '{"FI:533"}' and acts[-1] == 'WriterIssue',
+        'a-late-not-now': a_stage and f('answer') == '"NotNow"' and f('pc') == '"Answered"'
+            and f('decided') == '<<"original.admitted", "">>' and acts[-1] == 'PostWrites',
+        'a-duplicate-issue': a_stage and counts(f('issue_count')).get('controller_grant') == 2 and 'DropBind' in acts,
+        'a-drop-configured-setup-mark': g3('toolkit_store.compare_and_swap', 'configured_setup.rs:414', 1,
+                                           'ConfiguredSetup', 'InlineWrite'),
+        'a-drop-setup-request-grant-mark': g3('grants.change', 'setup_request.rs:318', 1, 'SetupRequest',
+                                              'WriterIssue'),
+        'a-drop-native-root-mark': g3('grants.change', 'native_operations.rs:894', 1, 'FindNative', 'WriterIssue'),
+        'a-drop-peer-operation-and-entry-note': g3('grants.change', 'peer_ingress.rs:615', 1, 'Peer', 'WriterIssue',
+                                                   first_site='PI:872-876') and f('offers') == '1',
+        'a-drop-configured-setup-grant-mark': g3('grants.change', 'configured_setup.rs:293', 2, 'ConfiguredSetup',
+                                                 'WriterIssue') and ended[:1] == ['Gone']
+            and acts[acts.index('DropBind') - 1] == 'InlineWrite',
+        'a-drop-setup-target-mark-configured': g3('grants.change', 'setup_targets.rs:154', 2, 'ConfiguredSetup',
+                                                  'WriterIssue') and ended[:1] == ['Gone'],
+        'a-drop-setup-target-mark-request': g3('grants.change', 'setup_targets.rs:154', 2, 'SetupRequest',
+                                               'WriterIssue') and ended[:1] == ['Gone'],
+        'a-drop-native-child-mark': g3('grants.change', 'native_operations.rs:938', 2, 'FindNative', 'WriterIssue')
+            and ended[:1] == ['Gone'] and 'WriterFail' in acts,
+        'a-drop-native-child-mark-after-crash': g3('grants.change', 'native_operations.rs:938', 2, 'FindNative',
+                                                   'WriterIssue') and ended[:1] == ['Crashed'],
+        'a-drop-callback-leaf-mark': g3('grants.change', 'callbacks.rs:165', 2, 'ClassInput', 'InlineWrite')
+            and ended[:1] == ['Refused'] and 'InlineFail' in acts,
+        'a-drop-callback-leaf-mark-after-crash': g3('grants.change', 'callbacks.rs:165', 2, 'ClassInput',
+                                                    'InlineWrite') and ended[:1] == ['Crashed'],
+        'a-drop-class-input-mark': g3('toolkit_store.compare_and_swap', 'class_input.rs:284', 1, 'ClassInput',
+                                      'InlineWrite') and f('initial') == '"Shared"',
+        'a-drop-class-input-mark-after-refusal': g3('toolkit_store.compare_and_swap', 'class_input.rs:284', 2,
+                                                    'ClassInput', 'InlineWrite')
+            and ended[:1] == ['Refused'] and 'InlineFail' in acts,
+        'a-drop-native-child-mark-shared': g3('grants.change', 'native_operations.rs:938', 1, 'FindNative',
+                                              'WriterIssue') and f('initial') == '"Shared"'
+            and 'DropBind' not in acts and 'WriterFail' not in acts,
+        'a-drop-service-observation-mark': g3('toolkit_store.compare_and_swap', 'service.rs:379', 2, 'BatchSetup',
+                                              'InlineWrite') and ended[:1] == ['Refused'] and 'InlineFail' in acts,
+        'a-drop-service-observation-mark-after-crash': g3('toolkit_store.compare_and_swap', 'service.rs:379', 2,
+                                                          'BatchSetup', 'InlineWrite') and ended[:1] == ['Crashed'],
+        'a-notnow-after-failed-write': a_stage and f('backstop') == 'TRUE' and f('door') == '"ClassInput"'
+            and effect[:1] == ['original.class_input'] and wrote[:1] == ['FALSE'] and acts[-1] == 'Handle'
+            and 'InlineFail' in acts,
+        'a-refused-waits': a_stage and f('pc') == '"MetaWait"' and f('answer') == '"Refused"'
+            and wrote[:1] == ['TRUE'] and acts[-1] == 'Handle' and 'InlineFail' in acts,
+        'row-class-first-send-a': a_stage and f('door') == '"ClassInput"' and f('outcome') == '"Admitted"'
+            and f('waited') == 'TRUE' and f('notnow_seen') == 'FALSE' and f('attempt') == '1'
+            and effect == ['original.callback_grant', ''],
+        'row-batch-first-send-a': a_stage and f('door') == '"BatchSetup"' and f('outcome') == '"Admitted"'
+            and f('waited') == 'TRUE' and f('notnow_seen') == 'FALSE' and f('attempt') == '1'
+            and effect == ['original.service_setup_grant', ''],
+        'row-bound-resend-a': a_stage and f('door') == '"Find"' and f('outcome') == '"Admitted"'
+            and f('notnow_seen') == 'TRUE' and f('attempt') == '2',
+        'row-orphan-duplicate': a_stage and f('dup_refused') == 'TRUE'
+            and counts(f('issue_count')).get('controller_grant') == 1 and f('outcome') == '"Refused"'
+            and 'DropBind' in acts,
+        'row-orphan-duplicate-retry': a_stage and f('dup_refused') == 'TRUE'
+            and counts(f('issue_count')).get('controller_grant') == 1 and f('outcome') == '"Admitted"'
+            and f('attempt') == '3' and 'DropBind' in acts,
+        'row-leaf-first-after-refusal': after('callbacks.rs:165', 'Refused', 'ClassInput') and 'InlineFail' in acts,
+        'row-leaf-first-after-crash': after('callbacks.rs:165', 'Crashed', 'ClassInput'),
+        'row-native-child-first-after-drop': after('native_operations.rs:938', 'Gone', 'FindNative')
+            and 'WriterFail' in acts,
+        'row-native-child-first-after-crash': after('native_operations.rs:938', 'Crashed', 'FindNative'),
+        'row-configured-targets-first-after-drop': after('setup_targets.rs:154', 'Gone', 'ConfiguredSetup'),
+        'row-request-targets-first-after-drop': after('setup_targets.rs:154', 'Gone', 'SetupRequest'),
+        'row-configured-grant-first-after-drop': after('configured_setup.rs:293', 'Gone', 'ConfiguredSetup'),
+        'row-class-selection-first-shared': a_stage and f('initial') == '"Shared"'
+            and f('door') in ('"ClassInput"', '"ClassNative"') and f('attempt') == '1'
+            and first[:1] == ['class_input.rs:284'],
+        'row-class-selection-first-after-refusal': after('class_input.rs:284', 'Refused', 'ClassInput')
+            and 'InlineFail' in acts,
+        'row-native-child-first-shared': a_stage and f('initial') == '"Shared"' and f('door') == '"FindNative"'
+            and f('attempt') == '1' and first[:1] == ['native_operations.rs:938'],
+        'row-service-observation-first-after-refusal': after('service.rs:379', 'Refused', 'BatchSetup')
+            and 'InlineFail' in acts,
+        'row-service-observation-first-after-crash': after('service.rs:379', 'Crashed', 'BatchSetup'),
+    }
+    for door in ['Find', 'Launch']:
+        for site in ['P', 'A']:
+            for initial in ['First', 'Partial', 'Bound']:
+                checks[f'row-held-a-{door.lower()}-{site.lower()}-{initial.lower()}'] = held(door, site, initial)
+    return checks
+
+
+def stage_b_checks(f, actions):
+    last = actions[-1] if actions else 'Initial'
+    b = f.get('stage') == '"B"'
+    procs = records(f.get('sp'))
+    journal = records(f.get('jr'))
+    preps = records(f.get('prep'))
+    native = tuples(f.get('native'))
+    # Core's admissions as <<session, raw key, epoch>> (the admitting dispatch dropped).
+    keys3 = [t[:3] for t in native]
+    refused = tuples(f.get('refusals'))
+    issue_once = all(v <= 1 for v in counts(f.get('issue_count')).values())
+
+    def proc(**want):
+        return any(all(q(p.get(k)) == v for k, v in want.items()) for p in procs)
+
+    def jr(slot, key):
+        return q(journal[slot - 1].get(key)) if len(journal) >= slot else ''
+
+    def o(slot, field):
+        return q(f.get(('offer_' if slot == 1 else 'offer2_') + field))
+
+    def phase(slot):
+        return o(slot, 'phase')
+
+    def admitted(slot):
+        return phase(slot) == 'CoreObserved' and o(slot, 'receipt_kind') in ('Admitted', 'Found')
+
+    def not_admitted(slot):
+        return phase(slot) == 'CoreObserved' and o(slot, 'receipt_kind') in ('CoreRefused', 'EntryRefused')
+
+    def num(slot, field):
+        value = o(slot, field)
+        return int(value) if value.isdigit() else -1
+
+    def before_last(earlier, later):
+        # `earlier` occurs before the last occurrence of `later`.
+        if later not in actions:
+            return False
+        cut = len(actions) - 1 - actions[::-1].index(later)
+        return earlier in actions[:cut]
+
+    def held(door, site, initial):
+        return (b and q(f.get('door')) == door and q(f.get('initial')) == initial and q(f.get('held_site')) == site
+                and proc(pc='MetaWait', cause='SourceHeld') and last == f'B_Decide{site}')
+
+    checks = {
+        'block-in-protected': b and f.get('gate') == '"Held"'
+            and any(q(p.get('pc')) in ('DecideP', 'DecideA') for p in procs) and f.get('meta_holder') != '0',
+        'stale-snapshot': b and last == 'B_CommitStore' and phase(1) == 'Offered'
+            and f.get('src_readiness') == '"ClosedToOffers"' and f.get('offer_source_revision') != jr(1, 'crev'),
+        'cached-incarnation': b and last == 'B_CommitStore' and phase(1) == 'Offered'
+            and f.get('current_inc') == '"inc2"' and f.get('offer_incarnation') == '"inc1"' and jr(1, 'cinc') == 'inc2',
+        'fresh-key-replay': b and last == 'B_Entry' and f.get('epoch') == '2' and 'B_Crash' in actions
+            and any(t[1] == 'k3' for t in native) and proc(kind='driver', key='k3'),
+        'dispatch-current-session': b and last == 'B_Entry' and ['inc2', 'k1', '1'] in keys3
+            and f.get('offer_incarnation') == '"inc1"' and 'B_ReplaceSession' in actions,
+        # The first send ended Held; the next send prepares a second offer instead of the kept one.
+        'replay-reprepares': b and last == 'B_Create' and phase(1) == 'Offered' and phase(2) == 'Prepared'
+            and 'B_MetaExpire' in actions,
+        'lost-reply-reprepare': b and last == 'B_Create' and phase(1) == 'Offered' and phase(2) == 'Prepared'
+            and f.get('lost_reply_seen') == 'TRUE' and 'B_ReadBack' in actions,
+        'effects-before-owner': b and last == 'B_PrepIssue' and phase(1) == 'Absent' and phase(2) == 'Absent'
+            and f.get('issued') not in (None, '{}'),
+        'send-before-owner': b and last == 'B_Call' and phase(1) == 'Prepared' and proc(pc='Lock'),
+        # Meta called (the protected section entered) without the dispatch start recorded.
+        'call-without-dispatch-record': b and last == 'B_Call' and phase(1) == 'Offered' and proc(pc='Lock')
+            and num(1, 'dispatch_count') == 0,
+        'commit-without-outbox': b and last == 'B_CommitStore' and phase(1) == 'Offered' and jr(1, 'outbox') == 'FALSE',
+        'discard-clears-obligation': b and last == 'B_PeerExpire' and f.get('door') == '"Peer"'
+            and phase(1) == 'Offered' and jr(1, 'outbox') == 'FALSE' and jr(1, 'fifo') == 'FALSE',
+        'refusal-as-notnow': b and last in ('B_DecideP', 'B_DecideA') and f.get('auth_ok') == 'FALSE'
+            and proc(cause='PolicyDenied', dec='NotNow'),
+        'closed-as-notnow': b and last in ('B_DecideP', 'B_DecideA') and f.get('src_readiness') == '"ClosedToOffers"'
+            and proc(cause='SourceClosed', dec='NotNow'),
+        'held-before-closed': b and last in ('B_DecideP', 'B_DecideA') and f.get('gate') == '"Held"'
+            and f.get('src_readiness') == '"ClosedToOffers"' and proc(cause='SourceHeld', dec='NotNow'),
+        'untyped-commit-refusal': b and last == 'B_CommitRefuse' and phase(1) == 'Withdrawn'
+            and f.get('auth_ok') == 'FALSE' and proc(out='Refused', cause='None'),
+        'drop-retry-owner': b and last in ('B_DecideP', 'B_DecideA') and proc(out='NotNow', cause='SourceHeld'),
+        'discard-parked': b and last == 'B_PeerExpire' and f.get('door') == '"Peer"' and phase(1) == 'Offered'
+            and jr(1, 'pend') == 'TRUE' and jr(1, 'fifo') == 'FALSE' and jr(1, 'outbox') == 'TRUE',
+        # Two peer binds of the session live at once: the drain ignored.
+        'peer-binds-concurrently': b and f.get('door') == '"Peer"'
+            and sum(1 for p in procs if q(p.get('pc')) not in ('Idle', 'Done')) == 2,
+        'forge-admission': b and last == 'B_ObserveRead' and admitted(1) and native == []
+            and f.get('published_read') == '"Unread"',
+        'forget-lost-reply': b and last == 'B_Settle' and phase(1) == 'Offered' and proc(out='Unresolved')
+            and ['inc1', 'k1', '1'] in keys3 and jr(1, 'read_owed') == 'FALSE',
+        # A read taken before the re-drive's admission, whose answer was lost, clears the read
+        # owed after that loss.
+        'stale-read-clears': b and last == 'B_ObserveRead' and phase(1) == 'Offered' and proc(out='Unresolved')
+            and any(t[1] == 'k1' for t in native) and jr(1, 'read_owed') == 'FALSE',
+        'drop-mutates-phase': b and last == 'B_DropSend' and phase(1) == 'Withdrawn' and proc(out='Gone'),
+        'drop-clears-seal': b and last == 'B_DropSend' and phase(1) == 'Prepared'
+            and f.get('offer_preparation_receipt') == '""' and f.get('offer_revision') == '2' and proc(out='Gone'),
+        'cached-authority': b and last == 'B_Entry' and f.get('admitted_stale') == 'TRUE'
+            and f.get('auth_ok') == 'FALSE' and proc(waited='TRUE') and 'B_Revoke' in actions
+            and 'B_MetaRebind' in actions,
+        'entry-without-fence': b and last == 'B_Entry' and f.get('admitted_stale') == 'TRUE'
+            and f.get('auth_ok') == 'FALSE' and after_index(actions, 'B_Revoke', 'B_Lock'),
+        'publication-inside-store': b and last == 'B_StoreBegin' and f.get('store_pc') == '"hook"'
+            and f.get('conn_holder') == '"store"',
+        'skip-restart-scan': b and last == 'B_Scan' and f.get('epoch') == '2' and phase(1) == 'Offered'
+            and jr(1, 'parked') == 'FALSE' and jr(1, 'outbox') == 'TRUE',
+        'scan-first-record-only': b and last == 'B_Scan' and f.get('epoch') == '2' and phase(2) == 'Offered'
+            and jr(2, 'parked') == 'FALSE' and jr(2, 'outbox') == 'TRUE' and phase(1) == 'CoreObserved',
+        'admit-after-close': b and f.get('life_phase') == '"Closing"' and f.get('entered_after_close') == 'TRUE',
+        'close-without-join': b and last == 'B_LifeSettle' and f.get('life_phase') == '"Closed"'
+            and f.get('joined') == 'FALSE',
+        'close-forgets-unresolved': b and last == 'B_LifeSettle' and f.get('life_phase') == '"Closed"'
+            and f.get('joined') == 'TRUE' and phase(1) == 'Offered' and num(1, 'close_epoch') == 0,
+        'close-skips-preparers': b and last == 'B_LifeSettle' and f.get('life_phase') == '"Closed"'
+            and f.get('joined') == 'TRUE' and any(q(p.get('st')) == 'Running' for p in preps),
+        'omit-driver-undeclared': b and f.get('mode') == '"undeclared"' and phase(1) == 'Offered'
+            and last == 'B_CommitStore',
+        # The declared fixture's stand-in claims a production admission.
+        'fixture-claims': b and f.get('mode') == '"fixture"' and f.get('claimed') == 'TRUE' and admitted(1)
+            and 'B_FixtureCall' in actions,
+        # An Unavailable read published as Absent discharges the read owed after a lost answer:
+        # the record is kept with nothing owed over Core's admission, with a false final absence.
+        'unavailable-as-absent': b and last == 'B_ObserveRead' and f.get('epoch') == '1' and phase(1) == 'Offered'
+            and num(1, 'absence_through') == 1 and ['inc1', 'k1', '1'] in keys3 and jr(1, 'read_owed') == 'FALSE',
+        # An Absent read fed as Core's refusal of the last open dispatch: the receipt names a
+        # refusal Core never made.
+        'absent-terminates': b and last == 'B_ObserveRead' and not_admitted(1)
+            and o(1, 'receipt_kind') == 'CoreRefused' and refused == [] and 'B_Crash' in actions,
+        # A lost answer fed as not submitted; a later fence refusal settles against Core.
+        'lost-as-not-submitted': b and not_admitted(1) and ['inc1', 'k1', '1', '1'] in native
+            and o(1, 'receipt_kind') == 'EntryRefused' and num(1, 'receipt_dispatch') == 2,
+        # The owner settles a refusal while another dispatch of the key is open (owner mutant).
+        'notadmitted-while-inflight': b and not_admitted(1) and ['inc1', 'k1', '1'] in keys3
+            and f.get('core_refusals') == '1',
+        # Admitted in the ended process, the answer lost; the restart answers that dispatch as not
+        # submitted and the re-drive's fence refusal settles the record NotAdmitted.
+        'crash-clears-ambiguity': b and last == 'B_Settle' and not_admitted(1) and ['inc1', 'k1', '1'] in keys3
+            and f.get('epoch') == '2' and proc(out='Refused', cause='EntryRefused') and 'B_ForgetAmbiguity' in actions,
+        # The fence's refusal recorded as Core's.
+        'receipt-wrong-kind': b and last == 'B_Settle' and not_admitted(1) and o(1, 'receipt_kind') == 'CoreRefused'
+            and ['1', '1', 'EntryRefused'] in refused,
+        # A volatile or supervisor drop fed as Core's refusal: a native verdict from a transport end.
+        'drop-as-verdict': b and last == 'B_Settle' and f.get('door') == '"Peer"' and not_admitted(1)
+            and refused == [] and 'B_PeerExpire' in actions,
+        # The final absence recorded at the restart's read, the re-drive still owed (owner mutant).
+        'absence-without-redispatch': b and last == 'B_ObserveRead' and f.get('epoch') == '2'
+            and num(1, 'absence_through') > 0 and jr(1, 'redrive') == 'TRUE',
+        # The final absence recorded over a dispatch of this process that then admits (owner mutant).
+        'absence-in-process': b and num(1, 'absence_through') > 0
+            and any(t[1] == 'k1' and int(t[3]) <= num(1, 'absence_through') for t in native),
+        # The durable read's absence recorded as final over a lost dispatch of this process whose
+        # admission write is still in flight (owner mutant).
+        'durable-read-counts': b and last == 'B_ObserveRead' and f.get('epoch') == '1'
+            and num(1, 'absence_through') >= 1 and 'B_ReadDurable' in actions
+            and any(t[1] == 'k1' and int(t[3]) <= num(1, 'absence_through') for t in tuples(f.get('landing'))),
+        # A durable read started with no admission write in flight.
+        'durable-read-anytime': b and last == 'B_ReadDurable' and f.get('read_kind') == '"Durable"'
+            and tuples(f.get('landing')) == [],
+        # The fail-stop's next process kept the closing (or closed) lifetime.
+        'failstop-keeps-closing-lifetime': b and last == 'B_Restart' and f.get('fatal') == '"PublicationPoisoned"'
+            and f.get('life_cur') == '1' and f.get('life_phase') in ('"Closing"', '"Closed"') and 'B_FailStop' in actions,
+        'no-relookup-b': b and f.get('prep_refused') == 'TRUE' and proc(out='Refused', cause='PreparationRefused')
+            and 'controller_grant' in strings(f.get('dup_arts')) and issue_once,
+        'row-class-first-send-b': b and f.get('door') == '"ClassInput"' and admitted(1)
+            and proc(out='Admitted', waited='TRUE'),
+        'row-batch-first-send-b': b and f.get('door') == '"BatchSetup"' and admitted(1)
+            and proc(out='Admitted', waited='TRUE'),
+        'row-production-claimed': b and f.get('mode') == '"production"' and f.get('claimed') == 'TRUE'
+            and admitted(1) and 'B_Call' in actions,
+        'row-fixture-unclaimed': b and f.get('mode') == '"fixture"' and f.get('claimed') == 'FALSE' and admitted(1)
+            and 'B_FixtureCall' in actions and 'B_Call' not in actions,
+        'row-close-records-unresolved': b and f.get('life_phase') == '"Closed"' and phase(1) == 'Offered'
+            and num(1, 'close_epoch') == 1 and 'B_JoinDriver' in actions and 'B_CloseRecord' in actions,
+        # The restart after a stop: the next process (its new lifetime open) re-drives the record
+        # the stopped process's close recorded and it is admitted once, its receipt naming the
+        # next process's dispatch.
+        'row-stop-restart-redrive-admitted': b and f.get('life_cur') == '2' and f.get('epoch') == '2' and admitted(1)
+            and o(1, 'receipt_kind') == 'Admitted' and num(1, 'receipt_epoch') == 2 and num(1, 'close_epoch') == 1
+            and len(native) == 1 and proc(kind='driver', out='Admitted') and 'B_Stop' in actions
+            and before_last('B_Life2Open', 'B_Redrive'),
+        # A durable claim queued at the stop: Core re-offers it to the next process.
+        'row-stop-restart-claim-reoffered': b and f.get('door') == '"Peer"' and f.get('life_cur') == '2'
+            and admitted(1) and o(1, 'receipt_kind') == 'Admitted' and num(1, 'receipt_epoch') == 2
+            and num(1, 'close_epoch') == 1 and len(native) == 1 and proc(kind='core', out='Admitted')
+            and 'B_Stop' in actions and before_last('B_Life2Open', 'B_CoreReoffer'),
+        # The close's record blocks the next process's re-drive (owner mutant): the re-drive stands
+        # at its call over the record the stopped process's close recorded.
+        'close-blocks-later-process': b and f.get('life_cur') == '2' and f.get('epoch') == '2' and phase(1) == 'Offered'
+            and num(1, 'close_epoch') == 1 and proc(kind='driver', pc='Call') and 'B_Stop' in actions,
+        'row-lost-reply-readback': b and f.get('lost_reply_seen') == 'TRUE' and admitted(1) and phase(2) == 'Absent'
+            and 'B_ReadBack' in actions,
+        'row-restart-redrive': b and f.get('epoch') == '2' and f.get('crashed_offered') == 'TRUE' and admitted(1)
+            and 'B_Scan' in actions,
+        'row-held-then-replayed': b and f.get('replayed') == 'TRUE' and admitted(1) and phase(2) == 'Absent'
+            and keys3 == [['inc1', 'k1', '1']] and proc(out='Held') and proc(out='Admitted'),
+        'row-lost-receipt-s1-s2': b and f.get('current_inc') == '"inc2"' and admitted(1)
+            and keys3 == [['inc1', 'k1', '1']] and proc(out='Held', cause='OriginalAdmissionPending'),
+        'row-peer-pending-reoffered': b and f.get('door') == '"Peer"' and admitted(1) and phase(2) == 'Absent'
+            and proc(kind='core', out='Admitted') and 'B_PeerExpire' in actions and 'B_CoreReoffer' in actions,
+        'row-concurrent-sends-one-offer': b and f.get('cas_lost') == 'TRUE' and admitted(1) and phase(2) == 'Absent'
+            and len(native) == 1 and all(q(p.get('out')) == 'Admitted' for p in procs),
+        'row-second-offer-after-notadmitted': b and not_admitted(1) and admitted(2)
+            and keys3 == [['inc1', 'k2', '1']],
+        'row-entry-refused-notadmitted': b and f.get('auth_ok') == 'FALSE' and not_admitted(1) and native == []
+            and o(1, 'receipt_kind') == 'EntryRefused' and num(1, 'receipt_dispatch') == 1
+            and proc(out='Refused', cause='EntryRefused') and ['1', '1', 'EntryRefused'] in refused,
+        'row-receipt-names-core-refusal': b and not_admitted(1) and o(1, 'receipt_kind') == 'CoreRefused'
+            and num(1, 'receipt_dispatch') == 1 and num(1, 'receipt_epoch') == 1 and native == []
+            and ['1', '1', 'CoreRefused'] in refused,
+        'row-refusal-left-journal': b and admitted(1) and o(1, 'receipt_kind') == 'Admitted'
+            and ['1', '1', 'CoreRefused'] in refused and num(1, 'receipt_dispatch') == 2 and len(native) == 1,
+        'row-dispatch-before-meta': b and f.get('door') != '"Peer"' and proc(pc='DecideP')
+            and num(1, 'dispatch_count') >= 1 and last == 'B_Lock',
+        'row-dispatch-before-peer-section': b and f.get('door') == '"Peer"' and proc(pc='DecideP', kind='caller')
+            and num(1, 'dispatch_count') >= 1 and last == 'B_PeerSection',
+        'row-lost-answer-recorded': b and phase(1) == 'Offered' and o(1, 'unresolved_dispatches') == '{1}'
+            and proc(out='Unresolved') and last == 'B_Settle',
+        'row-lost-dispatch-observed': b and f.get('epoch') == '1' and admitted(1) and len(native) == 1
+            and proc(out='Unresolved') and last == 'B_ObserveRead',
+        'row-lost-before-replayed': b and f.get('epoch') == '1' and f.get('replayed') == 'TRUE' and admitted(1)
+            and keys3 == [['inc1', 'k1', '1']] and proc(out='Unresolved'),
+        'row-final-absence-covers-dispatches': b and f.get('epoch') == '2' and phase(1) == 'Offered'
+            and num(1, 'absence_through') >= 2 and num(1, 'absence_through') == num(1, 'dispatch_count')
+            and jr(1, 'redrive') == 'FALSE' and 'B_Redrive' in actions and last == 'B_ObserveRead',
+        'row-final-absence-then-later-dispatch': b and num(1, 'absence_through') > 0 and admitted(1)
+            and num(1, 'receipt_dispatch') > num(1, 'absence_through'),
+        # The caller's replay dispatched the parked record after the restart; no re-drive ran.
+        'row-replay-discharges-redrive': b and f.get('epoch') == '2' and last == 'B_Call' and jr(1, 'parked') == 'TRUE'
+            and jr(1, 'redrive') == 'FALSE' and num(1, 'last_dispatch_epoch') == 2 and 'B_Redrive' not in actions
+            and proc(kind='caller'),
+        'row-rebind-limit-held': b and proc(out='Held', rb='3') and actions.count('B_MetaRebind') == 3,
+        'row-offered-source-cancelled-observed': b and f.get('src_phase') == '"Cancelled"' and admitted(1)
+            and after_index(actions, 'B_SrcCancel', 'B_CommitStore'),
+        'row-source-closed-during-wait-kept': b and f.get('src_readiness') == '"ClosedToOffers"'
+            and phase(1) == 'Offered' and proc(out='Refused', cause='SourceClosed', waited='TRUE'),
+        'row-revoked-during-wait-kept': b and f.get('auth_ok') == 'FALSE' and phase(1) == 'Offered'
+            and proc(out='Refused', cause='PolicyDenied', waited='TRUE'),
+        'row-revoked-after-admission-kept': b and f.get('auth_ok') == 'FALSE' and admitted(1)
+            and f.get('admitted_stale') == 'FALSE' and after_index(actions, 'B_Revoke', 'B_Entry'),
+        'row-session-replaced-held': b and f.get('current_inc') == '"inc2"' and phase(1) == 'Offered' and native == []
+            and proc(out='Held', cause='OriginalAdmissionPending'),
+        'row-orphan-withdrawn-after-restart': b and f.get('epoch') == '2' and f.get('scanned') == 'TRUE'
+            and phase(1) == 'Withdrawn' and num(1, 'preparation_epoch') == 1 and jr(1, 'ie') == '0'
+            and 'B_ScanWithdraw' in actions and 'B_Crash' in actions,
+        'row-crash-mid-preparation-owned': b and f.get('dead_prep') == 'TRUE' and phase(1) == 'Withdrawn'
+            and admitted(2) and issue_once and 'B_ScanWithdraw' in actions,
+        'row-close-joins-preparer': b and f.get('life_phase') == '"Closed"' and f.get('close_waited_prep') == 'TRUE'
+            and 'B_JoinDriver' in actions,
+        'row-b-duplicate-relookup': b and strings(f.get('dup_arts')) != set() and f.get('prep_refused') == 'FALSE'
+            and admitted(1) and issue_once,
+        'row-b-setup-request-duplicate-relookup': b and f.get('door') == '"SetupRequest"'
+            and strings(f.get('dup_arts')) & {'setup_request_child', 'setup_request_targets'}
+            and f.get('prep_refused') == 'FALSE' and admitted(1) and issue_once,
+        'row-unavailable-then-admitted': b and admitted(1) and o(1, 'receipt_kind') == 'Found'
+            and f.get('unavail_reads') != '0' and actions.count('B_ObserveRead') >= 1,
+        # The binder's rule for a re-offered claim of a terminal record.
+        'row-reoffer-terminal-admitted-bound': b and f.get('door') == '"Peer"' and admitted(1)
+            and o(1, 'receipt_kind') == 'Found' and len(native) == 1 and proc(kind='core', d='0', out='Admitted')
+            and 'B_CoreReoffer' in actions,
+        # The re-offer of an admitted record, its section entered after the authority's
+        # revocation, passes no new fence: Core's dedup answers it.
+        'row-reoffer-admitted-no-fence': b and f.get('door') == '"Peer"' and f.get('auth_ok') == 'FALSE'
+            and admitted(1) and o(1, 'receipt_kind') == 'Found' and len(native) == 1
+            and proc(kind='core', d='0', view='FALSE', out='Admitted') and after_index(actions, 'B_PeerSection', 'B_Revoke'),
+        # A record withdrawn for no verdict: Core re-offers its claim and the same delivery is
+        # prepared again in a new offer, admitted once.
+        'row-withdrawn-restart-prepared-again': b and f.get('door') == '"Peer"' and phase(1) == 'Withdrawn'
+            and o(1, 'withdrawal_cause') == 'ProcessEnded' and admitted(2) and len(native) == 1
+            and proc(kind='core', out='Admitted') and 'B_Crash' in actions and 'B_ScanWithdraw' in actions
+            and before_last('B_CoreReoffer', 'B_Create'),
+        'row-withdrawn-stale-prepared-again': b and f.get('door') == '"Peer"' and phase(1) == 'Withdrawn'
+            and o(1, 'withdrawal_cause') == 'PreparationStale' and admitted(2) and o(2, 'incarnation') == 'inc2'
+            and len(native) == 1 and proc(kind='core', out='Admitted') and 'B_ReplaceSession' in actions
+            and before_last('B_CoreReoffer', 'B_Create'),
+        'row-withdrawn-stop-prepared-again': b and f.get('door') == '"Peer"' and f.get('life_cur') == '2'
+            and phase(1) == 'Withdrawn' and o(1, 'withdrawal_cause') == 'AdmissionClosed' and admitted(2)
+            and num(2, 'preparation_epoch') == 2 and len(native) == 1 and proc(kind='core', out='Admitted')
+            and 'B_Stop' in actions and before_last('B_Life2Open', 'B_CoreReoffer'),
+        # A verdict withdrawal ends the delivery refused, typed, and Core's claim with it.
+        'row-peer-verdict-withdrawal-refused': b and last == 'B_CommitRefuse' and f.get('door') == '"Peer"'
+            and phase(1) == 'Withdrawn' and o(1, 'withdrawal_cause') == 'PolicyDenied' and jr(1, 'fifo') == 'FALSE'
+            and f.get('orphan_claim') == 'FALSE' and proc(out='Refused', cause='PolicyDenied'),
+        # A closed admission before the record exists: Core keeps the claim with no record and
+        # re-offers it to the next process, where it is prepared and admitted once.
+        'row-lookup-closed-claim-kept': b and f.get('door') == '"Peer"' and f.get('life_cur') == '2' and admitted(1)
+            and num(1, 'preparation_epoch') == 2 and num(1, 'close_epoch') == 0 and len(native) == 1
+            and proc(kind='core', out='Admitted') and 'B_Stop' in actions
+            and before_last('B_Life2Open', 'B_CoreReofferFresh'),
+        # A verdict met over an unresolved dispatch answers NotReady: the claim stays queued,
+        # held, with a read by key owed.
+        'row-no-denial-over-ambiguity': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('auth_ok') == 'FALSE' and phase(1) == 'Offered' and o(1, 'unresolved_dispatches') != '{}'
+            and jr(1, 'fifo') == 'TRUE' and jr(1, 'held') == 'TRUE' and jr(1, 'read_owed') == 'TRUE'
+            and proc(kind='core', out='Pending', cause='PolicyDenied'),
+        # The held claim released after a restart: the final absence covers the lost dispatch
+        # and Core's next re-offer, a dispatch after the evidence, is denied.
+        'row-held-claim-denied-after-restart': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('epoch') == '2' and f.get('auth_ok') == 'FALSE' and native == [] and phase(1) == 'Offered'
+            and f.get('absence_epoch') == '2' and o(1, 'unresolved_dispatches') == '{1}'
+            and o(1, 'dispatch_epochs') == '<<1>>'
+            and o(1, 'unresolved_dispatches') != '{}' and num(1, 'absence_through') > 0 and jr(1, 'fifo') == 'FALSE'
+            and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
+                    and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()
+                    and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
+            and 'B_Crash' in actions and before_last('B_ObserveRead', 'B_CoreReoffer'),
+        # The held claim released in the same process: Core's live read recorded the final
+        # absence over the lost dispatch and the held re-offer's, and Core's next re-offer, a
+        # dispatch after the evidence, is denied; no crash or stop before.
+        'row-held-claim-denied-in-process': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('epoch') == '1' and f.get('auth_ok') == 'FALSE' and native == [] and phase(1) == 'Offered'
+            and o(1, 'unresolved_dispatches') != '{}' and num(1, 'absence_through') >= 2 and jr(1, 'fifo') == 'FALSE'
+            and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
+                    and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()
+                    and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
+            and 'B_Crash' not in actions and 'B_Stop' not in actions and 'B_ReadCore' in actions
+            and before_last('B_ObserveRead', 'B_CoreReoffer'),
+        # The entry fence's held branch released in the same process: the re-offer refused at the
+        # fence over the lost dispatch, the live read's evidence over both, the next re-offer denied.
+        'row-fence-held-released': b and last == 'B_Settle' and f.get('door') == '"Peer"' and f.get('epoch') == '1'
+            and f.get('auth_ok') == 'FALSE' and native == [] and ['1', '2', 'EntryRefused'] in refused
+            and num(1, 'absence_through') >= 2 and jr(1, 'fifo') == 'FALSE'
+            and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
+                    and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()
+                    and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
+            and 'B_Crash' not in actions and 'B_ReadCore' in actions,
+        # The drain's FIFO head first: the queued claim's re-offer before the second delivery.
+        'row-peer-head-first': b and f.get('door') == '"Peer"' and admitted(1) and len(native) == 1
+            and f.get('begun') == '2' and proc(kind='core', out='Admitted') and proc(kind='caller', n='2', out='Admitted')
+            and before_last('B_CoreReoffer', 'B_Begin'),
+        # Volatile and supervisor deliveries (no claim).
+        'row-noclaim-dropped-kept': b and f.get('door') == '"Peer"' and phase(1) == 'Offered' and proc(out='Dropped')
+            and jr(1, 'fifo') == 'FALSE',
+        'row-noclaim-retry-admitted': b and f.get('door') == '"Peer"' and admitted(1) and len(native) == 1
+            and proc(out='Dropped') and proc(out='Admitted'),
+        # The drain binds a fresh delivery over a queued claim.
+        'peer-skips-queued-claim': b and last == 'B_Begin' and f.get('door') == '"Peer"' and f.get('begun') == '2'
+            and jr(1, 'fifo') == 'TRUE' and proc(kind='caller', pc='Lookup', n='2') and 'B_PeerExpire' in actions,
+        # Contention answered refused: a held source over an open source and admission; a
+        # replaced session with a current authority.
+        'held-refused': b and last in ('B_DecideP', 'B_DecideA') and f.get('gate') == '"Held"'
+            and f.get('src_phase') == '"Open"' and f.get('src_readiness') == '"Ready"'
+            and proc(dec='Refused', cause='SourceClosed'),
+        'stale-refused': b and last == 'B_DecideA' and f.get('current_inc') == '"inc2"'
+            and o(1, 'incarnation') == 'inc1' and f.get('auth_ok') == 'TRUE' and proc(dec='Refused', cause='PolicyDenied'),
+        # Core's re-offer of a record the restart withdrew (no verdict) refused in the section.
+        'withdrawn-always-refused': b and last == 'B_DecideP' and f.get('door') == '"Peer"' and phase(1) == 'Withdrawn'
+            and o(1, 'withdrawal_cause') == 'ProcessEnded' and proc(kind='core', dec='Refused', cause='PreparationWithdrawn')
+            and 'B_Crash' in actions and 'B_CoreReoffer' in actions,
+        # Core's claim ended at a closed admission (Denied instead of NotReady).
+        'closed-admission-denied': b and f.get('door') == '"Peer"' and f.get('life_phase') == '"Closing"'
+            and proc(out='Refused', cause='AdmissionClosed') and f.get('orphan_claim') == 'FALSE'
+            and jr(1, 'fifo') == 'FALSE' and last in ('B_Lookup', 'B_CommitRefuse', 'B_Settle'),
+        # Core's claim ended for a verdict met over an unresolved dispatch.
+        'denied-over-ambiguity': b and last == 'B_Settle' and f.get('door') == '"Peer"' and f.get('auth_ok') == 'FALSE'
+            and phase(1) == 'Offered' and o(1, 'unresolved_dispatches') != '{}' and jr(1, 'fifo') == 'FALSE'
+            and proc(kind='core', out='Refused', cause='PolicyDenied'),
+        # Core's claim ended at the entry fence by the closing admission: the fence's typed
+        # refusal settles the record and the claim is gone.
+        'fence-closed-admission-denied': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('life_phase') == '"Closing"' and not_admitted(1) and o(1, 'receipt_kind') == 'EntryRefused'
+            and ['1', '1', 'EntryRefused'] in refused and proc(out='Refused', cause='EntryRefused')
+            and jr(1, 'fifo') == 'FALSE' and f.get('orphan_claim') == 'FALSE',
+        # Core's claim ended at the entry fence for a verdict met over an unresolved dispatch.
+        'fence-denied-over-ambiguity': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('auth_ok') == 'FALSE' and phase(1) == 'Offered' and o(1, 'unresolved_dispatches') != '{}'
+            and jr(1, 'fifo') == 'FALSE' and proc(kind='core', out='Refused', cause='EntryRefused'),
+        # A durable delivery the entry fence refused for the closing admission: Core keeps the
+        # claim and re-offers it to the next process after the stop, where the record is admitted
+        # once.
+        'row-entry-closed-claim-kept': b and f.get('door') == '"Peer"' and f.get('life_cur') == '2' and admitted(1)
+            and ['1', '1', 'EntryRefused'] in refused and keys3 == [['inc1', 'k1', '2']]
+            and proc(kind='core', out='Admitted') and 'B_LifeBeginClose' in actions and 'B_Stop' in actions
+            and before_last('B_Life2Open', 'B_CoreReoffer'),
+        # The fail-stop on a poisoned publication during the close (the first lifetime stays
+        # Closing: the process did not wait for it), the next process in a new lifetime, where
+        # Core's re-offer admits the durable delivery once.
+        'row-poisoned-fail-stop-recovered': b and f.get('door') == '"Peer"' and f.get('fatal') == '"PublicationPoisoned"'
+            and f.get('life_phase') == '"Closing"' and f.get('life_cur') == '2' and len(native) == 1
+            and any(admitted(i) and num(i, 'receipt_epoch') == 2 for i in (1, 2))
+            and proc(kind='core', out='Admitted') and 'B_FailStop' in actions and 'B_Crash' not in actions
+            and 'B_LifeBeginClose' in actions
+            and (before_last('B_Life2Open', 'B_CoreReoffer') or before_last('B_Life2Open', 'B_CoreReofferFresh')),
+        # The re-offer of an admitted record refused at the entry fence after the source closed.
+        'readmitted-fence': b and last == 'B_Entry' and f.get('door') == '"Peer"' and admitted(1)
+            and f.get('src_readiness') == '"ClosedToOffers"' and proc(kind='core', ans='EntryRefused'),
+    }
+    for field in ['preparation_epoch', 'dispatch_count', 'dispatch_epochs', 'unresolved_dispatches',
+                  'last_dispatch_epoch', 'receipt_kind', 'receipt_dispatch', 'receipt_epoch', 'absence_through',
+                  'close_epoch', 'withdrawal_cause']:
+        checks['forge-field-' + field.replace('_', '-')] = b and last == 'B_Forge_' + field
+    for cause, name in [('PolicyDenied', 'policy-denied'), ('SourceClosed', 'source-closed'),
+                        ('AdmissionClosed', 'admission-closed'), ('PreparationStale', 'preparation-stale')]:
+        checks[f'row-commit-refused-{name}'] = (b and last == 'B_CommitRefuse' and phase(1) == 'Withdrawn'
+                                                and proc(out='Refused', cause=cause))
+    for door in ['ClassInput', 'FindNative', 'BatchSetup', 'ConfiguredSetup', 'SetupRequest']:
+        checks[f'row-b-partial-resend-{door.lower()}'] = (
+            b and f.get('door') == f'"{door}"' and f.get('drop_partial') == 'TRUE' and admitted(1) and issue_once
+            and 'B_DropSend' in actions)
+    for door in ['Find', 'Launch']:
+        for site in ['P', 'A']:
+            for initial in ['First', 'Partial', 'Bound']:
+                checks[f'row-held-b-{door.lower()}-{site.lower()}-{initial.lower()}'] = held(door, site, initial)
+    return checks
+
+
+def witness(name, fields, actions):
+    checks = {**attempt_checks(fields, actions), **stage_b_checks(fields, actions)}
+    if name not in checks:
+        raise ValueError('no final-state predicate for ' + name)
+    if not checks[name]:
+        raise ValueError('wrong final state for ' + name)
+
+
+def lasso(text):
+    """The states of a liveness counterexample and how it repeats (a loop back or stuttering)."""
+    body = text.split('The following behavior constitutes a counter-example:', 1)
+    if len(body) != 2:
+        raise ValueError('missing liveness counterexample')
+    states, current = [], []
+    for line in body[1].splitlines():
+        if re.match(r'^(State )?\d+: ', line) or line.startswith('Back to state'):
+            if current:
+                states.append(parse_fields('\n'.join(current)))
+            current = []
+            continue
+        current.append(line)
+    if current:
+        states.append(parse_fields('\n'.join(current)))
+    states = [s for s in states if s]
+    if re.search(r'^State \d+: Stuttering', body[1], re.MULTILINE) or 'Stuttering' in body[1]:
+        loop = 'stuttering'
+    elif 'Back to state' in body[1]:
+        loop = 'back-to-state'
+    else:
+        raise ValueError('liveness counterexample without a loop')
+    return states, loop
+
+
+def live_witness(name, states, loop):
+    last = states[-1]
+    f = last.get
+    procs = records(f('sp'))
+    journal = records(f('jr'))
+
+    def proc(**want):
+        return any(all(q(p.get(k)) == v for k, v in want.items()) for p in procs)
+
+    def jr(slot, key):
+        return q(journal[slot - 1].get(key)) if len(journal) >= slot else ''
+
+    native = tuples(f('native'))
+    keys3 = [t[:3] for t in native]
+    checks = {
+        # The send's intent was committed and is never dispatched.
+        'live-no-dispatch-fairness': f('offer_phase') == '"Offered"' and proc(pc='Call'),
+        # Every read unavailable: Core admitted the key and the record is never observed.
+        'live-core-unavailable-forever': f('offer_phase') == '"Offered"' and ['inc1', 'k1', '1'] in keys3
+            and jr(1, 'read_owed') == 'TRUE' and any(s.get('raw_read') == '"Unavailable"' for s in states),
+        'live-no-read-fairness': f('offer_phase') == '"Offered"' and ['inc1', 'k1', '1'] in keys3
+            and jr(1, 'read_owed') == 'TRUE',
+        # The wait's condition cleared before its deadline; the waiter never woke, the send ran
+        # into the deadline and gave up, Held, the source free.
+        'live-never-rebind': proc(out='Held', cause='SourceHeld') and f('gate') == '"Free"'
+            and any(s.get('gate') == '"Free"' and 'MetaWait' in (s.get('sp') or '') for s in states),
+        'live-no-restart-fairness': f('alive') == 'FALSE',
+        'live-no-preparer-fairness': any(q(p.get('st')) == 'Running' for p in records(f('prep'))),
+        'live-no-orphan-withdrawal': f('offer_phase') == '"Prepared"' and f('offer_preparation_epoch') == '1'
+            and f('epoch') == '2',
+        # The wait's condition persists and the deadline never passes.
+        'live-no-deadline': (proc(pc='MetaWait', dl='FALSE') or proc(pc='PeerWait', dl='FALSE'))
+            and (f('gate') == '"Held"' or f('current_inc') == '"inc2"'),
+        'live-no-reoffer-fairness': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE',
+        # The live read fed as durable: the claim stays held and queued, the reads go on.
+        'live-read-as-durable': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE' and jr(1, 'held') == 'TRUE',
+        # Durable reads at any time: the held claim loops on durable reads.
+        'live-durable-read-anytime': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE' and jr(1, 'held') == 'TRUE'
+            and any(s.get('read_kind') == '"Durable"' for s in states),
+        # Without the declared wait assumption a send waits forever.
+        'live-driver-only-disposition': f('offer_phase') == '"Offered"'
+            and (proc(pc='MetaWait') or proc(pc='PeerWait')),
+        'live-driver-only-rebind': proc(pc='MetaWait', dl='FALSE') and f('gate') == '"Free"',
+        'live-driver-only-send-ends': proc(pc='MetaWait') or proc(pc='PeerWait'),
+    }
+    if name not in checks:
+        raise ValueError('no liveness predicate for ' + name)
+    if not checks[name]:
+        raise ValueError('wrong liveness counterexample for ' + name)
+
+
+def main():
+    generated, run = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+    base_workers = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    manifest = json.loads((generated / 'manifest.json').read_text())
+    generator = Path(__file__).with_name('generate-combined-composition')
+    if sha(generator) != manifest['generator_sha256']:
+        raise ValueError('generator changed after export')
+    source = Path(__file__).resolve().parents[1] / 'models' / manifest['attempt_model']['name']
+    if sha(source) != manifest['attempt_model']['sha256']:
+        raise ValueError('the attempt model changed after export')
+    artifacts = manifest['artifact_hashes']
+    if any(sha(generated / name) != digest for name, digest in artifacts.items()):
+        raise ValueError('export changed')
+    for name in manifest['profiles']:
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', (generated / (name + '.cfg')).read_text()):
+            raise ValueError('generic deadlock checking must stay on')
+    # An owner mutant's modules differ from the composed ones only where the manifest says: the
+    # owner by its header and one guard conjunct, the combined module by its header and the two
+    # offer INSTANCE lines.
+    owner_text = (generated / 'offer_owner.tla').read_text()
+    combined_text = (generated / 'combined_composition.tla').read_text()
+    for mutant, spec in manifest.get('owner_mutants', {}).items():
+        ident = spec['owner_module'].removeprefix('offer_owner_')
+        expected_owner = owner_text.replace('---- MODULE offer_owner ----', f'---- MODULE {spec["owner_module"]} ----', 1)
+        start = expected_owner.index('\n' + spec['transition'] + '(') + 1
+        end = expected_owner.index('\n\n', start)
+        block = expected_owner[start:end]
+        if block.count(spec['conjunct']) != 1:
+            raise ValueError(f'{mutant}: conjunct not unique in {spec["transition"]}')
+        expected_owner = expected_owner[:start] + block.replace(spec['conjunct'], spec['replacement']) + expected_owner[end:]
+        if (generated / (spec['owner_module'] + '.tla')).read_text() != expected_owner:
+            raise ValueError(f'{mutant}: the owner mutant differs beyond its one conjunct')
+        expected_combined = combined_text.replace('---- MODULE combined_composition ----',
+                                                  f'---- MODULE {spec["module"]} ----', 1)
+        for prefix in ('offer', 'offer2'):
+            expected_combined = expected_combined.replace(f'{prefix} == INSTANCE offer_owner WITH',
+                                                          f'{prefix} == INSTANCE offer_owner_{ident} WITH', 1)
+        if (generated / (spec['module'] + '.tla')).read_text() != expected_combined:
+            raise ValueError(f'{mutant}: the composed mutant module differs beyond its INSTANCE lines')
+    known = set(manifest['actions'])
+    properties = set(manifest['safety_properties'])
+    run.mkdir(exist_ok=False)
+    inputs = run / 'inputs'
+    shutil.copytree(generated, inputs)
+    result = {'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'scope': manifest['scope'], 'full_b1_acceptance': False,
+              'manifest_sha256': sha(generated / 'manifest.json'),
+              'verifier_sha256': sha(Path(__file__)), 'profiles': {},
+              'resources': {'workers_mutants_rows': 1, 'workers_bases_controls_liveness': base_workers,
+                            'heap': '2 GiB for mutants and rows, 16 GiB for the bases, controls and liveness',
+                            'timeout_seconds': TIMEOUT, 'sequential': True, 'generic_deadlock_checking': 'ON'}}
+    save(run / 'STARTED.json', result)
+    profiles = manifest['profiles']
+    order = ([n for n, p in profiles.items() if p['kind'] in ('mutant', 'row', 'live-mutant')]
+             + [n for n, p in profiles.items() if p['kind'] in ('base', 'control', 'live-base')])
+    only = os.environ.get('B1_ONLY_PROFILES')
+    if only:
+        order = [n for n in order if n in set(only.split(','))]
+    passed = True
+    union = {}
+    for name in order:
+        profile = profiles[name]
+        expected = profile['expected']
+        single = profile['kind'] in ('mutant', 'row')
+        workers = 1 if single else base_workers
+        env = os.environ.copy()
+        env['JAVA_TOOL_OPTIONS'] = '-Xmx2048m' if single else '-Xmx16384m'
+        log = run / (name + '.log')
+        module = profile.get('module', 'combined_composition')
+        if not (inputs / (module + '.tla')).is_file():
+            raise ValueError(f'{name}: no module {module}')
+        command = ['tlc', '-workers', str(workers), '-seed', '1', '-coverage', '5',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / (module + '.tla'))]
+        row = {'kind': profile['kind'], 'command': command, 'expected': expected}
+        started = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out, stderr=subprocess.STDOUT,
+                                         env=env, timeout=TIMEOUT, check=False)
+            text = log.read_text()
+            row['exit_code'] = process.returncode
+            row['states'] = re.findall(SUMMARY, text, re.MULTILINE)[-1:]
+            if expected is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('expected a clean pass')
+                if profile['kind'] == 'base':
+                    # TLC prints a coverage report every few minutes; only the last (the
+                    # final one, after the search ended) counts.
+                    reports = text.split('The coverage statistics at ')
+                    if len(reports) < 2:
+                        raise ValueError('no coverage report')
+                    coverage = {}
+                    for action, d, t in re.findall(
+                            r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module combined_composition>: '
+                            r'(\d+):(\d+)$', reports[-1], re.MULTILINE):
+                        action = normalize(action, known)
+                        if action in known:
+                            entry = coverage.setdefault(action, {'distinct': 0, 'total': 0})
+                            entry['distinct'] += int(d)
+                            entry['total'] += int(t)
+                    if any(coverage.get(a, {}).get('total', 0) != 0 for a in manifest['fault_only_actions']):
+                        raise ValueError('a fault-only action ran in a clean base')
+                    row['action_coverage'] = coverage
+                    for action, entry in coverage.items():
+                        union[action] = union.get(action, 0) + entry['total']
+            elif profile['kind'] == 'live-mutant':
+                if process.returncode != 13 or f'Temporal property {expected} was violated' not in text:
+                    raise ValueError('did not violate its attributed liveness property')
+                states, loop = lasso(text)
+                live_witness(name, states, loop)
+                row['loop'] = loop
+                row['final_state'] = states[-1]
+                row['trace_length'] = len(states)
+            else:
+                if expected in properties:
+                    ok = process.returncode == 13 and f'Action property {expected} is violated' in text
+                else:
+                    ok = process.returncode == 12 and f'Invariant {expected} is violated' in text
+                if not ok:
+                    raise ValueError('did not violate its attributed invariant or property')
+                fields, actions = final_state(text, known)
+                witness(name, fields, actions)
+                row['final_state'] = fields
+                row['actions'] = actions
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['seconds'] = round((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds(), 1)
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(json.dumps({'profile': name, 'kind': profile['kind'], 'passed': row['passed'],
+                          'exit': row.get('exit_code'), 'states': row.get('states'), 'seconds': row['seconds'],
+                          'error': row.get('error')}), flush=True)
+    required = set(manifest['actions']) - set(manifest['fault_only_actions'])
+    bases_run = [n for n in order if profiles[n]['kind'] == 'base']
+    result['coverage_union'] = union
+    if bases_run and not only:
+        missing = sorted(a for a in required if union.get(a, 0) == 0)
+        result['coverage_missing'] = missing
+        if missing:
+            passed = False
+    result['export_unchanged'] = all(sha(generated / n) == d for n, d in artifacts.items())
+    result['inputs_unchanged'] = all(sha(inputs / n) == d for n, d in artifacts.items())
+    result['generator_unchanged'] = sha(generator) == manifest['generator_sha256']
+    result['attempt_model_unchanged'] = sha(source) == manifest['attempt_model']['sha256']
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (len(result['profiles']) == len(order)
+               and all(value for key, value in result.items() if key.endswith('_unchanged')))
+    if only:
+        result['subset'] = sorted(only.split(','))
+    result['result'] = ('passed' if passed and not only else 'passed_subset' if passed
+                        else 'failed_or_incomplete')
+    result['at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

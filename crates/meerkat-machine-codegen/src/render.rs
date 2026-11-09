@@ -580,6 +580,73 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "SettleRetainedRunNotRetainedRetired",
     "SettleRetainedRunNotRetainedStopped",
     "SettleRetainedRunInertDestroyed",
+    // The run marked resumable whose resumed-run admission could not decide
+    // is held until a later answer releases it.
+    "HoldResumedRunForAdmissionIdle",
+    "HoldResumedRunForAdmissionAttached",
+    "HoldResumedRunForAdmissionRunning",
+    "HoldResumedRunForAdmissionRetired",
+    "HoldResumedRunForAdmissionStopped",
+    "ReleaseResumedRunAdmissionIdle",
+    "ReleaseResumedRunAdmissionAttached",
+    "ReleaseResumedRunAdmissionRunning",
+    "ReleaseResumedRunAdmissionRetired",
+    "ReleaseResumedRunAdmissionStopped",
+    // The scoped tool grant gate's server gate (0.9.11): a model-request
+    // boundary's extension of the gate by a gated server's names, and the
+    // grant path's stage of a gated server. Both inputs are declared after
+    // every published one.
+    "ExtendToolGrantGateChangedIdle",
+    "ExtendToolGrantGateChangedAttached",
+    "ExtendToolGrantGateChangedRunning",
+    "ExtendToolGrantGateChangedRetired",
+    "ExtendToolGrantGateChangedStopped",
+    "ExtendToolGrantGateUnchangedIdle",
+    "ExtendToolGrantGateUnchangedAttached",
+    "ExtendToolGrantGateUnchangedRunning",
+    "ExtendToolGrantGateUnchangedRetired",
+    "ExtendToolGrantGateUnchangedStopped",
+    "SurfaceStageGatedAddIdle",
+    "SurfaceStageGatedAddAttached",
+    "SurfaceStageGatedAddRunning",
+    // A channel's close sweep closes its delegation intake (0.9.11).
+    "CloseLiveDelegationIntakeIdle",
+    "CloseLiveDelegationIntakeAttached",
+    "CloseLiveDelegationIntakeRunning",
+    "CloseLiveDelegationIntakeRetired",
+    "CloseLiveDelegationIntakeStopped",
+    // The recovered ungoverned row's requester batch key (0.9.11), declared
+    // beside BindInputAuthority in the catalog.
+    "BindInputRequesterBatchKeyIdle",
+    "BindInputRequesterBatchKeyAttached",
+    "BindInputRequesterBatchKeyRunning",
+    "BindInputRequesterBatchKeyRetired",
+    "BindInputRequesterBatchKeyStopped",
+    // A host's compaction request and its consumption by the agent's
+    // compaction check (0.9.11).
+    "RequestCompactionRecordedIdle",
+    "RequestCompactionRecordedAttached",
+    "RequestCompactionRecordedRunning",
+    "RequestCompactionAlreadyRecordedIdle",
+    "RequestCompactionAlreadyRecordedAttached",
+    "RequestCompactionAlreadyRecordedRunning",
+    "RequestCompactionNotServingInitializing",
+    "RequestCompactionNotServingRetired",
+    "RequestCompactionNotServingStopped",
+    "RequestCompactionNotServingDestroyed",
+    "ConsumeCompactionRequestTakenRunning",
+    "ConsumeCompactionRequestTakenRetired",
+    "ConsumeCompactionRequestNoneRunning",
+    "ConsumeCompactionRequestNoneRetired",
+    "ConsumeCompactionRequestStaleRunRunning",
+    "ConsumeCompactionRequestStaleRunRetired",
+    "ConsumeCompactionRequestOutsideCheckRunning",
+    "ConsumeCompactionRequestOutsideCheckRetired",
+    "ConsumeCompactionRequestInertInitializing",
+    "ConsumeCompactionRequestInertIdle",
+    "ConsumeCompactionRequestInertAttached",
+    "ConsumeCompactionRequestInertStopped",
+    "ConsumeCompactionRequestInertDestroyed",
 ];
 
 // Append-only emission tails for the other machines, whose public
@@ -855,8 +922,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverOperatorInstructionGenerationHighwaterKept",
             "PrepareMemberInstructionDeliveryNotOwedRunning",
             "PrepareMemberInstructionDeliveryNotOwedStopped",
-            "PrepareMemberInstructionDeliveryPlacedRunning",
-            "PrepareMemberInstructionDeliveryPlacedStopped",
             "PrepareMemberInstructionDeliveryUnbornRunning",
             "PrepareMemberInstructionDeliveryUnbornStopped",
             "PrepareMemberInstructionDeliveryUnboundRunning",
@@ -1043,6 +1108,182 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // (0.9.11).
             "AdoptLegacyIdentityEntryAdoptedUnlisted",
             "AdoptLegacyIdentityEntryRetireUnadopted",
+            // A host's adoption over a declared identity entry (0.9.11): its
+            // archive terminals, the takeover's verdicts and the replay of
+            // its mark.
+            "ObserveMemberRetirementArchivedLiveHostAdopted",
+            "ObserveMemberRetirementArchivedRetiredHostAdopted",
+            "TakeOverIdentityEntryAdopting",
+            "TakeOverIdentityEntryEnded",
+            "TakeOverIdentityEntryDeferred",
+            "TakeOverIdentityEntryNotADeclaredEntry",
+            "TakeOverIdentityEntryNonAuthoritative",
+            "TakeOverIdentityEntryMobNotRunningStopped",
+            "TakeOverIdentityEntryMobNotRunningCompleted",
+            "TakeOverIdentityEntryMobNotRunningDestroyed",
+            "RecoverIdentityEntryAdoptingMarkedRunning",
+            "RecoverIdentityEntryAdoptingStaleRunning",
+            // A build preparation the host asked to retry (0.9.11): the wake
+            // feedback arm that records it, and its resolution.
+            "ResolveMemberRevivalRetryableBuildPreparationRunning",
+            "ResolveMemberBuildPreparationRunning",
+            "ResolveMemberBuildPreparationStopped",
+            "ResolveMemberBuildPreparationCompleted",
+            // Owned edges (0.9.11): an owned edge's declaration and end, a
+            // plain unwire's admission, and an owned edge's recovery at a
+            // start.
+            "DeclareOwnedIdentityEdgeDeclared",
+            "DeclareOwnedIdentityEdgeAlreadyOwned",
+            "DeclareOwnedIdentityEdgePeerUnknown",
+            "DeclareOwnedIdentityEdgeOwnerInvalid",
+            "DeclareOwnedIdentityEdgeMobNotRunningStopped",
+            "DeclareOwnedIdentityEdgeMobNotRunningCompleted",
+            "DeclareOwnedIdentityEdgeMobNotRunningDestroyed",
+            "EndOwnedIdentityEdgeEnded",
+            "EndOwnedIdentityEdgeNotOwner",
+            "EndOwnedIdentityEdgeAbsent",
+            "EndOwnedIdentityEdgeNonAuthoritative",
+            "EndOwnedIdentityEdgeChangesHeld",
+            "EndOwnedIdentityEdgeMobNotRunningStopped",
+            "EndOwnedIdentityEdgeMobNotRunningCompleted",
+            "EndOwnedIdentityEdgeMobNotRunningDestroyed",
+            "AdmitMemberUnwireAdmittedRunning",
+            "AdmitMemberUnwireAdmittedStopped",
+            "AdmitMemberUnwireAdmittedCompleted",
+            "AdmitMemberUnwireAdmittedDestroyed",
+            "AdmitMemberUnwireOwnedEdgeRunning",
+            "AdmitMemberUnwireOwnedEdgeStopped",
+            "AdmitMemberUnwireOwnedEdgeCompleted",
+            "AdmitMemberUnwireOwnedEdgeDestroyed",
+            "RecoverOwnedIdentityEdgeRecoveredRunning",
+            "RecoverOwnedIdentityEdgeRecoveredStopped",
+            "RecoverOwnedIdentityEdgeSkippedRunning",
+            "RecoverOwnedIdentityEdgeSkippedStopped",
+            // Adoption into store custody (0.9.11), one arm per verdict.
+            "AdoptIdentityIntoStoreAdopted",
+            "AdoptIdentityIntoStoreNotAdoptable",
+            "AdoptIdentityIntoStorePredecessorMismatch",
+            "AdoptIdentityIntoStoreAdmissionUnsettled",
+            "AdoptIdentityIntoStoreDeclaredApplyOpen",
+            "AdoptIdentityIntoStoreNameUnreadable",
+            "AdoptIdentityIntoStoreNameTombstoned",
+            "AdoptIdentityIntoStoreNonAuthoritative",
+            "AdoptIdentityIntoStoreChangesHeld",
+            "AdoptIdentityIntoStoreMobNotRunningStopped",
+            "AdoptIdentityIntoStoreMobNotRunningCompleted",
+            "AdoptIdentityIntoStoreMobNotRunningDestroyed",
+            // The downgrade cycle (0.9.11): the admission after a purge, the
+            // purge, the boot's rowless reservation and the import, one arm
+            // per verdict.
+            "AdmitIdentityChangeRowsPurged",
+            "PurgeIdentityRowsPurged",
+            "PurgeIdentityRowsNonAuthoritative",
+            "PurgeIdentityRowsReplayed",
+            "PurgeIdentityRowsOperationReused",
+            "PurgeIdentityRowsRowsPurged",
+            "PurgeIdentityRowsNotHostOperator",
+            "PurgeIdentityRowsChangesNotHeld",
+            "PurgeIdentityRowsMobNotRunningStopped",
+            "PurgeIdentityRowsMobNotRunningCompleted",
+            "PurgeIdentityRowsMobNotRunningDestroyed",
+            "RecoverRowlessCreatedEntryReservedRunning",
+            "RecoverRowlessCreatedEntryReservedStopped",
+            "RecoverRowlessCreatedEntryKeptRunning",
+            "RecoverRowlessCreatedEntryKeptStopped",
+            "ImportIdentityRecordRestoredInPlace",
+            "ImportIdentityRecordRestoredOwedSeat",
+            "ImportIdentityRecordRestoredPending",
+            "ImportIdentityRecordRestoredArchived",
+            "ImportIdentityRecordRestoredTombstone",
+            "ImportIdentityRecordRestoredByAdoption",
+            "ImportIdentityRecordUnchanged",
+            "ImportIdentityRecordNameTakenMeanwhile",
+            "ImportIdentityRecordUnsettled",
+            "ImportIdentityRecordNonAuthoritative",
+            "ImportIdentityRecordChangesHeld",
+            "ImportIdentityRecordRowsPurged",
+            "ImportIdentityRecordMobNotRunningStopped",
+            "ImportIdentityRecordMobNotRunningCompleted",
+            "ImportIdentityRecordMobNotRunningDestroyed",
+            // Owned edges and the downgrade cycle (0.9.11): an owned edge's
+            // realization, an import's restoration of one, and the purge
+            // with no row to purge.
+            "AdmitOwnedEdgeRealizationRealizeRunning",
+            "AdmitOwnedEdgeRealizationRealizeStopped",
+            "AdmitOwnedEdgeRealizationRealizeCompleted",
+            "AdmitOwnedEdgeRealizationRealizeDestroyed",
+            "AdmitOwnedEdgeRealizationNotOwnedRunning",
+            "AdmitOwnedEdgeRealizationNotOwnedStopped",
+            "AdmitOwnedEdgeRealizationNotOwnedCompleted",
+            "AdmitOwnedEdgeRealizationNotOwnedDestroyed",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityRunning",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityStopped",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed",
+            "RestoreOwnedIdentityEdgeRestored",
+            "RestoreOwnedIdentityEdgeSkipped",
+            "RestoreOwnedIdentityEdgeMobNotRunningStopped",
+            "RestoreOwnedIdentityEdgeMobNotRunningCompleted",
+            "RestoreOwnedIdentityEdgeMobNotRunningDestroyed",
+            "PurgeIdentityRowsNothingToPurge",
+            // The seal refused while an unseated entry it does not list
+            // remains, which the one-entry unlist ends first (0.9.11).
+            "SealDeclaredRosterRefused",
+            // A respawn's abandonment replayed after a later life of its
+            // name ended, a no-op (0.9.11).
+            "ObserveRespawnTopologyAbandonedStaleEndedSuccessor",
+            // A member build's tool dispatch admission (0.9.11), in every
+            // phase.
+            "ResolveMemberDispatchAdmissionAskHostRunning",
+            "ResolveMemberDispatchAdmissionAskHostStopped",
+            "ResolveMemberDispatchAdmissionAskHostCompleted",
+            "ResolveMemberDispatchAdmissionAskHostDestroyed",
+            "ResolveMemberDispatchAdmissionInheritRunning",
+            "ResolveMemberDispatchAdmissionInheritStopped",
+            "ResolveMemberDispatchAdmissionInheritCompleted",
+            "ResolveMemberDispatchAdmissionInheritDestroyed",
+            "ResolveMemberDispatchAdmissionRefusedRunning",
+            "ResolveMemberDispatchAdmissionRefusedStopped",
+            "ResolveMemberDispatchAdmissionRefusedCompleted",
+            "ResolveMemberDispatchAdmissionRefusedDestroyed",
+            "ResolveMemberDispatchAdmissionNoneRequiredRunning",
+            "ResolveMemberDispatchAdmissionNoneRequiredStopped",
+            "ResolveMemberDispatchAdmissionNoneRequiredCompleted",
+            "ResolveMemberDispatchAdmissionNoneRequiredDestroyed",
+            // The record of a member incarnation whose lineage runs under a
+            // tool dispatch admission (0.9.11).
+            "RecordMemberDispatchAdmissionLineageRunning",
+            "RecordMemberDispatchAdmissionLineageStopped",
+            // An identity's life marker (0.9.11): the end of a retirement
+            // that ends the identity, and the resets recovered at resume.
+            "EndIdentityLifeRunning",
+            "EndIdentityLifeStopped",
+            "EndIdentityLifeCompleted",
+            "EndIdentityLifeDestroyed",
+            "RecoverIdentityLifeResetsRunning",
+            "RecoverIdentityLifeResetsStopped",
+            "RecoverIdentityLifeResetsCompleted",
+            "RecoverIdentityLifeResetsDestroyed",
+            // External work refused for an identity entry and for a name
+            // reserved unreadable (0.9.11).
+            "ResolveSubmitWorkRejectionIdentityMember",
+            "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+        ],
+    ),
+    // The end of a grant with its subject (0.9.11), after every arm 0.9.10
+    // published and the run-scope arms (0.9.11), which follow them in
+    // catalog order; then the end with its subject of a run-ended grant.
+    // Every ToolGrantLifecycleMachine arm added after them is appended here
+    // too, so none of them moves.
+    (
+        "ToolGrantLifecycleMachine",
+        &[
+            "EndWithSubjectActive",
+            "EndWithSubjectAfterDeadline",
+            "EndWithSubjectSettledExpired",
+            "EndWithSubjectSettledRevoked",
+            "AdmitEndedWithSubject",
+            "EndWithSubjectSettledRunEnded",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

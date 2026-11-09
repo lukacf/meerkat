@@ -24,6 +24,8 @@ from .host_control import (
     SelectedHostArtifact,
     ToolkitMobKitRuntime,
     ToolkitPersistentTransport,
+    _hosted_mcp_redirect_base,
+    _check_private_gateway_transport,
 )
 
 
@@ -40,6 +42,10 @@ class ToolkitApplicationRuntime(ToolkitMobKitRuntime):
     Supply the real provider/builder configuration without ``mob_config`` or a
     second tool-policy input. Native authenticates the selected plan carried by
     both the inherited private request and the ordinary opaque init field.
+
+    ``private_workflow_launch=True`` explicitly selects the fresh host's private
+    workflow-child preparation path. It does not commission G or manufacture a
+    parent/workflow selection; ordinary startup is unchanged when omitted.
     """
 
     def __init__(
@@ -47,7 +53,13 @@ class ToolkitApplicationRuntime(ToolkitMobKitRuntime):
         config: Any,
         preparation: ApplicationPreparation,
         finalize: Callable[[SelectedHostArtifact], Awaitable[HostBootstrapSelection]],
+        *, member_mcp: Any = None, private_workflow_launch: bool = False,
+        hosted_mcp_redirect_base: str | None = None,
     ):
+        hosted_mcp_redirect_base = _hosted_mcp_redirect_base(hosted_mcp_redirect_base)
+        if type(private_workflow_launch) is not bool:
+            raise HostControlError("private workflow launch must be an explicit boolean")
+        self._private_workflow_launch = private_workflow_launch
         if not isinstance(preparation, ApplicationPreparation) or not callable(finalize):
             raise HostControlError("application preparation and finalizer are required")
         # Keep the exact bytes supplied on this attempt. Native independently
@@ -66,7 +78,8 @@ class ToolkitApplicationRuntime(ToolkitMobKitRuntime):
             raise HostControlError("application preparation plan changed")
         # The subclass supplies the preparation transport below. The parent's
         # ordinary lifecycle and host_control accessor remain the same owners.
-        super().__init__(config, preparation)
+        super().__init__(config, preparation, member_mcp=member_mcp, private_workflow_launch=private_workflow_launch,
+                         hosted_mcp_redirect_base=hosted_mcp_redirect_base)
         self._application_preparation = preparation
         self._application_plan = plan
         self._application_finalizer = finalize
@@ -75,12 +88,15 @@ class ToolkitApplicationRuntime(ToolkitMobKitRuntime):
         self.preparation_attempt: ApplicationPreparationAttempt | None = None
 
     def _make_gateway_transport(self) -> ToolkitPersistentTransport:
+        _check_private_gateway_transport(self._config)
         if self._application_started:
             raise HostControlError("application preparation already started; inspect the original attempt")
         if self._config.gateway_bin is None:
             raise HostControlError("application preparation requires its local gateway")
         self._application_started = True
-        return ToolkitPersistentTransport(self._config.gateway_bin, self._application_preparation)
+        return ToolkitPersistentTransport(self._config.gateway_bin, self._application_preparation, member_mcp=self._member_mcp,
+                                          private_workflow_launch=self._private_workflow_launch,
+                                          hosted_mcp_redirect_base=self._hosted_mcp_redirect_base)
 
     def _build_init_params(self) -> dict[str, Any]:
         params = super()._build_init_params()

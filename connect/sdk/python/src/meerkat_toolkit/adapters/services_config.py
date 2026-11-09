@@ -16,7 +16,7 @@ from typing import Any, Mapping
 
 OPERATIONS = {
     "slack": ("auth_test", "list_conversations_page", "get_conversation", "history_page", "replies_page", "read_interval", "get_permalink", "get_user"),
-    "gmail": ("list_messages_page", "get_message", "send_raw", "create_draft_raw", "send_message", "get_profile", "read_message", "read_text_part", "create_draft_message"),
+    "gmail": ("history_page", "list_messages_page", "get_message", "send_raw", "create_draft_raw", "send_message", "get_profile", "read_message", "read_text_part", "create_draft_message"),
     "google-calendar": ("list_events_page", "get_event", "insert_event", "patch_event", "delete_event"),
     "google-drive": ("list_files_page", "get_file", "download_content", "export_content"),
 }
@@ -588,6 +588,14 @@ def tool_descriptions(configuration: Configuration) -> list[dict[str, Any]]:
         }, ("from_address", "to", "subject", "body_text"))
         schemas = {
             "get_profile": _fields({}),
+            "history_page": _fields({
+                "start_history_id": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[0-9]+$"},
+                "page_token": nullable(text),
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 500},
+                "history_types": {"type": "array", "maxItems": 4, "uniqueItems": True,
+                    "items": {"enum": ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"]}},
+                "label_id": nullable(gmail_id),
+            }, ("start_history_id",)),
             "list_messages_page": _fields({"query": nullable(text),
                 "label_ids": {"type": "array", "maxItems": 100, "items": gmail_id},
                 "page_token": nullable(text), "max_results": {"type": "integer", "minimum": 1, "maximum": 500},
@@ -634,6 +642,8 @@ def tool_descriptions(configuration: Configuration) -> list[dict[str, Any]]:
     if configuration.profile == "slack" and "allowed_channel_ids" in configuration.config:
         for name in ("get_conversation", "get_permalink", "history_page", "replies_page", "read_interval"):
             notes[name] += " Channel routing is limited by the host's fixed allowed_channel_ids configuration."
+    if configuration.profile == "gmail":
+        notes["history_page"] = "Read one Gmail history page from an explicit checkpoint. max_results counts history records, not messages. Preserve nextPageToken; a 404 means the checkpoint cannot be continued. Does not advance an observation cursor or replay history automatically."
     if configuration.profile == "gmail" and "allowed_recipient_addresses" in configuration.config:
         for name in ("send_message", "create_draft_message"):
             notes[name] += " Every To/Cc/Bcc recipient must be within the host's fixed allowed_recipient_addresses configuration."

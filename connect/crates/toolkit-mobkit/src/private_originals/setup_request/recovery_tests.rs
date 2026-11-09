@@ -15,20 +15,23 @@ use std::{
 use toolkit_store::*;
 
 const DECISION_SCHEMA: &str = "toolkit.operator-application-parent";
-struct RecoveryStore {
+pub(in crate::private_originals) struct RecoveryStore {
     inner: Arc<dyn ToolkitStore>,
     mode: AtomicUsize,
-    fail_get: Mutex<Option<StoreKey>>,
+    pub(in crate::private_originals) fail_get: Mutex<Option<StoreKey>>,
+    pub(in crate::private_originals) retire_on_issued:
+        Mutex<Option<Arc<crate::installed_host::dynamic_members::AdmittedMemberClass>>>,
     fail_list: AtomicBool,
     list_calls: AtomicUsize,
     missing_get: Mutex<Option<StoreKey>>,
 }
 impl RecoveryStore {
-    fn new(inner: Arc<dyn ToolkitStore>) -> Arc<Self> {
+    pub(in crate::private_originals) fn new(inner: Arc<dyn ToolkitStore>) -> Arc<Self> {
         Arc::new(Self {
             inner,
             mode: AtomicUsize::new(0),
             fail_get: Mutex::new(None),
+            retire_on_issued: Mutex::new(None),
             fail_list: AtomicBool::new(false),
             list_calls: AtomicUsize::new(0),
             missing_get: Mutex::new(None),
@@ -86,6 +89,15 @@ impl ToolkitStore for RecoveryStore {
             && !transition.data.body["setup_request"].is_null();
         let issued_decision = transition.data.schema == DECISION_SCHEMA
             && transition.data.body["issued"]["state"] == "issued";
+        if issued_decision {
+            let retire = self.retire_on_issued.lock().unwrap().take();
+            if let Some(admitted) = retire {
+                admitted
+                    .retire()
+                    .await
+                    .map_err(|_| StoreError::OwnerUnavailable)?;
+            }
+        }
         if (selected_source && matches!(mode, 1 | 2)) || (issued_decision && mode == 3) {
             self.mode.store(0, Ordering::SeqCst);
             let key = transition.key.clone();
@@ -526,6 +538,7 @@ async fn public_review_refuses_changed_session_revocation_and_cancellation_witho
                 .owner
                 .grants()
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &selected.parent[0].root_authority,
                     &selected.parent[0],
                     &mut custody,

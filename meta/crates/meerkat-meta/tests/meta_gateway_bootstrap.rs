@@ -1597,6 +1597,17 @@ impl ComposedGateway {
         overrides: Value,
         args: &[&str],
     ) -> Result<Self, Value> {
+        Self::launch_with_tools(workspace, mob_id, "comms = true\n", overrides, args)
+    }
+
+    /// [`Self::launch`] with `tools` as the `alpha` profile's tools table.
+    fn launch_with_tools(
+        workspace: &Path,
+        mob_id: &str,
+        tools: &str,
+        overrides: Value,
+        args: &[&str],
+    ) -> Result<Self, Value> {
         let config = workspace.join("config");
         std::fs::create_dir_all(&config).expect("config dir");
         // The profile is turn-driven: a fresh AutonomousHost seat (alice's)
@@ -1608,7 +1619,7 @@ impl ComposedGateway {
             format!(
                 "[mob]\nid = \"{mob_id}\"\norchestrator = \"alpha\"\n\n[profiles.alpha]\nmodel = \
                  \"gpt-5.5\"\nexternal_addressable = true\nruntime_mode = \"turn_driven\"\n\n\
-                 [profiles.alpha.tools]\ncomms = true\n"
+                 [profiles.alpha.tools]\n{tools}"
             ),
         )
         .expect("mob.toml");
@@ -1627,6 +1638,7 @@ impl ComposedGateway {
             .env("ANTHROPIC_API_KEY", "sk-ant-regression-test")
             .env("OPENAI_API_KEY", "sk-regression-test")
             .env("XDG_STATE_HOME", workspace.join("xdg-state"))
+            .env("XDG_CONFIG_HOME", workspace.join("xdg-config"))
             .env("RUST_LOG", "error")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1730,6 +1742,63 @@ fn meta_gateway_serves_mob_announcements_on_its_console() {
         listed["result"]["subscriptions"].as_array().map(Vec::len),
         Some(1),
         "{listed}"
+    );
+}
+
+/// meta_gateway takes the host's maximum grant lifetime as its top-level
+/// `tool_grants` init param, as rpc_gateway takes
+/// `runtime_options.tool_grants`: a 400-day maximum admits a 365-day grant on
+/// its console.
+#[cfg(unix)]
+#[test]
+fn meta_gateway_takes_the_maximum_grant_lifetime_at_init() {
+    let workspace = TempDir::new().expect("workspace");
+    let gateway = ComposedGateway::launch_with_tools(
+        workspace.path(),
+        "meta-granting",
+        "comms = true\nbuiltins = true\ngrant_gated = { tools = [\"datetime\"] }\n",
+        json!({ "tool_grants": { "max_lifetime_ms": 400_u64 * 86_400_000 } }),
+        &[],
+    )
+    .expect("init with the maximum grant lifetime");
+    let granted = gateway.call(
+        "meta/tool_grants/grant",
+        json!({
+            "identity": "personal:alice",
+            "target": { "kind": "tool", "name": "datetime" },
+            "duration_ms": 365_u64 * 86_400_000,
+        }),
+    );
+    assert_eq!(granted["result"]["grant"]["status"], "active", "{granted}");
+}
+
+/// A maximum grant lifetime that is not a positive whole number of
+/// milliseconds within 2^53 - 1 refuses meta_gateway's init, on the init's
+/// id and with the typed kind rpc_gateway answers.
+#[cfg(unix)]
+#[test]
+fn meta_gateway_refuses_an_invalid_maximum_grant_lifetime() {
+    let workspace = TempDir::new().expect("workspace");
+    let refused = ComposedGateway::launch(
+        workspace.path(),
+        "meta-granting-refused",
+        json!({ "tool_grants": { "max_lifetime_ms": 0 } }),
+        &[],
+    )
+    .err()
+    .expect("the init is refused");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("tool_grants.max_lifetime_ms"), "{refused}");
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("tool_grant_lifetime_invalid"),
+        "{refused}"
+    );
+    assert_eq!(
+        refused["id"],
+        json!(1),
+        "answered on the init's id: {refused}"
     );
 }
 

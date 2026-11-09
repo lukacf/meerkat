@@ -185,13 +185,43 @@ pub(crate) fn child_bounds(
     Ok(requested)
 }
 
+pub(crate) fn validate_workflow_targets<'a>(
+    targets: impl IntoIterator<Item = &'a Option<GrantTarget>>,
+) -> Result<(), HostLifetimeError> {
+    let targets = targets.into_iter().collect::<Vec<_>>();
+    validate_targets(targets.iter().copied())?;
+    if targets.is_empty()
+        || targets.iter().any(|target| {
+            !matches!(target, Some(GrantTarget::McpServer { .. }))
+                && **target != Some(ConfiguredHelperReportCapability::public_target())
+        })
+    {
+        return Err(HostLifetimeError::InvalidSelection);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_workflow_compiled(
+    targets: &[CompiledAgentSetupTarget],
+) -> Result<(), HostLifetimeError> {
+    validate_workflow_targets(targets.iter().map(|target| &target.target))?;
+    validate_compiled_depth(targets, 2)
+}
+
 pub(crate) fn validate_compiled(
     targets: &[CompiledAgentSetupTarget],
+) -> Result<(), HostLifetimeError> {
+    validate_compiled_depth(targets, 1)
+}
+
+fn validate_compiled_depth(
+    targets: &[CompiledAgentSetupTarget],
+    depth: u32,
 ) -> Result<(), HostLifetimeError> {
     validate_targets(targets.iter().map(|target| &target.target))?;
     if targets.iter().enumerate().any(|(index, target)| {
         target.parent.validate().is_err()
-            || target.restrictions.delegation_depth != DelegationDepth::remaining(1)
+            || target.restrictions.delegation_depth != DelegationDepth::remaining(depth)
             || targets[..index]
                 .iter()
                 .any(|prior| prior.parent == target.parent)
@@ -332,7 +362,9 @@ impl OperatorSetup {
         mut saved: StoredRecord,
         mut record: OperatorDecision,
         presented: Arc<dyn Fn() -> bool + Send + Sync>,
+        caller: Option<&super::setup_request::ReviewedSetupCaller>,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
+        self.check_setup_caller(caller)?;
         if !matches!(record.issued, ParentIssuance::Issued { .. }) {
             return self.observe(&record);
         }
@@ -348,49 +380,68 @@ impl OperatorSetup {
                 // Persist entry intent before touching the native writer. If
                 // that CAS is unknown, no write is attempted on this path.
                 record.target_issuance[index] = TargetIssuance::Pending;
+                self.check_setup_caller(caller)?;
                 saved = match self.persist_target_progress(&saved, &record).await {
                     Ok(saved) => saved,
-                    Err(_) => return Ok(OperatorParentOutcome::PendingReconciliation),
+                    Err(HostLifetimeError::Unavailable) => {
+                        return Ok(OperatorParentOutcome::PendingReconciliation);
+                    }
+                    Err(error) => return Err(error),
                 };
             }
             let parent = match &record.target_issuance[index] {
                 TargetIssuance::Issued { .. } => continue,
                 TargetIssuance::Refused => return Ok(OperatorParentOutcome::Unavailable),
                 TargetIssuance::NotStarted => return Err(HostLifetimeError::InvalidSelection),
-                TargetIssuance::Pending => self.lifetime.with_current_setup(|| {
-                    if enter {
-                        if !presented() {
-                            return Ok(Err(meerkat_authorization::grants::GrantRefusal::Denied));
-                        }
-                        Ok(self
-                            .source
-                            .grants()
-                            .issue_root(
-                                &record.operator,
-                                id.clone(),
-                                record.application.clone(),
-                                record.represented_subject.clone(),
-                                target.requested.clone(),
-                            )
-                            .map(Some))
-                    } else {
-                        Ok(self.source.grants().issued_reference(&id))
-                    }
-                })?,
+                TargetIssuance::Pending => {
+                    self.with_setup_caller(caller, || {
+                        self.lifetime.with_current_setup(|| {
+                            self.check_setup_caller(caller)?;
+                            if enter {
+                                if !presented() {
+                                    return Ok(Err(
+                                        meerkat_authorization::grants::GrantRefusal::Denied,
+                                    ));
+                                }
+                                Ok(self
+                                    .source
+                                    .grants()
+                                    .issue_root(
+                                        &meerkat_core::AdmissionGuard::none(),
+                                        &record.operator,
+                                        id.clone(),
+                                        record.application.clone(),
+                                        record.represented_subject.clone(),
+                                        target.requested.clone(),
+                                    )
+                                    .map(Some))
+                            } else {
+                                Ok(self.source.grants().issued_reference(&id))
+                            }
+                        })
+                    })
+                    .await?
+                }
             };
             record.target_issuance[index] = match parent {
                 Ok(Some(parent))
                     if parent.root_authority == record.operator && parent.grant_id == id =>
                 {
-                    let current = self.source.grants().resolve_lineage(
-                        std::slice::from_ref(&parent),
-                        &record.application,
-                        record.represented_subject.as_ref(),
-                    );
-                    if !current.is_ok_and(|grant| {
-                        grant.restrictions() == &target.requested && grant.check_current().is_ok()
-                    }) {
-                        return Ok(OperatorParentOutcome::Unavailable);
+                    if !enter {
+                        // A lookup proves identity only. Unlike this call's
+                        // successful issue_root, it must validate the saved
+                        // intended restrictions before acknowledging recovery.
+                        let current = self.source.grants().resolve_lineage(
+                            std::slice::from_ref(&parent),
+                            &record.application,
+                            record.represented_subject.as_ref(),
+                        );
+                        if !current.is_ok_and(|grant| {
+                            grant.restrictions() == &target.requested
+                                && grant.check_current().is_ok()
+                        }) {
+                            return Ok(OperatorParentOutcome::Unavailable);
+                        }
                     }
                     TargetIssuance::Issued { parent }
                 }
@@ -400,11 +451,29 @@ impl OperatorSetup {
                 Ok(Some(_)) => return Ok(OperatorParentOutcome::Unavailable),
                 _ => return Ok(OperatorParentOutcome::PendingReconciliation),
             };
+            // A later retirement cannot erase the actual issuer's outcome.
+            // The next target must separately pass the current-member fence.
             saved = match self.persist_target_progress(&saved, &record).await {
                 Ok(saved) => saved,
-                Err(_) => return Ok(OperatorParentOutcome::PendingReconciliation),
+                Err(HostLifetimeError::Unavailable) => {
+                    return Ok(OperatorParentOutcome::PendingReconciliation);
+                }
+                Err(error) => return Err(error),
             };
+            if enter && let TargetIssuance::Issued { parent } = &record.target_issuance[index] {
+                let current = self.source.grants().resolve_lineage(
+                    std::slice::from_ref(parent),
+                    &record.application,
+                    record.represented_subject.as_ref(),
+                );
+                if !current.is_ok_and(|grant| {
+                    grant.restrictions() == &target.requested && grant.check_current().is_ok()
+                }) {
+                    return Ok(OperatorParentOutcome::Unavailable);
+                }
+            }
         }
+        self.check_setup_caller(caller)?;
         self.observe(&record)
     }
 
@@ -413,7 +482,8 @@ impl OperatorSetup {
         saved: &StoredRecord,
         record: &OperatorDecision,
     ) -> Result<StoredRecord, HostLifetimeError> {
-        self.originals
+        let saved = self
+            .originals
             .compare_and_swap(Transition {
                 key: saved.key.clone(),
                 expected_revision: saved.revision,
@@ -424,6 +494,7 @@ impl OperatorSetup {
                 effects: vec![],
             })
             .await
-            .map_err(|_| HostLifetimeError::Unavailable)
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        Ok(saved)
     }
 }

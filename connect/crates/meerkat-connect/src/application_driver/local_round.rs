@@ -52,7 +52,21 @@ impl LocalRoundCleanup {
             }
         }
         if self.native_drained && self.owner_clean && !self.failed {
-            Ok(())
+            // Native transport shutdown preceded this fenced join. Persist only
+            // the same owner's successful empty-close observation; cancellation
+            // and failed dispositions never manufacture reusable custody.
+            match self
+                .owner
+                .as_mut()
+                .ok_or(GatewayHostError::Unavailable)?
+                .persist_empty_close()
+            {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    self.failed = true;
+                    Err(GatewayHostError::Unavailable)
+                }
+            }
         } else {
             Err(GatewayHostError::Unavailable)
         }
@@ -85,10 +99,11 @@ impl LocalRoundCleanup {
 
 impl Driver {
     pub(super) async fn join_local_round(&self) -> Result<(), GatewayHostError> {
+        let Some((attempts, guards)) = &self.local_round else {
+            return Ok(());
+        };
         let mut cleanup = self.local_round_cleanup.lock().await;
-        cleanup
-            .join_until_settled(&self.local_round_attempts, &self.attempt_guards)
-            .await
+        cleanup.join_until_settled(attempts, guards).await
     }
 }
 

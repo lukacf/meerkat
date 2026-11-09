@@ -1349,6 +1349,7 @@ impl MobActor {
             mob_dsl::MemberWakeFeedbackVerdict::Applied => {
                 self.member_wakes.running.remove(&run.attempt);
                 self.clear_member_restore_failure(&run.identity).await;
+                self.reset_member_build_preparation_retry(&run.identity);
                 self.member_wakes
                     .answer(run.attempt, Ok(MemberWakeOutcome::Ready));
                 self.report_member_built_after_wake(&run.identity).await;
@@ -1423,6 +1424,7 @@ impl MobActor {
             bridge_session_id: session_id,
             reason: error.to_string(),
             hold: error.durable_resume_hold(),
+            cause_data: error.structured_data(),
             registration_refusal: match error {
                 MobError::MemberRegistrationRefused { call, .. } => Some(*call),
                 _ => None,
@@ -1551,6 +1553,7 @@ impl MobActor {
                     bridge_session_id: session_id,
                     reason: reason_text,
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             )

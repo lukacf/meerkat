@@ -22,7 +22,54 @@ dependency layout without changing its implementation source.
 
 ## Unreleased follow-up source
 
+### Hosted authentication and private workflow SDKs
+
+Connect checkpoint `9992bb5b9fbc03978f54900bc8f9e2d9a6da8a96` binds hosted
+authentication to the actual Meta factory's credential service, configured-target
+resolver and member MCP custody. Credential completion is observable before
+member reconnection, while the same owned task remains joined through disposal.
+An actual successful native cancellation certifies retirement; diagnostic strings
+do not. Ceremony disposal does not remove stored credentials. Source review and
+format checks passed. The new native reconnect and cancellation controls have
+not run; adoption of the reviewed Core/Meta pair and supplied host wiring remain.
+
+Checkpoint `97309ae6dc20b000d75578eb0651dde237073259` exposes exact private
+workflow-child requests in the Python and TypeScript SDKs, with explicit opt-in
+for fresh application preparation. The affected Python suite passed 142 tests;
+TypeScript type checking, build and 140 tests passed. These are SDK controls, not
+native commissioning or shared Console completion evidence.
+
+### Private workflow child and authenticated-read harness
+
+Connect checkpoint `8d03eadbf8ea923ae8e37247bcddb71f050ec25c` adds the supplied
+private workflow-child preparation path and the explicit gateway launch option.
+It binds the exact original, WorkGraph child, retained native planning authority
+and configured setup selection through the existing source writer and record.
+An uncertain native grant operation remains unavailable rather than becoming a
+definite denial. Independent source review passed after that correction; the
+new acceptance controls have not executed. The child SDK operations are now
+available as described above. Helper commissioning, complete Console integration
+and cold shared reconstruction are separate unfinished work.
+
+Connect checkpoint `aa7eaba3e07bb064a9de5212e5e454798d259df6` adds the authenticated
+GitHub acceptance harness and narrow common-verifier hooks. Nine focused offline
+controls and four existing credential controls passed; the assembly suite had
+67 passes and one skip. The warm suite had 35 passes and one failure reproduced
+on the unchanged baseline. Independent source review passed. No account token
+was accessed and no vendor or native account read ran. Native working-directory
+support and actual read/cleanup evidence remain required. The updated macOS
+resource package has now passed composition and checksum validation, with
+resource digest `cd11fbfb9e57cf13f6b5e8bfa8ac5ff158bbb9a577c15dc9cb6cbb7985c0a86c`.
+Its native tools retain their recorded historical provenance; packaging does not
+qualify native installation or account use. The harness never deletes the host's
+existing GitHub credentials.
+
 ### Ordinary 0.9.4 and deferred shared setup
+
+This branch restores only the deferred shared-setup delta on top of ordinary
+0.9.4. It preserves the candidate for 0.9.5 development without reopening that
+feature as a 0.9.4 release gate. No shared native or end-to-end qualification is
+claimed by the branch split.
 
 The ordinary 0.9.4 branch is extracted from the public mixed draft
 [`ffeb622f9d06a0190ba87eb2290d67909ee1dfe1`](https://github.com/lukacf/meerkat-connect/commit/ffeb622f9d06a0190ba87eb2290d67909ee1dfe1).

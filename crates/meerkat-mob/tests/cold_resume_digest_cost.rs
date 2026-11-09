@@ -185,6 +185,7 @@ fn profile(peer_description: &str) -> Profile {
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),

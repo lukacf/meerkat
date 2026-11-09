@@ -247,6 +247,13 @@ pub(crate) enum WorkGraphAdmissionError {
     /// unserialized admission is exactly the race the sidecar exists to
     /// prevent.
     Lock(String),
+    /// The target or supervisor key names `member`, a member private to a
+    /// person: it is built without WorkGraph tools, while every turn of a
+    /// bound member takes the binding's tools, so no binding can serve it
+    /// ([`WorkGraphAdmission::refuse_private_member_target`]).
+    PrivateMember { member: String },
+    /// The roster entry of the member a target names could not be read.
+    MemberUnreadable { member: String, detail: String },
 }
 
 /// Held for the whole check-then-mutate window of one admission decision.
@@ -553,6 +560,33 @@ impl WorkGraphAdmission {
                 Err(_) => GoalAttentionTarget::Session { session_id },
             },
         )
+    }
+
+    /// Refuse a lowered target or supervisor key ([`Self::lower_member_session_target`])
+    /// that names a member of this mob private to a person (its roster labels
+    /// name a private owner), whoever asks: the member's owner and an access
+    /// admin too. The RPC methods and the agent tool plane both ask it.
+    pub(crate) async fn refuse_private_member_target(
+        &self,
+        target: &GoalAttentionTarget,
+    ) -> Result<(), WorkGraphAdmissionError> {
+        let Some(member) =
+            crate::rpc::workgraph_methods::target_member(&self.mob_handle.definition().id, target)
+        else {
+            return Ok(());
+        };
+        let entry = self
+            .mob_handle
+            .get_member(&meerkat_mob::AgentIdentity::from(member.as_str()))
+            .await
+            .map_err(|error| WorkGraphAdmissionError::MemberUnreadable {
+                member: member.clone(),
+                detail: error.to_string(),
+            })?;
+        if entry.is_some_and(|entry| crate::access::private_owner(&entry.labels).is_some()) {
+            return Err(WorkGraphAdmissionError::PrivateMember { member });
+        }
+        Ok(())
     }
 
     /// Take the admission for one check-then-mutate window. The in-process

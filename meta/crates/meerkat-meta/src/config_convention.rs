@@ -8,6 +8,7 @@
 //!   console.toml                # console UI view configuration (optional)
 //!   gating.toml                 # gating rules (optional)
 //!   access.toml                 # ABAC access control (optional, opt-in)
+//!   mcp_accounts.toml           # MCP server account modes (optional, opt-in)
 //!   defaults/
 //!     schedules.toml            # default schedule definitions (optional)
 //! deployment/
@@ -68,6 +69,13 @@ pub struct ConventionalPaths {
     /// any other entry or lookup error is reported for the strict loader
     /// rather than leaving access control off.
     pub access_toml: Option<PathBuf>,
+    /// Account modes of MCP servers (e.g. `config/mcp_accounts.toml`,
+    /// [`crate::McpAccountsConfig`]). Its presence decides whose account a
+    /// server's operations act with, so like
+    /// [`access_toml`](Self::access_toml) it is `None` only when the lookup
+    /// reports `NotFound`; any other entry or lookup error is reported for
+    /// the strict loader.
+    pub mcp_accounts_toml: Option<PathBuf>,
     /// Routing config (e.g. `deployment/routing.toml`).
     pub routing_toml: Option<PathBuf>,
     /// Contact directory TOML (e.g. `config/contacts.toml`).
@@ -98,6 +106,7 @@ impl ConventionalPaths {
         let gating_toml = check_entry(config.join("gating.toml"));
         let console_toml = check_file(config.join("console.toml"));
         let access_toml = check_entry(config.join("access.toml"));
+        let mcp_accounts_toml = check_entry(config.join("mcp_accounts.toml"));
         let routing_toml = check_file(deployment.join("routing.toml"));
         let contacts_toml = check_file(config.join("contacts.toml"));
 
@@ -114,6 +123,7 @@ impl ConventionalPaths {
             gating_toml,
             console_toml,
             access_toml,
+            mcp_accounts_toml,
             routing_toml,
             contacts_toml,
             meerkat_config_toml: None,

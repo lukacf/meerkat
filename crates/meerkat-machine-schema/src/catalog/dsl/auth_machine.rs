@@ -141,6 +141,28 @@ macro_rules! auth_catalog_machine_dsl {
                 // grow behind the shell's back; the Release transition is
                 // guarded on the drain being complete.
                 release_draining: bool,
+                // The generation the durable lifecycle marker of the current
+                // publication carries, when it is not credential_generation:
+                // the lease took the publication from a durable record
+                // published at a lower generation (another process's login or
+                // refresh, numbered by that process's lease), or a rollback
+                // restored a publication whose marker the lease's own later
+                // publication had passed. credential_generation never goes
+                // back, so the marker and the lease can name one publication
+                // by different generations; every marker this lease writes for
+                // the publication carries this value, and the durable relation
+                // compares a record with it. None when the marker carries
+                // credential_generation, and while no credential is present.
+                adopted_marker_generation: Option<u64>,
+                // The publication time of the credential the lease last
+                // withdrew (a release or a clear while it held one). A
+                // durable record published strictly after it is a later
+                // publication the lease takes; one published at or before
+                // it is not. A release or clear with no credential held
+                // keeps it, so a repeated release never drops the bound; a
+                // publication, or a restore with a credential, clears it.
+                // None while a credential is present.
+                released_publication_at_millis: Option<u64>,
             }
 
             init(Valid) {
@@ -161,6 +183,8 @@ macro_rules! auth_catalog_machine_dsl {
                 oauth_device_poll_ids = EmptySet,
                 oauth_outstanding_flow_count = 0,
                 release_draining = false,
+                adopted_marker_generation = None,
+                released_publication_at_millis = None,
             }
 
             terminal [Released]
@@ -220,6 +244,11 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_generation: u64,
                     credential_published_at_millis: Option<u64>,
                     restored_oauth_membership_observed: bool,
+                    // The captured snapshot's adopted_marker_generation:
+                    // below credential_generation when present.
+                    adopted_marker_generation: Option<u64>,
+                    // The captured snapshot's released_publication_at_millis.
+                    released_publication_at_millis: Option<u64>,
                 },
                 RestoreOAuthBrowserFlow { flow_id: String, provider: Option<String>, redirect_uri: Option<String>, expires_at_millis: Option<u64> },
                 RestoreOAuthDeviceFlow { flow_id: String, provider: Option<String>, expires_at_millis: Option<u64> },
@@ -386,6 +415,29 @@ macro_rules! auth_catalog_machine_dsl {
                 self.lifecycle_phase != Phase::Released || self.release_draining == false
             }
 
+            // A marker generation the lease records names its current
+            // publication: a credential is present, and the marker's
+            // generation is below the lease's (when they are equal the
+            // lease records none).
+            invariant adopted_marker_generation_below_credential_generation {
+                if self.adopted_marker_generation == None {
+                    true
+                } else {
+                    self.credential_present
+                    && self.adopted_marker_generation.get("value") < self.credential_generation
+                }
+            }
+
+            // The bound a withdrawn publication leaves is kept only while no
+            // credential is present.
+            invariant released_publication_only_without_credential {
+                if self.credential_present {
+                    self.released_publication_at_millis == None
+                } else {
+                    true
+                }
+            }
+
             // --- Transitions ---
 
             // A publication that names its credential value never publishes
@@ -419,6 +471,8 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_generation = self.credential_generation + 1;
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
+                    self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -643,6 +697,8 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_generation = self.credential_generation + 1;
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = None;
+                    self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -794,8 +850,14 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
+                    self.adopted_marker_generation = None;
                 }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
@@ -813,8 +875,14 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
+                    self.adopted_marker_generation = None;
                 }
                 to ReauthRequired
                 emit EmitLifecycleEvent {
@@ -833,8 +901,14 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
+                    self.adopted_marker_generation = None;
                     self.oauth_browser_flow_ids = EmptySet;
                     self.oauth_browser_flow_providers = EmptyMap;
                     self.oauth_browser_flow_redirect_uris = EmptyMap;
@@ -908,8 +982,14 @@ macro_rules! auth_catalog_machine_dsl {
                     self.expires_at = None;
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
+                    self.released_publication_at_millis = if self.credential_present {
+                        self.credential_published_at_millis
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     self.credential_present = false;
                     self.credential_published_at_millis = None;
+                    self.adopted_marker_generation = None;
                     self.oauth_browser_flow_ids = EmptySet;
                     self.oauth_browser_flow_providers = EmptyMap;
                     self.oauth_browser_flow_redirect_uris = EmptyMap;
@@ -938,14 +1018,37 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Valid) && credential_present && credential_published_at_millis != None }
+                guard "restore_adopted_marker_generation_below_generation" {
+                    if adopted_marker_generation == None {
+                        true
+                    } else {
+                        adopted_marker_generation.get("value") < credential_generation
+                    }
+                }
                 update {
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // The restored publication keeps the marker generation
+                    // it was captured with: the captured one, or the
+                    // captured lease generation once the lease has passed
+                    // it (a later publication of its own failed to persist).
+                    self.adopted_marker_generation = if adopted_marker_generation != None {
+                        adopted_marker_generation
+                    } else {
+                        if credential_generation < self.credential_generation {
+                            Some(credential_generation)
+                        } else {
+                            None
+                        }
+                    };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -970,14 +1073,37 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Expiring) && credential_present && credential_published_at_millis != None }
+                guard "restore_adopted_marker_generation_below_generation" {
+                    if adopted_marker_generation == None {
+                        true
+                    } else {
+                        adopted_marker_generation.get("value") < credential_generation
+                    }
+                }
                 update {
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // The restored publication keeps the marker generation
+                    // it was captured with: the captured one, or the
+                    // captured lease generation once the lease has passed
+                    // it (a later publication of its own failed to persist).
+                    self.adopted_marker_generation = if adopted_marker_generation != None {
+                        adopted_marker_generation
+                    } else {
+                        if credential_generation < self.credential_generation {
+                            Some(credential_generation)
+                        } else {
+                            None
+                        }
+                    };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1002,14 +1128,37 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Refreshing) && credential_present && credential_published_at_millis != None }
+                guard "restore_adopted_marker_generation_below_generation" {
+                    if adopted_marker_generation == None {
+                        true
+                    } else {
+                        adopted_marker_generation.get("value") < credential_generation
+                    }
+                }
                 update {
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // The restored publication keeps the marker generation
+                    // it was captured with: the captured one, or the
+                    // captured lease generation once the lease has passed
+                    // it (a later publication of its own failed to persist).
+                    self.adopted_marker_generation = if adopted_marker_generation != None {
+                        adopted_marker_generation
+                    } else {
+                        if credential_generation < self.credential_generation {
+                            Some(credential_generation)
+                        } else {
+                            None
+                        }
+                    };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1034,14 +1183,37 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::Expired) && credential_present && credential_published_at_millis != None }
+                guard "restore_adopted_marker_generation_below_generation" {
+                    if adopted_marker_generation == None {
+                        true
+                    } else {
+                        adopted_marker_generation.get("value") < credential_generation
+                    }
+                }
                 update {
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // The restored publication keeps the marker generation
+                    // it was captured with: the captured one, or the
+                    // captured lease generation once the lease has passed
+                    // it (a later publication of its own failed to persist).
+                    self.adopted_marker_generation = if adopted_marker_generation != None {
+                        adopted_marker_generation
+                    } else {
+                        if credential_generation < self.credential_generation {
+                            Some(credential_generation)
+                        } else {
+                            None
+                        }
+                    };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1066,14 +1238,37 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard { lifecycle_phase == Some(AuthLifecyclePhase::ReauthRequired) && credential_present && credential_published_at_millis != None }
+                guard "restore_adopted_marker_generation_below_generation" {
+                    if adopted_marker_generation == None {
+                        true
+                    } else {
+                        adopted_marker_generation.get("value") < credential_generation
+                    }
+                }
                 update {
                     self.expires_at = expires_at;
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // The restored publication keeps the marker generation
+                    // it was captured with: the captured one, or the
+                    // captured lease generation once the lease has passed
+                    // it (a later publication of its own failed to persist).
+                    self.adopted_marker_generation = if adopted_marker_generation != None {
+                        adopted_marker_generation
+                    } else {
+                        if credential_generation < self.credential_generation {
+                            Some(credential_generation)
+                        } else {
+                            None
+                        }
+                    };
+                    self.released_publication_at_millis = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1098,7 +1293,9 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
                 guard "restore_oauth_membership_present" { self.oauth_outstanding_flow_count > 0 || restored_oauth_membership_observed }
@@ -1107,6 +1304,8 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
                     self.credential_present = false;
+                    self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = released_publication_at_millis;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1131,7 +1330,9 @@ macro_rules! auth_catalog_machine_dsl {
                     credential_present,
                     credential_generation,
                     credential_published_at_millis,
-                    restored_oauth_membership_observed
+                    restored_oauth_membership_observed,
+                    adopted_marker_generation,
+                    released_publication_at_millis
                 }
                 guard "restore_snapshot_has_no_credential" { credential_present == false || lifecycle_phase == None || lifecycle_phase == Some(AuthLifecyclePhase::Released) }
                 guard "restore_oauth_membership_absent" { self.oauth_outstanding_flow_count == 0 && restored_oauth_membership_observed == false }
@@ -1141,6 +1342,8 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = None;
                     self.refresh_attempt = 0;
                     self.credential_present = false;
+                    self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = released_publication_at_millis;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1181,6 +1384,21 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // A record published at a lower generation (another
+                    // process's) keeps its marker generation; the lease
+                    // keeps the larger one.
+                    self.adopted_marker_generation = if credential_present
+                        && credential_generation < self.credential_generation
+                    {
+                        Some(credential_generation)
+                    } else {
+                        None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1212,6 +1430,21 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // A record published at a lower generation (another
+                    // process's) keeps its marker generation; the lease
+                    // keeps the larger one.
+                    self.adopted_marker_generation = if credential_present
+                        && credential_generation < self.credential_generation
+                    {
+                        Some(credential_generation)
+                    } else {
+                        None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1243,6 +1476,21 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // A record published at a lower generation (another
+                    // process's) keeps its marker generation; the lease
+                    // keeps the larger one.
+                    self.adopted_marker_generation = if credential_present
+                        && credential_generation < self.credential_generation
+                    {
+                        Some(credential_generation)
+                    } else {
+                        None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1274,6 +1522,21 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // A record published at a lower generation (another
+                    // process's) keeps its marker generation; the lease
+                    // keeps the larger one.
+                    self.adopted_marker_generation = if credential_present
+                        && credential_generation < self.credential_generation
+                    {
+                        Some(credential_generation)
+                    } else {
+                        None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1305,6 +1568,21 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    // A record published at a lower generation (another
+                    // process's) keeps its marker generation; the lease
+                    // keeps the larger one.
+                    self.adopted_marker_generation = if credential_present
+                        && credential_generation < self.credential_generation
+                    {
+                        Some(credential_generation)
+                    } else {
+                        None
+                    };
+                    self.released_publication_at_millis = if credential_present {
+                        None
+                    } else {
+                        self.released_publication_at_millis
+                    };
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -1337,6 +1615,7 @@ macro_rules! auth_catalog_machine_dsl {
                     self.last_refresh = last_refresh;
                     self.refresh_attempt = refresh_attempt;
                     self.credential_present = credential_present;
+                    self.adopted_marker_generation = None;
                     if credential_generation > self.credential_generation {
                         self.credential_generation = credential_generation;
                     }
@@ -2104,6 +2383,8 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_generation = self.credential_generation + 1;
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
+                    self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {
@@ -2124,6 +2405,8 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_generation = self.credential_generation + 1;
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
+                    self.adopted_marker_generation = None;
+                    self.released_publication_at_millis = None;
                 }
                 to Valid
                 emit EmitLifecycleEvent {

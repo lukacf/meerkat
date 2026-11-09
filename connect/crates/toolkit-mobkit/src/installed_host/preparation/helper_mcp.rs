@@ -129,6 +129,7 @@ impl PreparedHelperMcp {
             source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     self.id.clone(),
                     helper.logical_executor.clone(),
@@ -161,7 +162,7 @@ impl PreparedHelperMcp {
 
 fn refusal(error: GrantRefusal) -> HostLifetimeError {
     match error {
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }

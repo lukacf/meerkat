@@ -1281,10 +1281,21 @@ impl HarnessGate {
 
     /// Wait until the runtime asks, bounded by `within`; whether it asked.
     pub async fn wait_asked(&self, within: Duration) -> bool {
+        self.wait_asked_times(1, within).await
+    }
+
+    /// Wait until the runtime asked `times` times, bounded by `within`;
+    /// whether it did.
+    pub async fn wait_asked_times(&self, times: u32, within: Duration) -> bool {
         let mut asked = self.asked.subscribe();
-        tokio::time::timeout(within, asked.wait_for(|count| *count > 0))
+        tokio::time::timeout(within, asked.wait_for(|count| *count >= times))
             .await
             .is_ok_and(|seen| seen.is_ok())
+    }
+
+    /// The verdict this gate answers.
+    pub fn verdict(&self) -> ResumeGate {
+        self.verdict
     }
 
     pub fn release(&self) {
@@ -1532,6 +1543,7 @@ fn profile(durable: bool, bundles: Vec<String>) -> Profile {
         model: "gpt-5.5".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: NonZeroU64::new(COMPACTION_THRESHOLD),
         resume_overrides: Vec::new(),
@@ -1872,17 +1884,47 @@ impl Incarnation {
         session: &SessionId,
         tag: &str,
     ) -> Result<usize, String> {
+        self.prompts_in(session, tag, false).await
+    }
+
+    /// [`Self::prompts_in_transcript`] over [`Self::committed_session`].
+    pub async fn prompts_in(
+        &self,
+        session: &SessionId,
+        tag: &str,
+        run_held: bool,
+    ) -> Result<usize, String> {
         let prompt = prompt_text(tag);
         Ok(self
-            .service
-            .load_authoritative_session(session)
-            .await
-            .map_err(|error| format!("load the session: {error}"))?
-            .ok_or("the session is gone")?
+            .committed_session(session, run_held)
+            .await?
             .messages()
             .iter()
             .filter(|message| matches!(message, Message::User(user) if user.text_content().contains(&prompt)))
             .count())
+    }
+
+    /// `session`'s committed transcript. With `run_held`, a run of the
+    /// session is held for its next start and keeps its provisional tail
+    /// ahead of the committed snapshot, which the strict read refuses by
+    /// design until a start, an attach or an archive settles the tail: the
+    /// snapshot under the tail is read instead, as the service's observers
+    /// read it (`observe_authoritative_session_body_tolerating_tail`).
+    pub async fn committed_session(
+        &self,
+        session: &SessionId,
+        run_held: bool,
+    ) -> Result<meerkat_core::Session, String> {
+        let loaded = if run_held {
+            self.service
+                .observe_authoritative_session_body_tolerating_tail(session)
+                .await
+        } else {
+            self.service.load_authoritative_session(session).await
+        };
+        loaded
+            .map_err(|error| format!("load the session: {error}"))?
+            .ok_or_else(|| "the session is gone".to_string())
     }
 
     pub async fn shut_down(self) {
@@ -2521,7 +2563,38 @@ pub async fn restart(
             }
         }
     }
-    if !incarnation
+    // A gate that cannot decide neither resumes nor ends the run: the
+    // runtime asks it through every attempt, then holds the run marked, its
+    // input open, for the next start.
+    let undecided = gate
+        .as_ref()
+        .is_some_and(|gate| gate.verdict() == ResumeGate::Unavailable);
+    if undecided {
+        let attempts = meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPTS;
+        let Some(gate) = gate.as_ref() else {
+            return Err("no gate was installed".to_string());
+        };
+        if !gate.wait_asked_times(attempts, STEP).await {
+            return Err(format!(
+                "the runtime did not ask the gate {attempts} times before holding the run"
+            ));
+        }
+        let deadline = Instant::now() + STEP;
+        while incarnation
+            .machine
+            .resumed_run_admission_held(&session)
+            .await
+            .is_none()
+        {
+            if Instant::now() >= deadline {
+                return Err(
+                    "the run whose gate could not decide was not held for the next start"
+                        .to_string(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    } else if !incarnation
         .wait_terminal(&session, &killed.input, STEP)
         .await
     {
@@ -2545,9 +2618,10 @@ pub async fn restart(
         killed,
         fence_leases,
         held_events,
+        undecided,
     )
     .await?;
-    let main_prompts = incarnation.prompts_in_transcript(&session, MAIN).await?;
+    let main_prompts = incarnation.prompts_in(&session, MAIN, undecided).await?;
     let provisional_tail_run =
         provisional_tail_run(incarnation.runtime_store.as_ref(), &session).await?;
     incarnation.shut_down().await;
@@ -2606,11 +2680,13 @@ pub async fn report_for(
     killed: &KilledState,
     fence_leases: bool,
 ) -> Result<RestartReport, String> {
-    report_from(incarnation, tag, session, killed, fence_leases, None).await
+    report_from(incarnation, tag, session, killed, fence_leases, None, false).await
 }
 
 /// [`report_for`], reading the session's events from `held_events` when the
-/// restart subscribed to them before its session stopped being live.
+/// restart subscribed to them before its session stopped being live, and
+/// its transcript as [`Incarnation::committed_session`] does with
+/// `run_held`.
 async fn report_from(
     incarnation: &Incarnation,
     tag: &str,
@@ -2618,6 +2694,7 @@ async fn report_from(
     killed: &KilledState,
     fence_leases: bool,
     held_events: Option<meerkat_core::comms::SessionEventSubscription>,
+    run_held: bool,
 ) -> Result<RestartReport, String> {
     // The runs, from the events the session retains. A session the restart
     // never loaded (a compaction race's run ended in the first incarnation)
@@ -2693,12 +2770,7 @@ async fn report_from(
         .collect();
 
     // The transcript the input's runs left.
-    let transcript = incarnation
-        .service
-        .load_authoritative_session(session)
-        .await
-        .map_err(|error| format!("load the session: {error}"))?
-        .ok_or("the session is gone")?;
+    let transcript = incarnation.committed_session(session, run_held).await?;
     let mut transcript_rounds = Vec::new();
     let mut transcript_results = Vec::new();
     let mut interrupted = Vec::new();

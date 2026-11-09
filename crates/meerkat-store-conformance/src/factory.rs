@@ -62,7 +62,10 @@ pub trait ArtifactStoreFactory: Send + Sync {
 /// chapter kills a "process" by dropping its handle (and any commit it has in
 /// flight) and opens another; the realm outlives every handle. For a remote
 /// backend that is a new client over the same dataset; for the in-memory
-/// reference store it is another handle on one shared instance.
+/// reference store it is another handle on one shared instance. A process
+/// that stopped also acquires the fence again on its own handle, as Core's
+/// writer does after a failed renew, and must then load and list what other
+/// handles committed meanwhile.
 ///
 /// The realm starts empty: no scopes and no fence token acquired.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -75,6 +78,15 @@ pub trait HostStoreFactory: Send + Sync {
     /// ([`HostStore::fence_timing`]) had passed with no renew: advance the
     /// store's clock, or wait the lease out.
     async fn lapse_fence_leases(&self) -> Result<(), ConformanceFailure>;
+
+    /// Fold the realm's batches now, for a store that resolves two batches
+    /// at one version only when it folds them (compaction): the chapter's
+    /// conflict row runs it between and after the pair. The default does
+    /// nothing; a store with no fold to run proves its conflict listing in
+    /// its own tests.
+    async fn fold_now(&self) -> Result<(), ConformanceFailure> {
+        Ok(())
+    }
 }
 
 /// Adapter turning an async closure into a [`SessionStoreFactory`].

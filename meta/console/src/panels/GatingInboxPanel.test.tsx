@@ -173,6 +173,54 @@ describe("GatingInboxPanel recorded audit", () => {
       expect(view.getByTitle(action, { exact: true })).toBeTruthy();
     }
   });
+
+  // audit_tab_shows_decider_and_assurance
+  it("names who decided, as which approver, and with what assurance", () => {
+    const decided = {
+      ...evaluated, audit_id: "person-decision", pending_id: "pending-2", event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
+      detail: { decision: "approve", approver_id: "release-manager", deciding_principal: "alice@example.test", approver_binding: "held", deciding_assurance: "person_authenticated" },
+    };
+    const device = {
+      ...decided, audit_id: "operator-decision", action_id: "stdio-check",
+      detail: { decision: "approve", approver_id: "ops-lead", deciding_principal: "ops-lead", approver_binding: "principal", deciding_assurance: "device_trusted" },
+    };
+    const unnamed = { ...decided, audit_id: "label-only", action_id: "older-record", detail: { decision: "approve", approver_id: "duty-approver" } };
+    const view = render(<GatingInboxPanel pending={[]} audit={[decided, device, unnamed]} onDecide={vi.fn()} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(row).getByText("Decided by: alice@example.test (as Release manager) - person authenticated")).toBeTruthy();
+    expect(row.textContent?.includes("Approver:")).toBe(false);
+    const operator = view.getByTitle("stdio-check", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(operator).getByText("Decided by: ops-lead - device trusted")).toBeTruthy();
+    const older = view.getByTitle("older-record", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(older).getByText("Approver: Duty approver")).toBeTruthy();
+    expect(older.textContent?.includes("Decided by:")).toBe(false);
+  });
+
+  it("names the decider without an assurance the record does not carry", () => {
+    const decided = {
+      ...evaluated, audit_id: "no-assurance", pending_id: "pending-3", event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
+      detail: { decision: "approve", approver_id: "release-manager", deciding_principal: "alice@example.test", approver_binding: "held" },
+    };
+    const view = render(<GatingInboxPanel pending={[]} audit={[decided]} onDecide={vi.fn()} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(row).getByText("Decided by: alice@example.test (as Release manager)")).toBeTruthy();
+  });
+
+  it("says when the records are kept in the gateway's memory, without claiming a start time", () => {
+    const memory = "Kept in the gateway's memory: decisions from before a gateway restart may be missing.";
+    const view = render(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} auditRetention="process" />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.getByTestId("gating-audit-retention").textContent).toBe(memory);
+    fireEvent.click(view.getByTestId("gating-tab:auto"));
+    expect(view.getByTestId("gating-audit-retention").textContent).toBe(memory);
+    expect(view.queryByText(/since the gateway started/i)).toBeNull();
+    view.rerender(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} auditRetention="durable" />);
+    expect(view.queryByTestId("gating-audit-retention")).toBeNull();
+    view.rerender(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} />);
+    expect(view.queryByTestId("gating-audit-retention")).toBeNull();
+  });
 });
 
 describe("GatingInboxPanel frame and requests without the shared resource", () => {
@@ -428,6 +476,50 @@ describe("GatingInboxPanel host-provided attention", () => {
     expect(view.queryByTestId("host-attention-list") === null).toBe(true);
     fireEvent.click(view.getByTestId("gating-tab:pending"));
     expect(view.getByTestId("host-attention:host:a")).toBeTruthy();
+  });
+});
+
+describe("GatingInboxPanel private replies", () => {
+  const reply = {
+    id: "reply-1",
+    kind: "private_reply" as const,
+    createdAtMs: Date.now() - 60_000,
+    text: "Your release is approved.",
+    redacted: false,
+    origin: { identity: "alpha", interactionId: "interaction-1", inputFrameId: "frame-1" },
+  };
+  const hostItem = { sourceId: "host", sourceLabel: "Host", id: "a", title: "Confirm a setting", href: "/host/items/a", details: [] };
+  it("lists the person's replies on Pending after the approvals and before the host's items", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}
+      consoleAttention={{ status: "ready", items: [reply] }}
+      hostAttention={{ status: "ready", items: [hostItem], failedSources: [] }} />);
+    const replies = view.getByTestId("console-attention-list");
+    expect(within(replies).getByText("Your release is approved.")).toBeTruthy();
+    expect(replies.classList.contains("gating-inbox__cards")).toBe(true);
+    expect(replies.compareDocumentPosition(view.getByText("Publish reviewed changes")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(replies.compareDocumentPosition(view.getByTestId("host-attention-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.queryByTestId("console-attention-list") === null).toBe(true);
+  });
+  it("keeps an empty approval list to one line while a reply shows", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("ready"), requests: [] }}
+      consoleAttention={{ status: "ready", items: [reply] }} />);
+    const empty = view.getByText("No pending approvals.").closest(".cc-panel-empty");
+    expect(empty?.classList.contains("cc-panel-empty--inline")).toBe(true);
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ ...snapshot("ready"), requests: [] }}
+      consoleAttention={{ status: "ready", items: [] }} />);
+    expect(view.getByText("No pending approvals.").closest(".cc-panel-empty")?.classList.contains("cc-panel-empty--inline")).toBe(false);
+  });
+  it("dismisses through its handler and offers no Dismiss without one", () => {
+    const onDismiss = vi.fn();
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")}
+      consoleAttention={{ status: "ready", items: [reply] }} onDismissAttention={onDismiss} />);
+    fireEvent.click(view.getByTestId("console-attention-dismiss:reply-1"));
+    expect(onDismiss).toHaveBeenCalledWith(reply);
+    view.rerender(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={snapshot("ready")} readOnly
+      consoleAttention={{ status: "ready", items: [reply] }} />);
+    expect(view.getByTestId("console-attention:reply-1")).toBeTruthy();
+    expect(view.queryByTestId("console-attention-dismiss:reply-1") === null).toBe(true);
   });
 });
 

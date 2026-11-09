@@ -1666,6 +1666,9 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             system_prompts: Vec::new(),
             transient_turn_context: value.transient_turn_context,
             transient_turn_context_appends: Vec::new(),
+            // Request-only context lives only in the process that admitted
+            // it; no wire value carries it.
+            request_only_context: Vec::new(),
             model: value.model.map(ModelId::new),
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,

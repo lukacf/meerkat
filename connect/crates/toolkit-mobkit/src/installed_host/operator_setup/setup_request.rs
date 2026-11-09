@@ -3,6 +3,118 @@ use super::*;
 use crate::private_originals::{LocalControllerSetup, PrivateSetupRequestSelection};
 use meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin;
 
+/// A proposal retains an observation of the actual prepared caller, never an
+/// authority snapshot. Every use reopens the same live source/member owner.
+#[derive(Clone)]
+pub(super) struct ReviewedSetupCaller {
+    source: std::sync::Weak<crate::private_originals::PrivateOriginals>,
+    original: crate::private_originals::PrivateOriginalRef,
+    session: meerkat_core::SessionId,
+    route: meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceRoute,
+    pub(super) member: meerkat_toolkit::host_lifetime::policy::PreparedNativeMember,
+    context: Option<EvidenceId>,
+    admission: Option<crate::installed_host::dynamic_members::MemberClassAdmission>,
+}
+
+impl ReviewedSetupCaller {
+    fn capture(
+        owner: &OperatorSetup,
+        prepared: &LocalControllerSetup,
+    ) -> Result<Self, HostLifetimeError> {
+        let source = prepared
+            .source_owner()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        source.check_setup_owner(&owner.lifetime, &owner.source)?;
+        let (route, member, context) = source
+            .selected_source_route(&prepared.original().route)
+            .map_err(setup_source_error)?;
+        let admission =
+            source.selected_setup_admission(&(route.clone(), member.clone(), context.clone()))?;
+        let caller = Self {
+            source: Arc::downgrade(&source),
+            original: prepared.original().clone(),
+            session: prepared.session_id().clone(),
+            route,
+            member,
+            context,
+            admission,
+        };
+        caller.check_current(owner)?;
+        Ok(caller)
+    }
+
+    pub(super) fn check_current(&self, owner: &OperatorSetup) -> Result<(), HostLifetimeError> {
+        let source = self
+            .source
+            .upgrade()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        source.check_setup_owner(&owner.lifetime, &owner.source)?;
+        let (route, member, context) = source
+            .selected_source_route(&self.original.route)
+            .map_err(setup_source_error)?;
+        if route != self.route
+            || member != self.member
+            || context != self.context
+            || context
+                .as_ref()
+                .is_some_and(|id| id.as_str() != self.session.to_string())
+            || !matches!(
+                &route.origin,
+                CompiledNativeSourceOrigin::LocalConsole { .. }
+            )
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+        if source.selected_setup_admission(&(route, member, context))? != self.admission {
+            return Err(HostLifetimeError::Denied);
+        }
+        Ok(())
+    }
+
+    pub(super) fn route(
+        &self,
+    ) -> &meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceRoute {
+        &self.route
+    }
+
+    pub(super) async fn with_current<T>(
+        &self,
+        owner: &OperatorSetup,
+        effect: impl FnOnce() -> Result<T, HostLifetimeError>,
+    ) -> Result<T, HostLifetimeError> {
+        self.check_current(owner)?;
+        let source = self
+            .source
+            .upgrade()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        source
+            .with_selected_setup_caller(
+                &(
+                    self.route.clone(),
+                    self.member.clone(),
+                    self.context.clone(),
+                ),
+                self.admission.as_ref(),
+                || {
+                    self.check_current(owner)?;
+                    effect()
+                },
+            )
+            .await
+    }
+}
+
+pub(super) fn setup_source_error(
+    error: crate::private_originals::PrivateOriginalError,
+) -> HostLifetimeError {
+    match error {
+        crate::private_originals::PrivateOriginalError::Unavailable => {
+            HostLifetimeError::Unavailable
+        }
+        _ => HostLifetimeError::Denied,
+    }
+}
+
 impl OperatorSetup {
     /// This preparation has already left the native identity lease. The actual
     /// source owner and actual SessionId are retained, never chosen by the UI.
@@ -16,25 +128,20 @@ impl OperatorSetup {
                 != (meerkat_core::ApprovalOwnerRef::Session {
                     session_id: prepared.session_id().clone(),
                 })
-            || !matches!(
-                self.route(&prepared.original().route)?.origin,
-                CompiledNativeSourceOrigin::LocalConsole { .. }
-            )
         {
             return Err(HostLifetimeError::WrongOwner);
         }
-        let mut proposal = self.prepare_setup_parent_review(
+        let caller = ReviewedSetupCaller::capture(self, prepared)?;
+        let mut proposal = self.prepare_setup_parent_review_for(
             prepared.original().route.clone(),
             prepared.session_id(),
             request,
+            Some(caller.clone()),
         )?;
         let origin = crate::original_ingress::helper_originals::HelperSetupOrigin {
             realm: self.native.realm.clone(),
             source_owner: self.native.ingress_domain.clone(),
-            original_authority: self
-                .route(&prepared.original().route)?
-                .source_authority
-                .clone(),
+            original_authority: caller.route.source_authority.clone(),
             original: prepared.original().clone(),
         };
         let targets = self.original_helper_targets(&origin)?;
@@ -82,8 +189,21 @@ pub(crate) async fn validate_setup_selection(
     source: &ToolkitOriginalOwner,
     store: &dyn ToolkitStore,
     selection: &PrivateSetupRequestSelection,
+    originals: &crate::private_originals::PrivateOriginals,
 ) -> Result<ExecutionRestrictions, HostLifetimeError> {
-    validate_selection(lifetime, source, store, selection, true).await
+    validate_selection(lifetime, source, store, selection, Some(originals), true).await
+}
+
+/// Same bound decision and current caller, without requiring every unrelated
+/// target to remain current. Each actual target operation owns that check.
+pub(crate) async fn validate_bound_setup_selection(
+    lifetime: &NativeHostLifetime,
+    source: &ToolkitOriginalOwner,
+    store: &dyn ToolkitStore,
+    selection: &PrivateSetupRequestSelection,
+    originals: &crate::private_originals::PrivateOriginals,
+) -> Result<ExecutionRestrictions, HostLifetimeError> {
+    validate_selection(lifetime, source, store, selection, Some(originals), false).await
 }
 
 /// Reopen the same canonical approved selection without resolving unrelated
@@ -94,7 +214,7 @@ pub(crate) async fn validate_retained_setup_selection(
     store: &dyn ToolkitStore,
     selection: &PrivateSetupRequestSelection,
 ) -> Result<ExecutionRestrictions, HostLifetimeError> {
-    validate_selection(lifetime, source, store, selection, false).await
+    validate_selection(lifetime, source, store, selection, None, false).await
 }
 
 async fn validate_selection(
@@ -102,7 +222,8 @@ async fn validate_selection(
     source: &ToolkitOriginalOwner,
     store: &dyn ToolkitStore,
     selection: &PrivateSetupRequestSelection,
-    require_current: bool,
+    originals: Option<&crate::private_originals::PrivateOriginals>,
+    resolve_parents: bool,
 ) -> Result<ExecutionRestrictions, HostLifetimeError> {
     lifetime.validate_current_selection()?;
     let policy = lifetime.selected_policy();
@@ -110,11 +231,32 @@ async fn validate_selection(
         .native_host
         .as_ref()
         .ok_or(HostLifetimeError::Unavailable)?;
-    let route = native
-        .routes
-        .iter()
-        .find(|route| route.id == selection.original.route)
-        .ok_or(HostLifetimeError::Denied)?;
+    let current = originals
+        .map(|owner| {
+            owner
+                .selected_source_route(&selection.original.route)
+                .map_err(setup_source_error)
+        })
+        .transpose()?;
+    let admission = match (originals, current.as_ref()) {
+        (Some(owner), Some(selected)) => owner.selected_setup_admission(selected)?,
+        _ => None,
+    };
+    let route = if let Some((route, _, context)) = &current {
+        if context
+            .as_ref()
+            .is_some_and(|id| id.as_str() != selection.session_id.to_string())
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+        route
+    } else {
+        native
+            .routes
+            .iter()
+            .find(|route| route.id == selection.original.route)
+            .ok_or(HostLifetimeError::Denied)?
+    };
     if selection.parent.len() != 1
         || !matches!(
             route.origin,
@@ -124,16 +266,21 @@ async fn validate_selection(
         return Err(HostLifetimeError::Denied);
     }
     let (member, _, _) = route.source_binding(policy)?;
-    let member = native
-        .members
-        .iter()
-        .find(|selected| &selected.member == member)
-        .ok_or(HostLifetimeError::InvalidSelection)?;
+    let audience = if let Some((_, selected, _)) = &current {
+        &selected.audience
+    } else {
+        &native
+            .members
+            .iter()
+            .find(|selected| &selected.member == member)
+            .ok_or(HostLifetimeError::InvalidSelection)?
+            .audience
+    };
     let expected =
         application_operations::parent_restrictions(application_operations::find_and_install(
             &native.grant_administrator,
             &route.logical_executor,
-            &member.audience,
+            audience,
             &selection.session_id,
         ));
     let key = StoreKey {
@@ -147,8 +294,13 @@ async fn validate_selection(
         .map_err(|_| HostLifetimeError::Unavailable)?
         .ok_or(HostLifetimeError::Unavailable)?;
     let record = decode(&stored, &key)?;
-    if !super::setup_recovery::decision_key_matches(lifetime, native, &key, &record)?
-        || record.route != selection.original.route
+    if !super::setup_recovery::decision_key_matches_for(
+        lifetime,
+        native,
+        &key,
+        &record,
+        Some(route),
+    )? || record.route != selection.original.route
         || record.purpose != OperatorParentPurpose::SetupRequest
         || !record.setup_request.as_ref().is_some_and(|intent| {
             intent.session_id == selection.session_id
@@ -180,7 +332,7 @@ async fn validate_selection(
     {
         return Err(HostLifetimeError::Denied);
     }
-    if require_current {
+    if resolve_parents {
         let current = source
             .grants()
             .resolve_lineage(
@@ -213,6 +365,21 @@ async fn validate_selection(
         }
     }
     lifetime.validate_current_selection()?;
+    if let Some(owner) = originals {
+        if Some(
+            owner
+                .selected_source_route(&selection.original.route)
+                .map_err(setup_source_error)?,
+        ) != current
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+        if let Some(selected) = &current
+            && owner.selected_setup_admission(selected)? != admission
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+    }
     Ok(expected)
 }
 

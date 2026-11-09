@@ -94,9 +94,23 @@ A delegate helper is ephemeral: it is retired after its one task, and also when
 the calling turn stops waiting for it first.
 
 Unless its `tooling` supplies a profile, a helper runs on the model and
-provider (and self-hosted server) the calling session was built with, so a
-session on a realm `[models.<id>]` entry or a self-hosted model delegates. The
-helper resolves its own credentials from the realm.
+provider (and self-hosted server) the calling session runs on when the call
+runs, so a session on a realm `[models.<id>]` entry or a self-hosted model
+delegates. That is the session's current identity: after a turn that named
+another `model`, `provider`, `self_hosted_server_id` or `auth_binding`, the
+next `delegate` follows the switch. The helper also resolves its credentials
+through the session's auth binding; a session with none leaves the helper to
+the realm's resolution. Three helpers do not take the session's binding: one
+whose `tooling` supplies an inline profile builds on that profile, which names
+no binding; one whose `tooling` names a realm profile builds on that profile's
+binding, or on the realm's default; and one placed on another host resolves
+its credentials on that host. A `delegate` whose session's route changed since
+the last one replaces
+the session's implicit mob, with everything in it (members spawned there
+included), and its result says it created the mob. The current identity is
+read from the session's stored metadata, which `rkat` and the JSON-RPC, REST
+and MCP servers keep; a session on the in-memory ephemeral session service,
+which keeps none, delegates on the route it was built with.
 
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
@@ -295,6 +309,62 @@ such as a typo, fails the member's build with `DeclaredToolUnknown`, unless the
 profile declares an MCP server that maps no `tool_names` or opts into a bundle
 the build withholds; then the name is checked only at call time.
 
+### Granting tools to a member at run time
+
+`tools.grant_gated` mounts built-in tool families, tool names and the tools of
+MCP servers hidden: the member is not shown them and every call is refused
+until a live [scoped tool grant](/concepts/tools#scoped-tool-grants) opens
+them, for a bounded window. Leave a gated family's switch off; the gate mounts
+it closed, and a binary that does not know the gate keeps it off.
+
+```toml
+[profiles.worker.tools]
+comms = true
+grant_gated = { families = ["shell"], tools = ["deploy"], mcp_servers = ["tickets"] }
+```
+
+A gated MCP server the profile configures (`tools.mcp_servers`) starts no
+process until a live grant of that server (`{"kind": "mcp_server", "server":
+"tickets"}`) covers the member at a build, so the member connects it at its
+next build, a respawn for one, and not before; the build decides this as it
+composes the member's tools. `unconfigured_mcp_servers =
+true` gates every MCP server the profile does not configure, whatever path
+attaches it later; the servers it configures stay open.
+
+At every build, resume included, a member's gate is its own profile's gate
+joined with its role's current gate, so a member spawned with its own profile
+still gets its role's gate at its next build. A store-owned identity declared
+with its role's named profile is built from the role's definition, as a worker
+of the role is: its own gate is the role's current gate, less the families its
+declaration switches off; one declared with an exact profile of its own
+(`profile_override`) gets the role's gate as role entries, and so does one
+whose desired material does not record where its profile came from (one
+adopted by an earlier release). A role entry never fails the build: a role
+tool name and a role MCP server are gated from the moment they appear, a role
+family is gated where the member mounts it, and a role family the member does
+not mount is ignored. A grant to the member's identity (`tool_grants/grant`
+with `{"kind": "identity", "mob_id", "identity"}`) follows the member across
+respawns and restarts, and ends when the identity ends, with the grants of
+the session the mob holds for it then: at the end of a plain retire; at the
+end of a retirement that unlists or removes an identity entry; at the
+unlist of an unseated identity entry, or a complete roster's seal of one it
+does not list and no host's intent row names; at the removal
+of an unseated store-owned identity; when a respawn whose replacement fails
+after the old member's archive is abandoned, by its own step or by the
+resume after a stop; or at a reset of the mob. A respawn keeps them, and so
+does a host's adoption of a declared identity, which ends the identity's
+entry, not the identity. A name
+created again needs a grant of its own, and a later resume, which replays
+the earlier respawn's abandonment, ends none of its grants. A grant between a respawn's
+retirement of the old member and the seating of its replacement answers
+`subject_unknown`, since the identity is out of the roster then: retry it
+once the respawn answers. An identity grant answers `applies`,
+whether the member's running build gates its target (`at_next_build` for a
+gated server the profile configures that the running build left
+unattached), and `tool_grants/list`
+answers the member's gate, running and next build. A member whose gate names
+anything cannot be placed on another host.
+
 ### Opting into host tool bundles
 
 `tools.bundles` names host tool bundles a profile opts into. It is the lenient
@@ -345,6 +415,9 @@ provider = "anthropic"
 # Durable self-hosted binding (with provider = "self_hosted" and a
 # [self_hosted.models] entry in the host config).
 # self_hosted_server_id = "local"
+# Realm auth binding the members resolve their credentials through. Omitted,
+# a member resolves its realm's binding for the provider.
+# auth_binding = { realm = "global", binding = "team_key" }
 # Default provider for `Auto` image-generation targets (profile-level wins
 # over the mob-level default below).
 image_generation_provider = "gemini"
@@ -357,15 +430,27 @@ auto_compact_threshold = 60000
 resume_overrides = ["model", "provider"]
 ```
 
-A resumed member keeps its durable credential binding while its provider is
-unchanged. When `provider` in `resume_overrides` moves a member to another
-provider, the member keeps its history and resolves the new provider's binding
-from its realm, as a fresh member of the profile would: the realm's binding for
-that provider, then the parent realms and `global`, then the provider's
-environment key. A durable binding backed by a credential account keeps that
-account; if no binding for the new provider shares it, the resume is refused
-with a typed error and the durable session is left as it was. A host that runs
-a member for another host needs the release with this behaviour to resume it.
+A profile's `auth_binding` is an explicit build input: its members build on
+that binding, a resumed member included, and a spawn that names its own
+binding wins over it. Only an operator's own definition may name it: a mob
+pack whose definition names one fails validation, and Connect refuses an
+application setup definition that names one. An owner can also write a realm
+profile that names one, through JSON-RPC `mob/profile/create` and
+`mob/profile/update` and the MCP profile tools; reading that profile back does
+not show the binding. A member placed on a member host
+resolves its credentials there and does not carry the profile's binding, and
+an adaptive layer refuses a profile that names one.
+
+Otherwise, a resumed member keeps its durable credential binding while its
+provider is unchanged. When `provider` in `resume_overrides` moves a member to
+another provider, the member keeps its history and resolves the new provider's
+binding from its realm, as a fresh member of the profile would: the realm's
+binding for that provider, then the parent realms and `global`, then the
+provider's environment key. A durable binding backed by a credential account
+keeps that account; if no binding for the new provider shares it, the resume is
+refused with a typed error and the durable session is left as it was. A host
+that runs a member for another host needs the release with this behaviour to
+resume it.
 
 Anthropic prompt caching is a per-profile `provider_params` decision. From
 0.8.33 the default is `automatic` on every backend that supports it (Anthropic
@@ -643,7 +728,7 @@ Spawn defaults matter:
 | `launch_mode` | fresh member |
 | `tool_access_policy` | inherit |
 | `auto_wire_parent` | `false`; when `true`, a spawn made from a member's own turn into its own mob (the agent tool `mob_spawn_member`, or the member tools `spawn_member` and `spawn_many_members`) wires the new member to that member, and any other spawn wires nothing |
-| `definition_wiring` (Rust `SpawnMemberSpec` only) | `Applies`: the definition's wiring rules (`auto_wire_orchestrator`, `role_wiring`) wire the member. `DefinitionWiring::Exempt` seats it with no edge those rules declare, and no member spawned, seated or rotated later is wired to it by them (see [Wire Peers](#wire-peers)) |
+| `definition_wiring` (Rust `SpawnMemberSpec` only) | `Applies`: the definition's wiring rules (`auto_wire_orchestrator`, `role_wiring`) wire the member. `DefinitionWiring::Exempt` seats it with no edge those rules declare, and no member spawned, seated or rotated later is wired to it by them (see [Wire Peers](#wire-peers)); it is also outside the definition's role-wide flow steps, which only role targets naming it reach, and a durable fork of it is seated exempt too |
 | `entry_custody` (Rust `SpawnMemberSpec` only) | `false`: the member is a worker. `true` (`with_entry_custody(true)`) seats the member of an identity entry through a spawn or a dormant seat: a host's own durable identity, which no worker reconcile spawns or retires (`reconcile` and `ensure_member` refuse a spec with entry custody), no spawn without entry custody takes, and neither the agent lane nor the agent mob tools act on (see [Identity entries](/reference/mob-architecture#identity-entries)) |
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
@@ -685,6 +770,28 @@ session build for that spawn or cold resume. It is executable process-local
 behavior, not durable configuration: re-supply it from a
 `SpawnMemberCustomizer` after restart. Remote placement rejects it before
 materialization instead of dropping the override.
+
+A host gates a member's tool calls with a per-member
+`SpawnMemberSpec.tool_dispatch_admission` (an `Arc<dyn ToolDispatchAdmission>`),
+usually set by its `SpawnMemberCustomizer`. It is process-local: it is never
+persisted and never copied to a fork. When a member whose build runs under one
+is forked (the agent tools `fork_off` and `council`, `MobHandle::fork_member`
+and its siblings, a live delegation), the customizer is asked for the child
+before the child is seated, and only the `tool_dispatch_admission` of its
+answer is used: the child runs under it, or the fork is refused with
+`MobError::DispatchAdmissionRequired`. A refused `fork_off` or handle fork
+forks nothing; a refused council branch is refused after the council forked
+its source for it, and the council's cleanup removes that fork. A
+`fork_helper` child of such a member is asked as any spawn is, and is refused
+the same way when the customizer installs none. Every later build of such a
+child (a wake, a restore after a restart, a reload, an explicit resume) and a
+respawn successor of it ask again, and are refused when the customizer
+installs none, so the child never runs without an admission. A fork child
+seated before 0.9.11, whose spawn row records nothing, is asked the same way
+each time it is rebuilt and runs under the admission the customizer installs,
+or under none when it installs none. A member a spawn policy seats is asked
+too, for its admission alone (`SpawnSource::PolicySpawn`), and runs under what
+the customizer installs. Before 0.9.11 such members ran with no admission.
 
 A trusted host that decides each member's destination or agent mandate
 installs a `MemberRuntimeRegistrationHook` with
@@ -922,7 +1029,17 @@ Explicit wiring (`mob/wire`, topology operations) still applies to it, and a
 respawn restores the explicit edges it held. The exemption is recorded with
 the member, so a restart and a respawn keep it; a rotation
 (`MobHandle::rotate_member`) takes the exemption of the spec it seats. A
-member placed on a member host cannot be exempt.
+durable fork of an exempt member (`MobHandle::fork_member`, an agent's
+`fork_off` child, a temporary council's local participant, a live delegation
+worker from `MobHandle::fork_member_at_turn_boundary`) is seated exempt
+too, whatever seating its request states. A member placed on a member host
+cannot be exempt.
+
+An exempt member is outside the definition's role-wide flow dispatch as
+well: a flow step on its profile dispatches to it only when the run's role
+targets name it (`MobHandle::run_flow_with_role_targets`), a flow's
+supervisor escalation never picks it, and a role whose only Active members
+are exempt gets a provisioned flow member, as a role with none does.
 
 ## Send Work
 
@@ -1475,18 +1592,47 @@ the persistent store, read-only. See
 [Member binding history](/reference/mob-architecture#member-binding-history)
 for what each read answers.
 
-### Operator instructions (Rust hosts)
+### Operator instructions
 
 A host gives a mob's members standing System-plane instructions by slot
 (a namespace the host owns and a key), revision and body, for a target:
-every member (`OperatorInstructionTarget::Mob`), the members of one profile
-(`Profile { profile }`) or one member (`Member { agent_identity }`). A target
+every member (`{"kind": "mob"}`, `OperatorInstructionTarget::Mob` in Rust),
+the members of one profile (`{"kind": "profile", "profile": ...}`) or one
+member (`{"kind": "member", "agent_identity": ...}`). A target
 is a predicate, not a reference: a member added later, or moved to the
 profile later, receives the record then, and a target that names a missing
 profile or member matches nobody (the receipt's `matched_members` shows
-zero).
+zero). Since 0.9.11 the verbs are on JSON-RPC (`mob/set_instruction`,
+`mob/revoke_instruction` and `mob/instruction_status`; see
+[RPC operator instructions](/api/rpc#operator-instructions)) and in the Python
+and TypeScript SDKs. The Web SDK has none: browser sessions keep no durable
+session document, so every delivery would be refused
+(`durability_unavailable`).
 
-```rust
+<CodeGroup>
+```python Python
+mob = client.mob("team")
+receipt = await mob.set_instruction(
+    "app.example", "tone", 1, "Answer formally.",
+    {"kind": "profile", "profile": "worker"},
+)
+# Revoke at a higher revision; the record keeps its target.
+await mob.revoke_instruction("app.example", "tone", 2)
+status = await mob.instruction_status(profile="worker")
+```
+
+```typescript TypeScript
+const mob = client.mob("team");
+const receipt = await mob.setInstruction(
+  "app.example", "tone", 1, "Answer formally.",
+  { kind: "profile", profile: "worker" },
+);
+// Revoke at a higher revision; the record keeps its target.
+await mob.revokeInstruction("app.example", "tone", 2);
+const status = await mob.instructionStatus({ profile: "worker" });
+```
+
+```rust Rust
 use meerkat_mob::{OperatorInstructionTarget, OperatorInstructionWrite};
 
 let receipt = handle
@@ -1501,6 +1647,7 @@ let receipt = handle
 // Revoke at a higher revision; the record keeps its target.
 handle.revoke_operator_instruction(slot, next_revision).await?;
 ```
+</CodeGroup>
 
 The receipt returns once the record is in the mob's journal. Delivery is
 asynchronous: every member whose snapshot the write changes (the record's
@@ -1516,19 +1663,29 @@ through live sessions run in their own lane. An exact repeat answers as a
 duplicate; a lower revision, the same revision with other content, a body
 over 256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
 completed or destroyed mob are refused typed
-(`OperatorInstructionError::code`). A revoked slot keeps its record (its
+(`OperatorInstructionError::code`; on the wire `error.data.instruction_set_code`).
+A revoked slot keeps its record (its
 effect Absent), so it counts toward the 64 slots until a reset clears the
-records. Writes need the `AdminHost` scope and are never an agent tool.
+records. Writes need the `AdminHost` scope and are never an agent tool. On a
+governed runtime (a runtime with a native work authorization host) every
+write and revoke is refused `prepared_authorization_required` before anything
+is journaled: such a write needs prepared authorization, which this release
+does not mint, so a retry is refused the same way.
 
-`MobHandle::operator_instruction_status` (scope `ReadHistory`) reads the
-records and, per member, its residency, its delivery state (`Current`,
-`Owed` with the last retryable failure, or `Blocked` with a reason), and per
+`mob/instruction_status` (`MobHandle::operator_instruction_status`, scope
+`ReadHistory`) reads the
+records and, per member, its residency, its delivery state (`current`,
+`owed` with the last retryable failure, or `blocked` with a reason), and per
 slot what the member should have, what its session recorded and the entry
 that put it in effect, with the reason a change is still pending (the
 session's next run start, a model that lowers System rows only in the
 leading prefix, or one that cannot carry them at all). It reads committed
 session state and never wakes a member; a member whose session cannot be
-read is reported with the reason, and the page still answers.
+read is reported with the reason, and the page still answers. The reasons
+and the residency are advisory and may grow: the SDKs keep a value they do
+not know as `{"unknown": <the value>}`. A member's session also publishes an
+`operator_instructions_applied` event for each entry it applies (an
+observation; the status read is the authority).
 
 A member's session target belongs to its mob: another mob's delivery to it
 is refused (`owned_by_other_mob`) until the owning mob releases it, which a
@@ -1538,11 +1695,13 @@ and answers incomplete naming each of them, still seated, so one retry
 releases them all; a member session whose operator-instruction state does not
 read has nothing to release and never holds up a retirement or a destroy. A
 member's session refuses its own host's session-level writes
-(`SessionServiceInstructionExt::set_session_instruction` answers
+(`session/set_instruction` and
+`SessionServiceInstructionExt::set_session_instruction` answer
 `owned_by_mob`) from the moment a mob seats it, even before the mob writes
 anything, so the mob's first write never replaces a write the host was told
-was recorded; write to a member through `MobHandle::set_operator_instruction`
-with a member target instead. A dormant resume seat stamps the member binding
+was recorded; write to a member through `mob/set_instruction`
+(`MobHandle::set_operator_instruction`) with a member target instead. A
+dormant resume seat stamps the member binding
 at the seat, without a wake, on a session that names none. The member binding
 a mob stamps on a session is never cleared, so a session a mob seated keeps
 refusing its host's own writes after the member retires with the session kept,
@@ -1563,9 +1722,33 @@ arrive; they apply from its next fresh run start. A blocked member stays
 blocked until a write with a new revision of a slot that selects it, a new
 seat of the member, or a restart; an exact repeat of a write does not unblock
 it. A reset clears the records and keeps the generation moving forward, so a
-session never sees an older snapshot replace a newer one. A
-placed member is reported blocked (`member_host_unsupported`) until member
-hosts take deliveries. A mob that recorded operator instructions journals
+session never sees an older snapshot replace a newer one. A placed member
+(one on another host) receives its snapshot on its member host: the mob
+sends it over the supervisor bridge, and the host records it in the
+member's session the same way, without waking the member. A member placed
+by a spawn that mints its session on a 0.9.11 member host is born with its
+snapshot too: the mob asks the host's features once for the spawn, the
+host records the snapshot in the session it mints, and the member's first
+turn (its initial message or kickoff) already has the instructions. On an
+older or a governed member host the member is born without them: its
+first turn runs without the instructions, and its delivery then blocks it
+`member_host_unsupported`, as follows. In a mob whose
+hosts run different releases, a placed member whose member host runs a
+release before 0.9.11 is reported blocked (`member_host_unsupported`): its
+host refuses the record before any effect, nothing is recorded, and the
+member stays blocked until its host runs 0.9.11 and a write selects it
+again (or it is seated again). A placed member on a governed member host
+(its runtime has a native work authorization host) is blocked
+`member_host_unsupported` too: the host refuses the record
+`prepared_authorization_required` before anything is written, since this
+release provides no prepared authorization for instruction writes. A
+snapshot whose record would not fit the supervisor bridge's frame (about
+1 MiB with its envelope, which the mob's 1 MiB active budget can reach) is
+not sent: the placed member is blocked `member_host_unsupported` until a
+write changes its snapshot. The status read reports a placed member's
+delivery but does not read its session on the member host
+(`effective_read` is `unreadable`). A mob that recorded operator
+instructions journals
 them at mob event schema 10, which a release before operator instructions
 refuses for every mob of that realm, not only that one: see
 [Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8) before any

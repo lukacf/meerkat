@@ -1318,6 +1318,26 @@ mod tests {
         ));
     }
 
+    /// The executor contract for the ephemeral runtime executor: a boundary
+    /// cancel the runtime loop applies while no run is active is a no-op, so
+    /// the session keeps serving input.
+    #[tokio::test]
+    async fn ephemeral_runtime_executor_idle_boundary_cancel_conformance() {
+        let (service, machine) = service();
+        let created = materialize_ephemeral_runtime_session(&service, &machine, request(), false)
+            .await
+            .expect("materialize");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &machine,
+            &created.session_id,
+        )
+        .await;
+        machine
+            .unregister_session(&created.session_id)
+            .await
+            .expect("runtime teardown");
+    }
+
     #[tokio::test]
     async fn failed_materialization_releases_capacity_before_returning() {
         let (service, machine) = service();

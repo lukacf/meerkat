@@ -529,9 +529,15 @@ async fn mcp_status_reports_reauth_for_a_stored_credential_without_a_secret() {
         .unwrap()
         .expect("the login stored a credential");
     tokens.primary_secret = None;
-    meerkat_providers::auth_store::TokenStore::save(store.as_ref(), &key, &tokens)
-        .await
-        .unwrap();
+    // An ephemeral store has no fence: its writes take a guard over none.
+    meerkat_providers::auth_store::TokenStore::save(
+        store.as_ref(),
+        &meerkat_core::AdmissionGuard::none(),
+        &key,
+        &tokens,
+    )
+    .await
+    .unwrap();
     let used = service
         .mcp_oauth_authority()
         .unwrap()

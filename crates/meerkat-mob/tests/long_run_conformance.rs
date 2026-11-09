@@ -346,9 +346,18 @@ impl Harness {
             .unwrap()
             .take()
             .ok_or_else(|| harness_failure("restart", "no row was killed"))?;
-        restart(&store, *plan, gate, &killed, self.backend == Backend::Host)
+        // A gate that cannot decide leaves the run for the next start, so
+        // the row stays for another restart.
+        let undecided = gate
+            .as_ref()
+            .is_some_and(|gate| gate.verdict() == ResumeGate::Unavailable);
+        let restarted = restart(&store, *plan, gate, &killed, self.backend == Backend::Host)
             .await
-            .map_err(|error| harness_failure("restart", error))
+            .map_err(|error| harness_failure("restart", error))?;
+        if undecided {
+            *self.current.lock().unwrap() = Some((store, killed));
+        }
+        Ok(restarted)
     }
 }
 

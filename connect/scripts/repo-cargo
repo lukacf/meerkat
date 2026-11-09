@@ -5,13 +5,21 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && git rev-parse --show-toplevel)"
 workspace_root="${repo_root}/."
 git_common_dir="$(cd "${repo_root}" && git rev-parse --path-format=absolute --git-common-dir)"
+git_common_dir="$(cd -P -- "${git_common_dir}" && pwd -P)"
 worktree_root="$(cd "${repo_root}" && git rev-parse --path-format=absolute --show-toplevel)"
 
 hash_path() {
   printf '%s' "$1" | shasum | cut -c1-10
 }
 
-repo_slug="$(basename "${repo_root}")"
+# The common Git directory, not the checkout name, identifies the repository.
+# Conventional .git directories retain the main checkout's existing cache key.
+repo_slug="$(basename "${git_common_dir}")"
+if [[ "${repo_slug}" == ".git" ]]; then
+  repo_slug="$(basename "$(dirname "${git_common_dir}")")"
+else
+  repo_slug="${repo_slug%.git}"
+fi
 repo_key="${repo_slug}-$(hash_path "${git_common_dir}")"
 
 if [[ -n "${RUST_LANE_ID:-}" ]]; then
@@ -64,4 +72,12 @@ EOF
 fi
 
 cd "${workspace_root}"
-exec cargo "$@"
+# Rustup consumes an optional leading +toolchain before Cargo options.
+# Insert policy before the command, never after `run --` program arguments.
+cargo_policy="${repo_root}/.cargo/config.toml"
+if [[ "${1-}" == +* ]]; then
+  selected_toolchain="$1"
+  shift
+  exec cargo "${selected_toolchain}" --config "${cargo_policy}" "$@"
+fi
+exec cargo --config "${cargo_policy}" "$@"

@@ -4,6 +4,9 @@ serve a method answers method not found, raised naming the method."""
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,6 +14,7 @@ import pytest
 
 from meerkat import MeerkatClient, MeerkatError
 from meerkat.errors import meerkat_error_from_jsonrpc_code
+from meerkat.streaming import _StdoutDispatcher
 
 DECISION_ID = "decision:" + "fe421f09" * 8
 SUBJECT_DIGEST = "sha256:" + "55c20681" * 8
@@ -172,6 +176,46 @@ async def test_an_unknown_phase_is_kept_raw() -> None:
     assert read["decision"]["phase"] == "archived"
 
 
+EXECUTED = dict(
+    DECISION,
+    kind="grant.child",
+    phase="executed",
+    effect={"grant_id": DECISION_ID + "/approval-grant"},
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "decision",
+    [
+        DECISION,
+        EXECUTED,
+        dict(EXECUTED, effect=dict(EXECUTED["effect"], issued_at_ms=3_000)),
+    ],
+    ids=["without_effect", "with_effect", "effect_with_an_unknown_field"],
+)
+async def test_a_decision_effect_reaches_the_caller_as_the_server_wrote_it(
+    decision: dict[str, Any],
+) -> None:
+    # An executed decision may name its effect: a decision without one, one
+    # with one, and one whose effect carries a field this SDK does not know
+    # all reach the caller unchanged.
+    expected = copy.deepcopy(decision)
+    client, _ = fake_client(
+        {
+            "decision/get": {"decision": decision},
+            "decision/list": {"decisions": [decision], "unreadable": []},
+        }
+    )
+
+    read = await client.get_decision(DECISION_ID)
+    listing = await client.list_decisions()
+
+    assert read == {"decision": expected}
+    assert listing == {"decisions": [expected], "unreadable": []}
+    assert read["decision"].get("effect") == expected.get("effect")
+
+
 DECISION_CALLS: list[tuple[str, Callable[[MeerkatClient], Awaitable[Any]]]] = [
     ("decision/list", lambda client: client.list_decisions()),
     ("decision/get", lambda client: client.get_decision(DECISION_ID)),
@@ -231,3 +275,44 @@ async def test_every_other_error_reaches_the_caller_unchanged(
         await call(client)
 
     assert raised.value is unavailable
+
+
+NOTICE = {
+    "notice_id": "472e7eeb-5768-494e-9e4b-4193c676f0a3",
+    "decision_id": DECISION_ID,
+    "kind": "release",
+    "event": "presented",
+    "phase": "open",
+    "approver_id": "operator",
+    "requester": DECISION["requester"],
+    "presentation": {
+        "rendering": "Release build 7 to production.",
+        "renderer": "render.v1",
+        "subject_digest": SUBJECT_DIGEST,
+        "parts": [{"index": 0, "count": 1, "part_digest": SUBJECT_DIGEST}],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_a_decision_notice_is_dropped_never_buffered_as_a_session_event() -> None:
+    """A stdio connection shows its operator each durable decision as a
+    ``decision/notice``; this client has no handler for it and drops it,
+    even while a stream waits for its session, when a session event that
+    names none would be buffered."""
+    reader = asyncio.StreamReader()
+    dispatcher = _StdoutDispatcher(reader)
+    dispatcher.subscribe_pending_stream(3)
+    dispatcher.start()
+    for line in (
+        {"jsonrpc": "2.0", "method": "decision/notice", "params": NOTICE},
+        # A sentinel response orders the assertions after the notice.
+        {"jsonrpc": "2.0", "id": 7, "result": {}},
+    ):
+        reader.feed_data((json.dumps(line) + "\n").encode())
+    await asyncio.wait_for(dispatcher.expect_response(7), timeout=1.0)
+    # Read before the end of input, which empties every buffer.
+    assert dispatcher._unmatched_buffer == {}
+    assert dispatcher._event_queues == {}
+    reader.feed_eof()
+    await dispatcher.stop()

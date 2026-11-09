@@ -93,288 +93,113 @@ fn setup_request(prepared: &LocalControllerSetup) -> ApprovalRequest {
 async fn explicit_correlated_targets_use_one_review_source_and_real_first_input() {
     let fixture = Box::pin(ContinuationFixture::for_service_input()).await;
     let result = AssertUnwindSafe(Box::pin(async {
-        let owner = fixture
-            .source
-            .local_operator_setup(fixture.lifetime().clone())
-            .unwrap();
+        let owner = fixture.source.local_operator_setup(fixture.lifetime().clone()).unwrap();
         let selected_helper = helper(&owner);
         let owner = owner.with_helper_selection(Some(selected_helper)).unwrap();
         let (prepared, submission) = prepared(&fixture, "paired-explicit-source").await;
         let original = prepared.original().clone();
         let request = setup_request(&prepared);
-        let outcome = owner
-            .review_original_setup_request(prepared, request, |request| async move {
-                let approvals = ApprovalService::new();
-                let pending = approvals.request(request).unwrap();
-                Ok(approvals
-                    .decide(
-                        &pending.approval_id,
-                        ApprovalDecision::Approve,
-                        ApprovalPrincipalId::new("paired-review").unwrap(),
-                        None,
-                        None,
-                    )
-                    .unwrap())
-            })
-            .await
-            .unwrap();
-        let OperatorParentOutcome::SetupRequestSelected { selection } = outcome else {
-            panic!("paired selection missing")
-        };
+        let outcome = owner.review_original_setup_request(prepared, request, |request| async move {
+            let approvals = ApprovalService::new(); let pending = approvals.request(request).unwrap();
+            Ok(approvals.decide(&pending.approval_id, ApprovalDecision::Approve,
+                ApprovalPrincipalId::new("paired-review").unwrap(), None, None).unwrap())
+        }).await.unwrap();
+        let OperatorParentOutcome::SetupRequestSelected { selection } = outcome else { panic!("paired selection missing") };
         assert_eq!(selection.helper_targets.len(), 3);
-        assert_eq!(
-            selection.helper_targets[0].target,
-            Some(ConfiguredHelperReportCapability::public_target())
-        );
-        assert_eq!(
-            selection.helper_targets[1].target,
-            Some(ConfiguredHelperReportCapability::account_target())
-        );
-        assert_eq!(
-            selection.helper_targets[2].target,
-            Some(ConfiguredHelperReportCapability::target())
-        );
+        assert_eq!(selection.helper_targets[0].target, Some(ConfiguredHelperReportCapability::public_target()));
+        assert_eq!(selection.helper_targets[1].target, Some(ConfiguredHelperReportCapability::account_target()));
+        assert_eq!(selection.helper_targets[2].target, Some(ConfiguredHelperReportCapability::target()));
         for (index, target) in selection.helper_targets.iter().enumerate() {
-            assert!(
-                selection.helper_targets[..index]
-                    .iter()
-                    .all(|other| other.parent != target.parent)
-            );
+            assert!(selection.helper_targets[..index].iter().all(|other| other.parent != target.parent));
         }
-        assert!(
-            selection
-                .helper_targets
-                .iter()
-                .all(|target| !selection.parent.contains(&target.parent))
-        );
-        let before = owner
-            .retained_setup_decision(&original)
-            .await
-            .unwrap()
-            .unwrap();
-        let reviewed_origin = decode(&before, &before.key)
-            .unwrap()
-            .setup_request
-            .unwrap()
-            .origin
-            .unwrap();
-        assert!(
-            reviewed_origin.original_authority
-                == owner.route(&original.route).unwrap().source_authority
-        );
-        let first = fixture
-            .source
-            .with_synthetic_admission_diagnostics(async {
-                let first = fixture
-                    .source
-                    .submit_authenticated_original(submission.clone())
-                    .await
-                    .unwrap();
-                let state = match &first {
-                    PrivateOriginalSubmission::Admitted {
-                        turn_ticket: Some(_),
-                        ..
-                    } => "AdmittedWithTicket",
-                    PrivateOriginalSubmission::Admitted {
-                        turn_ticket: None, ..
-                    } => "AdmittedWithoutTicket",
-                    PrivateOriginalSubmission::AdmissionUnresolved => "AdmissionUnresolved",
-                    PrivateOriginalSubmission::NativeOutcomeUnavailable => {
-                        "NativeOutcomeUnavailable"
-                    }
-                };
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "synthetic-admission target.first_submission.outcome: {state}"
-                );
-                first
-            })
-            .await;
-        assert!(matches!(
-            first,
-            PrivateOriginalSubmission::Admitted {
-                turn_ticket: Some(_),
-                ..
-            }
-        ));
+        assert!(selection.helper_targets.iter().all(|target| !selection.parent.contains(&target.parent)));
+        let before = owner.retained_setup_decision(&original).await.unwrap().unwrap();
+        let reviewed_origin = decode(&before, &before.key).unwrap().setup_request.unwrap().origin.unwrap();
+        assert!(reviewed_origin.original_authority == owner.route(&original.route).unwrap().source_authority);
+        assert_eq!(fixture.model_requests(), 0);
+        assert!(fixture.machine.session_input_states(&fixture.session).await.unwrap().report.is_empty());
+        let first = fixture.source.with_synthetic_admission_diagnostics(async {
+            let first = fixture.source.submit_authenticated_original(submission.clone()).await.unwrap();
+            let state = match &first {
+                PrivateOriginalSubmission::Admitted { turn_ticket: Some(_), .. } => "AdmittedWithTicket",
+                PrivateOriginalSubmission::Admitted { turn_ticket: None, .. } => "AdmittedWithoutTicket",
+                PrivateOriginalSubmission::AdmissionUnresolved => "AdmissionUnresolved",
+                PrivateOriginalSubmission::NativeOutcomeUnavailable => "NativeOutcomeUnavailable",
+            };
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "synthetic-admission target.first_submission.outcome: {state}");
+            first
+        }).await;
+        let PrivateOriginalSubmission::Admitted { session_id, input_id, deduplicated: false, turn_ticket: Some(_), .. } = &first
+            else { panic!("first submission requires its own native input and ticket") };
+        assert_eq!(session_id, &fixture.session.to_string());
+        let first_input = meerkat_core::lifecycle::InputId::from_uuid(input_id.parse().unwrap());
         fixture.finish(&Ok(first)).await.unwrap();
-        let binding = fixture
-            .source
-            .binding_evidence(&original)
-            .await
-            .unwrap()
-            .unwrap();
+        // The armed context probe produces a tool call before the final
+        // answer, so this one joined input makes two model requests.
+        let settled_requests = fixture.model_requests();
+        assert_eq!(settled_requests, 2);
+        let inputs = fixture.machine.session_input_states(&fixture.session).await.unwrap().report;
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].state.input_id, first_input);
+        let binding = fixture.source.binding_evidence(&original).await.unwrap().unwrap();
         assert!(reviewed_origin.original_authority == binding.candidate().original_work.authority);
         assert!(reviewed_origin.source_owner == binding.candidate().ingress_namespace.ingress);
         assert!(reviewed_origin.original == original);
-        let WorkAuthorityBasis::TargetedGrantLineages {
-            base: None,
-            targets,
-        } = &binding.candidate().authority_basis
-        else {
-            panic!("target basis missing")
-        };
+        let WorkAuthorityBasis::TargetedGrantLineages { base: None, targets } = &binding.candidate().authority_basis else { panic!("target basis missing") };
         assert_eq!(targets.len(), 4);
         for (index, target) in targets.iter().enumerate() {
-            assert!(
-                targets[..index]
-                    .iter()
-                    .all(|other| other.lineage.last() != target.lineage.last())
-            );
+            assert!(targets[..index].iter().all(|other| other.lineage.last() != target.lineage.last()));
         }
-        let replay = fixture
-            .source
-            .submit_authenticated_original(submission)
-            .await
-            .unwrap();
-        assert!(matches!(
-            replay,
-            PrivateOriginalSubmission::Admitted {
-                deduplicated: true,
-                ..
-            }
-        ));
-        let after = owner
-            .retained_setup_decision(&original)
-            .await
-            .unwrap()
-            .unwrap();
+        let replay = fixture.source.submit_authenticated_original(submission).await.unwrap();
+        assert!(matches!(replay, PrivateOriginalSubmission::Admitted { deduplicated: true, session_id, input_id, .. }
+            if session_id == fixture.session.to_string() && input_id == first_input.to_string()));
+        let after = owner.retained_setup_decision(&original).await.unwrap().unwrap();
         assert_eq!(before.content_digest, after.content_digest);
-        assert_eq!(
-            fixture.source.binding_evidence(&original).await.unwrap(),
-            Some(binding.clone())
-        );
-        let source_key = StoreKey {
-            realm: fixture.scope.realm.clone(),
-            owner: fixture.scope.owner.clone(),
-            id: crate::private_originals::source_key_id(
-                &owner.native.realm,
-                owner.source.ingress_domain(),
-                &binding.candidate().original_work.authority,
-                &original.original,
-            )
-            .unwrap(),
-        };
+        assert_eq!(fixture.source.binding_evidence(&original).await.unwrap(), Some(binding.clone()));
+        let source_key = StoreKey { realm: fixture.scope.realm.clone(), owner: fixture.scope.owner.clone(),
+            id: crate::private_originals::source_key_id(&owner.native.realm, owner.source.ingress_domain(),
+                &binding.candidate().original_work.authority, &original.original).unwrap() };
         let source_before = fixture.store.get(&source_key).await.unwrap().unwrap();
         {
             let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();
             for parent in [&selection.parent[0], &selection.helper_targets[0].parent] {
-                owner
-                    .source
-                    .grants()
-                    .revoke(&parent.root_authority, parent, &mut custody)
-                    .unwrap();
+                owner.source.grants().revoke(&meerkat_core::AdmissionGuard::none(), &parent.root_authority, parent, &mut custody).unwrap();
             }
         }
         // The exact same canonical decision is still required. Revoking FI
         // and public does not revoke the independent account/report selections.
-        assert!(
-            validate_setup_selection(
-                &owner.lifetime,
-                &owner.source,
-                owner.originals.as_ref(),
-                &selection
-            )
-            .await
-            .is_err()
-        );
-        validate_retained_setup_selection(
-            &owner.lifetime,
-            &owner.source,
-            owner.originals.as_ref(),
-            &selection,
-        )
-        .await
-        .unwrap();
-        let mut changed = selection.clone();
-        changed.helper_targets.clear();
-        assert!(
-            validate_retained_setup_selection(
-                &owner.lifetime,
-                &owner.source,
-                owner.originals.as_ref(),
-                &changed
-            )
-            .await
-            .is_err()
-        );
+        assert!(validate_setup_selection(&owner.lifetime, &owner.source, owner.originals.as_ref(), &selection, &fixture.source).await.is_err());
+        validate_retained_setup_selection(&owner.lifetime, &owner.source, owner.originals.as_ref(), &selection).await.unwrap();
+        let mut changed = selection.clone(); changed.helper_targets.clear();
+        assert!(validate_retained_setup_selection(&owner.lifetime, &owner.source, owner.originals.as_ref(), &changed).await.is_err());
         let claims = binding.candidate();
         let custody = meerkat_runtime::meerkat_machine::AuthenticatedOriginal {
-            original_work: claims.original_work.clone(),
-            occurrence_scope: claims.ingress_namespace.occurrence_scope.clone(),
-            original_authentication: claims.original_authentication.clone(),
-            root_event: claims.root_event.clone(),
-            contributing_work: claims.contributing_work.clone(),
-            target: claims.target.clone(),
-            authority_basis: claims.authority_basis.clone(),
+            original_work: claims.original_work.clone(), occurrence_scope: claims.ingress_namespace.occurrence_scope.clone(),
+            original_authentication: claims.original_authentication.clone(), root_event: claims.root_event.clone(),
+            contributing_work: claims.contributing_work.clone(), target: claims.target.clone(), authority_basis: claims.authority_basis.clone(),
         };
         // Exercise the actual rebind callback, under the actual mutation owner.
         // This reconstructs source evidence only, never cold native admission.
-        owner
-            .source
-            .bind_issued_access_async(
-                binding.clone(),
-                custody,
-                &claims.requester,
-                &claims.ingress_actor,
-                Some(&owner.native.grant_administrator),
-                |association| {
-                    let source = &fixture.source;
-                    let original = &original;
-                    async move {
-                        source
-                            .persist_or_observe_binding(original, &association, true)
-                            .await
-                    }
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            fixture.store.get(&source_key).await.unwrap().unwrap(),
-            source_before
-        );
+        owner.source.bind_issued_access_async(binding.clone(), custody, &claims.requester, &claims.ingress_actor,
+            Some(&owner.native.grant_administrator), |association| {
+                let source = &fixture.source; let original = &original;
+                async move { source.persist_or_observe_binding(original, &association, true).await }
+            }).await.unwrap();
+        assert_eq!(fixture.store.get(&source_key).await.unwrap().unwrap(), source_before);
         let report_target = ConfiguredHelperReportCapability::target();
-        let report_path = claims
-            .authority_basis
-            .lineage_for(Some(&report_target))
-            .unwrap();
-        owner
-            .source
-            .grants()
-            .resolve_lineage(
-                report_path,
-                &claims.logical_executor,
-                claims.represented_subject.as_ref(),
-            )
-            .unwrap()
-            .check_current()
-            .unwrap();
+        let report_path = claims.authority_basis.lineage_for(Some(&report_target)).unwrap();
+        owner.source.grants().resolve_lineage(report_path, &claims.logical_executor,
+            claims.represented_subject.as_ref()).unwrap().check_current().unwrap();
         let account_target = ConfiguredHelperReportCapability::account_target();
-        let account_path = claims
-            .authority_basis
-            .lineage_for(Some(&account_target))
-            .unwrap();
-        owner
-            .source
-            .grants()
-            .resolve_lineage(
-                account_path,
-                &claims.logical_executor,
-                claims.represented_subject.as_ref(),
-            )
-            .unwrap()
-            .check_current()
-            .unwrap();
-        assert_eq!(
-            fixture.model_requests(),
-            1,
-            "reconstruction must not submit another input"
-        );
-    }))
-    .catch_unwind()
-    .await;
+        let account_path = claims.authority_basis.lineage_for(Some(&account_target)).unwrap();
+        owner.source.grants().resolve_lineage(account_path, &claims.logical_executor,
+            claims.represented_subject.as_ref()).unwrap().check_current().unwrap();
+        let inputs = fixture.machine.session_input_states(&fixture.session).await.unwrap().report;
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].state.input_id, first_input);
+        assert_eq!(fixture.model_requests(), settled_requests, "reconstruction must not submit another input");
+    })).catch_unwind().await;
     let closed = fixture.shutdown().await;
     assert!(closed.is_ok(), "{closed:?}");
     if let Err(payload) = result {

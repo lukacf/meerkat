@@ -11,7 +11,11 @@
 //! The presenter retains the terminal or host actor;
 //! this gate does not cover descendants, jobs, rebuilds, schedules or bridges.
 
+#[cfg(all(unix, any(test, feature = "console")))]
+mod closed_disposition;
 pub mod installation_policy;
+#[cfg(all(unix, any(test, feature = "console")))]
+pub(crate) use closed_disposition::ClosedLocalApprovalsArtifact;
 use installation_policy::{InstallationPolicySource, InstalledInstallationPolicy, PolicyEntry};
 
 use std::{
@@ -192,10 +196,38 @@ struct Attempt {
     retired: watch::Sender<bool>,
 }
 
+impl Attempt {
+    fn settled_for_close(&self) -> bool {
+        matches!(
+            self.custody,
+            Custody::Settled(LiveBridgeEffectOutcome::Committed | LiveBridgeEffectOutcome::Failed)
+        ) && self.held.is_none()
+            && self.service_entry.is_none()
+            && self.policy_entry.is_none()
+    }
+}
+
 struct State {
     session: Option<SessionId>,
     closed: bool,
     attempt: Option<Attempt>,
+    // A later successful request cannot erase an earlier unresolved waiter.
+    // This only restricts close eligibility; it never admits or replays work.
+    unresolved_history: bool,
+    service_dispatches: usize,
+}
+
+impl State {
+    fn retain_attempt(&mut self, attempt: Attempt) {
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|prior| !prior.settled_for_close())
+        {
+            self.unresolved_history = true;
+        }
+        self.attempt = Some(attempt);
+    }
 }
 
 struct Shared {
@@ -290,6 +322,22 @@ pub struct LocalApprovals {
     service_tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
 }
 
+/// Observation from the exact closed approval owner, not permission to reopen
+/// it or admit a saved decision. Native input and physical-resource settlement
+/// are separate prerequisites. This process-owned value has no wire codec.
+#[cfg(any(test, feature = "console"))]
+pub(crate) struct ClosedLocalApprovals {
+    shared: Arc<Shared>,
+    session: SessionId,
+}
+
+#[cfg(any(test, feature = "console"))]
+impl ClosedLocalApprovals {
+    pub(crate) fn source(&self) -> (&Path, &SessionId) {
+        (&self.shared.store_path, &self.session)
+    }
+}
+
 /// The sole local terminal decision endpoint. It is deliberately not cloneable.
 pub struct ApprovalPresenter {
     shared: Arc<Shared>,
@@ -299,7 +347,125 @@ pub struct ApprovalPresenter {
     pending: Option<ApprovalPrompt>,
 }
 
+// Availability of the retained task is distinct from a policy refusal. The
+// projection carries no retry or settlement authority.
+fn service_task_failure(
+    name: &str,
+    error: impl Into<toolkit_mobkit::installed_host::acquisition::ServiceTaskError>,
+) -> ToolError {
+    use toolkit_mobkit::{
+        installed_host::acquisition::ServiceTaskError, private_originals::PrivateOriginalError,
+    };
+    match error.into() {
+        ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => ToolError::unavailable(
+            name,
+            meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+        ),
+        ServiceTaskError::Refused(
+            PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
+        ) => ToolError::access_denied(name),
+        ServiceTaskError::ReprepareRequired(refusal) => {
+            ServiceTaskError::reprepare_required(refusal)
+        }
+    }
+}
+
 impl LocalApprovals {
+    #[cfg(unix)]
+    pub(crate) async fn reserve_shared_entry(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        member: Option<&toolkit_mobkit::private_originals::InstalledSharedPreparation>,
+    ) -> Result<toolkit_mobkit::private_originals::InstalledSharedEntry, ToolError> {
+        self.service_tasks
+            .as_ref()
+            .ok_or_else(|| ToolError::access_denied(call.name))?
+            .reserve_shared_entry(call, context, plan, member)
+            .await
+            .map_err(|error| {
+                use toolkit_mobkit::{
+                    installed_host::acquisition::ServiceTaskError,
+                    private_originals::PrivateOriginalError,
+                };
+                match error {
+                    ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => {
+                        ToolError::OperationAuthorizationUnavailable
+                    }
+                    ServiceTaskError::Refused(
+                        PrivateOriginalError::Denied | PrivateOriginalError::Conflict,
+                    ) => ToolError::access_denied(call.name),
+                    ServiceTaskError::ReprepareRequired(refusal) => {
+                        ServiceTaskError::reprepare_required(refusal)
+                    }
+                }
+            })
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn join_shared_preparation(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        selection: &meerkat_toolkit::setup::SharedPreparationSelection,
+        resource: Arc<dyn toolkit_mobkit::private_originals::SharedPreparationResource>,
+    ) -> Result<toolkit_mobkit::private_originals::InstalledSharedPreparation, ToolError> {
+        self.check_session(
+            context
+                .origin_session_id()
+                .ok_or_else(|| ToolError::access_denied(call.name))?,
+        )
+        .map_err(|_| ToolError::access_denied(call.name))?;
+        self.service_tasks
+            .as_ref()
+            .ok_or_else(|| ToolError::access_denied(call.name))?
+            .join_shared_preparation(call, context, plan, selection, resource)
+            .await
+            .map_err(|error| service_task_failure(call.name, error))
+    }
+    #[cfg(unix)]
+    pub(crate) async fn leave_shared_preparation(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        member: &toolkit_mobkit::private_originals::InstalledSharedPreparation,
+    ) -> Result<serde_json::Value, ToolError> {
+        self.service_tasks
+            .as_ref()
+            .ok_or_else(|| ToolError::access_denied(call.name))?
+            .leave_shared_preparation(call, context, plan, member)
+            .await
+            .map_err(|error| service_task_failure(call.name, error))
+    }
+    /// This call's current authorization check after its shared effect ran,
+    /// through the service task source; Core's own answer is returned as it
+    /// gave it. Without a task source the same bounded wait runs here.
+    #[cfg(unix)]
+    pub(crate) async fn check_after_shared_effect(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        site: &'static str,
+    ) -> Result<Option<ToolDispatchContext>, ToolError> {
+        match self.service_tasks.as_ref() {
+            Some(tasks) => {
+                tasks
+                    .check_after_shared_effect(call, context, plan, churn, site)
+                    .await
+            }
+            None => {
+                toolkit_mobkit::current_check::check_after_owner_change(
+                    context, call, plan, churn, site,
+                )
+                .await
+            }
+        }
+    }
     // Exercise the existing per-request deadline after the exact prompt is
     // acknowledged. This is not owner retirement or operation-grant revocation.
     #[cfg(test)]
@@ -369,6 +535,25 @@ impl LocalApprovals {
         Self::create_for_actor(
             parent,
             DECISION_LIFETIME,
+            PAIRED_HOST_FRONTEND_CONSENT_TOOLS,
+            actor,
+            Some(expires_at),
+        )
+    }
+
+    /// Test-only constructor for the real native decision timer. Browser
+    /// attribution expiry is a separate bound enforced by the original host
+    /// bridge; shortening it does not change DECISION_LIFETIME.
+    #[cfg(test)]
+    pub(crate) fn create_browser_with_test_decision_lifetime(
+        parent: &Path,
+        actor: ApprovalPrincipalId,
+        expires_at: SystemTime,
+        decision_lifetime: Duration,
+    ) -> Result<(Self, ApprovalPresenter), ConnectError> {
+        Self::create_for_actor(
+            parent,
+            decision_lifetime.min(DECISION_LIFETIME),
             PAIRED_HOST_FRONTEND_CONSENT_TOOLS,
             actor,
             Some(expires_at),
@@ -493,6 +678,8 @@ impl LocalApprovals {
                 session: None,
                 closed: false,
                 attempt: None,
+                unresolved_history: false,
+                service_dispatches: 0,
             }),
             prompts: tx,
             retirement,
@@ -546,6 +733,32 @@ impl LocalApprovals {
         cancelled: impl std::future::Future<Output = ()>,
         created: impl FnOnce(&ApprovalId),
     ) -> Result<ApprovalRecord, ConnectError> {
+        self.review_access_selected(request, cancelled, created, false)
+            .await
+    }
+
+    /// Only the installed operator presenter can select this Runtime owner.
+    /// It retains the actual authenticated Console carrier separately.
+    #[cfg(feature = "console")]
+    pub(crate) async fn review_operator_access(
+        &self,
+        request: ApprovalRequest,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> Result<ApprovalRecord, ConnectError> {
+        if request.owner != ApprovalOwnerRef::Runtime {
+            return Err(invalid("Operator review requires its runtime owner"));
+        }
+        self.review_access_selected(request, cancelled, |_| {}, true)
+            .await
+    }
+
+    async fn review_access_selected(
+        &self,
+        request: ApprovalRequest,
+        cancelled: impl std::future::Future<Output = ()>,
+        created: impl FnOnce(&ApprovalId),
+        operator: bool,
+    ) -> Result<ApprovalRecord, ConnectError> {
         tokio::pin!(cancelled);
         // Earlier account/status work may have been joined after caller loss.
         // Do not create a fresh approval record for that retired request.
@@ -582,8 +795,12 @@ impl LocalApprovals {
         let record = {
             let mut state = self.shared.live_state()?;
             if state.closed
-                || !matches!(&request.owner,
-                ApprovalOwnerRef::Session { session_id } if state.session.as_ref() == Some(session_id))
+                || !(if operator {
+                    request.owner == ApprovalOwnerRef::Runtime && state.session.is_none()
+                } else {
+                    matches!(&request.owner, ApprovalOwnerRef::Session { session_id }
+                        if state.session.as_ref() == Some(session_id))
+                })
                 || state.attempt.as_ref().is_some_and(|attempt| {
                     matches!(
                         attempt.custody,
@@ -601,8 +818,11 @@ impl LocalApprovals {
                 .shared
                 .service
                 .request(request.clone())
-                .map_err(|error| ConnectError::native("retain native access review", error))?;
-            state.attempt = Some(Attempt {
+                .map_err(|error| {
+                    state.unresolved_history = true;
+                    ConnectError::native("retain native access review", error)
+                })?;
+            state.retain_attempt(Attempt {
                 approval_id: record.approval_id.clone(),
                 input: AttemptInput::AccessReview(Box::new(request)),
                 review_work: None,
@@ -719,54 +939,84 @@ impl LocalApprovals {
                 .resolve()
                 .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
         }
-        let held = owner.retain_action(call, session)?;
-        let mut reviewed = held.review();
-        reviewed["tool"] = call.name.into();
-        reviewed["call_id"] = call.id.into();
-        // The installed source selects the same canonical waiting task without
-        // requiring service access authority. Its currentness is re-opened after
-        // the decision, including on the application-policy branch.
-        let task = match &self.service_tasks {
-            Some(tasks) => tasks
-                .prepare_software(call, context, plan)
-                .await
-                .map_err(|_| refused())?,
-            None => None,
-        };
-        if self.shared.installation_policy.is_some()
-            && self.service_tasks.is_some()
-            && task.is_none()
-        {
-            return Err(ToolError::unavailable(
-                call.name,
-                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
-            ));
-        }
-        let policy_entry = match &self.shared.installation_policy {
-            Some(source) => {
-                let refreshed = context.check_tool_authorization(call, plan)?;
-                let policy = source
-                    .resolve()
-                    .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
-                let entry = match policy {
-                    Some(policy) => policy
-                        .reserve(
-                            held.realm(),
-                            call,
-                            refreshed.as_ref().unwrap_or(context),
-                            &reviewed,
-                        )
-                        .map_err(|error| installation_policy::tool_refusal(call.name, error))?,
-                    None => None,
-                };
-                // Only an actual human-required decision selects this same
-                // invocation's real presenter. Denial/staleness never retries it.
-                if entry.is_none() && self.shared.prompts.is_closed() {
-                    return Ok(SoftwareReviewOutcome::RequiresHuman);
-                }
-                entry
+        // The retained action and the prepared task are this attempt's
+        // decision. The installation-policy branch checks the call before it
+        // reserves the policy entry; a refusal to rebuild there releases both
+        // and waits out the change holding nothing, with this call's one
+        // churn, then retains the action and prepares the task again, every
+        // precondition checked afresh. A change that outlasts the bounds,
+        // and every other refusal, is answered as Core gave it.
+        let mut churn = context.owner_change_churn();
+        let (held, reviewed, task, policy_entry) = loop {
+            let held = owner.retain_action(call, session)?;
+            let mut reviewed = held.review();
+            reviewed["tool"] = call.name.into();
+            reviewed["call_id"] = call.id.into();
+            // The installed source selects the same canonical waiting task
+            // without requiring service access authority. Its currentness is
+            // re-opened after the decision, including on the
+            // application-policy branch.
+            let task = match &self.service_tasks {
+                Some(tasks) => tasks
+                    .prepare_software(call, context, plan)
+                    .await
+                    .map_err(|error| service_task_failure(call.name, error))?,
+                None => None,
+            };
+            if self.shared.installation_policy.is_some()
+                && self.service_tasks.is_some()
+                && task.is_none()
+            {
+                return Err(ToolError::unavailable(
+                    call.name,
+                    meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+                ));
             }
-            None => None,
+            let policy_entry = match &self.shared.installation_policy {
+                Some(source) => {
+                    let refreshed = match toolkit_mobkit::current_check::check_before_effect(
+                        context, call, plan,
+                    ) {
+                        Ok(refreshed) => refreshed,
+                        Err(error) => {
+                            drop((held, task));
+                            if toolkit_mobkit::current_check::refuses_to_rebuild(&error)
+                                && toolkit_mobkit::current_check::wait_after_refusal(
+                                    context,
+                                    &mut churn,
+                                    "connect.install.policy",
+                                )
+                                .await
+                            {
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    let policy = source
+                        .resolve()
+                        .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
+                    let entry = match policy {
+                        Some(policy) => policy
+                            .reserve(
+                                held.realm(),
+                                call,
+                                refreshed.as_ref().unwrap_or(context),
+                                &reviewed,
+                            )
+                            .map_err(|error| installation_policy::tool_refusal(call.name, error))?,
+                        None => None,
+                    };
+                    // Only an actual human-required decision selects this same
+                    // invocation's real presenter. Denial/staleness never retries it.
+                    if entry.is_none() && self.shared.prompts.is_closed() {
+                        return Ok(SoftwareReviewOutcome::RequiresHuman);
+                    }
+                    entry
+                }
+                None => None,
+            };
+            break (held, reviewed, task, policy_entry);
         };
         self.check_session(session).map_err(|_| refused())?;
         self.shared
@@ -792,7 +1042,7 @@ impl LocalApprovals {
         context: &ToolDispatchContext,
     ) -> Result<ServiceDispatchGuard, ToolError> {
         let refused = || ToolError::access_denied(call.name);
-        let state = self.shared.state().map_err(|_| refused())?;
+        let mut state = self.shared.state().map_err(|_| refused())?;
         if context.origin_session_id() != state.session.as_ref() {
             return Err(refused());
         }
@@ -805,9 +1055,14 @@ impl LocalApprovals {
                 if call_id == call.id && name == call.name && arguments == call.args.get())
             })
             .ok_or_else(refused)?;
+        let id = attempt.approval_id.clone();
+        state.service_dispatches = state
+            .service_dispatches
+            .checked_add(1)
+            .ok_or_else(refused)?;
         Ok(ServiceDispatchGuard {
             shared: self.shared.clone(),
-            id: attempt.approval_id.clone(),
+            id,
         })
     }
 
@@ -896,12 +1151,16 @@ impl LocalApprovals {
 
     /// Observe only this live owner's latest retained software attempt. This
     /// never searches approval history, renews permission or recommends retry.
+    /// Its checks hold nothing, so an owner change of the work's own
+    /// publication in progress is waited out with `churn`, the waiting state
+    /// of the setup_state call, and the check made again.
     pub(crate) async fn software_review_observation(
         &self,
         owner: &crate::service_install::CheckedInstalls,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<serde_json::Value, ToolError> {
         let refused = || ToolError::access_denied(call.name);
         if call.name != "setup_state" {
@@ -909,6 +1168,15 @@ impl LocalApprovals {
         }
         let session = context.origin_session_id().ok_or_else(refused)?;
         self.check_session(session).map_err(|_| refused())?;
+        let refreshed = toolkit_mobkit::current_check::check_after_owner_change(
+            context,
+            call,
+            plan,
+            churn,
+            "connect.setup_state.observation",
+        )
+        .await?;
+        let context = refreshed.as_ref().unwrap_or(context);
         let (id, task) = {
             let state = self.shared.live_state().map_err(|_| refused())?;
             if state.closed || state.session.as_ref() != Some(session) {
@@ -929,6 +1197,24 @@ impl LocalApprovals {
                         .work_authorization()
                         .map(|authorization| authorization.execution_scope())
             {
+                use meerkat_core::exact_operation::OperationExecutionScope::RuntimeInput;
+                // An independently authorized input in this same runtime has
+                // no review here. Do not disclose or revalidate the prior
+                // caller's task. Same-input mismatches and unscoped claims
+                // still refuse; this does not select or reuse an approval.
+                if matches!((attempt.review_work.as_ref(), attempt.review_scope.as_ref(),
+                    context.retained_work(), context.work_authorization().map(|work| work.execution_scope())),
+                    (Some(prior_work), Some(RuntimeInput { owner_session_id: prior_session,
+                        runtime_epoch_id: prior_epoch, canonical_input_id: prior_input, .. }),
+                     Some(current_work), Some(RuntimeInput { owner_session_id: current_session,
+                        runtime_epoch_id: current_epoch, canonical_input_id: current_input, .. }))
+                    if prior_session == session && current_session == session && prior_epoch == current_epoch
+                        && prior_input != current_input && prior_work.runtime_id() == current_work.runtime_id())
+                {
+                    return Ok(serde_json::json!({
+                        "scope":"latest_retained_software_attempt_only", "review":null,
+                    }));
+                }
                 return Err(refused());
             }
             (
@@ -937,9 +1223,18 @@ impl LocalApprovals {
             )
         };
         if let Some(task) = task {
-            task.check_setup_current().await.map_err(|_| refused())?;
+            task.check_setup_current()
+                .await
+                .map_err(|error| service_task_failure(call.name, error))?;
         }
-        context.check_tool_authorization(call, plan)?;
+        toolkit_mobkit::current_check::check_after_owner_change(
+            context,
+            call,
+            plan,
+            churn,
+            "connect.setup_state.observation_current",
+        )
+        .await?;
         let state = self.shared.live_state().map_err(|_| refused())?;
         if state.closed || state.session.as_ref() != Some(session) {
             return Err(refused());
@@ -1247,6 +1542,44 @@ impl LocalApprovals {
         self.shared.retire_checked()
     }
 
+    /// Select this exact live owner's decision source for host provenance.
+    /// The path grants no authority to reopen or replay its decisions.
+    #[cfg(feature = "console")]
+    pub(crate) fn source_for_session(&self, session: &SessionId) -> Result<&Path, ConnectError> {
+        self.check_session(session)?;
+        Ok(&self.shared.store_path)
+    }
+
+    /// Observe this already retired owner after its dispatches have joined.
+    /// Pending, returned-only, interrupted or unknown custody stays unresolved,
+    /// including when a later request on the same owner has succeeded.
+    #[cfg(any(test, feature = "console"))]
+    pub(crate) fn closed_observation(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<ClosedLocalApprovals>, ConnectError> {
+        let state = self.shared.state()?;
+        if state.session.as_ref() != Some(session) {
+            return Err(invalid(
+                "The closed approval owner does not cover this session",
+            ));
+        }
+        if !state.closed
+            || state.unresolved_history
+            || state.service_dispatches != 0
+            || state
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| !attempt.settled_for_close())
+        {
+            return Ok(None);
+        }
+        Ok(Some(ClosedLocalApprovals {
+            shared: self.shared.clone(),
+            session: session.clone(),
+        }))
+    }
+
     pub fn has_uncertain_dispatch(&self) -> bool {
         self.shared.state.lock().map_or(true, |state| {
             state
@@ -1360,6 +1693,17 @@ impl ApprovalPrompt {
     ) -> Result<(), ConnectError> {
         if self.console_task().is_none() {
             return Err(invalid("The software prompt has no Console task"));
+        }
+        self.decide_current(decision, Some(current))
+    }
+    #[cfg(feature = "console")]
+    pub(crate) fn decide_operator(
+        &mut self,
+        decision: ApprovalDecision,
+        current: crate::installed_service_review::account_request::console::DecisionCheck,
+    ) -> Result<(), ConnectError> {
+        if self.record.owner != ApprovalOwnerRef::Runtime || self.service_task.is_some() {
+            return Err(invalid("The operator prompt has another owner"));
         }
         self.decide_current(decision, Some(current))
     }
@@ -1477,6 +1821,17 @@ impl Drop for ServiceDispatchGuard {
         }
         drop(state);
         drop(policy);
+        // Keep this dispatch outstanding until its policy reservation has
+        // actually dropped, including when cleanup needs another owner lock.
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.service_dispatches.checked_sub(1) {
+            Some(remaining) => state.service_dispatches = remaining,
+            None => state.unresolved_history = true,
+        }
     }
 }
 
@@ -1557,9 +1912,12 @@ impl Shared {
                 allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
                 expires_at: Some(expires.into()), metadata: Default::default(),
                 request_provenance: policy_provenance,
-            }).map_err(|_| refused())?;
+            }).map_err(|_| { state.unresolved_history = true; refused() })?;
             if let Some(entry) = &policy_entry {
-                let actor = entry.actor().map_err(|_| refused())?;
+                let actor = entry.actor().map_err(|_| {
+                    state.unresolved_history = true;
+                    refused()
+                })?;
                 self.service
                     .decide(
                         &record.approval_id,
@@ -1568,9 +1926,12 @@ impl Shared {
                         None,
                         None,
                     )
-                    .map_err(|_| refused())?;
+                    .map_err(|_| {
+                        state.unresolved_history = true;
+                        refused()
+                    })?;
             }
-            state.attempt = Some(Attempt {
+            state.retain_attempt(Attempt {
                 approval_id: record.approval_id.clone(),
                 input: AttemptInput::Dispatch {
                     call_id: call.id.into(),
@@ -1634,7 +1995,9 @@ impl Shared {
                 .map_err(|_| refused())?
         };
         if let Some(task) = &task {
-            task.check_setup_current().await.map_err(|_| refused())?;
+            task.check_setup_current()
+                .await
+                .map_err(|error| service_task_failure(call.name, error))?;
         }
         let mut state = self.live_state().map_err(|_| refused())?;
         if state.closed {
@@ -2557,6 +2920,251 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    fn check_retired_presenter_artifact(fixture: &Fixture) {
+        use meerkat_toolkit::host_lifetime::control::SelectedHostArtifact;
+        use sha2::Digest;
+        let root = fixture._directory.path().canonicalize().unwrap();
+        let path = root.join("selected-resource-association.json");
+        let raw = b"inert association selection for actual presenter-owner evidence";
+        std::fs::write(&path, raw).unwrap();
+        let association = SelectedHostArtifact {
+            path,
+            sha256: format!("{:x}", sha2::Sha256::digest(raw)),
+        };
+        assert!(
+            ClosedLocalApprovalsArtifact::read_for_association(
+                &association,
+                fixture.approvals.store_path(),
+                &fixture.session
+            )
+            .is_err(),
+            "source bytes alone cannot substitute for the actual retired presenter proof"
+        );
+        let proof = fixture
+            .approvals
+            .closed_observation(&fixture.session)
+            .unwrap()
+            .unwrap();
+        let retained = proof.retain_for_association(&association).unwrap();
+        retained.check().unwrap();
+        let repeated = proof.retain_for_association(&association).unwrap();
+        assert_eq!(retained.artifact(), repeated.artifact());
+        assert!(
+            ClosedLocalApprovalsArtifact::read_for_association(
+                &association,
+                fixture.approvals.store_path(),
+                &SessionId::new()
+            )
+            .is_err()
+        );
+        assert!(
+            ClosedLocalApprovalsArtifact::read_for_association(
+                &association,
+                &root.join("other-source.json"),
+                &fixture.session
+            )
+            .is_err()
+        );
+        let history = std::fs::read(fixture.approvals.store_path()).unwrap();
+        std::fs::write(fixture.approvals.store_path(), b"changed ordinary history").unwrap();
+        assert!(retained.check().is_err());
+        std::fs::write(fixture.approvals.store_path(), &history).unwrap();
+        retained.check().unwrap();
+        let selected = std::fs::read(&association.path).unwrap();
+        std::fs::write(&association.path, b"changed association").unwrap();
+        assert!(retained.check().is_err());
+        std::fs::write(&association.path, selected).unwrap();
+        retained.check().unwrap();
+        assert_eq!(
+            std::fs::read(fixture.approvals.store_path()).unwrap(),
+            history,
+            "observing a disposition never reopens or rewrites old decisions"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_approval_observation_requires_exact_retired_owner_and_settled_dispatches() {
+        let empty = Fixture::new(DECISION_LIFETIME, 0, permitted());
+        assert!(
+            empty
+                .approvals
+                .closed_observation(&SessionId::new())
+                .is_err()
+        );
+        assert!(
+            empty
+                .approvals
+                .closed_observation(&empty.session)
+                .unwrap()
+                .is_none()
+        );
+        empty.approvals.retire_checked().unwrap();
+        let observed = empty
+            .approvals
+            .closed_observation(&empty.session)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&observed.shared, &empty.approvals.shared));
+        assert_eq!(
+            observed.source(),
+            (empty.approvals.store_path(), &empty.session)
+        );
+        assert!(empty.approvals.check_session(&empty.session).is_err());
+        assert!(empty.entries().is_empty());
+        #[cfg(unix)]
+        check_retired_presenter_artifact(&empty);
+
+        let mut settled = Fixture::new(DECISION_LIFETIME, 0, permitted());
+        for id in ["first", "second"] {
+            let task = settled.dispatch(id, INERT, "{}");
+            settled
+                .prompt()
+                .await
+                .decide(ApprovalDecision::Approve)
+                .unwrap();
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(settled.inner.entered.load(Ordering::SeqCst), 2);
+        assert_eq!(settled.entries().len(), 2);
+        settled.approvals.retire_checked().unwrap();
+        assert!(
+            settled
+                .approvals
+                .closed_observation(&settled.session)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            settled
+                .dispatch("closed", INERT, "{}")
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(settled.inner.entered.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            settled.entries().len(),
+            2,
+            "observation cannot mint another decision"
+        );
+        #[cfg(unix)]
+        check_retired_presenter_artifact(&settled);
+    }
+
+    #[tokio::test]
+    async fn later_success_does_not_erase_cancelled_or_returned_approval_custody() {
+        let mut cancelled = Fixture::new(DECISION_LIFETIME, 0, permitted());
+        let prior = cancelled.dispatch("cancelled", INERT, "{}");
+        let mut old = cancelled.prompt().await;
+        prior.abort();
+        assert!(prior.await.unwrap_err().is_cancelled());
+        let next = cancelled.dispatch("next", INERT, "{}");
+        cancelled
+            .prompt()
+            .await
+            .decide(ApprovalDecision::Approve)
+            .unwrap();
+        next.await.unwrap().unwrap();
+        cancelled.approvals.retire_checked().unwrap();
+        assert!(
+            cancelled
+                .approvals
+                .closed_observation(&cancelled.session)
+                .unwrap()
+                .is_none()
+        );
+        assert!(old.decide(ApprovalDecision::Approve).is_err());
+        assert_eq!(cancelled.inner.entered.load(Ordering::SeqCst), 1);
+        assert!(
+            cancelled
+                .entries()
+                .iter()
+                .any(|record| record.status == ApprovalStatus::Pending)
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let (approvals, mut presenter) = LocalApprovals::create(directory.path()).unwrap();
+        let session = SessionId::new();
+        approvals.bind_session(&session).unwrap();
+        let approvals = Arc::new(approvals);
+        for _ in 0..2 {
+            let owner = approvals.clone();
+            let request = access_request(&session);
+            let review = tokio::spawn(async move { owner.review_access(request).await });
+            tokio::time::timeout(Duration::from_secs(3), presenter.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .decide(ApprovalDecision::Approve)
+                .unwrap();
+            assert_eq!(
+                review.await.unwrap().unwrap().status,
+                ApprovalStatus::Approved
+            );
+        }
+        approvals.retire_checked().unwrap();
+        assert!(
+            approvals.closed_observation(&session).unwrap().is_none(),
+            "returning a native decision does not settle its downstream effect owner"
+        );
+        assert!(
+            approvals.shared.state().unwrap().unresolved_history,
+            "access-review replacement must preserve the earlier returned-only custody"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_request_before_retention_remains_unresolved_after_later_success() {
+        for access_review in [false, true] {
+            let mut fixture = Fixture::new(DECISION_LIFETIME, 0, permitted());
+            let directory = fixture
+                .approvals
+                .store_path()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            let retained = directory.with_extension("retained");
+            std::fs::rename(&directory, &retained).unwrap();
+            if access_review {
+                assert!(
+                    fixture
+                        .approvals
+                        .review_access(access_request(&fixture.session))
+                        .await
+                        .is_err()
+                );
+            } else {
+                assert!(
+                    fixture
+                        .dispatch("unavailable", INERT, "{}")
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+            }
+            assert!(fixture.approvals.shared.state().unwrap().attempt.is_none());
+            assert!(fixture.approvals.shared.state().unwrap().unresolved_history);
+            std::fs::rename(&retained, &directory).unwrap();
+            let next = fixture.dispatch("next", INERT, "{}");
+            fixture
+                .prompt()
+                .await
+                .decide(ApprovalDecision::Approve)
+                .unwrap();
+            next.await.unwrap().unwrap();
+            fixture.approvals.retire_checked().unwrap();
+            assert!(
+                fixture
+                    .approvals
+                    .closed_observation(&fixture.session)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(fixture.inner.entered.load(Ordering::SeqCst), 1);
+        }
+    }
+
     fn access_request(session: &SessionId) -> ApprovalRequest {
         ApprovalRequest {
             requester: ApprovalPrincipalId::new("fixture-requester").unwrap(),
@@ -3200,6 +3808,15 @@ mod tests {
             assert_eq!(fixture.inner.entered.load(Ordering::SeqCst), 1);
             assert_eq!(fixture.entries().len(), 1);
             assert_eq!(fixture.entries()[0].status, ApprovalStatus::Approved);
+            fixture.approvals.retire_checked().unwrap();
+            assert!(
+                fixture
+                    .approvals
+                    .closed_observation(&fixture.session)
+                    .unwrap()
+                    .is_none(),
+                "joined cancellation or unknown return cannot prove approval settlement"
+            );
         }
     }
 
@@ -3264,6 +3881,14 @@ mod tests {
         assert_eq!(
             audit.list(Default::default()).unwrap()[0].status,
             ApprovalStatus::Pending
+        );
+        fixture.approvals.retire_checked().unwrap();
+        assert!(
+            fixture
+                .approvals
+                .closed_observation(&fixture.session)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -3711,6 +4336,7 @@ mod tests {
             Err(ConnectError::Native { .. })
         ));
         assert!(f.approvals.retire_checked().is_err());
+        assert!(f.approvals.closed_observation(&f.session).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3862,5 +4488,44 @@ mod tests {
                 .is_err()
         );
         assert_eq!(f.inner.entered.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "console")]
+    #[tokio::test]
+    async fn operator_member_review_uses_runtime_owner_without_relaxing_session_reviews() {
+        let dir = tempfile::tempdir().unwrap();
+        let (approvals, mut presenter) = LocalApprovals::create_console_setup(dir.path()).unwrap();
+        let mut request = access_request(&SessionId::new());
+        request.owner = ApprovalOwnerRef::Runtime;
+        assert!(approvals.review_access(request.clone()).await.is_err());
+        let review = approvals.review_operator_access(request.clone(), std::future::pending());
+        let presentation = async {
+            let mut prompt = presenter.next().await.unwrap();
+            assert_eq!(prompt.record().owner, ApprovalOwnerRef::Runtime);
+            assert!(prompt.console_task().is_none());
+            assert!(
+                prompt
+                    .decide_operator(ApprovalDecision::Approve, Arc::new(|| false))
+                    .is_err()
+            );
+            prompt
+                .decide_operator(ApprovalDecision::Approve, Arc::new(|| true))
+                .unwrap();
+        };
+        let (record, ()) = tokio::join!(review, presentation);
+        let record = record.unwrap();
+        assert_eq!(record.status, ApprovalStatus::Approved);
+        assert_eq!(record.proposed_action, request.proposed_action);
+        assert_eq!(record.owner, ApprovalOwnerRef::Runtime);
+        let mut session_request = request;
+        session_request.owner = ApprovalOwnerRef::Session {
+            session_id: SessionId::new(),
+        };
+        assert!(
+            approvals
+                .review_operator_access(session_request, std::future::pending())
+                .await
+                .is_err()
+        );
     }
 }

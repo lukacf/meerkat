@@ -796,6 +796,8 @@ for line in sys.stdin:
                 config,
                 connection_id: connection.connection_id(),
                 uri: "ui://documents/panel",
+                service_secret_launch: None,
+                credential_publication: None,
             };
             assert!(matches!(
                 provider.prepare_resource(target(), &context).await,
@@ -840,6 +842,8 @@ for line in sys.stdin:
             config: connection.config(),
             connection_id: connection.connection_id(),
             uri: "ui://documents/panel",
+            service_secret_launch: None,
+            credential_publication: None,
         };
         assert!(
             provider
@@ -879,6 +883,8 @@ for line in sys.stdin:
             config: connection.config(),
             connection_id: connection.connection_id(),
             uri: "ui://documents/panel",
+            service_secret_launch: None,
+            credential_publication: None,
         };
         assert!(
             provider

@@ -114,3 +114,41 @@ async fn a_user_document_write_cannot_drop_a_stand_in_section_a_realm_composes_t
         );
     }
 }
+
+/// A file-backed SDK store writes through its document's admission fence:
+/// while an admission holds the fence, a full replace and a patch refuse
+/// typed after their bounded wait, with nothing written, and the next write
+/// after the hold ends lands.
+#[cfg(unix)]
+#[tokio::test]
+async fn document_writes_refuse_admission_in_progress_with_nothing_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    std::fs::write(&path, "max_tokens = 100\n").unwrap();
+    let store = SdkConfigStore::with_path(path.clone());
+    let fence = store.inner().admission_fence().expect("a document fence");
+    fence.ensure_exists().unwrap();
+    let mut held = meerkat_core::AdmissionHold::try_acquire(vec![fence]).unwrap();
+    let (set, patch) = tokio::join!(
+        store.set(meerkat::Config::default()),
+        store.patch(ConfigDelta(json!({ "max_tokens": 300 }))),
+    );
+    assert!(
+        matches!(set, Err(meerkat::ConfigError::AdmissionInProgress)),
+        "{set:?}"
+    );
+    assert!(
+        matches!(patch, Err(meerkat::ConfigError::AdmissionInProgress)),
+        "{patch:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "max_tokens = 100\n"
+    );
+    held.release();
+    let patched = store
+        .patch(ConfigDelta(json!({ "max_tokens": 300 })))
+        .await
+        .unwrap();
+    assert_eq!(patched.max_tokens, Some(300));
+}

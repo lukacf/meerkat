@@ -61,7 +61,25 @@ impl InstalledAcquisition {
             .originals
             .setup_result_source_from(context, &self.helper_selections())
             .await;
-        let initial_current = context.check_tool_authorization(call, None)?;
+        #[cfg(test)]
+        self.host
+            .originals
+            .observe_service_task_stage_for_test("report.authorization");
+        // Each of the report's checks holds nothing, so an owner change of
+        // the work's own publication in progress is waited out within the
+        // report's one waiting state, and the check made again. Nothing of
+        // the report ran before this first check, so a refusal here is
+        // certified not dispatched; the later ones follow its store write and
+        // claim nothing.
+        let mut churn = context.owner_change_churn();
+        let initial_current = crate::current_check::check_before_effect_after_owner_change(
+            context,
+            call,
+            None,
+            &mut churn,
+            "toolkit.setup_report.source",
+        )
+        .await?;
         let context = initial_current.as_ref().unwrap_or(context);
         let source = source.map_err(source_error)?;
         let operation = Id::new(source.operation.acquisition.id.clone()).map_err(|_| denied())?;
@@ -98,7 +116,14 @@ impl InstalledAcquisition {
             .originals
             .setup_result_source_from(context, &self.helper_selections())
             .await;
-        let recorded_current = context.check_tool_authorization(call, None)?;
+        let recorded_current = crate::current_check::check_after_owner_change(
+            context,
+            call,
+            None,
+            &mut churn,
+            "toolkit.setup_report.recorded",
+        )
+        .await?;
         let context = recorded_current.as_ref().unwrap_or(context);
         let after = after.map_err(source_error)?;
         if after.helper != source.helper
@@ -151,7 +176,14 @@ impl InstalledAcquisition {
         // last wait. Its policy checks current host/component and full native
         // authority. Do not nest this under the host recovery custody lock:
         // that policy enters the same activation owner.
-        let final_current = context.check_tool_authorization(call, None)?;
+        let final_current = crate::current_check::check_after_owner_change(
+            context,
+            call,
+            None,
+            &mut churn,
+            "toolkit.setup_report.final",
+        )
+        .await?;
         let _current_context = final_current.as_ref().unwrap_or(context);
         let after = after.map_err(source_error)?;
         if after.helper != source.helper
@@ -233,10 +265,13 @@ fn unavailable() -> ToolError {
 fn invalid() -> ToolError {
     ToolError::InvalidArguments { name: SETUP_REPORT.into(), reason: "Provide kind failed or unavailable and a nonempty human-facing explanation within 4096 bytes. Operation, authority and routing are supplied by the installed host.".into() }
 }
+/// A source owner's answer as the report tool's: its own refusal denies; a
+/// conflict in the source's facts is contention (another writer's change in
+/// flight), unavailable, retryable.
 fn source_error(error: PrivateOriginalError) -> ToolError {
     match error {
-        PrivateOriginalError::Unavailable => unavailable(),
-        _ => denied(),
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => unavailable(),
+        PrivateOriginalError::Denied => denied(),
     }
 }
 /// Exact native tool definition for the application's initial-surface compiler.
@@ -250,4 +285,34 @@ pub fn setup_report_definition() -> ToolDef {
         ToolSourceKind::RustBundle,
         SETUP_RESULTS_BUNDLE,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The source owner's answer as the report tool's: a conflict in the
+    // source's facts is contention (another writer's change in flight), so
+    // it is unavailable, retryable, never a denial; only the owner's own
+    // refusal denies.
+    //
+    // RED before the fix: a conflict answers `access_denied`.
+    #[test]
+    fn a_source_conflict_is_unavailable_never_a_denial() {
+        assert!(
+            matches!(
+                source_error(PrivateOriginalError::Conflict),
+                ToolError::Unavailable { .. }
+            ),
+            "a conflict is contention"
+        );
+        assert!(matches!(
+            source_error(PrivateOriginalError::Unavailable),
+            ToolError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            source_error(PrivateOriginalError::Denied),
+            ToolError::AccessDenied { .. }
+        ));
+    }
 }

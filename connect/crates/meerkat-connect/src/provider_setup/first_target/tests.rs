@@ -211,6 +211,54 @@ async fn first_target_refuses_profile_collision_and_present_default() {
 }
 
 #[tokio::test]
+async fn first_target_refuses_next_to_copilot_section() {
+    // A GitHub Copilot account configured once, in the realm's own document
+    // or in the global document it inherits. Core lowers the section into the
+    // account's three routes, so the realm already has model targets.
+    for realm in ["work", "global"] {
+        let root = tempfile::tempdir().unwrap();
+        let storage = storage(root.path());
+        let path = crate::realm::config_source(&storage)
+            .unwrap()
+            .config_doc_path(&storage.locator.realm);
+        let document = if realm == "work" {
+            path.clone()
+        } else {
+            storage.layout.user_rkat_root().unwrap().join("config.toml")
+        };
+        let body = format!(
+            "[realm.{realm}.copilot]\nsource = {{kind = \"env\", env = \"CONNECT_COPILOT_SECTION_TOKEN\"}}\n"
+        );
+        std::fs::create_dir_all(document.parent().unwrap()).unwrap();
+        std::fs::write(&document, &body).unwrap();
+        let startup = SessionStartup::open(storage.clone()).await.unwrap();
+        let runtime = crate::realm::own_config_runtime(&storage).unwrap();
+        let error = match prepare(
+            &startup,
+            &runtime,
+            request(),
+            name(),
+            "gpt-6-astra",
+            Provider::OpenAI,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("first-target setup must not add a target next to a [copilot] section"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("A native model binding appeared"),
+            "{realm}: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&document).unwrap(), body);
+        assert_eq!(path.exists(), realm == "work");
+        assert!(!path.with_file_name("config_state.json").exists());
+    }
+}
+
+#[tokio::test]
 async fn first_target_original_native_generation_refuses_a_concurrent_writer() {
     let root = tempfile::tempdir().unwrap();
     let storage = storage(root.path());
@@ -295,6 +343,26 @@ impl ConfigStore for ObstructGenerationAfterPatch {
     }
     async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
         let config = self.file.patch(delta).await?;
+        self.patched.fetch_add(1, Ordering::SeqCst);
+        tokio::fs::create_dir(&self.state_path).await?;
+        Ok(config)
+    }
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.file.admission_fence()
+    }
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), ConfigError> {
+        self.file.set_held(guard, config).await
+    }
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        let config = self.file.patch_held(guard, delta).await?;
         self.patched.fetch_add(1, Ordering::SeqCst);
         tokio::fs::create_dir(&self.state_path).await?;
         Ok(config)
@@ -386,6 +454,26 @@ impl ConfigStore for HeldPatch {
         self.entered.add_permits(1);
         self.release.acquire().await.unwrap().forget();
         self.file.patch(delta).await
+    }
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.file.admission_fence()
+    }
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), ConfigError> {
+        self.file.set_held(guard, config).await
+    }
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        self.patched.fetch_add(1, Ordering::SeqCst);
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        self.file.patch_held(guard, delta).await
     }
 }
 
@@ -528,19 +616,21 @@ impl meerkat_auth_core::auth_store::TokenStore for HeldTokens {
     }
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &meerkat_auth_core::auth_store::TokenKey,
         tokens: &meerkat_auth_core::auth_store::PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         self.release.acquire().await.unwrap().forget();
-        self.file.save(key, tokens).await
+        self.file.save(fence, key, tokens).await
     }
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &meerkat_auth_core::auth_store::TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.file.clear(key).await
+        self.file.clear(fence, key).await
     }
     async fn list(
         &self,
@@ -600,7 +690,9 @@ async fn first_target_change_during_native_key_save_keeps_saved_effect_and_refus
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(root.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.path().join("credentials").join("refresh-locks"),
+            )),
         );
         startup.factory = startup
             .factory

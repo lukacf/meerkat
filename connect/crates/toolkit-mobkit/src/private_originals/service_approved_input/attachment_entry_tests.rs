@@ -94,7 +94,7 @@ async fn mutate(
                 .unwrap()
                 .singleton_grant()
                 .unwrap();
-            let route = source.route(&b.route).unwrap();
+            let route = &source.route(&b.route).unwrap();
             let original = OriginalWorkRef {
                 authority: route.source_authority.clone(),
                 work: b.original.clone(),
@@ -107,7 +107,12 @@ async fn mutate(
             source
                 .owner
                 .grants()
-                .revoke(&route.grant_caller, lineage.last().unwrap(), &mut custody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &route.grant_caller,
+                    lineage.last().unwrap(),
+                    &mut custody,
+                )
                 .unwrap();
         }
     }

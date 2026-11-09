@@ -22,7 +22,12 @@
  */
 
 export { MeerkatClient } from "./client.js";
-export type { ConnectOptions, MobMemberLiveOpenOptions } from "./client.js";
+export type {
+  ConnectOptions,
+  MobMemberEventsOptions,
+  MobMemberLiveOpenOptions,
+  ToolGrantMemberSubject,
+} from "./client.js";
 export type { WireMemberProgressSnapshot } from "./generated/types.js";
 export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
@@ -35,6 +40,7 @@ export type {
   MobBoundedHelperResult,
   MobBoundedHelperResultStatus,
   MobForkHelperOptions,
+  MobForkMemberOptions,
   MobHelperResult,
   MobHelperOptions,
   MobKickoffMemberSnapshot,
@@ -181,6 +187,9 @@ export type {
   MobHardCancelResult,
   MobStopMemberRunResult,
   StopRunResult,
+  CompactSessionResult,
+  MobCompactMemberResult,
+  WireCompactionRequestOutcome,
   WireRunStopReceipt,
   WireRunStopContributor,
   MobLifecycleAction,
@@ -264,7 +273,9 @@ export type {
   TranscriptRewriteSelection,
   TranscriptToolResultContentBlockReplacement,
   TranscriptUserContentBlockReplacement,
+  RequesterPrincipal,
   ToolCallDedupeKey,
+  ToolCallRequester,
   TurnAuthBindingOverride,
   TurnOptions,
   TurnToolOverlay,
@@ -393,6 +404,33 @@ export {
   authErrorReason,
 } from "./auth-errors.js";
 export type { WireAuthErrorDetail, WireAuthErrorReason } from "./generated/types.js";
+export { INSTRUCTION_SET_ERROR_CODES, instructionSetCode } from "./instructions.js";
+export type {
+  InstructionAdvisoryUnknown,
+  InstructionBlockReason,
+  InstructionEffectiveRead,
+  InstructionEffectiveSlot,
+  InstructionLowering,
+  InstructionPendingReason,
+  InstructionRecord,
+  InstructionResidency,
+  InstructionSlotState,
+  InstructionSlotView,
+  InstructionTarget,
+  InstructionTargetOwner,
+  InstructionWriteOptions,
+  MemberInstructionDelivery,
+  MemberInstructionDeliveryState,
+  MemberInstructionSlot,
+  MemberInstructionStatus,
+  MobInstructionStatus,
+  MobInstructionStatusOptions,
+  MobInstructionWriteResult,
+  SessionInstructionSlot,
+  SessionInstructionStatus,
+  SessionInstructionWriteResult,
+} from "./instructions.js";
+export type { InstructionSetErrorCode } from "./generated/types.js";
 export type {
   AttentionBindingRequest,
   AttentionBindingResult,
@@ -474,6 +512,9 @@ export type {
   MobSpawnPolicyInput,
   MobSpawnReceiptWire,
   MobSpawnSpecParams,
+  MobStreamCursor,
+  MobForkMemberParams,
+  MobForkMemberResult,
   MobRotateSupervisorResult,
   MobClaimCallbackRouteParams,
   MobClaimCallbackRouteResult,

@@ -153,13 +153,14 @@ same-runtime `GatewayStartupCleanupError.cleanup` handle. Meta retains
 that handle on every rejected composed stop and preserves unprintable original
 errors without formatting them.
 
-The source package pins its optional peers and development dependencies to
-published `@rkat/meta-sdk` 0.9.10 and `@rkat/sdk` 0.9.10. The npm lock contains
+The source package pins its development dependencies to published
+`@rkat/meta-sdk` 0.9.10 and `@rkat/sdk` 0.9.10, and its optional peers accept
+both from 0.9.10 below 0.10.0 (`>=0.9.10 <0.10.0`). The npm lock contains
 their registry tarballs and integrity hashes; `npm ci --ignore-scripts` installs
 that exact selection before Toolkit's build and tests. The native-host control
 module imports Meta directly and does not skip when it is absent.
 
-Toolkit's own package version is 0.9.10. This source update does not replace
+Toolkit's own package version is 0.9.11. This source update does not replace
 an existing release asset or qualify an installed application. Other native
 development compositions must record their matching SDK source and actual
 staged bytes as described in [BUILDING.md](../../BUILDING.md#sdks).

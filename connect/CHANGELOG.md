@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.11] - 2026-11-09
+
 Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11
 and Connect 0.9.11, released together): GitHub release `connect-v0.9.11`, a
 prerelease that is never the repository's latest.
@@ -68,6 +70,12 @@ prerelease that is never the repository's latest.
   the wait is unavailable. The workflow call gate, plan staging and the
   setup report tool answer a conflict in a source's facts as unavailable too.
   Each answered `access_denied`.
+
+- `@rkat/toolkit` accepts any `@rkat/sdk` and `@rkat/meta-sdk` from 0.9.10
+  up to, but not including, 0.10.0 as optional peers (`>=0.9.10 <0.10.0`;
+  each was one exact version), so it installs next to the 0.9.11 SDKs
+  without a peer conflict. Its development dependencies and lock keep the
+  published SDK versions it is built and tested against.
 
 ### Fixed
 

@@ -813,9 +813,9 @@ fi
 # samples a restore's last_refresh and refresh_attempt: they set only the
 # state fields of those names, which nothing reads, and their whole domains
 # made the audit's bounded space generate 140 million states (797 s locally
-# with 4 TLC workers) instead of 13 million (87 s). Its --whole-domain mode
-# (by hand) explores their whole domains, reaches the same witnesses and
-# refuses the same mutants.
+# with 4 TLC workers) instead of 13 million (87 s). Its --whole-domain mode,
+# which nightly's machine-verify-deep job runs with --mutants, explores their
+# whole domains, reaches the same witnesses and refuses the same mutants.
 source_credential_publication_audit="${workspace_root}/specs/machines/auth/source_credential_publication_audit.sh"
 if [[ ! -x "${source_credential_publication_audit}" ]]; then
   echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2

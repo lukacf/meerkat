@@ -27,7 +27,7 @@
 # --whole-domain assigns each input field the CI profile samples its Deep
 # domain, the field's whole domain, instead: the space this audit explored
 # before the CI profile sampled them. Both forms reach the same witnesses and
-# refuse the same mutants.
+# refuse the same mutants; nightly's machine-verify-deep job runs this one.
 set -euo pipefail
 
 usage="usage: source_credential_publication_audit.sh <max-steps> [--mutants] [--whole-domain] [extra tlc args...]"

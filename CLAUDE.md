@@ -790,7 +790,9 @@ nightly set is:
 `machine-verify` (bounded TLC, including every non-skipped composition
 witness with its completion proof), `machine-verify-deep` (`make
 machine-verify-deep-compositions`: Deep TLC over the compositions that fit
-the 900 s per-run cap; a capped run fails as TLC INCOMPLETE), `sdk-host`,
+the 900 s per-run cap; a capped run fails as TLC INCOMPLETE; then the
+AuthMachine source-credential publication audit with `--whole-domain`, over
+the whole domains of the restore inputs its CI profile samples), `sdk-host`,
 `gcp-buildbuddy`
 (`buildbuddy.yml` in `full-fresh` mode: the whole Bazel graph), plus the
 existing `lint` (clippy `--all-targets`), `lint-feature-matrix`,

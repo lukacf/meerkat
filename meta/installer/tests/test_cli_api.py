@@ -593,6 +593,42 @@ async def test_ctrl_c_before_anything_is_sent_names_the_setup(forge):
     assert not [route for method, route, _, _ in transport.requests if method == "POST"]
 
 
+class Slow(Recording):
+    """Forge answers one route only after a while: longer than the --timeout the rows give."""
+
+    def __init__(self, app, route, seconds=5.0):
+        super().__init__(app)
+        self.route, self.seconds = route, seconds
+
+    async def handle_async_request(self, request):
+        if (request.method, request.url.path) == self.route:
+            self.requests.append((request.method, request.url.path, dict(request.url.params), None))
+            await asyncio.sleep(self.seconds)
+            self.requests.pop()
+        return await super().handle_async_request(request)
+
+
+@pytest.mark.parametrize("route,argv", [
+    (("GET", f"/api/guide/{GUIDE_ID}"), ["setup", "show", GUIDE_ID]),
+    (("POST", f"/api/guide/{GUIDE_ID}/respond"), ["setup", "send", GUIDE_ID, "--text", "Hello"]),
+    (("POST", f"/api/guide/{GUIDE_ID}/apply"), ["plan", "accept", GUIDE_ID]),
+])
+async def test_timeout_bounds_every_request(forge, route, argv):
+    forge.current.state = review_state() if argv[0] == "plan" else guide_state()
+    forge.operations.submit.return_value = (guide_state(version=5), False)
+    if argv[0] == "plan":
+        argv = [*argv, "--approve", (await run(forge, *argv, "--json")).document["digest"]]
+    transport = Slow(server.app, route)
+    started = asyncio.get_running_loop().time()
+    result = await cli([*argv, "--timeout", "300ms", "--json"], transport=transport)
+    elapsed = asyncio.get_running_loop().time() - started
+    assert result.code == 87 and elapsed < 4, f"exit {result.code} after {elapsed:.1f} s"
+    assert result.document["error"]["code"] == "wait_timeout", result.text
+    assert result.document["next"], "a timeout names the command that reads what happened"
+    if route[0] == "POST":
+        assert [entry[:2] for entry in transport.requests].count(route) == 1, "sent once, never again"
+
+
 def held_forge(posted, release, bodies):
     """A small Forge server on a free loopback port whose installation action answers only once released."""
 

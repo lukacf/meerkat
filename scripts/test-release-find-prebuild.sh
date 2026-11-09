@@ -556,6 +556,8 @@ lookup_for ancestor-once-exact-cannot-pass "${FIX_SHA}" "807 2" 0
 for ended in '"name": "Cross-compile and package Windows surface binaries on Linux", "conclusion": "failure"' \
   '"name": "Verify Windows binaries on a Windows runner", "conclusion": "cancelled"' \
   '"name": "Cross-compile and package Intel macOS surface binaries on Apple silicon (rkat-rpc)", "conclusion": "timed_out"' \
+  '"name": "Build and package Intel macOS surface binaries via BuildBuddy", "conclusion": "failure"' \
+  '"name": "Run and inspect the BuildBuddy Intel macOS binaries on Apple silicon", "conclusion": "failure"' \
   '"name": "Release binary build gate", "conclusion": "failure"'; do
   reset
   listing "$(exact_url "${FIX_SHA}")"

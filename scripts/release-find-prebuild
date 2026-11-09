@@ -65,6 +65,8 @@ TRAILING_JOBS=(
   "Cross-compile and package Windows surface binaries on Linux"
   "Verify Windows binaries on a Windows runner"
   "Cross-compile and package Intel macOS surface binaries on Apple silicon (*)"
+  "Build and package Intel macOS surface binaries via BuildBuddy"
+  "Run and inspect the BuildBuddy Intel macOS binaries on Apple silicon"
 )
 
 usage() {

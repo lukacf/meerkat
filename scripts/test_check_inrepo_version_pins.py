@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import io
 import json
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -496,6 +498,79 @@ class BumpTests(unittest.TestCase):
     def test_the_meta_sdk_bump_moves_the_pins_on_meta_packages(self):
         bump = (SCRIPTS.parent / "meta/scripts/bump-sdk-versions.sh").read_text()
         self.assertEqual(bump.count('"$TOPLEVEL/scripts/check_inrepo_version_pins.py" --root "$TOPLEVEL" --write'), 1)
+
+    def test_the_docs_stamper_leaves_the_attestation_example_a_release_archive_name(self):
+        # The deploying guide verifies an rkat release archive, named
+        # rkat-<version>-<target>.tar.gz; stamping the docs at a bump keeps it one.
+        root = SCRIPTS.parent
+        documents = ("scripts/stamp-docs-contract-version.sh", "docs/guides/deploying.mdx", "README.md",
+                     ".claude/skills/meerkat-platform/SKILL.md")
+        for version in ("0.9.12", "0.10.0"):
+            with tempfile.TemporaryDirectory(prefix="attestation example ") as directory:
+                scratch = Path(directory)
+                for path in documents:
+                    (scratch / path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(root / path, scratch / path)
+                subprocess.run(["bash", str(scratch / documents[0]), version], check=True, capture_output=True)
+                stamped = (scratch / "docs/guides/deploying.mdx").read_text(encoding="utf-8")
+                names = re.findall(r"gh attestation verify (rkat-\S+)", stamped)
+                self.assertTrue(names, "the deploying guide verifies a release archive")
+                for name in names:
+                    self.assertIn(name, ("rkat-<version>-x86_64-unknown-linux-gnu.tar.gz",
+                                         f"rkat-{version}-x86_64-unknown-linux-gnu.tar.gz"), f"stamped for {version}")
+
+
+class ConfiguredEntryTests(GuardTest):
+    """This repository's own entries cover what their reasons name, applied to synthetic trees."""
+
+    @staticmethod
+    def configured():
+        return json.loads((SCRIPTS.parent / pins.CONFIG).read_text(encoding="utf-8"))
+
+    def test_the_forge_product_input_entry_leaves_a_guide_row_to_the_check(self):
+        # The ordinary gateway and the Guide's gateway have the same URL shape in Forge's
+        # release inputs. Two releases past 0.9.10, the temporary entry for Forge's product
+        # inputs covers the ordinary gateway at 0.9.10, and a Guide row fallen back to it is refused.
+        entries = [entry for entry in self.configured()["allow"]
+                   if entry["path"].startswith("meta/installer/release/")]
+        self.assertTrue(entries)
+        self.repo = Repo(self.repo.root, version="0.9.12")
+        self.repo.write("meta/CHANGELOG.md", "## [0.9.12] - 2026-01-03\n\n## [0.9.11] - 2026-01-02\n\n"
+                        "## [0.9.10] - 2026-01-01\n")
+        self.repo.config["published_release_inputs"] = {
+            "reason": "Published assets pinned by digest move after their release.",
+            "paths": ["meta/installer/release/**"]}
+        self.repo.config["allow"] = entries
+        self.repo.save_config()
+        url = ("https://github.com/lukacf/meerkat/releases/download/meta-v0.9.10/"
+               "demo-gateway-0.9.10-x86_64-unknown-linux-gnu.tar.gz")
+        inputs = {"targets": {"linux-x86_64": {"files": {
+            "guide/rpc_gateway": {"url": url, "sha256": HEX},
+            "ordinary/rpc_gateway": {"url": url, "sha256": HEX}}}}}
+        self.repo.write("meta/installer/release/forge-release-inputs.json", json.dumps(inputs, indent=2) + "\n")
+        err = self.assertFindings("meta/installer/release/forge-release-inputs.json:6: release lukacf/meerkat "
+                                  "release meta-v0.9.10: pins meta 0.9.10, older than the release before")
+        self.assertNotIn("forge-release-inputs.json:10:", err)
+        self.assertNotIn("covers nothing", err)
+
+    def test_the_agent_team_runtime_follows_the_published_rule_on_its_version_line_only(self):
+        # The agent-team runtime's VERSION sits beside its wheel's SHA-256 and may lag a bump
+        # by one release; any other pin in that file names the version in this tree.
+        runtime = "meta/installer/launchkit/public_meta_runtime.py"
+        configured = [path for path in self.configured()["published_release_inputs"]["paths"]
+                      if (path if isinstance(path, str) else path["path"]) == runtime]
+        self.assertEqual(len(configured), 1)
+        for changelog in ("CHANGELOG.md", "meta/CHANGELOG.md"):
+            self.repo.write(changelog, "## [1.4.2] - 2026-01-03\n\n## [1.4.1] - 2026-01-02\n")
+        self.repo.config["published_release_inputs"] = {
+            "reason": "Published assets pinned by digest move after their release.", "paths": configured}
+        self.repo.config["version_constants"] = {runtime: {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        self.repo.write(runtime, f'VERSION = "1.4.1"\nSDK_WHEEL_SHA256 = "{HEX}"\n')
+        self.assertClean()
+        self.repo.write(runtime, f'VERSION = "1.4.1"\nSDK_WHEEL_SHA256 = "{HEX}"\nCORE_REQUIREMENT = "=1.4.1"\n')
+        self.assertFindings(f'{runtime}:3: constant CORE_REQUIREMENT = "=1.4.1": pins core 1.4.1, below its version '
+                            '1.4.2 in this tree\n')
 
 
 class CommandTests(unittest.TestCase):

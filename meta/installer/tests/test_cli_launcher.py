@@ -69,7 +69,8 @@ def entries(log):
 
 
 def test_the_launcher_is_executable_in_the_checkout():
-    assert LAUNCHER.stat().st_mode & 0o111 == 0o111
+    # Git records the executable bit; the checkout's umask decides the group and other bits.
+    assert LAUNCHER.stat().st_mode & 0o100 and os.access(LAUNCHER, os.X_OK)
     assert LAUNCHER.read_text().startswith("#!/usr/bin/env bash\n")
 
 

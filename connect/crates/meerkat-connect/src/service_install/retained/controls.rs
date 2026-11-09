@@ -594,3 +594,37 @@ fn enterprise_retained_metadata_refuses_reordering_cross_profile_and_host_or_sec
     old["metadata"]["help"] = valid["metadata"]["help"].clone();
     assert!(checked_official_metadata(&old["metadata"]).is_err());
 }
+
+#[test]
+fn empty_retained_page_with_a_cursor_says_the_list_continues() {
+    let realm = realm();
+    let session = SessionId::new();
+    let owner = CheckedInstalls::fixture(Arc::new(NoDispatch));
+    owner.bind_realm(&realm).unwrap();
+    let page = |candidates: Value, next_cursor: Value| {
+        json!({"kind":"retained_installation_page","candidates":candidates,
+            "next_cursor":next_cursor,"unconfirmed":false})
+    };
+    let cursor = |setup: &str| json!({"setup":setup,"workspace":"","after_job":""});
+    // The read stopped before it found a candidate: the list continues.
+    let empty = owner
+        .retain_candidates(&realm, &session, page(json!([]), cursor("setup-later")))
+        .unwrap();
+    assert_eq!(empty["candidates"], json!([]));
+    assert!(empty["next"].is_string());
+    assert_eq!(empty["scan_incomplete"], true);
+    // A page that found a candidate, and the end of the list, are complete.
+    let (mut found_with_next, _) = fixture("python");
+    found_with_next["next_cursor"] = cursor("setup-last");
+    let found = owner
+        .retain_candidates(&realm, &session, found_with_next)
+        .unwrap();
+    assert_eq!(found["candidates"].as_array().map(Vec::len), Some(1));
+    assert!(found["next"].is_string());
+    assert_eq!(found["scan_incomplete"], false);
+    let end = owner
+        .retain_candidates(&realm, &session, page(json!([]), Value::Null))
+        .unwrap();
+    assert!(end["next"].is_null());
+    assert_eq!(end["scan_incomplete"], false);
+}

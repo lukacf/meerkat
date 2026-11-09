@@ -263,6 +263,17 @@ async def test_home_applies_only_to_serve_and_doctor():
     assert run.code == 2 and "--server" in run.document["error"]["detail"]
 
 
+async def test_doctor_names_an_incomplete_environment_as_such(monkeypatch, tmp_path):
+    import importlib.util
+    original = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *args: None if name == "httpx" else original(name, *args))
+    run = await cli(["doctor", "--json"], environ={"META_FORGE_PORT": "8787", "META_FORGE_HOME": str(tmp_path)})
+    assert run.code == 86
+    failed = {item["area"]: item["message"] for item in run.document["result"]["checks"] if item["status"] == "fail"}
+    assert "Python environment is incomplete" in failed.get("environment", ""), failed
+    assert "port" not in failed, failed
+
+
 async def test_global_options_before_and_after_the_command_merge():
     first, second = "sha256:" + "a" * 64, "sha256:" + "b" * 64
     namespace = build_parser().parse_args(["--approve", first, "-v", "setup", "list", "--approve", second, "-v"])

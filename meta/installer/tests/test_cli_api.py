@@ -593,6 +593,54 @@ async def test_ctrl_c_before_anything_is_sent_names_the_setup(forge):
     assert not [route for method, route, _, _ in transport.requests if method == "POST"]
 
 
+async def test_installation_request_takes_only_an_installation_id(forge):
+    request = "cd20e4ba-618c-42e2-b40a-07d1628f1a53"
+    forge.deployment.action_request.return_value = {"action_request": {
+        "version": 1, "action_request_id": request, "guide_id": GUIDE_ID, "deployment_id": DEPLOYMENT_ID,
+        "action": "stop", "update_id": None, "phase": "settled", "outcome": "returned"}}
+    result = await run(forge, "installation", "request", GUIDE_ID, request, "--deployment", "latest-install", "--json")
+    assert (result.code, result.document.get("error", {}).get("code")) == (2, "usage"), result.text
+    assert "--deployment" in result.document["error"]["detail"] and "latest-install" not in result.text
+    assert not [route for _, route, _, _ in forge.transport.requests if "/action/" in route]
+    forge.deployment.action_request.assert_not_awaited()
+
+
+class Failing(Recording):
+    """A defect inside the command: an exception that is no typed outcome, carrying text it must not show."""
+
+    async def handle_async_request(self, request):
+        if request.url.path == f"/api/guide/{GUIDE_ID}":
+            raise RuntimeError("internal detail canary-5e1b0c2a")
+        return await super().handle_async_request(request)
+
+
+@pytest.mark.parametrize("mode", ["text", "json"])
+async def test_an_unexpected_error_is_typed_without_its_text(forge, mode):
+    try:
+        result = await cli(["setup", "show", GUIDE_ID, *(["--json"] if mode == "json" else [])],
+                           transport=Failing(server.app))
+    except RuntimeError:
+        pytest.fail("the exception escaped the command without its typed outcome")
+    assert result.code == 1 and "canary-5e1b0c2a" not in result.text
+    if mode == "json":
+        assert result.document["error"]["code"] == "internal_error" and result.document["next"]
+        assert "RuntimeError" in result.document["error"]["detail"]
+    else:
+        assert "internal_error" in result.stderr and "next: meta-forge setup show" in result.stderr
+
+
+async def test_chat_retry_without_a_saved_answer_says_so(forge):
+    forge.current.state = guide_state(operation={"request_id": "r" * 64, "version": 4, "status": "interrupted",
+                                                 "detail": "The server restarted."})
+    try:
+        result = await run(forge, "chat", GUIDE_ID, stdin=Terminal("/retry\n/quit\n"), terminal=True)
+    except KeyError:
+        pytest.fail("/retry failed on an interrupted turn that has no saved answer")
+    assert result.code == 0, result.text
+    assert "There is no interrupted or failed turn to resend." in result.stdout
+    forge.operations.submit.assert_not_awaited()
+
+
 class Slow(Recording):
     """Forge answers one route only after a while: longer than the --timeout the rows give."""
 

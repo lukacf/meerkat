@@ -7,10 +7,12 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 if [ ! -x "$root/.venv/bin/python" ]; then
   echo "Preparing Forge's Python environment first (bash start.sh --prepare-only)..." >&2
   (
-    # Preparation needs no provider credentials; none reach it.
+    # Preparation needs no provider credentials; none reach it. Meerkat reads
+    # RKAT_<NAME> before <NAME>, so the prefixed names are credentials too.
     while IFS= read -r name; do
       case "$name" in
         *_API_KEY|COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN) unset "$name" ;;
+        RKAT_COPILOT_GITHUB_TOKEN|RKAT_GH_TOKEN|RKAT_GITHUB_TOKEN) unset "$name" ;;
       esac
     done < <(compgen -e)
     exec bash "$root/start.sh" --prepare-only

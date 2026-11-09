@@ -162,7 +162,7 @@ HOST`) and open `http://127.0.0.1:8787` on your own computer.
 
 | Command | What it does |
 | --- | --- |
-| `serve` | Runs `start.sh` in this terminal; `--port N` and `--prepare-only` as for the launcher. Provider keys and tokens in the calling shell are not forwarded to Forge unless `--inherit-provider-env` is given. |
+| `serve` | Runs `start.sh` in this terminal; `--port N` and `--prepare-only` as for the launcher. Provider keys and tokens in the calling shell are not forwarded to Forge unless `--inherit-provider-env` is given, which is unsafe where other people have accounts on the computer: they can reach Forge's local port and use the keys through it. |
 | `doctor` | One `ok`, `warn` or `fail` line each for Python, the application check sandbox, the Google Cloud CLI, the state folder, background operation, the server and the port. |
 | `version` | This folder's Forge release and the running server's, with its runtimes. The other commands refuse a server of another release. |
 | `provider status` | Which model providers Forge's own agents can use. It never shows a key. |

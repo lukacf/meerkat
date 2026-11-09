@@ -14,7 +14,9 @@ from .. import FORGE_ROOT, cli_version, port_number
 from ..errors import CliError, step
 
 # Provider credentials a caller's shell may hold. serve forwards none of them
-# to Forge unless --inherit-provider-env is given.
+# to Forge unless --inherit-provider-env is given. Meerkat reads RKAT_<NAME>
+# before <NAME> for every credential variable, so each name counts with that
+# prefix too.
 PROVIDER_VARIABLES = {"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
 STARTUP_PHASES = {"storage_preparation": "preparing storage", "gateway_preparation": "preparing the gateway",
                   "native_bootstrap": "starting the agents", "identity_warmup": "warming up the agents",
@@ -24,7 +26,8 @@ PROTECTED_MAC_FOLDERS = ("Desktop", "Documents", "Downloads", "Library/Mobile Do
 
 
 def provider_variable(name):
-    return name.endswith("_API_KEY") or name in PROVIDER_VARIABLES
+    base = name.removeprefix("RKAT_")
+    return base.endswith("_API_KEY") or base in PROVIDER_VARIABLES
 
 
 def child_environment(environ, *, inherit_provider):
@@ -59,7 +62,9 @@ def register(commands, command_parser):
     serve.add_argument("--prepare-only", action="store_true",
                        help="prepare Forge's environment without starting it (start.sh --prepare-only)")
     serve.add_argument("--inherit-provider-env", action="store_true",
-                       help="forward provider keys and tokens from this shell's environment to Forge")
+                       help="forward provider keys and tokens from this shell's environment to Forge; unsafe "
+                            "where other people have accounts on this computer, since they can reach Forge's "
+                            "local port")
     serve.set_defaults(func=serve_command, name="serve")
     doctor = command_parser(commands, "doctor", "Check this computer for Forge: one ok, warn or fail line each.")
     doctor.set_defaults(func=doctor_command, name="doctor")

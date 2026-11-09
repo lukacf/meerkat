@@ -45,7 +45,8 @@ sys.path.insert(0, str(INSTALLER))
 
 PLACEHOLDER_KEY = "forge-ci-placeholder-not-a-provider-key"
 HOST = "mac" if sys.platform == "darwin" else "linux"
-CREDENTIAL_VARIABLES = {"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
+CREDENTIAL_VARIABLES = {prefix + name for prefix in ("", "RKAT_")
+                        for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")}
 
 
 def check(condition, message):

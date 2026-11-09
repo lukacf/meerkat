@@ -102,7 +102,9 @@ Then work in a second terminal in the same folder:
 `serve` runs `start.sh` without the provider keys or tokens of the calling
 shell; add `--inherit-provider-env` to forward them, or enter keys in
 **Guide settings** in a browser (over SSH, forward the port first:
-`ssh -L 8787:127.0.0.1:8787 HOST`). Accepting a plan, installing and starting
+`ssh -L 8787:127.0.0.1:8787 HOST`). Do not forward them where other people
+have accounts on the computer: they can reach Forge's local port and use the
+keys through it. Accepting a plan, installing and starting
 show a review first: at a terminal you confirm it, and a script adds
 `--approve` with the review's digest. `./meta-forge --help` lists every command;
 the [Forge reference](https://docs.rkat.ai/meta/forge/reference#terminal-commands)

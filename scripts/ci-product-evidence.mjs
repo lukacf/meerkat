@@ -12,8 +12,9 @@
 //     which then check every target, and their rustdoc rows);
 //   - meta: Core's and Meta's rows;
 //   - connect: every row, i.e. only a run whose validation_result is success.
-// A run whose validation_result is success is accepted for every product, as
-// before. Anything the rule cannot attribute refuses, which leaves the
+// A green run needs no judgment: the gates take it as before, and a failed
+// run whose attestation says every lane succeeded contradicts itself and is
+// refused. Anything the rule cannot attribute refuses, which leaves the
 // release on the whole-run requirement: no product_evidence or another
 // version, a plan-level error in the gate, a release-projection plan, a job
 // that ran without a known product, a lane the gate flagged without a failed
@@ -33,15 +34,17 @@
 //
 // Usage:
 //   ci-product-evidence.mjs record --output FILE [--jobs FILE]
-//       env ROW_PRODUCTS, FAILED_LANES (JSON), PLAN_ERRORS; without --jobs it
-//       lists GITHUB_RUN_ID's attempt GITHUB_RUN_ATTEMPT through `gh api`.
+//       env ROW_PRODUCTS, FAILED_LANES (JSON), PLAN_ERRORS, WAVE_COUNTS (the
+//       plan's row count per lane job); without --jobs it lists
+//       GITHUB_RUN_ID's attempt GITHUB_RUN_ATTEMPT through `gh api`,
+//       retrying a server error after each of API_RETRY_DELAYS seconds.
 //   ci-product-evidence.mjs accepts --product core|meta|connect --changed-paths FILE ATTESTATION
 //       FILE lists the paths the judged commit changes against its first
 //       parent, one per line (`git diff --name-only PARENT COMMIT`); run the
 //       parent's copy of this file. Exit 0 accepted, 1 refused (the reasons
 //       are printed), 2 usage.
 
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { inflateRawSync } from "node:zlib";
@@ -149,9 +152,25 @@ function singleJob(name) {
   return null;
 }
 
+// A lane job's display name before GitHub fills in its matrix: the name it
+// lists a lane job under when the job was skipped without one.
+const UNEXPANDED_ROW = { name: "${{ matrix.name }}", features: "${{ matrix.features }}" };
+
+// Whether a listed job is a lane wave the plan did not run: GitHub lists a
+// matrix job its `if:` skipped under the unexpanded name, which names no row,
+// and it is an unplanned wave when the plan's count for one of the lane jobs
+// that render that name (`waveCounts`, by ci.yml job key) is 0.
+function unplannedWave(job, waveCounts) {
+  if (job.conclusion !== "skipped" || !String(job.name).includes("${{")) return false;
+  return Object.values(LANE_JOBS)
+    .filter((lane) => lane.name(UNEXPANDED_ROW) === job.name)
+    .some((lane) => lane.jobs.some((key) => waveCounts?.[key] === 0));
+}
+
 // The product_evidence of one run attempt: every job but the gate, with its
-// conclusion and its product (null when nothing names it).
-export function recordEvidence({ rowProducts, jobs, failedLanes, planErrors }) {
+// conclusion and its product (null when nothing names it); a skipped wave
+// the plan did not run is marked `unplanned`.
+export function recordEvidence({ rowProducts, jobs, failedLanes, planErrors, waveCounts = {} }) {
   const planned = new Map();
   for (const [lane, rows] of Object.entries(rowProducts ?? {})) {
     const spec = LANE_JOBS[lane];
@@ -169,12 +188,13 @@ export function recordEvidence({ rowProducts, jobs, failedLanes, planErrors }) {
       .filter((job) => job.name !== GATE_JOB)
       .map((job) => {
         const known = planned.get(job.name) ?? singleJob(job.name);
-        return {
+        const entry = {
           name: job.name,
           conclusion: job.conclusion ?? "pending",
           product: known?.product ?? null,
           downstream: known?.downstream ?? false,
         };
+        return !known && unplannedWave(entry, waveCounts) ? { ...entry, unplanned: true } : entry;
       }),
   };
 }
@@ -183,16 +203,22 @@ function laneJobs(lane, jobs) {
   const spec = GATE_LANES[lane];
   if (!spec) return null;
   return jobs.filter(
-    (job) => (spec.exact ?? []).includes(job.name) || (spec.prefix ?? []).some((prefix) => job.name.startsWith(prefix)),
+    (job) =>
+      job.unplanned !== true &&
+      ((spec.exact ?? []).includes(job.name) || (spec.prefix ?? []).some((prefix) => job.name.startsWith(prefix))),
   );
 }
 
-// Whether `attestation` lets a release of `product` proceed, and why.
+// Whether `attestation` of a FAILED run lets a release of `product` proceed,
+// and why (a green run needs no judgment, and a failed run whose attestation
+// says every lane succeeded contradicts itself).
 // `changedPaths`: the paths the judged commit changes against its first
 // parent (see EVIDENCE_INPUTS); without them nothing is accepted on scope.
 export function acceptance(attestation, product, { changedPaths } = {}) {
   if (!PRODUCTS.includes(product)) return { accepted: false, reasons: [`unknown product ${product}`] };
-  if (attestation?.validation_result === "success") return { accepted: true, reasons: ["every lane succeeded"] };
+  if (attestation?.validation_result === "success") {
+    return { accepted: false, reasons: ["the run failed, but its attestation says every lane succeeded"] };
+  }
   const reasons = [];
   if (product === "connect") return { accepted: false, reasons: ["Connect depends on every row"] };
   if (!Array.isArray(changedPaths)) {
@@ -288,16 +314,58 @@ function option(args, name) {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
+const SERVER_ERROR = /HTTP 5\d\d/;
+
+function ghApi(args) {
+  return spawnSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+}
+
+function sleepSeconds(seconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
+}
+
+// Every job of one run attempt, {name, conclusion}, through `gh api`. Thirty
+// a page: a re-run attempt of a large run answered HTTP 502 to every listing
+// of 100 a page and listed its 183 jobs at 30. A server error (5xx) is retried
+// after each of `delays` seconds, as the gate's budget step retries; any
+// other failure, or one after the last retry, throws.
+export function listAttemptJobs({ repository, runId, attempt, delays = [], run = ghApi, sleep = sleepSeconds }) {
+  const path = `repos/${repository}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=30`;
+  const remaining = [...delays];
+  for (;;) {
+    const result = run(["api", "--paginate", path, "--jq", ".jobs[] | {name, conclusion}"]);
+    if (result.status === 0) {
+      return String(result.stdout).split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
+    }
+    const stderr = String(result.stderr ?? "").trim();
+    if (remaining.length > 0 && SERVER_ERROR.test(stderr)) {
+      const delay = remaining.shift();
+      console.log(`GitHub API server error for ${path} (${stderr}); retrying in ${delay} s`);
+      sleep(delay);
+      continue;
+    }
+    throw new Error(`gh api ${path} failed: ${stderr}`);
+  }
+}
+
 function runJobs() {
-  const repository = process.env.GITHUB_REPOSITORY;
-  const runId = process.env.GITHUB_RUN_ID;
-  const attempt = process.env.GITHUB_RUN_ATTEMPT;
-  const output = execFileSync(
-    "gh",
-    ["api", "--paginate", `repos/${repository}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`, "--jq", ".jobs[] | {name, conclusion}"],
-    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
-  return output.split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
+  return listAttemptJobs({
+    repository: process.env.GITHUB_REPOSITORY,
+    runId: process.env.GITHUB_RUN_ID,
+    attempt: process.env.GITHUB_RUN_ATTEMPT,
+    delays: String(process.env.API_RETRY_DELAYS ?? "").split(/\s+/).filter(Boolean).map(Number),
+  });
+}
+
+// The plan's row count per lane job (ci.yml job key), from WAVE_COUNTS: an
+// object of decimal strings, the planner's outputs. A value that is not a
+// count reads as unknown, which marks no wave unplanned.
+function waveCountsFrom(text) {
+  const counts = {};
+  for (const [key, value] of Object.entries(JSON.parse(text || "{}"))) {
+    counts[key] = /^\d+$/.test(String(value)) ? Number(value) : Number.NaN;
+  }
+  return counts;
 }
 
 function main(args) {
@@ -313,6 +381,7 @@ function main(args) {
       jobs,
       failedLanes: JSON.parse(process.env.FAILED_LANES || "null"),
       planErrors: Number.isInteger(planErrors) ? planErrors : null,
+      waveCounts: waveCountsFrom(process.env.WAVE_COUNTS),
     });
     writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`);
     const unknown = evidence.jobs.filter((job) => job.product === null && job.conclusion !== "skipped");

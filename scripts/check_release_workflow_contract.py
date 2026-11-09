@@ -1584,6 +1584,12 @@ def _lookup_scenarios() -> list[_LookupScenario]:
             changed=None,
         ),
         _LookupScenario(
+            "a failed push run on main whose attestation says every lane succeeded",
+            ((_ci_run(42, "main", **failed),),),
+            None,
+            attestations=((42, 1, {**_scoped_attestation(connect_red), "validation_result": "success"}),),
+        ),
+        _LookupScenario(
             "a failed push run on main whose failures include a Core row",
             ((_ci_run(31, "main", **failed),),),
             None,

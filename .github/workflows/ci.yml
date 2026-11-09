@@ -3969,6 +3969,7 @@ jobs:
         # unreadable, a lane GUARD_LANE_JOBS cannot name, or a named lane
         # with no completed job fails a pull request.
         if: ${{ !cancelled() }}
+        id: budget
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -4394,6 +4395,23 @@ jobs:
           ROW_PRODUCTS: ${{ needs.changes.outputs.row_products }}
           FAILED_LANES: ${{ steps.lanes.outputs.failed_lanes }}
           PLAN_ERRORS: ${{ steps.lanes.outputs.plan_errors }}
+          # The plan's row count per lane job: a lane wave it did not run is
+          # listed, skipped, under its job's unexpanded matrix name.
+          WAVE_COUNTS: >-
+            {"clippy": "${{ needs.changes.outputs.shard_first_count }}",
+            "clippy-rest": "${{ needs.changes.outputs.shard_rest_count }}",
+            "unit": "${{ needs.changes.outputs.unit_shard_count }}",
+            "main-unit": "${{ needs.changes.outputs.main_unit_first_count }}",
+            "main-unit-rest": "${{ needs.changes.outputs.main_unit_rest_count }}",
+            "main-unit-archive-build": "${{ needs.changes.outputs.main_archive_build_count }}",
+            "main-unit-archive-run": "${{ needs.changes.outputs.main_archive_run_count }}",
+            "integration": "${{ needs.changes.outputs.integration_count }}",
+            "closure-tests": "${{ needs.changes.outputs.closure_test_first_count }}",
+            "closure-tests-rest": "${{ needs.changes.outputs.closure_test_rest_count }}",
+            "feature-check": "${{ needs.changes.outputs.feature_check_first_count }}",
+            "feature-check-rest": "${{ needs.changes.outputs.feature_check_rest_count }}"}
+          # As the budget step: a server error listing the jobs is retried.
+          API_RETRY_DELAYS: 5 10 20
         run: |
           set -euo pipefail
           node scripts/ci-product-evidence.mjs record --output "${RUNNER_TEMP}/product-evidence.json"
@@ -4409,6 +4427,7 @@ jobs:
         env:
           LANES_OUTCOME: ${{ steps.lanes.outcome }}
           RELEASE_EVIDENCE_OUTCOME: ${{ steps.release_evidence.outcome }}
+          BUDGET_OUTCOME: ${{ steps.budget.outcome }}
           PRODUCT_EVIDENCE: ${{ steps.product_evidence.outcome == 'success' && steps.product_evidence.outputs.path || '' }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
@@ -4449,10 +4468,12 @@ jobs:
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
           mkdir -p "${destination}"
           tree_sha="$(git rev-parse 'HEAD^{tree}')"
-          # Green only when the lane check succeeded and, for a release
-          # projection, its reused evidence verified.
+          # Green only when every step of the gate before this one that can
+          # fail it succeeded: the lane check, a release projection's reused
+          # evidence, and the budget step (which reports on a push and can
+          # still fail). A failed gate is never attested as green.
           validation_result=failure
-          if [[ "${LANES_OUTCOME}" == "success" && ( "${RELEASE_EVIDENCE_OUTCOME}" == "success" || "${RELEASE_EVIDENCE_OUTCOME}" == "skipped" ) ]]; then
+          if [[ "${LANES_OUTCOME}" == "success" && ( "${RELEASE_EVIDENCE_OUTCOME}" == "success" || "${RELEASE_EVIDENCE_OUTCOME}" == "skipped" ) && "${BUDGET_OUTCOME}" == "success" ]]; then
             validation_result=success
           fi
           product_evidence='null'

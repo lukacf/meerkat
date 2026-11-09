@@ -916,7 +916,7 @@ def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=N
 
 # The root's product-scoped CI evidence reader. A failed exact-main CI run
 # counts for Meta only when the release commit's FIRST PARENT's copy of it,
-# told the paths the commit changes against that parent, accepts the run's
+# told the commit's changes against that parent, accepts the run's
 # exact-tree attestation for Meta: the rule and job-to-product table that
 # meta-release.yml's gate applied, never the commit's own copy.
 EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
@@ -959,7 +959,9 @@ def require_meta_scoped(value, sha):
     except ProtocolError as error:
         raise ProtocolError(f"the release commit's parent {parent} has no CI evidence reader ({EVIDENCE_READER}): "
                             f"only a green CI run counts ({error})") from None
-    changed = git("diff", "--name-only", parent, sha)
+    # The commit's changes as the parent-reader steps list them: a status and
+    # a path a line, a rename as a deletion and an addition.
+    changed = git("diff", "--name-status", "--no-renames", parent, sha)
     with workspace() as work:
         (work / "ci-product-evidence.mjs").write_text(reader + "\n")
         (work / "changed-paths.txt").write_text(changed + "\n" if changed else "")

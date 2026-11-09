@@ -759,9 +759,12 @@ and its CI must be green before a release tag (`require_ci_green`):
   lanes and plan errors), so a release whose product depends on none of the
   failed rows can still use a failed run (see `require_ci_green` below). A
   release gate judges that evidence with the release commit's first parent's
-  copy of the script, told the paths the commit changes against that parent;
-  a commit that changes the script, the planner, `ci/products.json`,
-  `scripts/ci-products.mjs` or `ci.yml` gets no product-scoped acceptance.
+  copy of the script, told the commit's changes against that parent (`git
+  diff --name-status --no-renames`: a renamed path counts under both names);
+  a commit that changes the script, the planner or a module it imports,
+  `ci/products.json`, the non-Rust reader inventory or `ci.yml`, or that
+  adds or deletes a package manifest (a package's location decides its
+  product), gets no product-scoped acceptance.
   For a `release-projection` plan
   it re-verifies the reused parent
   attempt with the parent's copies of the scripts (`ci-release-evidence.mjs

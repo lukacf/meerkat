@@ -28,12 +28,14 @@ gh attestation verify meta-forge-0.3.0-linux-x86_64.zip --repo lukacf/meerkat-me
 On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`.
 
 Each package's `README.md` names the destination it supports and its exact
-runtime selections:
+runtime selections. A package runs the Meerkat release it is built from: its
+guide runs that release's Meta and Core, its applications that release's Meta
+and Toolkit, and its agent teams install that release's published Meta.
 
-| Package | Supported destination | Guide runtime | Application runtime | Agent team runtime |
-| --- | --- | --- | --- | --- |
-| `linux-x86_64` | Linux x86_64 with exactly glibc 2.39 | Meta 0.9.3, Core 0.9.3 | Meta 0.9.7 and Toolkit 0.9.5 | Meta 0.9.6 |
-| `macos-arm64` | Apple Silicon macOS 13.5 or newer | Meta 0.9.3, Core 0.9.3 | Meta 0.9.4 and Toolkit 0.9.4 | Meta 0.9.6 |
+| Package | Supported destination |
+| --- | --- |
+| `linux-x86_64` | Linux x86_64 with exactly glibc 2.39 |
+| `macos-arm64` | Apple Silicon macOS 13.5 or newer |
 
 Forge releases made from the Meerkat monorepo are published in
 `lukacf/meerkat` under the tag `meta-installer-v<version>`, as packages named
@@ -136,7 +138,7 @@ applications without a connection setup helper as `ordinary_runtime`.
 | `standalone-manifest.json` | Pins the package's source, assets, SDKs, native product, checker dependencies and guide gateway. |
 | `requirements-standalone.txt` | Forge's exact Python dependency pins. |
 | `launchkit/`, `web/` | Forge's server and prebuilt interface. |
-| `vendor/guide/` | The guide's Meta RPC gateway and Meta SDK wheel. |
+| `vendor/guide/` | The guide's Meta RPC gateway and Meta SDK wheel: the published artifacts of the package's Meta release. |
 | `vendor/product/` | The application runtime: Meta and Toolkit SDK wheels, the Connect gateway archive, dependency wheels and the model catalog. |
 | `vendor/ordinary/` | The Meta RPC gateway for applications without a connection setup helper. |
 | `checker-dependencies/` | The dependency closure for application DOM checks. |

@@ -5,12 +5,17 @@
   "status": "Stable inputs of the next Linux target. forge-release.py does not read this file; the Linux target in forge-release-inputs.json changes only when every pending input is final.",
   "files": {
     "guide/rpc_gateway": {
-      "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.3/meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
-      "archive_size": 101221673,
-      "archive_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0",
+      "url": "https://github.com/lukacf/meerkat/releases/download/meta-v0.9.11/meta-rpc-gateway-0.9.11-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_size": 124816400,
+      "archive_sha256": "b456af91f5d309757e07cd34ed447bc01c00f6763385d738e6b97800e6dcd610",
       "member": "rpc_gateway",
-      "size": 479374128,
-      "sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335"
+      "size": 556749272,
+      "sha256": "bb3549536e2303da54fe174cd8380a95e93a2602fe7ac55c56d80fae333feb0d"
+    },
+    "guide/meerkat_meta-0.9.11-py3-none-any.whl": {
+      "url": "https://files.pythonhosted.org/packages/6e/38/4d89e0f12289583c206dd58a2c7addb9ddb52ccf6cf4b2767faae8eaffe2/meerkat_meta-0.9.11-py3-none-any.whl",
+      "size": 222960,
+      "sha256": "ee0d717ee67a36d97252c08b74e76573893fbc2549f3201a57d0bf24a4afe223"
     },
     "native/collection/evidence.json": {
       "url": "https://github.com/lukacf/meerkat-meta/releases/download/forge-native-v0.3.1/forge-service-host-0.3.1-linux-x86_64.evidence.json",
@@ -104,6 +109,7 @@
   },
   "pending_files": {},
   "gateway": "guide/rpc_gateway",
+  "guide_sdk": "guide/meerkat_meta-0.9.11-py3-none-any.whl",
   "ordinary_gateway": "ordinary/rpc_gateway",
   "native_programs": {
     "collection": {

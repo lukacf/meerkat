@@ -50,8 +50,6 @@ def load(name, path):
 
 
 forge = load("installer_release", ROOT / "scripts/installer-release.py")
-# The Guide's one exact selected release; the module has no package imports.
-guide_sdk = load("forge_guide_sdk", ROOT / "installer/launchkit/guide_sdk.py")
 release_tests = load("release_workflow_tests", ROOT / "scripts/test_release_workflow.py")
 REPO = "lukacf/meerkat"
 SHA = "a" * 40
@@ -184,7 +182,20 @@ PRODUCT = {
     "product/source-manifest.json": b'{"source": true}',
 }
 URL = "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/"
-GATEWAY_URL = "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.0/meta-rpc-gateway.tar.gz"
+# The Guide runs one Meta release: its rpc_gateway asset from the monorepo and
+# its meerkat-meta wheel on PyPI.
+GUIDE_VERSION = "0.9.0"
+
+
+def guide_url(target="linux-x86_64", version=GUIDE_VERSION):
+    return (f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}/"
+            f"meta-rpc-gateway-{version}-{forge.GATEWAY_TRIPLES[target]}.tar.gz")
+
+
+GATEWAY_URL = guide_url()
+GUIDE_WHEEL = b"guide client wheel bytes"
+GUIDE_WHEEL_NAME = f"guide/meerkat_meta-{GUIDE_VERSION}-py3-none-any.whl"
+GUIDE_WHEEL_URL = f"https://files.pythonhosted.org/packages/0f/1e/fixture/meerkat_meta-{GUIDE_VERSION}-py3-none-any.whl"
 
 
 def pin(data, **source):
@@ -200,9 +211,10 @@ def target_inputs(target="linux-x86_64"):
     files = {name: pin(data, url=URL + name.rsplit("/", 1)[1]) for name, data in PRODUCT.items()}
     files["product/assembly.json"] = pin(PRODUCT["product/assembly.json"],
                                          path="installer/release/inputs/linux-x86_64/assembly.json")
-    files["guide/rpc_gateway"] = {"url": GATEWAY_URL, "archive_size": len(ARCHIVE),
+    files["guide/rpc_gateway"] = {"url": guide_url(target), "archive_size": len(ARCHIVE),
                                   "archive_sha256": sha256(ARCHIVE), "member": "rpc_gateway",
                                   **pin(GATEWAY)}
+    files[GUIDE_WHEEL_NAME] = pin(GUIDE_WHEEL, url=GUIDE_WHEEL_URL)
     selection = {"format": forge.PRODUCT_SELECTION_FORMAT, "artifact_root": "/producer/product",
                  "target": target, "meta": {}, "toolkit": {},
                  "assembly": artifact("product/assembly.json"),
@@ -216,7 +228,8 @@ def target_inputs(target="linux-x86_64"):
              "toolkit_wheel": "product/connect.whl", "dependency_requirements": "product/requirements.txt",
              "dependency_wheels": ["product/dependency.whl"], "model_catalog": "product/catalog.json",
              "source_manifest": "product/source-manifest.json"}
-    return {"files": files, "gateway": "guide/rpc_gateway", "selection": selection, "paths": paths}
+    return {"files": files, "gateway": "guide/rpc_gateway", "guide_sdk": GUIDE_WHEEL_NAME,
+            "selection": selection, "paths": paths}
 
 
 ORDINARY = b"ordinary meta gateway bytes"
@@ -241,7 +254,8 @@ def with_ordinary(entry, version="0.9.4", name="ordinary/rpc_gateway", triple=No
 
 def inputs(targets=("linux-x86_64",)):
     return {"schema_version": 1, "kind": "forge-release-inputs",
-            "guide": {"version": "0.9.0", "core_version": "0.9.0", "meta_source": "c" * 40, "core_source": "d" * 40},
+            "guide": {"version": GUIDE_VERSION, "core_version": GUIDE_VERSION,
+                      "meta_source": "c" * 40, "core_source": "c" * 40},
             "targets": {target: target_inputs(target) for target in targets}}
 
 
@@ -809,21 +823,23 @@ class InputsTests(unittest.TestCase):
     def test_a_partially_pinned_target_is_refused(self):
         committed = json.loads((ROOT / forge.INPUTS).read_text())
         guide = next(iter(committed["targets"].values()))
-        # A target that holds only its guide gateway, as the skeleton does before the owner's
-        # selection, is refused, whichever target it is.
+        # A target that holds only its guide gateway and client, as the skeleton does before the
+        # owner's selection, is refused, whichever target it is.
         for target in forge.TARGETS:
-            with self.subTest(target=target, partial="guide gateway only"):
+            with self.subTest(target=target, partial="guide gateway and client only"):
                 value = copy.deepcopy(committed)
-                value["targets"][target] = {"files": {guide["gateway"]: guide["files"][guide["gateway"]]},
-                                            "gateway": guide["gateway"], "selection": None, "paths": None}
+                value["targets"][target] = {"files": {name: guide["files"][name]
+                                                      for name in (guide["gateway"], guide["guide_sdk"])},
+                                            "gateway": guide["gateway"], "guide_sdk": guide["guide_sdk"],
+                                            "selection": None, "paths": None}
                 with self.assertRaisesRegex(forge.ProtocolError, "owner's product selection"):
                     forge.validate_inputs(value)
-        # A committed target that loses any pin its selection, its gateways or its native programs
-        # name is refused.
+        # A committed target that loses any pin its selection, its gateways, its guide client or
+        # its native programs name is refused.
         for target, entry in committed["targets"].items():
             paths = entry["paths"]
             named = [paths[key] for key in paths if key not in ("artifact_root", "dependency_wheels")]
-            named += paths["dependency_wheels"] + [entry["gateway"]]
+            named += paths["dependency_wheels"] + [entry["gateway"], entry["guide_sdk"]]
             named += [entry["ordinary_gateway"]] if "ordinary_gateway" in entry else []
             named += [name for pins in entry.get("native_programs", {}).values() for name in pins.values()]
             for name in named:
@@ -834,19 +850,21 @@ class InputsTests(unittest.TestCase):
                         forge.validate_inputs(value)
 
     def test_the_guide_skeleton_is_refused_until_every_pending_value_is_filled(self):
-        selected = guide_sdk.SELECTED_VERSION
         skeleton = json.loads((ROOT / forge.INPUTS_DIR / "forge-release-inputs.skeleton.json").read_text())
         guide = skeleton["guide"]
-        # The gateway and the Guide's client come from the same Meta release commit.
-        self.assertEqual((guide["version"], guide["core_version"], guide["meta_source"]),
-                         (selected, selected, guide_sdk.SOURCE))
-        self.assertTrue(re.fullmatch("[0-9a-f]{40}", guide["core_source"]))
+        selected = guide["version"]
+        # Meta and Core of the Guide's release share its version and its release commit.
+        self.assertEqual((guide["core_version"], guide["core_source"]), (selected, guide["meta_source"]))
+        self.assertTrue(re.fullmatch("[0-9a-f]{40}", guide["meta_source"]))
         self.assertEqual(list(skeleton["targets"]), ["linux-x86_64"])
         entry = skeleton["targets"]["linux-x86_64"]
-        self.assertEqual((list(entry["files"]), entry["selection"], entry["paths"]), ([entry["gateway"]], None, None))
-        self.assertEqual(entry["files"][entry["gateway"]]["url"],
-                         f"https://github.com/lukacf/meerkat-meta/releases/download/v{selected}/"
-                         f"meta-rpc-gateway-{selected}-x86_64-unknown-linux-gnu.tar.gz")
+        self.assertEqual((sorted(entry["files"]), entry["selection"], entry["paths"]),
+                         (sorted([entry["gateway"], entry["guide_sdk"]]), None, None))
+        # The Guide's gateway and client are that release's own assets: the monorepo's
+        # rpc_gateway archive and the meerkat-meta wheel on PyPI.
+        self.assertEqual(entry["files"][entry["gateway"]]["url"], guide_url(version=selected))
+        self.assertTrue(entry["files"][entry["guide_sdk"]]["url"].startswith(forge.PYPI_FILES))
+        self.assertTrue(entry["files"][entry["guide_sdk"]]["url"].endswith(f"/meerkat_meta-{selected}-py3-none-any.whl"))
         # Only the product owner's selection, its paths and their files are pending.
         with self.assertRaisesRegex(forge.ProtocolError, "owner's product selection"):
             forge.validate_inputs(skeleton)
@@ -854,12 +872,13 @@ class InputsTests(unittest.TestCase):
         product = target_inputs()
         filled = copy.deepcopy(skeleton)
         target = filled["targets"]["linux-x86_64"]
-        target["files"].update({name: pin for name, pin in product["files"].items() if name != product["gateway"]})
+        target["files"].update({name: pin for name, pin in product["files"].items()
+                                if name not in (product["gateway"], product["guide_sdk"])})
         target.update(selection=product["selection"], paths=product["paths"])
         forge.validate_inputs(filled)
 
-        def gateway_value(key):
-            return lambda value: value["targets"]["linux-x86_64"]["files"]["guide/rpc_gateway"].__setitem__(key, None)
+        def pinned_value(name, key):
+            return lambda value: value["targets"]["linux-x86_64"]["files"][name].__setitem__(key, None)
 
         pending = {
             "meta source": lambda value: value["guide"].__setitem__("meta_source", None),
@@ -867,8 +886,11 @@ class InputsTests(unittest.TestCase):
             "selection": lambda value: value["targets"]["linux-x86_64"].__setitem__("selection", None),
             "paths": lambda value: value["targets"]["linux-x86_64"].__setitem__("paths", None),
             "product files": lambda value: value["targets"]["linux-x86_64"].__setitem__(
-                "files", {"guide/rpc_gateway": value["targets"]["linux-x86_64"]["files"]["guide/rpc_gateway"]}),
-            **{f"gateway {key}": gateway_value(key) for key in ("archive_size", "archive_sha256", "size", "sha256")},
+                "files", {name: value["targets"]["linux-x86_64"]["files"][name]
+                          for name in (entry["gateway"], entry["guide_sdk"])}),
+            **{f"gateway {key}": pinned_value(entry["gateway"], key)
+               for key in ("archive_size", "archive_sha256", "size", "sha256")},
+            **{f"guide client {key}": pinned_value(entry["guide_sdk"], key) for key in ("size", "sha256")},
         }
         for label, reset in pending.items():
             with self.subTest(label):
@@ -876,6 +898,37 @@ class InputsTests(unittest.TestCase):
                 reset(value)
                 with self.assertRaises(forge.ProtocolError):
                     forge.validate_inputs(value)
+
+    def test_the_guide_runs_one_monorepo_meta_release(self):
+        """The Guide's gateway is its Meta release's rpc_gateway asset from the monorepo,
+        for the target's own triple, and its client that release's meerkat-meta wheel on
+        PyPI. Meta and Core are one release: one version and one release commit."""
+        standalone = ("https://github.com/lukacf/meerkat-meta/releases/download/v0.9.0/"
+                      "meta-rpc-gateway-0.9.0-x86_64-unknown-linux-gnu.tar.gz")
+        gateway = "guide gateway must be the Meta 0.9.0 rpc_gateway release asset for linux-x86_64"
+        for label, url in (("standalone repository", standalone), ("another release", guide_url(version="0.9.1")),
+                           ("another target", guide_url("macos-arm64"))):
+            with self.subTest(label):
+                self.refused(lambda entry, _, url=url: entry["files"]["guide/rpc_gateway"].__setitem__("url", url),
+                             gateway)
+        self.refused(lambda entry, _: entry["files"]["guide/rpc_gateway"].__setitem__("member", "meta_gateway"),
+                     gateway)
+        client = "guide_sdk must be the published meerkat-meta 0.9.0 wheel"
+        for label, url in (("another release", GUIDE_WHEEL_URL.replace("0.9.0", "0.9.1")),
+                           ("a release asset", f"https://github.com/lukacf/meerkat/releases/download/meta-v0.9.0/"
+                                               f"meerkat_meta-0.9.0-py3-none-any.whl")):
+            with self.subTest(label):
+                self.refused(lambda entry, _, url=url: entry["files"][GUIDE_WHEEL_NAME].__setitem__("url", url), client)
+        self.refused(lambda entry, _: entry.__setitem__("guide_sdk", "guide/rpc_gateway"), client)
+        self.refused(lambda entry, _: entry.__setitem__("guide_sdk", "guide/missing.whl"), "guide_sdk must be a pinned input")
+        self.refused(lambda entry, _: entry.pop("guide_sdk"), "fields")
+        self.refused(lambda entry, _: entry.__setitem__("guide_sdk", "product/meta.whl"), "outside the product root")
+        one_release = "Meta and Core must be one release"
+        self.refused(lambda _, value: value["guide"].__setitem__("core_version", "0.9.1"), one_release)
+        self.refused(lambda _, value: value["guide"].__setitem__("core_source", "d" * 40), one_release)
+        for target in forge.TARGETS:
+            with self.subTest(target=target):
+                forge.validate_inputs(inputs((target,)))
 
     def test_a_complete_target_is_valid(self):
         forge.validate_inputs(inputs(("linux-x86_64", "macos-arm64")))
@@ -1050,6 +1103,7 @@ class FetchTests(unittest.TestCase):
     def served(self):
         value = {URL + name.rsplit("/", 1)[1]: data for name, data in PRODUCT.items()}
         value[GATEWAY_URL] = ARCHIVE
+        value[GUIDE_WHEEL_URL] = GUIDE_WHEEL
         return value
 
     def test_inputs_land_pinned_with_private_modes(self):
@@ -1061,6 +1115,8 @@ class FetchTests(unittest.TestCase):
                 self.assertEqual((output / name).stat().st_mode & 0o777, 0o600)
             self.assertEqual((output / "guide/rpc_gateway").read_bytes(), GATEWAY)
             self.assertEqual((output / "guide/rpc_gateway").stat().st_mode & 0o777, 0o700)
+            self.assertEqual((output / GUIDE_WHEEL_NAME).read_bytes(), GUIDE_WHEEL)
+            self.assertEqual((output / GUIDE_WHEEL_NAME).stat().st_mode & 0o777, 0o600)
             self.assertFalse((directory / "inputs-downloads").exists())
 
     def test_the_ordinary_gateway_lands_pinned_and_executable(self):
@@ -2155,8 +2211,9 @@ def with_native_programs(entry):
 
 class NativeProgramInputTests(unittest.TestCase):
     def test_native_roles_are_explicit_separate_linux_inputs(self):
-        forge.validate_target("linux-x86_64", with_native_programs(target_inputs()))
-        for defect in ("mac", "unknown", "missing", "alias", "product", "guide", "empty"):
+        guide = inputs()["guide"]
+        forge.validate_target("linux-x86_64", with_native_programs(target_inputs()), guide)
+        for defect in ("mac", "unknown", "missing", "alias", "product", "guide", "guide client", "empty"):
             with self.subTest(defect=defect):
                 target = "macos-arm64" if defect == "mac" else "linux-x86_64"
                 entry = with_native_programs(target_inputs(target))
@@ -2169,10 +2226,12 @@ class NativeProgramInputTests(unittest.TestCase):
                     programs["provider"]["executable"] = programs["collection"]["executable"]
                 elif defect in {"guide", "product"}:
                     programs["collection"]["executable"] = "guide/rpc_gateway" if defect == "guide" else "product/catalog.json"
+                elif defect == "guide client":
+                    programs["collection"]["evidence"] = GUIDE_WHEEL_NAME
                 elif defect == "empty":
                     entry["native_programs"] = {}
                 with self.assertRaises(forge.ProtocolError):
-                    forge.validate_target(target, entry)
+                    forge.validate_target(target, entry, guide)
 
     def test_package_command_passes_exact_native_pins_to_owner_packager(self):
         from types import SimpleNamespace
@@ -2202,6 +2261,10 @@ class NativeProgramInputTests(unittest.TestCase):
                 for kind, name in pins.items():
                     self.assertEqual(passed[role][kind], artifact_type(root / name,
                         entry["files"][name]["size"], entry["files"][name]["sha256"]))
+            # The Guide's client is the release's pinned wheel among the fetched inputs.
+            client = entry["files"][entry["guide_sdk"]]
+            self.assertEqual(packager.call_args.kwargs["guide_wheel"],
+                             artifact_type(root / entry["guide_sdk"], client["size"], client["sha256"]))
 
     def test_fetch_preserves_native_bytes_and_separate_modes(self):
         value = inputs()

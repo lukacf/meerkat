@@ -30,6 +30,20 @@ sedi() {
 sedi "s/^version = \".*\"/version = \"$VERSION\"/" "$ROOT/sdk/python/pyproject.toml"
 echo "  Python SDK: $VERSION"
 
+# Meta Forge (installer/) runs the workspace's own Meta: its Guide selects this
+# version, and its development environment installs this commit's SDK of it.
+# The agent-team runtime (installer/launchkit/public_meta_runtime.py) pins a
+# published wheel's SHA-256, so it moves with Forge's release inputs once the
+# release is published, not here.
+if [ -f "$ROOT/installer/launchkit/guide_sdk.py" ]; then
+    sedi -E 's/^SELECTED_VERSION = "[^"]*"$/SELECTED_VERSION = "'"$VERSION"'"/' "$ROOT/installer/launchkit/guide_sdk.py"
+    echo "  Forge Guide Meta version: $VERSION"
+fi
+if [ -f "$ROOT/installer/pyproject.toml" ]; then
+    sedi -E 's/"meerkat-meta==[^"]*"/"meerkat-meta=='"$VERSION"'"/' "$ROOT/installer/pyproject.toml"
+    echo "  Forge development Meta SDK: $VERSION"
+fi
+
 # TypeScript SDK (if present)
 if [ -f "$ROOT/sdk/typescript/package.json" ]; then
     node -e "

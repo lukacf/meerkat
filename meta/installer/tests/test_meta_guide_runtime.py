@@ -51,29 +51,57 @@ def test_agent_builder_uses_original_gateway_and_model_binding(selected):
     assert len(builder.calls) == 1, "changed gateway bytes must be rejected before builder admission"
 
 
-@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
-def test_fresh_guide_refuses_an_auth_binding_the_selected_runtime_cannot_apply(selected, binding):
+BINDINGS = [{"realm": "global", "binding": "copilot_openai"},
+            {"realm": "fixture", "binding": "host", "profile": "work"}]
+INVALID_BINDINGS = ["fixture-host-route", {"realm": "fixture"}, {"binding": "host"},
+    {"realm": "fixture", "binding": ""}, {"realm": "fixture", "binding": "host", "origin": "configured"},
+    {"realm": "fixture", "binding": 7}, {"realm": "fixture", "binding": "host\x00"}, None]
+
+
+@pytest.mark.parametrize("binding", BINDINGS)
+def test_fresh_guide_applies_a_profile_auth_binding(selected, binding):
     route = {**selected.model_configuration, "auth_binding": binding}
-    with pytest.raises(bootstrap.GatewayInstallError, match="cannot apply an explicit auth binding"):
+    accepted = replace(selected, _model_route=route)
+    assert accepted.model_configuration == route
+    assert bootstrap.selected_guide_runtime() is selected
+
+
+@pytest.mark.parametrize("binding", INVALID_BINDINGS)
+def test_fresh_guide_refuses_an_invalid_auth_binding(selected, binding):
+    route = {**selected.model_configuration, "auth_binding": binding}
+    with pytest.raises(bootstrap.GatewayInstallError, match="original trusted model route"):
         replace(selected, _model_route=route)
     assert bootstrap.selected_guide_runtime() is selected
 
 
-@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
-def test_worker_restore_refuses_unsupported_auth_binding_before_admission(selected, monkeypatch, binding):
+@pytest.mark.parametrize("binding", BINDINGS)
+def test_worker_restore_keeps_the_auth_binding_and_refuses_an_invalid_one(selected, monkeypatch, binding):
+    route = {**selected.model_configuration, "auth_binding": binding}
+    monkeypatch.setattr(bootstrap, "_selected_guide_runtime", replace(selected, _model_route=route))
     control = bootstrap.export_selected_guide_context()
-    control["model_configuration"]["auth_binding"] = binding
+    assert control["model_configuration"]["auth_binding"] == binding
     monkeypatch.setattr(bootstrap, "_selected_guide_runtime", None)
-    with pytest.raises(bootstrap.GatewayInstallError, match="cannot apply an explicit auth binding"):
-        bootstrap.restore_selected_guide_context(control)
-    assert bootstrap.selected_guide_runtime() is None
+    assert bootstrap.restore_selected_guide_context(control).model_configuration == route
+    for invalid in INVALID_BINDINGS:
+        monkeypatch.setattr(bootstrap, "_selected_guide_runtime", None)
+        changed = json.loads(json.dumps(control))
+        changed["model_configuration"]["auth_binding"] = invalid
+        with pytest.raises(bootstrap.GatewayInstallError, match="original trusted model route"):
+            bootstrap.restore_selected_guide_context(changed)
+        assert bootstrap.selected_guide_runtime() is None
 
 
-@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
-def test_profile_authoring_refuses_unsupported_auth_binding_instead_of_emitting_ignored_toml(binding):
+@pytest.mark.parametrize("binding", BINDINGS)
+def test_profile_authoring_emits_the_auth_binding_as_profile_toml(binding):
+    import tomllib
     route = {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": binding}
-    with pytest.raises(RuntimeError, match="cannot apply an explicit auth binding"):
-        guide_runtime.model_profile_lines(route["provider"], route["model"], route)
+    lines = guide_runtime.model_profile_lines(route["provider"], route["model"], route)
+    assert lines[:2] == ['model = "gpt-6.1-sol"', 'provider = "openai"'] and len(lines) == 3
+    parsed = tomllib.loads("[profiles.guide]\n" + "\n".join(lines) + "\n")["profiles"]["guide"]
+    assert parsed == {"model": "gpt-6.1-sol", "provider": "openai", "auth_binding": binding}
+    for invalid in INVALID_BINDINGS:
+        with pytest.raises(RuntimeError, match="invalid auth binding"):
+            guide_runtime.model_profile_lines(route["provider"], route["model"], {**route, "auth_binding": invalid})
 
 
 def test_no_implicit_predecessor_runtime(monkeypatch):

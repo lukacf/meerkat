@@ -103,9 +103,9 @@ An agent team package contains the compiled agents, the native Console, the
 configured tools and permitted notes. Forge compiles it directly, without an
 application builder.
 
-The package installs the published Meta release it pins, not the runtime
-Forge selected for its own applications. In Forge 0.3.0 that is Meta 0.9.6:
-the `meerkat-meta` SDK from PyPI by its fixed SHA-256, and the official
+The package installs the published Meta release it pins: the Meta release of
+the Meerkat release Forge is built from, not a separately selected older one.
+That is the `meerkat-meta` SDK from PyPI by its fixed SHA-256, and the official
 `meta-rpc-gateway` and `meta-gateway` archives, each checked against the
 release's published checksums. A model that release does not list is refused
 before export or installation, and the message names models it does list.
@@ -144,13 +144,14 @@ does not.
 
 ## Runtimes
 
-Forge keeps three runtime selections apart:
+Forge is built from one Meerkat release, whose Meta, Core and Connect share a
+version and are released together, and it runs that release:
 
-| Runtime | Used for | Forge 0.3.0 |
+| Runtime | Used for | Release |
 | --- | --- | --- |
-| Guide runtime | Forge's own setup team | Meta 0.9.3 with Core 0.9.3 |
-| Application runtime | Custom applications built by this Forge package | Meta 0.9.7 and Toolkit 0.9.5 (Linux package); Meta 0.9.4 and Toolkit 0.9.4 (macOS package) |
-| Agent team runtime | Every agent team package | The published Meta 0.9.6 release |
+| Guide runtime | Forge's own setup team | That release's Meta and Core |
+| Application runtime | Custom applications built by this Forge package | That release's Meta and Toolkit |
+| Agent team runtime | Every agent team package | That release's published Meta |
 
 Toolkit is Connect's Python SDK. Applications without a connection setup
 helper use the Meta RPC gateway included in the package. Updating Forge does

@@ -22,16 +22,25 @@ if an earlier Console dependency installation used different permissions.
 The build graph check bundles the actual application, including the shared chat,
 and rejects browser dependencies resolved from a sibling installation.
 
-The Guide runs one exact selected Meta release, `SELECTED_VERSION` in
-`launchkit/guide_sdk.py`, with the Core release of the same version: the runtime
-admission, the product verifier and the client pin all require that value
-exactly. The Python project selects that release's published client,
-`meerkat-meta==0.9.3`, for the Guide, and packaged products carry the same
-wheel. Its hash-pinned bytes and provenance are in `vendor/guide/`. This pure
-Python client includes the public helper transport-wait option.
-This is separate from the repository's current Meta release version and from
-each application's selected runtime. Updating repository source does not upgrade
-an installed application, choose its gateway, or qualify a new SDK/native pair.
+The Guide runs this repository's own Meta release: `SELECTED_VERSION` in
+`launchkit/guide_sdk.py` is the workspace's Meta version, with Core of the same
+version (Meta, Core and Connect release together). The runtime admission and
+the product verifier require that version exactly.
+`scripts/bump-sdk-versions.sh` moves it with Meta's version, together with the
+Python project's `meerkat-meta` pin, and `scripts/verify-version-parity.sh`
+checks both.
+
+A source checkout runs the Guide on this commit's Meta. The development
+environment and the installer workflow install `sdk/python`, and a gateway the
+Guide runs is built from the same commit
+(`./scripts/repo-cargo build -p meerkat-meta --bin rpc_gateway --locked`). A
+packaged Forge carries the same release's published client wheel and
+`rpc_gateway`: `installer/release/forge-release-inputs.json` pins both by size
+and SHA-256 once that release is published, and packaging refuses a client of
+another release. Agent team packages install that published release too
+(`launchkit/public_meta_runtime.py` pins its wheel's SHA-256 and recorded model
+catalog). Updating repository source does not upgrade an installed
+application, choose its gateway, or qualify a new SDK/native pair.
 Tests for retained predecessor applications also require the historical
 `meerkat-mobkit==0.8.42` SDK. That is a test dependency, not a runtime fallback.
 
@@ -43,9 +52,12 @@ one does not already exist. Python 3.12 matches hosted CI:
 
 ```bash
 python3.12 -m venv installer/.venv
-installer/.venv/bin/python -m pip install --no-index --no-deps --require-hashes --find-links installer/vendor/guide -r installer/requirements-guide-sdk.txt
+installer/.venv/bin/python -m pip install ./sdk/python
 installer/.venv/bin/python -m pip install -e './installer[test]'
 ```
+
+Install `sdk/python` first, so the pinned `meerkat-meta` is this commit's SDK
+rather than a published wheel, and again after it changes.
 
 On Linux, protected acceptance execution also requires `bubblewrap`,
 `libseccomp2` and working user, PID, mount and network namespace isolation. The
@@ -103,8 +115,8 @@ The shards also rerun each file listed in
 Meta SDK rather than the Guide SDK: `$(cat shard-startup.txt)` holds a shard's
 share.
 
-Generated-host wiring checks use the installed Guide SDK, without a private
-source intake. Toolkit-specific doctor checks additionally require the selected
+Generated-host wiring checks use the installed Meta SDK, this commit's
+`sdk/python`, without a private source intake. Toolkit-specific doctor checks additionally require the selected
 product's genuine Toolkit wheel and skip explicitly when it is absent. Passing
 these checks establishes SDK wiring with inert runtime fixtures, not a live
 native application or compatibility of its persisted state.
@@ -122,7 +134,7 @@ byte-installation tests forbid SDK imports during installation/readback, while
 preserving genuine SDK modules already imported by the host. Do not replace the
 selected SDK with the current repository source merely to make these cases pass.
 
-The reviewed Guide SDK accepts the public `spawn_helper(transport_timeout=...)`
+The Meta SDK the Guide runs accepts the public `spawn_helper(transport_timeout=...)`
 option. Forge passes the time remaining in the existing total 180-second visual
 review window, including provisioning and retirement, rather than extending the
 native execution budget. Other calls keep the SDK's default 60-second wait. The
@@ -138,6 +150,10 @@ authorize another helper.
 `start.sh` requires a complete prepared product for Meta startup. A source
 checkout and a built frontend are insufficient. The product owner supplies the
 selected Guide gateway, SDKs, application runtime and private host configuration.
+The Guide's gateway and client wheel are the published artifacts of the
+workspace's Meta release (`product_distribution.package(..., guide_wheel=...)`
+takes the client wheel's pin); a development product can instead carry a
+gateway built from the same commit and a wheel built from its `sdk/python`.
 The host installs the Guide client wheel and Toolkit wheel; the application's
 separately selected Meta wheel stays in the product closure for its own managed
 environment. Native gateway versions and state directories keep their original

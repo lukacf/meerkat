@@ -25,13 +25,24 @@ def selected_model_configuration():
 
 
 def model_profile_lines(provider, model, configuration=None):
-    """Author supported model fields without implying native auth selection."""
+    """Author a profile's model fields and the selected route's auth binding.
+
+    The binding is Core's mob Profile.auth_binding: the realm binding the
+    profile's members resolve their credentials through. It names, never
+    carries, a credential.
+    """
     lines = [f'model = {json.dumps(model)}', f'provider = {json.dumps(provider)}']
     if configuration is not None:
-        if "auth_binding" in configuration:
-            raise RuntimeError("This guide runtime cannot apply an explicit auth binding.")
         if configuration["provider"] != provider or configuration["model"] != model:
             raise RuntimeError("The Forge agent model changed its selected host route.")
+        if "auth_binding" in configuration:
+            from .bootstrap import auth_binding_reference
+            binding = configuration["auth_binding"]
+            if not auth_binding_reference(binding):
+                raise RuntimeError("The Forge agent model route names an invalid auth binding.")
+            fields = ", ".join(f"{key} = {json.dumps(binding[key])}"
+                for key in ("realm", "binding", "profile") if key in binding)
+            lines.append(f"auth_binding = {{ {fields} }}")
     return lines
 
 

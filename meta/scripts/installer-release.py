@@ -40,11 +40,14 @@ checkout reads (ROOT) name paths under Meta's own directory.
 Inputs (installer/release/forge-release-inputs.json, schema 1): per target,
 every file the packager reads, each pinned by size and SHA-256 and taken
 from this checkout (installer/release/inputs/) or from an allowlisted public
-release or PyPI URL, plus the owner's product selection and the guide's
-pinned Meta and Core versions and sources. A target's optional
-ordinary_gateway names the pinned Meta rpc_gateway release asset of the
-selection's Meta version; the package then also builds applications without a
-connection setup helper.
+release or PyPI URL, plus the owner's product selection and the Guide's Meta
+release: its version, which Core shares, and its release commit. The Guide
+runs the workspace's own Meta release, so a target's gateway is that
+release's rpc_gateway asset from the monorepo and its guide_sdk is that
+release's meerkat-meta wheel on PyPI. A target's optional ordinary_gateway
+names the pinned Meta rpc_gateway release asset of the selection's Meta
+version; the package then also builds applications without a connection
+setup helper.
 
 Selections are strict JSON objects:
   forge-accepted-candidate: schema_version=1, kind, repository, run_id,
@@ -131,6 +134,7 @@ ALLOWED_URLS = (
     "https://github.com/lukacf/meerkat-connect/releases/download/",
     "https://files.pythonhosted.org/packages/",
 )
+PYPI_FILES = "https://files.pythonhosted.org/packages/"
 DOWNLOAD_ATTEMPTS = 3
 # A release reuses the green run of the installer workflow (backend and
 # frontend) that tested exactly the installer inputs at the release commit:
@@ -239,8 +243,8 @@ def validate_pin(pin, name):
     rc.digest(pin["sha256"], f"input {name} SHA-256")
 
 
-def validate_target(target, entry):
-    keys = "files gateway selection paths"
+def validate_target(target, entry, guide):
+    keys = "files gateway guide_sdk selection paths"
     rc.exact_keys(entry, keys + "".join(" " + key for key in ("ordinary_gateway", "native_programs")
         if isinstance(entry, dict) and key in entry),
         f"{target} inputs")
@@ -250,6 +254,8 @@ def validate_target(target, entry):
         safe_name(name, f"{target} input name")
         validate_pin(pin, name)
     require(entry["gateway"] in files, f"{target} guide gateway must be a pinned input")
+    require(isinstance(entry["guide_sdk"], str) and entry["guide_sdk"] in files,
+            f"{target} guide_sdk must be a pinned input")
     selection = entry["selection"]
     require(isinstance(selection, dict) and selection.get("format") == PRODUCT_SELECTION_FORMAT
             and selection.get("target") == target, f"{target} needs the owner's product selection for {target}")
@@ -273,6 +279,19 @@ def validate_target(target, entry):
     for name, artifact in zip(wheels, selected):
         bound(name, artifact, "dependency wheel")
     require(not entry["gateway"].startswith(root + "/"), f"{target} guide gateway must stay outside the product root")
+    require(not entry["guide_sdk"].startswith(root + "/"), f"{target} guide_sdk must stay outside the product root")
+    # The Guide runs the workspace's own Meta release: that release's
+    # rpc_gateway asset from the monorepo and its meerkat-meta wheel on PyPI,
+    # never a standalone repository's release or a vendored wheel.
+    version = guide["version"]
+    gateway, client = files[entry["gateway"]], files[entry["guide_sdk"]]
+    asset = f"meta-rpc-gateway-{version}-{GATEWAY_TRIPLES[target]}.tar.gz"
+    require("member" in gateway and gateway["url"] == meta_release_urls(version, asset)[0]
+            and gateway["member"] == "rpc_gateway",
+            f"{target} guide gateway must be the Meta {version} rpc_gateway release asset for {target}")
+    require("url" in client and "member" not in client and client["url"].startswith(PYPI_FILES)
+            and client["url"].endswith(f"/meerkat_meta-{version}-py3-none-any.whl"),
+            f"{target} guide_sdk must be the published meerkat-meta {version} wheel")
     if "ordinary_gateway" in entry:
         # The application's ordinary Meta RPC gateway: the release asset of the
         # selected Meta SDK's own version, never the guide's or a product file.
@@ -292,7 +311,7 @@ def validate_target(target, entry):
         require(target == "linux-x86_64" and isinstance(programs, dict) and bool(programs)
                 and programs.keys() <= {"collection", "provider"},
                 "supplemental native programs must name a Linux collection or provider")
-        used = {entry["gateway"], entry.get("ordinary_gateway")}
+        used = {entry["gateway"], entry["guide_sdk"], entry.get("ordinary_gateway")}
         for role, pins in programs.items():
             rc.exact_keys(pins, "executable evidence", f"{target} native {role}")
             for kind, name in pins.items():
@@ -319,10 +338,13 @@ def validate_inputs(value):
         require(isinstance(guide[key], str) and VERSION.fullmatch(guide[key]), f"invalid guide {key}")
     for key in ("meta_source", "core_source"):
         rc.digest(guide[key], f"guide {key}", 40)
+    # Meta and Core release together: one version from one release commit.
+    require(guide["core_version"] == guide["version"] and guide["core_source"] == guide["meta_source"],
+            "the guide's Meta and Core must be one release: the same version and release commit")
     targets = value["targets"]
     require(isinstance(targets, dict) and set(targets) <= set(TARGETS), "unknown Forge target")
     for target, entry in targets.items():
-        validate_target(target, entry)
+        validate_target(target, entry, guide)
     return value
 
 
@@ -834,6 +856,10 @@ def package(args):
     selected_guide = launchkit_module("bootstrap").SelectedGuideRuntime(
         gateway=gateway, version=guide["version"], core_version=guide["core_version"],
         meta_source=guide["meta_source"], core_source=guide["core_source"])
+    artifact_file = launchkit_module("runtime_candidates").ArtifactFile
+    client = entry["files"][entry["guide_sdk"]]
+    guide_wheel = artifact_file(root.joinpath(*PurePosixPath(entry["guide_sdk"]).parts),
+        client["size"], client["sha256"])
     ordinary = None
     if "ordinary_gateway" in entry:
         ordinary = launchkit_module("connect_installer_caller").ExactFile(
@@ -842,12 +868,11 @@ def package(args):
     require(args.output.name == package_name(forge_version(), args.target), "unexpected package name")
     options = {"ordinary_gateway": ordinary} if ordinary is not None else {}
     if "native_programs" in entry:
-        artifact_file = launchkit_module("runtime_candidates").ArtifactFile
         options["native_programs"] = {role: {kind: artifact_file(
             root.joinpath(*PurePosixPath(name).parts), entry["files"][name]["size"], entry["files"][name]["sha256"])
             for kind, name in pins.items()} for role, pins in entry["native_programs"].items()}
     result = launchkit_module("product_distribution").package(ROOT / "installer", target, selected_guide, args.output,
-        **options)
+        guide_wheel=guide_wheel, **options)
     require(result["native_target"] == args.target, "the package was built for another target")
     print(json.dumps(result, sort_keys=True))
 

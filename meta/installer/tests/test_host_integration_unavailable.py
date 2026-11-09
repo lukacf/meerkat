@@ -38,20 +38,24 @@ async def test_missing_optional_host_module_refuses_before_owner_invocation(monk
         assert isinstance(caught.value.__cause__, ModuleNotFoundError)
 
 
-def test_ordinary_guide_pin_does_not_select_a_borrowed_channel():
-    from launchkit import guide_sdk
+def test_the_guide_and_receiver_share_one_release_and_a_version_tuple_selects_no_channel():
+    from launchkit import guide_sdk, receiver_sdk
     from launchkit.guide_transport import SelectedGuideTransport
     from launchkit.protected_startup import SelectedProtectedRuntime
-    factory = Mock()
+    # Both run the workspace's own Meta release, with Core of the same version.
+    assert (receiver_sdk.SELECTED_VERSION, receiver_sdk.declared_core_version()) == (
+        guide_sdk.SELECTED_VERSION, guide_sdk.declared_core_version())
     fields = dict(version=guide_sdk.SELECTED_VERSION, core_version=guide_sdk.declared_core_version(),
         meta_source="a" * 40, core_source="b" * 40,
         _model_route={"provider": "openai", "model": "gpt-6.1-sol"})
-    assert guide_sdk.SELECTED_VERSION == "0.9.3"
+    # The tuple alone grants no transport: a receiver needs its launcher's
+    # original callable factory, and protected startup metadata has no gateway.
     with pytest.raises(GatewayInstallError):
-        SelectedGuideTransport(factory=factory, **fields)
-    with pytest.raises(GatewayInstallError):
-        SelectedProtectedRuntime(**fields)
-    factory.assert_not_called()
+        SelectedGuideTransport(factory=None, **fields)
+    protected = SelectedProtectedRuntime(**fields)
+    assert not any(hasattr(protected, name) for name in ("gateway", "factory"))
+    with pytest.raises(GatewayInstallError, match="per-role admission"):
+        protected.recheck(verify_gateway=True)
 
 
 def test_selected_receiver_refuses_an_sdk_without_the_public_transport_api():

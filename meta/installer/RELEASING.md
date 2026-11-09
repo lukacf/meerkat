@@ -37,7 +37,13 @@ packager reads, per target (`linux-x86_64`, `macos-arm64`):
   from the standalone repository name its job's root, `forge-inputs`.
 - `paths`: where each selected artifact sits among `files`, under
   `artifact_root`, in the form `launchkit.packaged_runtime.relocate_selection` reads.
-- `gateway`: the pinned guide gateway, outside the product root.
+- `gateway`: the pinned guide gateway, outside the product root: the
+  `rpc_gateway` member of the Guide's Meta release asset
+  `meta-rpc-gateway-<version>-<triple>.tar.gz` from the monorepo's
+  `meta-v<version>` release, for the target's own triple.
+- `guide_sdk`: the Guide's client, outside the product root: that release's
+  `meerkat_meta-<version>-py3-none-any.whl` on PyPI. The package carries it for
+  Forge's own environment; no Guide wheel is committed.
 - `ordinary_gateway` (optional): the pinned `rpc_gateway` member of the
   `meta-rpc-gateway-<version>-<triple>.tar.gz` Meta release asset whose version
   equals the selection's Meta version (released from the monorepo under
@@ -48,19 +54,27 @@ packager reads, per target (`linux-x86_64`, `macos-arm64`):
   then also builds applications without a connection setup helper. Pin the
   asset of a published Meta release; its SHA-256 is never written in source.
 
-`guide` holds the guide's Meta and Core versions and their source commits.
+`guide` holds the Guide's Meta release: its version, which Core shares, and its
+release commit, which Meta's `meta-v<version>` and Core's `v<version>` tags
+both name (`meta_source` and `core_source`). The Guide runs the workspace's own
+Meta release (`SELECTED_VERSION` in `launchkit/guide_sdk.py`), so packaging
+refuses inputs of another release. These pins exist only once that release is
+published: after a release, fill them from it together with the agent-team
+runtime (`launchkit/public_meta_runtime.py`: its wheel's SHA-256, its release
+fixture under `installer/tests/fixtures/` and its model catalog, recorded with
+`python -m launchkit.public_meta_runtime`).
 Inputs must be public, and they must not carry private paths, user names or
 host details. A target without pins is not built.
 
 `installer/release/inputs/forge-release-inputs.skeleton.json` holds the
-`linux-x86_64` inputs of the Guide's selected Meta release (`SELECTED_VERSION`
-in `launchkit/guide_sdk.py`), filled from that published release: the guide
-versions, the Meta and Core release commits, and the gateway's release URL,
-archive and member sizes and SHA-256 values. `null` marks what only the product
-owner supplies: its selection and paths, whose files are not listed yet. The
-release protocol never reads the skeleton, and the inputs schema refuses it
-until every value is filled. Add the owner's selection, its paths and their
-pinned files, then replace `forge-release-inputs.json` with it.
+`linux-x86_64` inputs of the Guide's Meta release, filled from that published
+release: the guide versions, the release commit, the gateway's release URL,
+archive and member sizes and SHA-256 values, and the client wheel's URL, size
+and SHA-256. `null` marks what only the product owner supplies: its selection
+and paths, whose files are not listed yet. The release protocol never reads the
+skeleton, and the inputs schema refuses it until every value is filled. Add the
+owner's selection, its paths and their pinned files, then replace
+`forge-release-inputs.json` with it.
 
 ## Forge CI evidence
 

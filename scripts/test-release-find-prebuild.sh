@@ -533,7 +533,7 @@ lookup_for exact-commit-first "${FIX_SHA}" "802 2" 0
 
 # An exact-commit prebuild still under way is preferred: the lookup waits for
 # it rather than take an earlier commit's ready one, and takes the earlier
-# one only once the exact one can no longer pass.
+# one only once the exact one can no longer succeed.
 reset
 listing "$(exact_url "${FIX_SHA}")" "$(run_json 804 in_progress "" "" "" "${FIX_SHA}")"
 listing "${others_url}" "$(run_json 805 completed "" "" "" "${BASE_SHA}")" "$(run_json 804 in_progress "" "" "" "${FIX_SHA}")"
@@ -547,7 +547,7 @@ listing "$(exact_url "${FIX_SHA}")" "$(run_json 806 in_progress "" "" "" "${FIX_
 listing "${others_url}" "$(run_json 807 completed "" "" "" "${BASE_SHA}")" "$(run_json 806 in_progress "" "" "" "${FIX_SHA}")"
 jobs 806 pending "" '"name": "Build Web SDK package", "conclusion": "failure"'
 usable 807
-lookup_for ancestor-once-exact-cannot-pass "${FIX_SHA}" "807 2" 0
+lookup_for ancestor-once-exact-cannot-succeed "${FIX_SHA}" "807 2" 0
 
 # An earlier commit's prebuild whose trailing lanes (or its full binary build
 # gate) already failed is never taken: its tag run would publish the critical

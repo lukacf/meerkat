@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
@@ -211,8 +211,9 @@ function attestation({ jobs: list = GREEN, failedLanes = [], planErrors = 0, res
   };
 }
 const fail = (name, conclusion = "failure") => GREEN.map((entry) => (entry.name === name ? { ...entry, conclusion } : entry));
-// The judged commit changed none of the evidence's inputs (see below).
-const verdict = (record, product) => acceptance(record, product, { changedPaths: ["crates/meerkat-core/src/lib.rs"] });
+// The judged commit changed none of the evidence's inputs (see below): its
+// changes as `git diff --name-status --no-renames` lists them.
+const verdict = (record, product) => acceptance(record, product, { changedPaths: ["M\tcrates/meerkat-core/src/lib.rs"] });
 const expectRule = (label, record, expected) => {
   for (const [product, accepted] of Object.entries(expected)) {
     const { accepted: actual, reasons } = verdict(record, product);
@@ -352,18 +353,58 @@ assert.match(
 // A run of commit R is judged by R's first parent's copy of this module (the
 // release gates read it with `git show`), as reused CI evidence is: R cannot
 // certify its own red run with an edited job-to-product table. The copy is
-// told what R changed against that parent and refuses when R changed what
-// decides the evidence (this module, the planner's row products, the
-// products file, ci.yml's gate), or when nobody told it.
+// told what R changed against that parent (`git diff --name-status
+// --no-renames`: a status and a path a line, a rename as a deletion and an
+// addition) and refuses when R changed what decides the evidence (this
+// module, the planner and every module it imports, the data they read, the
+// products file, ci.yml's gate), added, deleted or retyped a package manifest
+// (a package's location decides its product), or when nobody told it.
 {
   const red = attestation({ jobs: connectRed, failedLanes: ["Main unit tests"] });
   assert.deepEqual(
     [...EVIDENCE_INPUTS].sort(),
-    [".github/workflows/ci.yml", "ci/products.json", "scripts/ci-cargo-lanes.mjs", "scripts/ci-product-evidence.mjs", "scripts/ci-products.mjs"],
+    [
+      ".github/workflows/ci.yml",
+      "ci/products.json",
+      "scripts/ci-cargo-lanes.mjs",
+      "scripts/ci-hook-coverage.mjs",
+      "scripts/ci-non-rust-readers.json",
+      "scripts/ci-non-rust-readers.mjs",
+      "scripts/ci-product-evidence.mjs",
+      "scripts/ci-products.mjs",
+      "scripts/ci-release-evidence.mjs",
+      "scripts/release-projection-only.mjs",
+      "scripts/release-version-pins.mjs",
+      "scripts/rust-test-selector.mjs",
+    ],
     "the inputs that decide a run's product evidence",
   );
+  // Every module the planner imports, directly or through another, is one
+  // of them: ci-hook-coverage.mjs, for one, decides which packages each
+  // product's closure-tests rows select. The reader imports no file of the
+  // repository: the gates load the parent's copy alone, from a temporary
+  // directory, where a relative import would fail and leave every red run
+  // waiting for a green one.
+  const relativeImports = (file) =>
+    [...readFileSync(file, "utf8").matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*|^\s*import\s+)["'](\.{1,2}\/[^"']+)["']/gm)].map(
+      (match) => resolve(dirname(file), match[1]),
+    );
+  const seen = new Set();
+  const pending = [resolve(here, "ci-cargo-lanes.mjs")];
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    pending.push(...relativeImports(file));
+  }
+  const closure = [...seen].map((file) => relative(resolve(here, ".."), file)).sort();
+  assert.ok(closure.includes("scripts/ci-hook-coverage.mjs") && closure.length >= 5, `the planner's imports: ${closure.join(", ")}`);
+  for (const module of closure) {
+    assert.ok(EVIDENCE_INPUTS.includes(module), `the planner imports ${module}, which decides the evidence: an evidence input`);
+  }
+  assert.deepEqual(relativeImports(resolve(here, "ci-product-evidence.mjs")), [], "the reader imports no file of the repository");
   assert.equal(acceptance(red, "core", { changedPaths: [] }).accepted, true, "a commit that changed nothing the evidence reads");
-  assert.equal(acceptance(red, "meta", { changedPaths: ["meta/README.md"] }).accepted, true, "a commit that changed other files");
+  assert.equal(acceptance(red, "meta", { changedPaths: ["M\tmeta/README.md"] }).accepted, true, "a commit that changed other files");
   for (const options of [undefined, {}, { changedPaths: null }, { changedPaths: "scripts/x.mjs" }]) {
     const { accepted, reasons } = acceptance(red, "core", options);
     assert.equal(accepted, false, `unknown changes refuse (${JSON.stringify(options)})`);
@@ -371,9 +412,35 @@ assert.match(
   }
   for (const input of EVIDENCE_INPUTS) {
     for (const product of ["core", "meta"]) {
-      const { accepted, reasons } = acceptance(red, product, { changedPaths: ["crates/meerkat-core/src/lib.rs", input] });
+      const { accepted, reasons } = acceptance(red, product, { changedPaths: ["M\tcrates/meerkat-core/src/lib.rs", `M\t${input}`] });
       assert.equal(accepted, false, `a commit that changes ${input} refuses ${product}`);
       assert.match(reasons.join(" "), new RegExp(`changes ${input.replaceAll(".", "\\.")}`));
+    }
+  }
+  // A release bump modifies manifests and the lock: no package moved.
+  assert.equal(
+    acceptance(red, "core", { changedPaths: ["M\tCargo.toml", "M\tCargo.lock", "M\tmeta/crates/meerkat-meta/Cargo.toml"] }).accepted,
+    true,
+    "a commit that modifies package manifests",
+  );
+  for (const [label, lines, reason] of [
+    ["an input renamed away", ["D\tci/products.json", "A\tci/products-renamed.json"], /changes ci\/products\.json/],
+    ["an input renamed in", ["D\tscripts/ci-old-planner.mjs", "A\tscripts/ci-cargo-lanes.mjs"], /changes scripts\/ci-cargo-lanes\.mjs/],
+    [
+      "a Core package moved under a product's root",
+      ["D\tcrates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/src/lib.rs"],
+      /deletes the package manifest crates\/meerkat-moved\/Cargo\.toml/,
+    ],
+    ["a package added", ["A\tconnect/crates/meerkat-new/Cargo.toml"], /adds the package manifest connect\/crates\/meerkat-new\/Cargo\.toml/],
+    ["a manifest retyped", ["T\tcrates/meerkat-core/Cargo.toml"], /package manifest crates\/meerkat-core\/Cargo\.toml/],
+    ["a bare path", ["crates/meerkat-core/src/lib.rs"], /no status and path the reader can read/],
+    ["a quoted path", ['M\t"crates/caf\\303\\251.rs"'], /no status and path the reader can read/],
+    ["a rename with its score", ["R100\tci/products.json\tci/products-renamed.json"], /no status and path the reader can read/],
+  ]) {
+    for (const product of ["core", "meta"]) {
+      const { accepted, reasons } = acceptance(red, product, { changedPaths: lines });
+      assert.equal(accepted, false, `${label} refuses ${product}`);
+      assert.match(reasons.join(" "), reason, `${label}: ${reasons.join("; ")}`);
     }
   }
 }

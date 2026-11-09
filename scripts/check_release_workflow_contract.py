@@ -1413,8 +1413,9 @@ class _LookupScenario:
     # job writes under RUNNER_TEMP ("real": this tree's reader; "refusing": a
     # copy whose rule refuses every run; None: the parent has no reader).
     parent_reader: str | None = "real"
-    # The paths the release commit changes against that parent, written next
-    # to it; None when the job could not list them.
+    # The release commit's changes against that parent, written next to it
+    # as `git diff --name-status --no-renames` lines (a bare path is a
+    # modified one); None when the job could not list them.
     changed: tuple[str, ...] | None = ()
 
 
@@ -1584,6 +1585,14 @@ def _lookup_scenarios() -> list[_LookupScenario]:
             changed=None,
         ),
         _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit that moves a Core "
+            "package under Meta's root",
+            ((_ci_run(43, "main", **failed),),),
+            None,
+            attestations=((43, 1, _scoped_attestation(connect_red)),),
+            changed=("D\tcrates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/Cargo.toml"),
+        ),
+        _LookupScenario(
             "a failed push run on main whose attestation says every lane succeeded",
             ((_ci_run(42, "main", **failed),),),
             None,
@@ -1696,8 +1705,12 @@ def _run_github_script(step: Step, scenarios: list[dict]) -> list[dict]:
                     encoding="utf-8",
                 )
             if scenario.get("changed", ()) is not None:
+                # As the parent-reader step lists them: `git diff
+                # --name-status --no-renames`, a status and a path a line (a
+                # bare path here is a modified one).
                 Path(parent, PARENT_EVIDENCE_CHANGES).write_text(
-                    "".join(f"{path}\n" for path in scenario.get("changed", ())), encoding="utf-8"
+                    "".join(f"{path}\n" if "\t" in path else f"M\t{path}\n" for path in scenario.get("changed", ())),
+                    encoding="utf-8",
                 )
             artifacts = []
             for number, (run_id, attempt, record) in enumerate(scenario.get("attestations", ()), start=1):
@@ -1839,8 +1852,9 @@ def _parent_reader_history(root: Path) -> dict[str, str]:
     has it; returns each commit by name. `base` has no reader and
     `no-reader` is its child; `parent` adds the reader to `base`; `linear`
     is a child of `parent` that edits the reader, the planner and a Core
-    file; `side`, another child of `parent`, edits the reader and the
-    planner, and `merge` merges it into `parent` (first parent `parent`)."""
+    file; `rename`, another child, renames ci/products.json; `side`, another
+    child, edits the reader and the planner, and `merge` merges it into
+    `parent` (first parent `parent`)."""
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(root), **_SCRATCH_GIT_ENV}
     commits: dict[str, str] = {}
 
@@ -1849,7 +1863,9 @@ def _parent_reader_history(root: Path) -> dict[str, str]:
             ["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env, check=True, capture_output=True, text=True
         ).stdout.strip()
 
-    def commit(name: str, files: dict[str, str]) -> None:
+    def commit(name: str, files: dict[str, str], removed: tuple[str, ...] = ()) -> None:
+        for path in removed:
+            Path(root, path).unlink()
         for path, text in files.items():
             Path(root, path).parent.mkdir(parents=True, exist_ok=True)
             Path(root, path).write_text(text, encoding="utf-8")
@@ -1873,6 +1889,8 @@ def _parent_reader_history(root: Path) -> dict[str, str]:
             "crates/core/src/lib.rs": "pub fn h() {}\n",
         },
     )
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("rename", {"ci/products-moved.json": "{}\n"}, removed=("ci/products.json",))
     git("checkout", "-q", "--detach", commits["parent"])
     commit(
         "side",
@@ -1929,9 +1947,10 @@ def _check_parent_reader_step(ci_block: list[str]) -> list[str]:
     commit's FIRST PARENT's copy of scripts/ci-product-evidence.mjs (never
     the commit's own copy, which it could edit, nor a merge's second
     parent's) and list every path the commit changes against that parent,
-    the inputs that decide the evidence included, so the copy can refuse a
-    commit that changes them; for a commit whose parent has no reader it
-    writes no judge, which leaves only a green run counting.
+    a renamed path under both its names, the inputs that decide the evidence
+    included, so the copy can refuse a commit that changes them; for a
+    commit whose parent has no reader it writes no judge, which leaves only
+    a green run counting.
     """
     steps = [step for step in job_steps(ci_block) if step.name == PARENT_READER_STEP]
     if len(steps) != 1:
@@ -1954,6 +1973,9 @@ def _check_parent_reader_step(ci_block: list[str]) -> list[str]:
             "first parent's",
             {PRODUCT_EVIDENCE_READER, "scripts/ci-cargo-lanes.mjs"},
         ),
+        # A rename lists both names: the reader refuses a commit that
+        # renames an input away as well as one that renames a file into it.
+        ("a release commit that renames ci/products.json", "rename", "first parent's", {"ci/products.json", "ci/products-moved.json"}),
         ("a release commit whose first parent has no reader", "no-reader", None, None),
     )
     with tempfile.TemporaryDirectory(prefix="release-parent-reader-") as scratch:

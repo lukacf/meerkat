@@ -4202,7 +4202,7 @@ for (const path of [
     };
     const judged = (evidence) =>
       acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core", {
-        changedPaths: ["crates/meerkat/src/session_runtime/live_orchestration.rs", "crates/meerkat-rpc/src/session_runtime.rs"],
+        changedPaths: ["M\tcrates/meerkat/src/session_runtime/live_orchestration.rs", "M\tcrates/meerkat-rpc/src/session_runtime.rs"],
       });
     assert.ok(
       Object.entries(probe.row_products).some(([lane, rows]) => rows.some((row) => metaOwn(lane, row) && lane !== "closure_check")),

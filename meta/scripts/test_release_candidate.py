@@ -273,9 +273,10 @@ class CandidateProtocolTests(unittest.TestCase):
         self.unreadable = set()
         self.toolchain = TOOLCHAIN
         # The release commit's first parent holds the CI evidence reader, and
-        # the commit changes these paths against it.
+        # the commit changes these paths against it (`git diff --name-status
+        # --no-renames` lines).
         self.parent_reader = True
-        self.changed_paths = ("meta/crates/meerkat-meta/src/lib.rs",)
+        self.changed_paths = ("M\tmeta/crates/meerkat-meta/src/lib.rs",)
         # Root build inputs whose id differs from the default, by "REV:PATH".
         self.root_inputs = {}
         for name, effect in (("index_entries", self.index_response),
@@ -334,7 +335,7 @@ class CandidateProtocolTests(unittest.TestCase):
                 raise helper.ProtocolError("git show failed: fatal: path 'scripts/ci-product-evidence.mjs' "
                                            f"does not exist in '{PARENT_SHA}'")
             return EVIDENCE_READER.read_text().strip()
-        if args == ("diff", "--name-only", PARENT_SHA, SHA):
+        if args == ("diff", "--name-status", "--no-renames", PARENT_SHA, SHA):
             return "\n".join(self.changed_paths)
         if args[:3] == ("rev-parse", "--verify", "--quiet"):
             # A root build input's id: the same at every revision unless a
@@ -1409,11 +1410,19 @@ class CandidateProtocolTests(unittest.TestCase):
                 ("the parent has no reader", connect, lambda: setattr(self, "parent_reader", False),
                  "ci-product-evidence.mjs"),
                 ("the commit changes the reader", connect,
-                 lambda: setattr(self, "changed_paths", ("scripts/ci-product-evidence.mjs",)),
+                 lambda: setattr(self, "changed_paths", ("M\tscripts/ci-product-evidence.mjs",)),
                  "changes scripts/ci-product-evidence.mjs"),
+                # Both names of a rename count: renaming an input away too.
+                ("the commit renames the products file", connect,
+                 lambda: setattr(self, "changed_paths", ("D\tci/products.json", "A\tci/products-renamed.json")),
+                 "changes ci/products.json"),
+                ("the commit moves a Core package under Meta's root", connect,
+                 lambda: setattr(self, "changed_paths", ("D\tcrates/meerkat-moved/Cargo.toml",
+                                                         "A\tmeta/crates/meerkat-moved/Cargo.toml")),
+                 "deletes the package manifest crates/meerkat-moved/Cargo.toml"),
                 ("the attestation names another commit", connect, None, "attestation")):
             with self.subTest(case=case):
-                self.parent_reader, self.changed_paths = True, ("meta/crates/meerkat-meta/src/lib.rs",)
+                self.parent_reader, self.changed_paths = True, ("M\tmeta/crates/meerkat-meta/src/lib.rs",)
                 if setup:
                     setup()
                 overrides = {"commit_sha": OTHER_SHA} if case == "the attestation names another commit" else {}

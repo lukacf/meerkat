@@ -2376,7 +2376,10 @@ def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None,
                     'export * from "./ci-product-evidence-real.mjs";\n'
                     'export function acceptance() { return { accepted: false, reasons: ["this copy refuses"] }; }\n')
         if changed is not None:
-            (parent / "changed-paths.txt").write_text("".join(f"{path}\n" for path in changed))
+            # As the parent-reader step lists them (`git diff --name-status
+            # --no-renames`): a bare path here is a modified one.
+            (parent / "changed-paths.txt").write_text(
+                "".join(f"{path}\n" if "\t" in path else f"M\t{path}\n" for path in changed))
         subprocess.run(["node", str(tmp / "harness.js"), str(tmp / "gate.js"), str(tmp / "scenario.json"),
                         str(tmp / "result.json")], check=True, capture_output=True, text=True, cwd=tmp)
         return json.loads((tmp / "result.json").read_text())
@@ -2398,8 +2401,9 @@ def parent_reader_history(root):
     """A scratch history for the parent-reader step, by commit name: `base`
     has no reader and `no-reader` is its child; `parent` adds the reader to
     `base`; `linear`, a child of `parent`, edits the reader, the planner and
-    a Core file; `side`, another child, edits the reader and the planner, and
-    `merge` merges it into `parent` (first parent `parent`)."""
+    a Core file; `rename`, another child, renames ci/products.json; `side`,
+    another child, edits the reader and the planner, and `merge` merges it
+    into `parent` (first parent `parent`)."""
     reader = "scripts/ci-product-evidence.mjs"
     env = {"PATH": os.environ["PATH"], "HOME": str(root), **SCRATCH_GIT_ENV}
     commits = {}
@@ -2408,7 +2412,9 @@ def parent_reader_history(root):
         return subprocess.run(["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env, check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def commit(name, files):
+    def commit(name, files, removed=()):
+        for path in removed:
+            (root / path).unlink()
         for path, text in files.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
             (root / path).write_text(text)
@@ -2424,6 +2430,8 @@ def parent_reader_history(root):
     commit("parent", {reader: PARENT_READER_COPIES["first parent's"]})
     commit("linear", {reader: PARENT_READER_COPIES["release commit's own"], "scripts/ci-cargo-lanes.mjs": "// 2\n",
                       "crates/core/src/lib.rs": "pub fn h() {}\n"})
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("rename", {"ci/products-moved.json": "{}\n"}, removed=("ci/products.json",))
     git("checkout", "-q", "--detach", commits["parent"])
     commit("side", {reader: PARENT_READER_COPIES["second parent's"], "scripts/ci-cargo-lanes.mjs": "// 3\n"})
     git("checkout", "-q", "--detach", commits["parent"])
@@ -2622,7 +2630,10 @@ class MetaCiGateTests(unittest.TestCase):
                 ("the commit changes the reader",
                  {"changed": ("crates/meerkat-core/src/lib.rs", "scripts/ci-product-evidence.mjs")}),
                 ("the commit changes the planner", {"changed": ("scripts/ci-cargo-lanes.mjs",)}),
+                ("the commit changes a module the planner imports", {"changed": ("scripts/ci-hook-coverage.mjs",)}),
                 ("the commit changes ci.yml", {"changed": (".github/workflows/ci.yml",)}),
+                ("the commit moves a Core package under Meta's root",
+                 {"changed": ("D\tcrates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/Cargo.toml")}),
                 ("the commit's changes are unknown", {"changed": None})):
             with self.subTest(case=case):
                 result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True, **options)
@@ -2638,9 +2649,9 @@ class MetaCiGateTests(unittest.TestCase):
         writes the release commit's FIRST PARENT's copy of the reader (never
         the commit's own, which it could edit, nor a merge's second
         parent's) and lists every path the commit changes against that
-        parent, the inputs that decide the evidence included; for a commit
-        whose parent has no reader it writes no judge, so only a green run
-        counts."""
+        parent, a renamed path under both its names, the inputs that decide
+        the evidence included; for a commit whose parent has no reader it
+        writes no judge, so only a green run counts."""
         with fixture_directory() as tmp:
             checkout = tmp / "checkout"
             checkout.mkdir()
@@ -2649,6 +2660,7 @@ class MetaCiGateTests(unittest.TestCase):
             for name, judge, changed in (
                     ("linear", "first parent's", {reader, "scripts/ci-cargo-lanes.mjs", "crates/core/src/lib.rs"}),
                     ("merge", "first parent's", {reader, "scripts/ci-cargo-lanes.mjs"}),
+                    ("rename", "first parent's", {"ci/products.json", "ci/products-moved.json"}),
                     ("no-reader", None, None)):
                 with self.subTest(commit=name):
                     result, written, listed = run_parent_reader_step(checkout, commits[name], tmp / f"runner-{name}")

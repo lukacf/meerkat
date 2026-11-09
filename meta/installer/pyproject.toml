@@ -31,3 +31,7 @@ launchkit = ["*.json", "visualization_references/*", "templates/**/*", "template
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# Source checkouts get the command line as a console script; packages run ./meta-forge.
+[project.scripts]
+meta-forge = "launchkit.cli:main"

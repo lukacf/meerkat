@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Meta Forge's command line: ./meta-forge --help
+# It runs with this folder's private Python environment, preparing it first
+# with start.sh when needed, and keeps the caller's working directory.
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if [ ! -x "$root/.venv/bin/python" ]; then
+  echo "Preparing Forge's Python environment first (bash start.sh --prepare-only)..." >&2
+  (
+    # Preparation needs no provider credentials; none reach it.
+    while IFS= read -r name; do
+      case "$name" in
+        *_API_KEY|COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN) unset "$name" ;;
+      esac
+    done < <(compgen -e)
+    exec bash "$root/start.sh" --prepare-only
+  ) 1>&2
+fi
+# -P: never import from the caller's working directory.
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+exec "$root/.venv/bin/python" -B -P -m launchkit.cli "$@"

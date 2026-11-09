@@ -352,7 +352,7 @@ def package(root, target, guide, output, *, ordinary_gateway=None, native_progra
             file_records[name] = {"sha256": hashed, "bytes": size}
             modes[name] = dom_files.get(name, 0o700 if name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY}
                 or any(name == _native_paths(role)["executable"] for role in NATIVE_PROGRAMS) else
-                0o755 if name == "start.sh" else 0o600 if name.startswith(("vendor/product/", "vendor/native/")) else 0o644)
+                0o755 if name in legacy.EXECUTABLE else 0o600 if name.startswith(("vendor/product/", "vendor/native/")) else 0o644)
             total += size
         if len(source_files) > MAX_FILES or total > MAX_TOTAL:
             raise legacy.DistributionError("The product distribution exceeds its bounds.")

@@ -7542,12 +7542,21 @@ async fn a_distillation_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_
     holder.await.expect("the budget holder's run");
 }
 
+/// The mob the runtime of a busy-budget row keeps its records under.
+const BUSY_BUDGET_MOB: &str = "busy-budget";
+
 /// A live identity, alice, whose memory has a distiller that reads one
 /// compaction discard for every session and no transcript, with the
 /// projection prepared over it and the realm's background budget held by
 /// another run for the whole row.
 struct BusyBudgetRow {
     runtime: Arc<IdentityRuntime>,
+    /// The runtime's Core.
+    core: Arc<SeatCore>,
+    /// The metadata store the runtime keeps its records in, under
+    /// [`BUSY_BUDGET_MOB`]: a successor over it and the same Core starts
+    /// where the runtime stopped.
+    records: Arc<dyn crate::runtime::PersistentMetadataStore>,
     /// Alice's session, which her reset retires.
     session: SessionId,
     discards: Arc<OneDiscardEach>,
@@ -7564,7 +7573,10 @@ async fn alice_with_a_busy_budget() -> BusyBudgetRow {
     let session = SessionId::new();
     let core = Arc::new(SeatCore::default());
     core.core.keep_journal();
+    let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
     let runtime = runtime_over(None, &core);
+    runtime.set_identity_records(Arc::clone(&records), BUSY_BUDGET_MOB.to_string());
     let customizer = ToldSeats::answering();
     runtime
         .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
@@ -7587,6 +7599,8 @@ async fn alice_with_a_busy_budget() -> BusyBudgetRow {
         .expect("the budget admits the holder");
     BusyBudgetRow {
         runtime,
+        core,
+        records,
         session,
         discards,
         errors,
@@ -7660,8 +7674,9 @@ async fn a_budget_wait_holds_another_identity_s_after_create_only_briefly() {
 
 /// A shutdown while a retirement's harvest waits for a busy budget ends the
 /// wait at once: the projection stops well within its share of the
-/// shutdown, and nothing is recorded or reported for the harvest, which its
-/// page still owes at the next start.
+/// shutdown, nothing is recorded or reported for the harvest, and its page
+/// still owes it: a successor over the same Core and metadata store runs the
+/// harvest again, which reads the session's discards again.
 ///
 /// RED before the wait watched the projection's stop: the shutdown waited
 /// out its whole share for the wait, and then aborted the projection.
@@ -7707,6 +7722,30 @@ async fn a_shutdown_ends_a_budget_wait_at_once_and_records_nothing() {
         reported.is_empty(),
         "nothing is reported for the stopped wait: {reported:?}"
     );
+
+    // The next start: a successor over the same Core and metadata store,
+    // whose budget is free, owes the stopped page and runs the harvest.
+    let read_before = row.discards.reads_of(&row.session);
+    let successor = runtime_over(None, &row.core);
+    successor.set_identity_records(Arc::clone(&row.records), BUSY_BUDGET_MOB.to_string());
+    let successor_memory_dir = tempfile::tempdir().expect("memory dir");
+    let (successor_memory, _) = memory_harvesting(
+        successor_memory_dir.path(),
+        &Arc::new(ReadSessions::default()),
+        &row.discards,
+        &Arc::new(GatedModel::new()),
+    );
+    successor.set_agent_memory(Some(successor_memory)).await;
+    successor.bind_lifecycle_projection(None);
+    successor.settle_lifecycle_projection().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while row.discards.reads_of(&row.session) == read_before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the successor never ran the harvest the stopped page owed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// The retirement hook of an incarnation a Meta step ended is called only

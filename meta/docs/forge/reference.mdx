@@ -268,9 +268,10 @@ installation form in the browser.
 
 `setup send --attach` and `--text-file`, the chat's `/attach` and
 `plan validate` never read Forge's private files (its state folder,
-`provider-settings.json`, an installation's `.env` and `.mobkit` folder) or
+`provider-settings.json`, an installation's `.env` and `.mobkit` folder),
 Meerkat's configuration folders that hold its credential store and user
-configuration (`~/.config/meerkat` and `~/.rkat`), also through a link. An
+configuration (`~/.config/meerkat` and `~/.rkat`) or anything under `/proc`,
+where process environments are, also through a link. An
 argument error names the option and never repeats the value given, in case a
 secret was typed in its place.
 

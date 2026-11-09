@@ -224,11 +224,12 @@ def option_ids(question, values):
 
 
 def private_roots(context):
-    """Folders this command never reads from: Forge's state folder, and Meerkat's configuration folders,
-    which hold its credential store (<config>/meerkat/credentials) and its user configuration (~/.rkat)."""
+    """Folders this command never reads from: Forge's state folder; Meerkat's configuration folders, which hold
+    its credential store (<config>/meerkat/credentials) and its user configuration (~/.rkat); and /proc, where
+    the environment of this command and of every other process of the same user can be read."""
     home = Path(context.environ.get("HOME") or Path.home())
     roots = [state_directory(context), home / ".rkat", home / ".config" / "meerkat",
-             home / "Library" / "Application Support" / "meerkat"]
+             home / "Library" / "Application Support" / "meerkat", Path("/proc")]
     configured = context.environ.get("XDG_CONFIG_HOME")
     if configured and os.path.isabs(configured):
         roots.append(Path(configured) / "meerkat")
@@ -267,8 +268,9 @@ def named_file(context, value, option):
         except (OSError, RuntimeError):
             pass
     if private_path(given, roots) or private_path(resolved, roots):
-        raise CliError("invalid_request", f"A file given to {option} is one of Forge's private files or in "
-                       "Meerkat's credential store; this command never reads it.",
+        raise CliError("invalid_request", f"A file given to {option} is one of Forge's private files, in "
+                       "Meerkat's credential store or under /proc, where process environments are; this command "
+                       "never reads it.",
                        next=[step(help_command, "See which files this command reads.")])
     return given, resolved
 

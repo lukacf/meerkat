@@ -1423,6 +1423,7 @@ mod tests {
     /// failed one reads failed. The cause is left off the wire while it is
     /// `failed`.
     #[test]
+    #[allow(clippy::expect_used)]
     fn a_lifecycle_effect_the_budget_kept_from_running_reads_did_not_run() {
         let event = |attempts: u32, cause: crate::runtime::LifecycleEffectFailureCause| {
             ErrorEvent::LifecycleEffectFailed {

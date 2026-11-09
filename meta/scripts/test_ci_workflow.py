@@ -1319,7 +1319,7 @@ class InstallerWorkflowTests(unittest.TestCase):
         spec.loader.exec_module(release)
         workflow = load(INSTALLER_WORKFLOW)
         self.assertLessEqual(set(release.EVIDENCE_JOBS), set(workflow["jobs"]))
-        self.assertEqual(workflow["jobs"]["backend"]["needs"], ["backend-shard", "agent-team-live"])
+        self.assertEqual(workflow["jobs"]["backend"]["needs"], ["backend-shard", "agent-team-live", "cli-team-live"])
         source = INSTALLER_WORKFLOW.read_text()
         self.assertEqual(source.count("name: installer-toolchain-${{ github.job }}-"), 3)
         self.assertEqual(release.INSTALLER_CI, ".github/workflows/meta-installer.yml")

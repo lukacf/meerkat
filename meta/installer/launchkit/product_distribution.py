@@ -146,6 +146,8 @@ Follow the printed local address. Keep the terminal open while using Forge.
 Press Ctrl+C to stop it. Your conversation and installed applications use their
 own retained state; keep their folders when returning or restarting.
 
+To work from a terminal instead, over SSH too, run `./meta-forge --help` here.
+
 For dependency and artifact preparation without starting Forge or native agents:
 
 ```sh

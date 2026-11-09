@@ -1,4 +1,4 @@
-"""A product package carries meta-forge executable, as it carries start.sh.
+"""A product package carries meta-forge executable, as it carries start.sh, and its README names it.
 
 Inert product inputs only: no SDK, gateway, server or native process runs.
 """
@@ -23,3 +23,5 @@ def test_the_product_package_restores_the_launcher_mode(product, bundle_source, 
     assert data["file_modes"]["README.md"] == 0o644
     assert stat.S_IMODE(launcher.stat().st_mode) == 0o755
     assert launcher.read_bytes() == LAUNCHER.read_bytes()
+    # The package's generated README names it.
+    assert "run `./meta-forge --help` here." in (extracted / "README.md").read_text()

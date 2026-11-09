@@ -2319,6 +2319,42 @@ jobs:
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
+      # The hosted runner has shut down in the middle of the wasm32 compile, after
+      # minutes without output, the way a runner short of memory or disk does.
+      # No step here uses these preinstalled toolchains. 12 GiB of swap goes on /mnt
+      # when that is a separate disk with 20 GiB free, else on /; vmstat logs every
+      # 30 seconds, and the step after the build prints it.
+      - name: Make room for the wasm build
+        shell: bash
+        run: |
+          set -euo pipefail
+          show_resources() {
+            free -h
+            if [[ -d /mnt ]]; then
+              df -h / /mnt
+            else
+              df -h /
+            fi
+            swapon --show || true
+          }
+          show_resources
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          swapfile=/web-sdk-swapfile
+          if mountpoint -q /mnt; then
+            mnt_avail_kib="$(df --output=avail -k /mnt | tail -n 1 | tr -d ' ')"
+            if ((mnt_avail_kib >= 20 * 1024 * 1024)); then
+              swapfile=/mnt/web-sdk-swapfile
+            fi
+          fi
+          echo "Adding 12 GiB of swap at ${swapfile}"
+          sudo fallocate -l 12GiB "${swapfile}"
+          sudo chmod 600 "${swapfile}"
+          sudo mkswap "${swapfile}"
+          sudo swapon "${swapfile}"
+          vmstat -t 30 >"${RUNNER_TEMP}/web-sdk-vmstat.log" 2>&1 </dev/null &
+          show_resources
+
       # No RUSTFLAGS here: sdks/web/scripts/build-wasm.mjs owns the wasm
       # flags (the getrandom cfg and the 8 MiB stack). An ambient RUSTFLAGS
       # made Cargo ignore them and shipped a 1 MiB stack from 0.8.30 through
@@ -2357,6 +2393,25 @@ jobs:
           fi
           echo "Web SDK wasm build: CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} RUSTC_WRAPPER=${RUSTC_WRAPPER:-none}"
           scripts/release-build-web-sdk-package.sh "${GITHUB_WORKSPACE}/web-sdk-package"
+
+      # Memory, disk and swap after the build, and the last 20 minutes of the
+      # vmstat log, also when the build failed.
+      - name: Show resources after the wasm build
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          free -h
+          if [[ -d /mnt ]]; then
+            df -h / /mnt
+          else
+            df -h /
+          fi
+          swapon --show || true
+          vmstat_log="${RUNNER_TEMP}/web-sdk-vmstat.log"
+          if [[ -f "${vmstat_log}" ]]; then
+            tail -n 40 "${vmstat_log}"
+          fi
 
       # Binds the artifact to its source. publish_web_sdk refuses a package
       # whose stamp does not name both its own checkout and Require green

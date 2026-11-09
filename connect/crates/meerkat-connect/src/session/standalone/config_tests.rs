@@ -340,7 +340,9 @@ async fn continuation_store_scenario(selected_store: bool) {
             profile:None,origin:meerkat_core::BindingOrigin::Configured });
         if let Some(root)=&provider_store_root {
             let persistence=meerkat_auth_core::auth_store::TokenStoreBackend::File { root:root.clone() }.open_with_refresh_authority().unwrap();
-            persistence.token_store().save(&meerkat_core::AdmissionGuard::none(),&key,&meerkat_core::auth::token_store::PersistedTokens::api_key("fixture-store-marker")).await.unwrap();
+            let fence=meerkat_core::AdmissionGuard::try_acquire(vec![meerkat_core::AdmissionFence::credentials(root,key.realm()).unwrap()]).unwrap();
+            persistence.token_store().save(&fence,&key,&meerkat_core::auth::token_store::PersistedTokens::api_key("fixture-store-marker")).await.unwrap();
+            drop(fence);
         }
         let continuation = StandaloneContinuation { provider_store_root:provider_store_root.clone(), storage:storage.clone(), session_id:history.id().clone(), server:server.clone() };
         let owner_before = std::fs::read(&owner_path).unwrap();

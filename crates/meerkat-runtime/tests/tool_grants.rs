@@ -22,11 +22,11 @@ use meerkat_core::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
 };
 use meerkat_core::approval::decision::{
-    ApproverId, AttestedDecision, AttributedReview, DecisionHoldRequest, DecisionId,
+    ApproverId, AttestedDecision, DecisionContractError, DecisionHoldRequest, DecisionId,
     DecisionIngress, DecisionKind, DecisionOperationId, DecisionPhase, DecisionPrincipalKey,
     DecisionReference, DecisionRenderer, DecisionRendering, DecisionRequestBody,
-    DecisionReviewVerdict, DecisionSubjectKey, InMemoryDecisionStore, PresentationAudience,
-    PresentationRecord, Sha256Digest, StoredDecision,
+    DecisionSubjectKey, InMemoryDecisionStore, PresentationAudience, PresentationRecord,
+    Sha256Digest, StoredDecision,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState};
 use meerkat_core::session_owner_wake::{
@@ -43,9 +43,9 @@ use meerkat_core::{
 };
 use meerkat_runtime::MeerkatMachine;
 use meerkat_runtime::decision::{
-    DecisionApproverCurrentness, DecisionClock, DecisionClockError, DecisionExecution,
-    DecisionExecutor, DecisionExecutorLoop, DecisionExecutorPass, DecisionPassOutcome,
-    DurableDecisionService,
+    DecisionApproverCurrentness, DecisionClock, DecisionClockError, DecisionError,
+    DecisionExecution, DecisionExecutor, DecisionExecutorLoop, DecisionExecutorPass,
+    DecisionPassOutcome, DurableDecisionService,
 };
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SqliteRuntimeStore};
 use meerkat_runtime::tool_grant::{
@@ -2089,8 +2089,9 @@ async fn a_tool_grant_request_with_a_review_stage_is_refused() {
         let rig = RequestRig::new(&durable);
         let session_id = SessionId::new();
         let subject = ToolGrantSubject::session(session_id.clone());
-        // A host holds a tool grant request with a review stage, which a
-        // reviewer's allow approves.
+        // A host's hold of a tool grant request with a review stage is
+        // refused at the hold: a tool grant is decided by people only, so no
+        // reviewer's allow can approve it.
         let body = ToolGrantIssueBody {
             body: TOOL_GRANT_ISSUE_BODY.to_owned(),
             subject: subject.clone(),
@@ -2112,7 +2113,7 @@ async fn a_tool_grant_request_with_a_review_stage_is_refused() {
             DecisionSubjectKey::new(format!("{}/tool:deploy/host:ask-1", subject.key())).unwrap();
         let decision_id = DecisionId::derive(&kind, &subject_key);
         let reviewer = principal_of(PrincipalKind::SharedAgent, "reviewer");
-        let held = rig
+        let refused = rig
             .decisions
             .hold(
                 DecisionHoldRequest::new(
@@ -2131,59 +2132,28 @@ async fn a_tool_grant_request_with_a_review_stage_is_refused() {
                     host_requester(),
                     ApproverId::new("operator").unwrap(),
                     T0 + 3_600_000,
-                    rendering.clone(),
+                    rendering,
                     DecisionRenderer::new(TOOL_GRANT_ISSUE_RENDERER).unwrap(),
                 )
                 .with_reviewer(DecisionPrincipalKey::of(&reviewer).unwrap()),
                 true,
             )
-            .expect("hold");
-        rig.decisions
-            .present(
-                &held.decision_id,
-                &PresentationRecord::complete(
-                    PresentationAudience::Reviewer {
-                        reviewer: DecisionPrincipalKey::of(&reviewer).unwrap(),
-                    },
-                    &rendering,
-                    None,
-                    DecisionReference::new("review").unwrap(),
-                    DecisionReference::new("message-1").unwrap(),
-                    T0,
-                ),
-            )
-            .expect("present to the reviewer");
-        let allowed = rig
-            .decisions
-            .review(
-                &held.decision_id,
-                &AttributedReview::new(
-                    reviewer,
-                    SessionId::new(),
-                    DecisionReference::new("call-1").unwrap(),
-                    DecisionReviewVerdict::Allow,
-                    rendering.subject_digest(),
-                )
-                .unwrap(),
-            )
-            .expect("review");
-        assert_eq!(allowed.state.phase, DecisionPhase::Approved);
-
-        let pass = rig.pass().await;
-        assert_eq!(
-            outcome_of(&pass, &held.decision_id),
-            vec![DecisionPassOutcome::ExecutionRefused],
-            "{backend:?}: a reviewer's allow never issues a grant: {pass:?}"
+            .expect_err("a tool grant is decided by people only");
+        assert!(
+            matches!(
+                &refused,
+                DecisionError::Invalid(DecisionContractError::ReviewStageNotAllowed { kind })
+                    if kind.as_str() == TOOL_GRANT_ISSUE_KIND
+            ),
+            "{backend:?}: {refused:?}"
         );
-        let refused = rig.decisions.get(&held.decision_id).unwrap();
-        assert_eq!(refused.state.phase, DecisionPhase::ExecutionRefused);
-        assert_eq!(
-            refused
-                .execution_refusal
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("not_a_human_decision")
+        // Nothing was held, and no grant was issued.
+        assert!(
+            matches!(
+                rig.decisions.get(&decision_id),
+                Err(DecisionError::NotFound(_))
+            ),
+            "{backend:?}: the refused request holds no decision"
         );
         assert!(rig.grants.list(&subject).await.unwrap().grants.is_empty());
     }

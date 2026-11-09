@@ -250,8 +250,10 @@ async fn v5_account_presenter_reuses_native_realm_profile_login_and_exact_access
     .unwrap();
     let persistence = ProviderAuthPersistence::new(
         Arc::new(FileTokenStore::new(root.path().join("vault"))),
+        // The coordinator's credential root (its lock directory's parent) is
+        // the file store's, so the fence it takes covers the store.
         Arc::new(FileLockCoordinator::new(
-            root.path().join("credential-locks"),
+            root.path().join("vault").join("credential-locks"),
         )),
     );
     let mut startup = SessionStartup {

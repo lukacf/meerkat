@@ -3,17 +3,66 @@
 Only the installer/validator output is controlled. The real Controller, peer
 MCP transports, native dispatch, review and canonical P owners remain in use.
 This does not establish package activation or usable service operations.
+
+The worker runs under the interpreter the native controls select
+(TOOLKIT_SHARED_TEST_PYTHON or TOOLKIT_D5_TEST_PYTHON), which must hold the
+whole pinned set of scripts/connect-test-python-requirements.txt: mcp 2.2.0
+and its closure, among them httpx2, anyio, jsonschema and referencing.
+scripts/connect-test-python prepares that interpreter. The setup modules
+import those packages only when a call first needs them, so the worker checks
+the set before it imports anything else and stops, naming each distribution
+that is missing or at another version.
 """
 import argparse
 import asyncio
+import importlib.metadata
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 import threading
 import time
 
 HERE = Path(__file__).resolve().parent
+# The pinned set scripts/connect-test-python installs, in this checkout.
+REQUIREMENTS = HERE.parents[3] / "scripts" / "connect-test-python-requirements.txt"
+
+
+def unmet_requirements(requirements=REQUIREMENTS):
+    """Each pinned distribution this interpreter lacks or holds at another version."""
+    unmet = []
+    for line in requirements.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, version = line.split()[0].split("==")
+        try:
+            found = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            found = "absent"
+        if found != version:
+            unmet.append(f"{re.sub(r'[-_.]+', '-', name).lower()}=={version} ({found})")
+    return unmet
+
+
+def require_pinned_python():
+    try:
+        unmet = unmet_requirements()
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"shared_native_owner: cannot read the pinned Python set {REQUIREMENTS}: {error}")
+    if unmet:
+        raise SystemExit(f"shared_native_owner: {sys.executable} lacks the pinned Python set of "
+                         "scripts/connect-test-python-requirements.txt (prepare it with "
+                         "scripts/connect-test-python): " + ", ".join(unmet))
+    # The modules the setup paths import on demand, at those exact versions.
+    import anyio, jsonschema, referencing  # noqa: E401, F401
+    import mcp.server.stdio  # noqa: F401
+    from mcp import types  # noqa: F401
+    from mcp.server import Server  # noqa: F401
+
+
+require_pinned_python()
 sys.path.insert(0, str(HERE))
 from test_selected_setup import SelectedFixture, SelectedRunner, adapter, backend
 

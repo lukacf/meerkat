@@ -5,6 +5,15 @@
 //! explicit physical mode instead uses the existing actual Controller child,
 //! peer sockets, census and joined snapshot with the same native registrations.
 //! This does not qualify native operation authority or whole G recovery.
+//!
+//! Every case runs its children under TOOLKIT_SHARED_TEST_PYTHON. The
+//! synthetic command peer needs only that interpreter's standard library. The
+//! physical mode runs `sdk/consumer-setup/tests/shared_native_owner.py` and
+//! `local_session.py` peers, which need the whole pinned set of
+//! `scripts/connect-test-python-requirements.txt`: mcp 2.2.0 and its closure,
+//! among them httpx2, anyio, jsonschema and referencing.
+//! `scripts/connect-test-python` prepares that interpreter and CI's Connect
+//! unit rows select it; the owner refuses any other before it starts.
 use super::*;
 use crate::application_setup::compilation::tests::{
     AttemptRegistrationFixture, attempt_registration_fixture,

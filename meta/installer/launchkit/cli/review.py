@@ -161,7 +161,7 @@ async def approve(ctx, document, *, question, approve_command):
     if ctx.interactive:
         for text in review_lines(document, digest):
             ctx.output.prompt(text + "\n")
-        answer = ctx.read_line(f"{question} [y/N] ")
+        answer = ctx.read_line(f"{question} [y/N] ", discard_typeahead=True)
         if answer is not None and answer.strip().lower() in ("y", "yes"):
             return digest
         raise CliError("approval_required", "Not approved. Nothing was changed.", review=document, digest=digest,

@@ -302,9 +302,15 @@ class Context:
             return value
         return self.output.mode == "text" and bool(getattr(self.output.stdout, "isatty", lambda: False)())
 
-    def read_line(self, prompt):
-        """One line from the person at the terminal; None at end of input."""
+    def read_line(self, prompt, *, discard_typeahead=False):
+        """One line from the person at the terminal; None at end of input.
+
+        For an approval, keys typed before the question appeared are discarded
+        first, so they cannot answer it.
+        """
         self.output.prompt(prompt)
+        if discard_typeahead:
+            discard_input(self.stdin)
         if self.stdin is sys.stdin and threading.current_thread() is threading.main_thread():
             # The asyncio runner's first Ctrl-C only cancels at the next await;
             # while blocked here, Ctrl-C must interrupt the read itself.
@@ -432,6 +438,15 @@ async def run_async(argv, *, stdin=None, stdout=None, stderr=None, environ=None,
 def interrupted(context):
     return CliError("interrupted", "Interrupted. Only waiting stopped; work already sent to Forge continues.",
                     next=context.next_steps(), request=context.request)
+
+
+def discard_input(stream):
+    """Drop what was typed at a terminal and not read yet; nothing to do for other streams."""
+    try:
+        import termios
+        termios.tcflush(stream.fileno(), termios.TCIFLUSH)
+    except (ImportError, AttributeError, OSError, ValueError):
+        pass
 
 
 def main(argv=None):

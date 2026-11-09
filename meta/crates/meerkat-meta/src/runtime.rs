@@ -1145,7 +1145,10 @@ impl std::fmt::Display for GatingWithdrawError {
         match self {
             Self::UnknownPendingId(id) => write!(f, "unknown pending id: {id}"),
             Self::NotRequester { actor_id, provided } => {
-                write!(f, "only the requester {actor_id} may withdraw, not {provided}")
+                write!(
+                    f,
+                    "only the requester {actor_id} may withdraw, not {provided}"
+                )
             }
             Self::EmptyPrincipal => write!(f, "withdrawing principal must not be empty"),
             Self::IdsUnavailable(reason) => write!(f, "{reason}"),

@@ -2430,13 +2430,21 @@ class ErrorEvent:
             runtime_id = context.get("agent_runtime_id", "")
             effect = context.get("effect", "")
             attempts = context.get("attempts", 0)
-            # A compaction harvest's error says itself whether a fallback
-            # harvest follows; any other side effect is not run again.
-            settled = "" if effect == "compaction_harvest" else ", and is not run again"
-            message = (
-                f"the {effect} of {identity} ({runtime_id}) failed after {attempts} "
-                f"attempts{settled}: {error}"
-            )
+            if context.get("cause") == "budget_busy":
+                # The realm's background budget did not admit the side
+                # effect's run within its wait: it did not run, and no
+                # attempt of it failed for that; the attempts that failed
+                # before it are named.
+                after = f" after {attempts} failed attempts" if attempts else ""
+                message = f"the {effect} of {identity} ({runtime_id}) did not run{after}: {error}"
+            else:
+                # A compaction harvest's error says itself whether a fallback
+                # harvest follows; any other side effect is not run again.
+                settled = "" if effect == "compaction_harvest" else ", and is not run again"
+                message = (
+                    f"the {effect} of {identity} ({runtime_id}) failed after {attempts} "
+                    f"attempts{settled}: {error}"
+                )
         elif category == ErrorCategory.LIFECYCLE_PROJECTION_OFF:
             message = str(context.get("detail", ""))
         elif category == ErrorCategory.MOB_ANNOUNCEMENT_ESCALATED:

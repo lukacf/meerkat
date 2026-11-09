@@ -12,7 +12,8 @@ import uuid
 from .. import refusal, setup_version
 from ..client import UUID, short
 from ..errors import CliError, step
-from ..render import (last_guide_message, plan_lines, plan_summary, question_lines, setup_lines, setup_name)
+from ..render import (json_text, last_guide_message, plan_lines, plan_summary, question_lines, setup_lines,
+                      setup_name)
 from ..review import approve, organization_document, plan_document, sha256_of
 from .host import state_directory
 
@@ -701,14 +702,15 @@ async def plan_export(context):
     if plan is None:
         raise CliError("not_found", "This setup has no plan yet.",
                        next=[step(f"meta-forge chat {identity}", "Describe the job to the guide.")])
-    content = (json.dumps(plan, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     result = {"setup": identity, "version": state.get("version"), "plan": label, "blueprint_sha256": sha256_of(plan)}
     if context.args.out:
+        content = (json.dumps(plan, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         result["file"] = write_new(context.args.out, content, "plan export")
         lines = [f"Wrote the {label} blueprint of setup {short(identity)} to {result['file']}."]
     else:
         result["blueprint"] = plan
-        lines = [content.decode("utf-8").rstrip("\n")]
+        # On a terminal, as JSON whose every character is printable: it parses to the same blueprint.
+        lines = [json_text(plan, indent=2)]
     context.output.success("plan export", result, lines=lines, setup=identity)
     return 0
 
@@ -863,8 +865,7 @@ async def chat_command(context):
         except CliError as error:
             if error.code in ("server_unavailable", "server_incompatible", "wait_timeout"):
                 raise
-            out.stderr.write(f"error: {error.detail} ({error.code})\n")
-            out.stderr.flush()
+            out.say(f"error: {error.detail} ({error.code})")
     out.line(f"Saved. Continue with: meta-forge chat {short(identity)}")
     out.finished = True
     return 0

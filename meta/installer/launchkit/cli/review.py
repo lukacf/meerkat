@@ -14,9 +14,8 @@ import json
 import re
 
 from .errors import CliError, step
-from .render import plan_summary, review_lines
+from .render import REVIEW_FORMAT, plan_summary, review_lines
 
-REVIEW_FORMAT = "meta-forge-review/1"
 DIGEST = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 
 

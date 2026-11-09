@@ -5,16 +5,62 @@ json: exactly one JSON document on stdout, also on failure.
 jsonl: one event per line on stdout, ending with exactly one result or error.
 
 Everything rendered here comes from the Forge server's presence-only reads or
-from the command's own non-secret arguments.
+from the command's own non-secret arguments. Server text may carry characters a
+terminal acts on (escape sequences, carriage returns) or hides (format
+characters such as a right-to-left override): every text write shows them
+escaped, and JSON output carries them as \\u escapes.
 """
 from __future__ import annotations
 
 import json
+import re
+import shlex
 
 FORMAT = "meta-forge-cli/1"
+REVIEW_FORMAT = "meta-forge-review/1"
 ACTIVE = {"queued", "installing", "checking", "starting", "stopping"}
 SETTLED = {"running", "stopped", "failed", "interrupted"}
 COLORS = {"ok": "32", "warn": "33", "fail": "31", "bold": "1", "dim": "2"}
+NAMED_ESCAPES = {"\n": "\\n", "\t": "\\t", "\r": "\\r"}
+NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?")
+
+
+def escaped(character):
+    """One character a terminal would act on or hide, as text: \\n, \\x1b, \\u202e."""
+    code = ord(character)
+    if character in NAMED_ESCAPES:
+        return NAMED_ESCAPES[character]
+    if code < 0x100:
+        return f"\\x{code:02x}"
+    return f"\\u{code:04x}" if code < 0x10000 else f"\\U{code:08x}"
+
+
+def visible(text):
+    """Text for a terminal: line breaks and tabs stay; every other character that is not printable (control,
+    format and separator characters, such as ESC, a carriage return or a right-to-left override) is escaped."""
+    text = str(text).replace("\r\n", "\n")
+    if text.replace("\n", "").replace("\t", "").isprintable():
+        return text
+    return "".join(character if character in "\n\t" or character.isprintable() else escaped(character)
+                   for character in text)
+
+
+def json_escaped(character):
+    code = ord(character)
+    if code < 0x10000:
+        return f"\\u{code:04x}"
+    code -= 0x10000
+    return f"\\u{0xd800 + (code >> 10):04x}\\u{0xdc00 + (code & 0x3ff):04x}"
+
+
+def json_text(value, **options):
+    """JSON text of a value, every character printable: JSON escapes control characters itself; the other
+    characters a terminal would act on or hide become \\u escapes. Parsing it gives the same value."""
+    text = json.dumps(value, ensure_ascii=False, **options)
+    if text.replace("\n", "").isprintable():
+        return text
+    return "".join(character if character == "\n" or character.isprintable() else json_escaped(character)
+                   for character in text)
 
 
 class Output:
@@ -37,23 +83,32 @@ class Output:
     def line(self, text=""):
         """A line of the human result on stdout (text mode only)."""
         if self.mode == "text":
-            self.stdout.write(text + "\n")
+            self.stdout.write(visible(text) + "\n")
+            self.stdout.flush()
+
+    def status_line(self, status, text):
+        """A result line led by its ok, warn or fail status, in color on a terminal (text mode only)."""
+        if self.mode == "text":
+            self.stdout.write(self.style(status, status) + visible(text) + "\n")
             self.stdout.flush()
 
     def note(self, text):
         """A progress or diagnostic line on stderr (text mode, unless quiet)."""
         if self.mode == "text" and not self.quiet:
-            self.stderr.write(text + "\n")
-            self.stderr.flush()
+            self.say(text)
+
+    def say(self, text):
+        """A line on stderr, whatever the mode."""
+        self.stderr.write(visible(text) + "\n")
+        self.stderr.flush()
 
     def trace(self, text):
         """Verbose diagnostics on stderr in every mode; never request or response bodies."""
         if self.verbose:
-            self.stderr.write(text + "\n")
-            self.stderr.flush()
+            self.say(text)
 
     def prompt(self, text):
-        self.stderr.write(text)
+        self.stderr.write(visible(text))
         self.stderr.flush()
 
     def event(self, command, kind, **fields):
@@ -64,7 +119,7 @@ class Output:
             self.note("  " + fields["message"])
 
     def _write(self, value):
-        self.stdout.write(json.dumps(value, ensure_ascii=False, sort_keys=False) + "\n")
+        self.stdout.write(json_text(value) + "\n")
         self.stdout.flush()
 
     def envelope(self, command, *, ok, result=None, error=None, setup=None, request=None, needs=(), next=(),
@@ -109,10 +164,11 @@ class Output:
         if self.mode == "text":
             if error.review is not None:
                 for text in review_lines(error.review, error.digest):
-                    self.stderr.write(text + "\n")
-            self.stderr.write(self.style("error", "fail") + f": {error.detail} ({error.code}, exit {error.exit_code})\n")
+                    self.say(text)
+            self.stderr.write(self.style("error", "fail")
+                              + visible(f": {error.detail} ({error.code}, exit {error.exit_code})") + "\n")
             if error.request is not None:
-                self.stderr.write(f"  request: {error.request}\n")
+                self.say(f"  request: {error.request}")
             self.stderr.flush()
             render_needs(self, error.needs, force=True)
             render_next(self, error.next, force=True)
@@ -130,31 +186,29 @@ def render_needs(output, needs, *, force=False):
     for need in needs:
         kind = need.get("kind")
         if kind == "question":
-            output.stderr.write("needs: the guide asks a question a person answers"
-                                + (f": {need['person_runs']}" if need.get("person_runs") else "") + "\n")
+            output.say("needs: the guide asks a question a person answers"
+                       + (f": {need['person_runs']}" if need.get("person_runs") else ""))
         elif kind == "needs_secret":
             handles = need.get("one_of") or [need.get("handle")]
-            output.stderr.write("needs: a person enters a secret outside this command: " + ", ".join(
-                str(handle) for handle in handles) + "\n")
+            output.say("needs: a person enters a secret outside this command: " + ", ".join(
+                str(handle) for handle in handles))
             if need.get("why"):
-                output.stderr.write(f"  why: {need['why']}\n")
+                output.say(f"  why: {need['why']}")
             if need.get("instruction"):
-                output.stderr.write(f"  how: {need['instruction']}\n")
+                output.say(f"  how: {need['instruction']}")
             if need.get("person_opens"):
-                output.stderr.write(f"  open: {need['person_opens']}\n")
+                output.say(f"  open: {need['person_opens']}")
             if need.get("person_runs"):
-                output.stderr.write(f"  run: {need['person_runs']}\n")
+                output.say(f"  run: {need['person_runs']}")
         else:
-            output.stderr.write(f"needs: {need}\n")
-    output.stderr.flush()
+            output.say(f"needs: {need}")
 
 
 def render_next(output, steps, *, force=False):
     if not steps or (output.quiet and not force):
         return
     for item in steps:
-        output.stderr.write(f"next: {item['command']}    # {item['reason']}\n")
-    output.stderr.flush()
+        output.say(f"next: {item['command']}    # {item['reason']}")
 
 
 # Plan (blueprint) renderings. A blueprint is the server's saved plan data.
@@ -239,33 +293,35 @@ def plan_summary(blueprint):
 
 
 def plan_lines(blueprint, *, label, version=None, readiness=None, availability=None):
+    """A plan as a person reads it: names and list items quoted where a bare reading could mislead, commands
+    as a shell would read them."""
     summary = plan_summary(blueprint)
     agents = sum(len(item["identities"]) for item in summary["classes"])
     header = f"Plan ({label}" + (f", setup version {version}" if version is not None else "") + "): "
-    header += f"\"{summary['project']['name']}\" ({summary['project']['slug']})"
+    header += f"{quoted(str(summary['project']['name']))} ({scalar(summary['project']['slug'])})"
     lines = [header,
-             f"  Destination: {summary['destination']}",
+             f"  Destination: {scalar(summary['destination'])}",
              f"  Agents: {len(summary['classes'])} classes, {agents} identities; entrypoint "
-             f"{summary['entrypoint']}; topology {summary['topology']}"]
+             f"{scalar(summary['entrypoint'])}; topology {scalar(summary['topology'])}"]
     for item in summary["classes"]:
-        names = ", ".join(item["identities"]) or "(no initial identities)"
-        lines.append(f"    {names}: {item['name']} [{item['model']}]")
-        lines.append("      tools: " + (", ".join(item["tools"]) or "none"))
+        names = ", ".join(map(scalar, item["identities"])) or "(no initial identities)"
+        lines.append(f"    {names}: {scalar(item['name'])} [{scalar(item['model'])}]")
+        lines.append("      tools: " + (", ".join(map(scalar, item["tools"])) or "none"))
     if summary["connections"]:
         lines.append("  Connections:")
         for item in summary["connections"]:
-            where = item.get("url") if item.get("transport") == "http" else " ".join(
-                str(part) for part in item.get("command") or [] if part)
-            lines.append(f"    {item['id']} ({item['transport']}): {where}")
+            where = scalar(item.get("url")) if item.get("transport") == "http" else shlex.join(
+                str(part) for part in item.get("command") or [] if part is not None)
+            lines.append(f"    {scalar(item['id'])} ({scalar(item['transport'])}): {where}")
     else:
         lines.append("  Connections: none")
     if summary["flows"]:
         lines.append("  Flows:")
         for flow in summary["flows"]:
-            lines.append(f"    {flow['id']}: {flow['name']}, {len(flow['steps'])} steps")
+            lines.append(f"    {scalar(flow['id'])}: {scalar(flow['name'])}, {len(flow['steps'])} steps")
     else:
         lines.append("  Flows: none")
-    lines.append(f"  Knowledge: {summary['knowledge']}")
+    lines.append(f"  Knowledge: {scalar(summary['knowledge'])}")
     if isinstance(readiness, dict):
         decisions = readiness.get("decision_blockers") or []
         work = readiness.get("implementation_blockers") or []
@@ -385,43 +441,86 @@ def receipt_lines(receipt):
     return lines
 
 
-def document_lines(value, indent="  "):
-    """A review document as plain indented lines, in its own key order."""
-    lines = []
+def bare(text, *, key=False):
+    """Whether a string reads as itself without quotes: printable, not padded, not empty, without quotes,
+    backslashes, brackets or ", " (the separator of list items), and not readable as null, true, false or a
+    number. A key also has no ": " and does not open like a list item."""
+    return (text != "" and text.isprintable() and text == text.strip() and not any(c in text for c in '"\\[]{}')
+            and ", " not in text and text not in ("null", "true", "false") and not NUMBER.fullmatch(text)
+            and not (key and (": " in text or text.startswith("- "))))
+
+
+def quoted(text):
+    """A string in double quotes, with quotes, backslashes and every character that is not printable escaped."""
+    return '"' + "".join("\\\\" if c == "\\" else '\\"' if c == '"' else c if c.isprintable() else escaped(c)
+                         for c in text) + '"'
+
+
+def scalar(value, *, key=False):
+    """One value as a person reads it: strings bare where that cannot mislead, else quoted; null, true and false
+    as in JSON."""
+    if isinstance(value, str):
+        return value if bare(value, key=key) else quoted(value)
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    return quoted(str(value))
+
+
+def nested(value):
+    """Whether a value takes lines of its own: a nonempty object, or a list holding objects or lists."""
+    return (isinstance(value, dict) and bool(value)) or (
+        isinstance(value, list) and any(isinstance(item, (dict, list)) for item in value))
+
+
+def inline(value):
     if isinstance(value, dict):
+        return "{}"
+    if isinstance(value, list):
+        return "[" + ", ".join(scalar(item) for item in value) + "]"
+    return scalar(value)
+
+
+def document_lines(value, indent="  "):
+    """A review document as indented lines that stand for exactly that document: keys as they are, lists in
+    brackets or as "- " items, and strings quoted with escapes wherever a bare reading could mislead."""
+    if isinstance(value, dict) and value:
+        lines = []
         for key, item in value.items():
-            label = str(key).replace("_", " ")
-            if isinstance(item, dict):
+            label = scalar(str(key), key=True)
+            if nested(item):
                 lines.append(f"{indent}{label}:")
                 lines.extend(document_lines(item, indent + "  "))
-            elif isinstance(item, list):
-                if not item:
-                    lines.append(f"{indent}{label}: none")
-                elif all(not isinstance(part, (dict, list)) for part in item):
-                    lines.append(f"{indent}{label}: " + ", ".join(str(part) for part in item))
-                else:
-                    lines.append(f"{indent}{label}:")
-                    for part in item:
-                        nested = document_lines(part, indent + "    ")
-                        if nested:
-                            lines.append(indent + "  - " + nested[0].strip())
-                            lines.extend(nested[1:])
             else:
-                lines.append(f"{indent}{label}: {item}")
-    elif isinstance(value, list):
-        for part in value:
-            lines.append(f"{indent}- {part}")
-    else:
-        lines.append(f"{indent}{value}")
-    return lines
+                lines.append(f"{indent}{label}: {inline(item)}")
+        return lines
+    if isinstance(value, list) and nested(value):
+        lines = []
+        for item in value:
+            if nested(item):
+                inner = document_lines(item, indent + "  ")
+                lines.append(f"{indent}- {inner[0].strip()}")
+                lines.extend(inner[1:])
+            else:
+                lines.append(f"{indent}- {inline(item)}")
+        return lines
+    return [f"{indent}{inline(value)}"]
 
 
 def review_lines(document, digest):
-    title = document.get("title") if isinstance(document, dict) else None
-    lines = [f"Review: {title}" if title else "Review:"]
-    body = {key: item for key, item in document.items() if key not in ("format", "title")} if isinstance(
-        document, dict) else document
-    lines.extend(document_lines(body))
+    """The review a person reads before approving: every key of the document (its title as the heading, its
+    constant format left out), rendered by document_lines. The digest covers exactly this document."""
+    if not isinstance(document, dict):
+        return ["Review:", *document_lines(document)] + ([f"Digest: {digest}"] if digest else [])
+    title = document.get("title")
+    lines = [f"Review: {scalar(title)}" if "title" in document else "Review:"]
+    body = {key: item for key, item in document.items()
+            if key != "title" and not (key == "format" and item == REVIEW_FORMAT)}
+    if body:
+        lines.extend(document_lines(body))
     if digest:
         lines.append(f"Digest: {digest}")
     return lines

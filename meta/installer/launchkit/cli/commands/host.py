@@ -216,16 +216,14 @@ async def doctor_command(context):
         except CliError as error:
             add("warn", "checker", f"application checker status unknown: {error.detail}")
     failed = [item for item in checks if item["status"] == "fail"]
-    lines = [context.output.style(item["status"], item["status"]) + f"\t{item['area']}\t{item['message']}"
-             for item in checks]
+    for item in checks:
+        context.output.status_line(item["status"], f"\t{item['area']}\t{item['message']}")
     result = {"checks": checks}
     if failed:
-        for text in lines:
-            context.output.line(text)
         raise CliError("prerequisite_unavailable", f"{len(failed)} local check(s) failed.", result=result,
                        next=[step("meta-forge doctor", "Run the checks again after correcting them.")])
-    lines.append(context.output.style("ok", "ok") + "\tdoctor\tForge can run here")
-    context.output.success("doctor", result, lines=lines)
+    context.output.status_line("ok", "\tdoctor\tForge can run here")
+    context.output.success("doctor", result)
     return 0
 
 

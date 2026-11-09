@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.11
+
 - `MetaRuntime.grant_tool(identity, *, tool=None, family=None,
   duration_ms=None, expires_at_ms=None, reason=None, decision_ref=None)`,
   `revoke_tool_grant(grant_id, *, reason=None)`,

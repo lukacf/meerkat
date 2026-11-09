@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.11
+
 - `MetaRuntime.grantTool(identity, { tool | family, durationMs |
   expiresAtMs, reason, decisionRef })` (options type `GrantToolOptions`),
   `revokeToolGrant(grantId, { reason })`,

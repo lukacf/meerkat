@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [01453e56759b](https://github.com/lukacf/meerkat/commit/01453e56759be007de027cab94c6e37053481da3) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [24be5586ae58](https://github.com/lukacf/meerkat/commit/24be5586ae58bdb1763240fb5bfed7bb74d8ed46) on 2026-11-09; Meta version 0.9.11 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -1493,8 +1493,9 @@ store is slower. Nothing reads the log to decide anything, and each owner's
 own record stays the authority for what happened. A row that cannot be
 written is logged and dropped, and the change stands as its owner answered
 it. The log is kept in the realm's metadata store: durable for
-`rpc_gateway` over a state directory or a host store realm, and for the
-process on `meta_gateway`, which keeps its metadata in memory; a console
+`rpc_gateway` over a state directory or a host store realm and for
+`meta_gateway` with persistent sessions, and for the process on a launch
+that keeps its metadata in memory; a console
 without a local runtime keeps none. Each record set keeps at most 20000
 rows, none older than 365 days, each bound give or take one page of 64
 rows; an embedder sets other bounds with

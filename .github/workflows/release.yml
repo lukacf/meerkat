@@ -269,6 +269,34 @@ jobs:
           fi
           echo "Version ${version} matches release tag ${release_tag}"
 
+      # A failed exact-main run is judged by the release commit's FIRST
+      # PARENT's copy of scripts/ci-product-evidence.mjs, as reused CI
+      # evidence is (see below): the commit cannot certify its own red run
+      # with an edited job-to-product table. The reader also gets the paths
+      # the commit changes against that parent, and refuses a commit that
+      # changes what decides the evidence. A parent without the reader, or a
+      # failure to list the changes, leaves only a green run counting.
+      - name: Read the CI evidence reader of the release commit's parent
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true') }}
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ steps.release_ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          parent_reader="${RUNNER_TEMP}/ci-evidence-parent"
+          mkdir -p "${parent_reader}"
+          if ! parent="$(git rev-parse --verify --quiet "${RELEASE_SHA}^1")"; then
+            echo "Release commit ${RELEASE_SHA} has no parent: only a green CI run counts."
+            exit 0
+          fi
+          if ! git show "${parent}:scripts/ci-product-evidence.mjs" > "${parent_reader}/ci-product-evidence.mjs"; then
+            rm -f "${parent_reader}/ci-product-evidence.mjs"
+            echo "${parent} has no product-scoped CI evidence reader: only a green CI run counts."
+            exit 0
+          fi
+          git diff --name-only "${parent}" "${RELEASE_SHA}" > "${parent_reader}/changed-paths.txt"
+          echo "A failed CI run of ${RELEASE_SHA} is judged by ${parent}'s reader; the commit changes $(wc -l < "${parent_reader}/changed-paths.txt") path(s)."
+
       # The release commit needs a successful push run of ci.yml at exactly
       # that commit on main or on release/<version>, the release branch of
       # the checked-out workspace version: a maintenance release is cut from
@@ -277,7 +305,8 @@ jobs:
       # dispatched run. On a tag run the step above has bound the version to
       # the tag. A failed run of that kind qualifies only when its attestation
       # shows every failure in rows Core does not depend on
-      # (scripts/ci-product-evidence.mjs; for example a Connect-only red row).
+      # (scripts/ci-product-evidence.mjs, the parent's copy written above;
+      # for example a Connect-only red row).
       - name: Require successful exact-main CI
         id: ci_run
         if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true') }}
@@ -341,13 +370,24 @@ jobs:
             }
 
             // The product-scoped verdict for Core on one completed attempt,
-            // read once per attempt.
+            // read once per attempt, by the release commit's parent's copy of
+            // the reader with the commit's changed paths (the step above).
+            const parentReader = require("path").join(process.env.RUNNER_TEMP || "", "ci-evidence-parent");
             let evidence = null;
             try {
-              const reader = require("path").resolve("scripts/ci-product-evidence.mjs");
+              const reader = require("path").join(parentReader, "ci-product-evidence.mjs");
               evidence = await import(require("url").pathToFileURL(reader).href);
             } catch (error) {
-              core.info(`This tree has no product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+              core.info(`The release commit's parent has no product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+            }
+            let changedPaths;
+            try {
+              changedPaths = fs
+                .readFileSync(require("path").join(parentReader, "changed-paths.txt"), "utf8")
+                .split("\n")
+                .filter((line) => line.trim());
+            } catch (error) {
+              core.info(`The release commit's changed paths are unknown (${error.message}); only a green run counts.`);
             }
             const verdicts = new Map();
             async function coreScopedVerdict(run) {
@@ -360,7 +400,7 @@ jobs:
                       owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
                     });
                     verdict = attestation
-                      ? evidence.acceptance(attestation, "core")
+                      ? evidence.acceptance(attestation, "core", { changedPaths })
                       : { accepted: false, reasons: ["the attempt has no exact-tree attestation"] };
                   } catch (error) {
                     verdict = { accepted: false, reasons: [`unreadable attestation: ${error.message}`] };
@@ -400,10 +440,11 @@ jobs:
               // A failed run still lets Core release when every failure sits
               // in rows Core does not depend on (only its own rows and the
               // downstream type-check rows count): the run's exact-tree
-              // attestation records each job's product, and this tree's
-              // scripts/ci-product-evidence.mjs judges it. Anything it cannot
-              // attribute, or a tree without that reader, keeps waiting for a
-              // green run.
+              // attestation records each job's product, and the release
+              // commit's parent's scripts/ci-product-evidence.mjs judges it.
+              // Anything it cannot attribute, a parent without that reader or
+              // a commit that changes what decides the evidence keeps waiting
+              // for a green run.
               for (const run of runs.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "failure")) {
                 const verdict = await coreScopedVerdict(run);
                 if (verdict.accepted) {
@@ -519,9 +560,12 @@ jobs:
                .component_results.ratchets == "success"))' \
             "${attestation}"
           # A failed run counts only when every failure sits in rows Core
-          # does not depend on (the lookup above selected it for that).
+          # does not depend on (the lookup above selected it for that), judged
+          # again by the release commit's parent's copy of the reader.
           if jq -e '.schema_version == 4 and .validation_result == "failure"' "${attestation}" >/dev/null; then
-            node scripts/ci-product-evidence.mjs accepts --product core "${attestation}"
+            parent_reader="${RUNNER_TEMP}/ci-evidence-parent"
+            node "${parent_reader}/ci-product-evidence.mjs" accepts --product core \
+              --changed-paths "${parent_reader}/changed-paths.txt" "${attestation}"
           fi
           schema="$(jq -r '.schema_version' "${attestation}")"
           echo "schema=${schema}" >> "${GITHUB_OUTPUT}"

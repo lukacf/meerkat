@@ -19,6 +19,13 @@
 // that ran without a known product, a lane the gate flagged without a failed
 // job, or a failed job the product depends on.
 //
+// A run of commit R is judged by R's first parent's copy of this file, as
+// reused CI evidence is (release.yml and meta-release.yml read it with `git
+// show`, and so does meta/scripts/release-candidate.py): R cannot certify its
+// own red run with an edited job-to-product table. That copy is told the
+// paths R changes against its parent, and refuses when they are unknown or
+// include one of EVIDENCE_INPUTS, which decide what the record says.
+//
 // Products of jobs: a matrix row's from the planner's `row_products` output
 // (scripts/ci-cargo-lanes.mjs), joined to the job by the lane's display name
 // template below; a single job's from SINGLE_JOBS. Repository-wide single
@@ -28,8 +35,11 @@
 //   ci-product-evidence.mjs record --output FILE [--jobs FILE]
 //       env ROW_PRODUCTS, FAILED_LANES (JSON), PLAN_ERRORS; without --jobs it
 //       lists GITHUB_RUN_ID's attempt GITHUB_RUN_ATTEMPT through `gh api`.
-//   ci-product-evidence.mjs accepts --product core|meta|connect ATTESTATION
-//       exit 0 accepted, 1 refused (the reasons are printed), 2 usage.
+//   ci-product-evidence.mjs accepts --product core|meta|connect --changed-paths FILE ATTESTATION
+//       FILE lists the paths the judged commit changes against its first
+//       parent, one per line (`git diff --name-only PARENT COMMIT`); run the
+//       parent's copy of this file. Exit 0 accepted, 1 refused (the reasons
+//       are printed), 2 usage.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -39,6 +49,18 @@ import { inflateRawSync } from "node:zlib";
 export const EVIDENCE_VERSION = 1;
 export const PRODUCTS = ["core", "meta", "connect"];
 export const GATE_JOB = "CI gate";
+
+// What decides a run's product evidence: this file (the tables and the
+// rule), the planner and the products file (each row's product), and ci.yml
+// (its jobs, the gate's lane check and the record step). A commit that
+// changes one of them gets no product-scoped acceptance of its own run.
+export const EVIDENCE_INPUTS = [
+  ".github/workflows/ci.yml",
+  "ci/products.json",
+  "scripts/ci-cargo-lanes.mjs",
+  "scripts/ci-product-evidence.mjs",
+  "scripts/ci-products.mjs",
+];
 
 // Each planned lane of row_products: the ci.yml jobs that run its rows and the
 // display name GitHub gives a row's job (the jobs' `name:` with the matrix
@@ -166,14 +188,23 @@ function laneJobs(lane, jobs) {
 }
 
 // Whether `attestation` lets a release of `product` proceed, and why.
-export function acceptance(attestation, product) {
+// `changedPaths`: the paths the judged commit changes against its first
+// parent (see EVIDENCE_INPUTS); without them nothing is accepted on scope.
+export function acceptance(attestation, product, { changedPaths } = {}) {
   if (!PRODUCTS.includes(product)) return { accepted: false, reasons: [`unknown product ${product}`] };
   if (attestation?.validation_result === "success") return { accepted: true, reasons: ["every lane succeeded"] };
   const reasons = [];
   if (product === "connect") return { accepted: false, reasons: ["Connect depends on every row"] };
+  if (!Array.isArray(changedPaths)) {
+    reasons.push("the judged commit's changes against its first parent are unknown");
+  } else {
+    for (const input of EVIDENCE_INPUTS.filter((path) => changedPaths.includes(path))) {
+      reasons.push(`the judged commit changes ${input}, which decides the evidence: only a green run counts`);
+    }
+  }
   const evidence = attestation?.product_evidence;
   if (!evidence || evidence.version !== EVIDENCE_VERSION) {
-    return { accepted: false, reasons: [`no product evidence of version ${EVIDENCE_VERSION}`] };
+    return { accepted: false, reasons: [...reasons, `no product evidence of version ${EVIDENCE_VERSION}`] };
   }
   if (attestation?.validation_result !== "failure") reasons.push(`validation_result ${attestation?.validation_result}`);
   if (attestation?.plan?.mode === "release-projection") reasons.push("a release-projection plan is never product-scoped");
@@ -290,9 +321,17 @@ function main(args) {
   }
   if (command === "accepts") {
     const product = option(args, "--product");
+    const changes = option(args, "--changed-paths");
     const file = args.at(-1);
-    if (!product || !file || file === product) return usage();
-    const verdict = acceptance(JSON.parse(readFileSync(file, "utf8")), product);
+    if (!product || !changes || !file || [product, changes].includes(file)) return usage();
+    let changedPaths;
+    try {
+      changedPaths = readFileSync(changes, "utf8").split("\n").filter((line) => line.trim());
+    } catch (error) {
+      console.log(`refused for ${product}: cannot read the judged commit's changed paths (${error.message})`);
+      return 1;
+    }
+    const verdict = acceptance(JSON.parse(readFileSync(file, "utf8")), product, { changedPaths });
     console.log(`${verdict.accepted ? "accepted" : "refused"} for ${product}: ${verdict.reasons.join("; ")}`);
     return verdict.accepted ? 0 : 1;
   }
@@ -300,7 +339,9 @@ function main(args) {
 }
 
 function usage() {
-  console.error("usage: ci-product-evidence.mjs record --output FILE [--jobs FILE] | accepts --product PRODUCT ATTESTATION");
+  console.error(
+    "usage: ci-product-evidence.mjs record --output FILE [--jobs FILE] | accepts --product PRODUCT --changed-paths FILE ATTESTATION",
+  );
   return 2;
 }
 

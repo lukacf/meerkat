@@ -183,7 +183,9 @@ waits (up to 120 minutes) until that run, and a Meta CI run at the commit that
 ran Meta's lanes, are green; a green re-run attempt counts. A red `ci.yml` run
 counts too when its attestation shows every failure in rows Meta does not
 depend on (Meta depends on Core's and Meta's rows; a Connect-only red row does
-not hold Meta back; the root's `scripts/ci-product-evidence.mjs` judges it).
+not hold Meta back; the root's `scripts/ci-product-evidence.mjs`, as the
+release commit's first parent has it, judges it, and refuses a commit that
+changes what decides that evidence).
 A candidate whose wait runs out binds nothing; dispatch a new one once CI is
 green.
 

@@ -5,7 +5,10 @@ description: >-
   2026-10-04 (tlaplus rebuilds its v1.8.0 pre-release in place), pinned by
   sha256: a mismatch fails the step and never falls back. The jar's source,
   sha256 and TLC version are always printed, so every lane records the build
-  it ran.
+  it ran. A GitHub release asset, as the mirror is, comes through the GitHub
+  API with the job's own token first (scripts/ci-release-asset-download), and
+  from its URL only when there is no token or that fails; the sha256 check
+  applies to the jar either way.
 
 inputs:
   url:
@@ -40,13 +43,24 @@ runs:
       env:
         TLC_JAR_URL: ${{ inputs.url }}
         TLC_JAR_SHA256: ${{ inputs.sha256 }}
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         lib="$HOME/.local/lib"
         bin="$HOME/.local/bin"
         mkdir -p "${lib}" "${bin}"
-        curl --fail --location --retry 5 --retry-delay 2 \
-          "${TLC_JAR_URL}" --output "${lib}/tla2tools.jar"
+        fetched=false
+        if [[ "${TLC_JAR_URL}" =~ ^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/([^/]+)$ ]]; then
+          if bash "${GITHUB_ACTION_PATH}/../../../scripts/ci-release-asset-download" \
+            "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${lib}/tla2tools.jar"; then
+            fetched=true
+          fi
+        fi
+        unset GH_TOKEN
+        if [[ "${fetched}" != true ]]; then
+          curl --fail --location --retry 5 --retry-delay 2 \
+            "${TLC_JAR_URL}" --output "${lib}/tla2tools.jar"
+        fi
         actual="$(sha256sum "${lib}/tla2tools.jar" | cut -d' ' -f1)"
         echo "tla2tools.jar sha256: ${actual} (${TLC_JAR_URL})"
         if [[ -z "${TLC_JAR_SHA256}" ]]; then

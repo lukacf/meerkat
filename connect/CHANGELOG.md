@@ -5,7 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- Connect releases are full GitHub releases, no longer prereleases. A
+  Connect release is still never the repository's latest: Core's release
+  stays latest. The `connect-v0.9.10` and `connect-v0.9.11` releases were
+  changed to match.
+
 ### Fixed
+
+- `toolkit_installed_service_candidates` no longer returns run after run of
+  pages with no candidate. A list call now reads on from its cursor until
+  its page holds a candidate or the list ends, and starts no new read after
+  20 seconds; a page that stops there without a candidate carries
+  `scan_incomplete: true` and a notice to call again with `next`, so it no
+  longer looks like the end of the list. Reading the list also no longer
+  lengthens it: the package owner's readback keeps its private files in a
+  `readback-` directory beside the setup attempts, where the list does not
+  look.
 
 - Under sustained heavy CPU load, attaching a native service no longer
   stalls before all of its members are attached. A readiness check's 250 ms
@@ -19,7 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11
 and Connect 0.9.11, released together): GitHub release `connect-v0.9.11`, a
-prerelease that is never the repository's latest.
+release that is never the repository's latest.
 
 ### Changed
 
@@ -164,7 +181,7 @@ prerelease that is never the repository's latest.
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10
 and Connect 0.9.10, released together) and the first Connect release from
-this repository: GitHub release `connect-v0.9.10`, a prerelease that is never
+this repository: GitHub release `connect-v0.9.10`, a release that is never
 the repository's latest. Connect 0.9.0 and 0.9.4 and the Linux component
 prereleases 0.9.5 and 0.9.6 were released from `lukacf/meerkat-connect`;
 there are no Connect releases numbered 0.9.7 to 0.9.9.

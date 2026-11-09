@@ -28,7 +28,7 @@ pub(super) fn tools() -> [Arc<ToolDef>; 2] {
     [
         Arc::new(ToolDef::new(
             INSTALLED_LIST_TOOL,
-            "Find retained service package requests from earlier setup in this realm. Use when credential setup ended before it was saved. Returns only current-session candidate handles and family/profile labels, not installed status or old approval. Select a candidate for current package verification. Pass next as after for another bounded page. Never ask the person for workspace paths or recovery files.",
+            "Find retained service package requests from earlier setup in this realm. Use when credential setup ended before it was saved. Returns only current-session candidate handles and family/profile labels, not installed status or old approval. Select a candidate for current package verification. Pass next as after for another bounded page; a page with scan_incomplete true is not the end of the list. Never ask the person for workspace paths or recovery files.",
             json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":"string","maxLength":80}}}),
         )),
         Arc::new(ToolDef::new(

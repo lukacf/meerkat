@@ -14,6 +14,7 @@ import signal
 import stat
 import sys
 import threading
+import time
 from types import ModuleType, SimpleNamespace
 
 MANIFEST_LIMIT = 16 * 1024 * 1024
@@ -492,6 +493,12 @@ def prepare(root, destination, stopped, *, realm_state_root=None, realm=None, di
 # Private transport for the existing Rust host. These locators are never agent
 # selection arguments; the host presents its own current-session handles.
 RETAINED_PAGE = 32
+# A list call reads positions from its cursor until its page holds a candidate
+# or the listing ends, and starts no new position after this many seconds:
+# one third of the native owner deadline (60 s) for the whole readback in
+# resources/readback_process.rs, so a position already being read and the
+# closing resource verification still fit within it.
+RETAINED_SCAN_SECONDS = 20
 RETAINED_SETUPS = 4096
 SETUP_NAME = re.compile(r"setup-[A-Za-z0-9_-]{1,128}\Z")
 WORK_NAME = re.compile(r"work-[0-9a-f]{32}\Z")
@@ -629,53 +636,78 @@ def retained_page(root, manifest, manifest_sha, host, request, stopped):
             if retained_name(entry.name, SETUP_NAME):
                 names.append(entry.name)
     names.sort()
-    setup = names[0] if cursor is None and names else cursor["setup"] if cursor is not None else None
-    if setup is None:
-        return page
+    if cursor is None:
+        if not names:
+            return page
+        cursor = {"setup": names[0], "workspace": "", "after_job": ""}
+    # A page with no candidate and a cursor reads like the end of the listing,
+    # so read on until this page holds a candidate or the listing ends. Each
+    # position is read as one page was before, and the returned cursor
+    # resumes exactly where this call stopped.
+    deadline = time.monotonic() + RETAINED_SCAN_SECONDS
+    while cursor is not None:
+        if stopped.is_set():
+            raise ResourceError("readback_cancelled")
+        candidates, unconfirmed, cursor = retained_position(
+            root, manifest, manifest_sha, host, parent, names, cursor, stopped)
+        page["candidates"].extend(candidates)
+        page["unconfirmed"] = page["unconfirmed"] or unconfirmed
+        if page["candidates"] or time.monotonic() >= deadline:
+            break
+    page["next_cursor"] = cursor
+    return page
+
+
+def retained_position(root, manifest, manifest_sha, host, parent, names, cursor, stopped):
+    """Read one listing position: one setup, one of its workspaces and at most
+    RETAINED_PAGE of that workspace's requests after the cursor's job. Return
+    its candidates, whether part of it is unconfirmed, and the next cursor
+    (None at the end of the listing)."""
+    setup = cursor["setup"]
+    candidates = []
+    unconfirmed = False
     later = next((name for name in names if name > setup), None)
-    if later is not None:
-        page["next_cursor"] = {"setup": later, "workspace": "", "after_job": ""}
+    next_cursor = None if later is None else {"setup": later, "workspace": "", "after_job": ""}
     # A readback-only artifact directory has no prepared owner. A partial or
     # incompatible preparation yields a fixed omission marker, not a global
     # failure that hides the next setup. Exact selection never falls back.
     try:
         directory = private_directory(parent / setup)
         if not (directory / "prepared").exists() and not (directory / "prepared").is_symlink():
-            return page
+            return candidates, unconfirmed, next_cursor
         context = retained_preparation(root, manifest, manifest_sha, host, parent, setup)
         workspaces = sorted([context.record["workspace"], *[row["workspace"] for row in context.record.get("prior", [])]])
-        workspace = cursor["workspace"] if cursor is not None and cursor["workspace"] else workspaces[0]
+        workspace = cursor["workspace"] or workspaces[0]
         if workspace not in workspaces:
             raise ResourceError("invalid_retained_cursor")
         following = next((name for name in workspaces if name > workspace), None)
         if following is not None:
-            page["next_cursor"] = {"setup": setup, "workspace": following, "after_job": ""}
+            next_cursor = {"setup": setup, "workspace": following, "after_job": ""}
         checkpoint, selected_root, entries = retained_checkpoint(context, workspace)
-        after = cursor["after_job"] if cursor is not None and cursor["workspace"] else ""
+        after = cursor["after_job"] if cursor["workspace"] else ""
         remaining = sorted((entry for entry in entries if entry["id"] > after), key=lambda entry: entry["id"])
         window = remaining[:RETAINED_PAGE]
         if len(remaining) > len(window):
-            page["next_cursor"] = {"setup": setup, "workspace": workspace, "after_job": window[-1]["id"]}
+            next_cursor = {"setup": setup, "workspace": workspace, "after_job": window[-1]["id"]}
         for entry in window:
             if stopped.is_set():
                 raise ResourceError("readback_cancelled")
             try:
                 summary = context.backend.retained_request_summary(selected_root, entry)
                 if summary is not None:
-                    page["candidates"].append({"locator": {"setup": setup, "workspace": workspace,
+                    candidates.append({"locator": {"setup": setup, "workspace": workspace,
                         "job_id": entry["id"], "request_sha256": entry["sha256"], "checkpoint_sha256": host.digest(checkpoint)},
                         "family": summary["family"], "profile": summary["profile"]})
             except Exception:
-                page["unconfirmed"] = True
+                unconfirmed = True
         retained_recheck(root, manifest, manifest_sha, host, parent, setup, context, workspace, checkpoint)
     except Exception:
         # All preparation/checkpoint errors remain fixed and private. A selected
         # readback uses the strict branch below and cannot skip to another item.
         if stopped.is_set():
             raise ResourceError("readback_cancelled") from None
-        page["candidates"] = []
-        page["unconfirmed"] = True
-    return page
+        return [], True, next_cursor
+    return candidates, unconfirmed, next_cursor
 
 
 def retained_selection(root, manifest, manifest_sha, host, request):

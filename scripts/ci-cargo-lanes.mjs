@@ -1647,6 +1647,7 @@ function isGlobalPath(path) {
     path === "scripts/rust-test-selector.mjs" ||
     path === "scripts/ci-pin-rust-toolchain-env" ||
     path === "scripts/ci-clippy-sccache-wrapper" ||
+    path === "scripts/ci-release-asset-download" ||
     path === ".github/workflows/ci.yml" ||
     path === PRODUCTS_PATH ||
     path === "scripts/ci-products.mjs"
@@ -1656,7 +1657,13 @@ function isGlobalPath(path) {
   return (
     path.startsWith(".cargo/") ||
     path.startsWith("scripts/cargo-") ||
-    path.startsWith(".github/actions/setup-rust-ci/")
+    // The setup every Rust lane runs: the toolchain, sccache, the mold linker
+    // and the cargo tools (the last two fetch their releases with
+    // scripts/ci-release-asset-download, above).
+    path.startsWith(".github/actions/setup-rust-ci/") ||
+    path.startsWith(".github/actions/setup-sccache-ci/") ||
+    path.startsWith(".github/actions/setup-mold-ci/") ||
+    path.startsWith(".github/actions/setup-cargo-tool-ci/")
   );
 }
 

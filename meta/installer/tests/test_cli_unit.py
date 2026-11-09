@@ -392,10 +392,19 @@ def test_turn_bodies_match_the_browser_requests():
 
 
 def test_child_environment_withholds_provider_credentials():
+    # Meerkat reads RKAT_<NAME> before <NAME> for every credential variable, the token names included.
     environ = {"PATH": "/usr/bin", "OPENAI_API_KEY": "x", "RKAT_GEMINI_API_KEY": "y", "GOOGLE_API_KEY": "z",
-               "GITHUB_TOKEN": "t", "GH_TOKEN": "t", "COPILOT_GITHUB_TOKEN": "t", "META_FORGE_HOME": "/s",
-               "MY_SETTING": "kept"}
+               "GITHUB_TOKEN": "t", "GH_TOKEN": "t", "COPILOT_GITHUB_TOKEN": "t", "RKAT_GITHUB_TOKEN": "t",
+               "RKAT_GH_TOKEN": "t", "RKAT_COPILOT_GITHUB_TOKEN": "t", "META_FORGE_HOME": "/s",
+               "MY_SETTING": "kept", "RKAT_WORKER_THREADS": "4"}
     assert child_environment(environ, inherit_provider=False) == {"PATH": "/usr/bin", "META_FORGE_HOME": "/s",
-                                                                 "MY_SETTING": "kept"}
+                                                                 "MY_SETTING": "kept", "RKAT_WORKER_THREADS": "4"}
     assert child_environment(environ, inherit_provider=True) == environ
     assert provider_variable("ANTHROPIC_API_KEY") and not provider_variable("API_KEY_FILE")
+
+
+async def test_serve_help_says_forwarding_keys_is_unsafe_on_a_shared_computer():
+    run = await cli(["serve", "--help"])
+    assert run.code == 0
+    help_text = " ".join(run.stdout.split())
+    assert "--inherit-provider-env" in help_text and "unsafe where other people have accounts on this computer" in help_text

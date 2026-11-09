@@ -80,7 +80,7 @@ def cli_environment(root, state):
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(root / "home"),
             "XDG_CONFIG_HOME": str(root / "config"), "META_FORGE_HOME": str(state), "META_FORGE_PORT": "8787",
             "OPENAI_API_KEY": CANARY, "RKAT_ANTHROPIC_API_KEY": CANARY, "GITHUB_TOKEN": CANARY,
-            "COPILOT_GITHUB_TOKEN": CANARY}
+            "COPILOT_GITHUB_TOKEN": CANARY, "RKAT_GITHUB_TOKEN": CANARY}
 
 
 @pytest.fixture
@@ -250,7 +250,8 @@ async def test_serve_withholds_provider_variables_unless_asked(forge):
     (path, argv, environment) = calls[-1]
     assert argv[1].endswith("start.sh") and environment["META_FORGE_PORT"] == "8899"
     assert not mentions(environment) and not mentions(argv)
-    assert {"OPENAI_API_KEY", "RKAT_ANTHROPIC_API_KEY", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN"}.isdisjoint(environment)
+    assert {"OPENAI_API_KEY", "RKAT_ANTHROPIC_API_KEY", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN",
+            "RKAT_GITHUB_TOKEN"}.isdisjoint(environment)
     assert "Not forwarding" in result.stderr and CANARY not in result.stderr
     assert environment["META_FORGE_HOME"] == str(forge.state) and environment["XDG_CONFIG_HOME"] == str(forge.config)
     result = await run(forge, "serve", "--inherit-provider-env", "--home", str(forge.root / "other"), executor=executor)

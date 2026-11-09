@@ -17,7 +17,8 @@ import pytest
 INSTALLER = Path(__file__).resolve().parents[1]
 LAUNCHER = INSTALLER / "meta-forge"
 CREDENTIALS = {"OPENAI_API_KEY": "launcher-test-value", "GITHUB_TOKEN": "launcher-test-value",
-               "RKAT_GEMINI_API_KEY": "launcher-test-value"}
+               "RKAT_GEMINI_API_KEY": "launcher-test-value", "RKAT_COPILOT_GITHUB_TOKEN": "launcher-test-value",
+               "RKAT_GH_TOKEN": "launcher-test-value"}
 
 FAKE_PYTHON = """#!{python}
 import json, os, sys
@@ -31,7 +32,7 @@ FAKE_START = """#!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "$0")" && pwd)"
 printf 'start.sh %s\\n' "$*" >> "$LAUNCH_LOG"
-for name in OPENAI_API_KEY GITHUB_TOKEN RKAT_GEMINI_API_KEY; do
+for name in OPENAI_API_KEY GITHUB_TOKEN RKAT_GEMINI_API_KEY RKAT_COPILOT_GITHUB_TOKEN RKAT_GH_TOKEN; do
   if [ -n "${!name+x}" ]; then printf 'leaked %s\\n' "$name" >> "$LAUNCH_LOG"; fi
 done
 echo "preparing on stdout"

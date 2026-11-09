@@ -35,8 +35,9 @@ from test_guide import SetupAgent
 
 CANARY = "canary-6f1d0c2a-secret-value-never-shown"
 CLI_ROOT = Path(__file__).resolve().parents[1] / "launchkit" / "cli"
+# HOME and XDG_CONFIG_HOME only locate Meerkat's folders, which the private-file guard never reads.
 ALLOWED_ENVIRONMENT = {"META_FORGE_PORT", "MOBKIT_LAUNCH_PORT", "META_FORGE_HOME", "MOBKIT_LAUNCH_HOME",
-                       "NO_COLOR", "PATH"}
+                       "NO_COLOR", "PATH", "HOME", "XDG_CONFIG_HOME"}
 WATCHED = ("open", "subprocess.Popen", "os.exec", "os.posix_spawn", "os.spawn", "os.system")
 RECORDED = None
 

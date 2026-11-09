@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -211,55 +212,99 @@ def option_ids(question, values):
     return selected
 
 
-def private_file(path, context):
-    """Forge's own secret stores are never read or attached."""
-    root = state_directory(context).resolve()
-    names = {path.name, path.resolve().name}
-    resolved = path.resolve()
-    return (bool(names & {"provider-settings.json", ".env"}) or any(name.startswith(".env") for name in names)
-            or resolved == root or root in resolved.parents)
+def private_roots(context):
+    """Folders this command never reads from: Forge's state folder, and Meerkat's configuration folders,
+    which hold its credential store (<config>/meerkat/credentials) and its user configuration (~/.rkat)."""
+    home = Path(context.environ.get("HOME") or Path.home())
+    roots = [state_directory(context), home / ".rkat", home / ".config" / "meerkat",
+             home / "Library" / "Application Support" / "meerkat"]
+    configured = context.environ.get("XDG_CONFIG_HOME")
+    if configured and os.path.isabs(configured):
+        roots.append(Path(configured) / "meerkat")
+    return roots
 
 
-async def upload(context, client, identity, values):
+def private_path(path, roots):
+    """Forge's private files by name (saved provider keys, an installation's .env and .mobkit files), or a
+    path inside one of the private folders. Names and folders compare without case."""
+    name = path.name.casefold()
+    if name == "provider-settings.json" or name.startswith(".env") or ".mobkit" in (
+            part.casefold() for part in path.parts):
+        return True
+    text = str(path).casefold()
+    return any(text == root or text.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
+
+
+def named_file(context, value, option):
+    """The one guard of every option that reads a file a person names (--attach, --text-file, /attach,
+    plan validate). It decides from the path alone, as given and with links resolved, before anything is
+    opened: Forge's private files and Meerkat's credential store are never read. Returns (given, resolved).
+    Errors name the option, never the value: a secret may have been typed in its place."""
+    help_command = "meta-forge plan validate --help" if option == "plan validate" else "meta-forge setup send --help"
+    given = Path(os.path.abspath(os.path.expanduser(value)))
+    try:
+        resolved = given.resolve()
+    except (OSError, RuntimeError):
+        raise CliError("usage", f"A file given to {option} cannot be read.",
+                       next=[step(help_command, "See which files this command reads.")]) from None
+    roots = set()
+    for root in private_roots(context):
+        absolute = Path(os.path.abspath(root))
+        roots.add(str(absolute).casefold())
+        try:
+            roots.add(str(absolute.resolve()).casefold())
+        except (OSError, RuntimeError):
+            pass
+    if private_path(given, roots) or private_path(resolved, roots):
+        raise CliError("invalid_request", f"A file given to {option} is one of Forge's private files or in "
+                       "Meerkat's credential store; this command never reads it.",
+                       next=[step(help_command, "See which files this command reads.")])
+    return given, resolved
+
+
+async def upload(context, client, identity, values, option="--attach"):
     if len(values) > MAX_ATTACHMENTS:
         raise CliError("usage", f"Attach at most {MAX_ATTACHMENTS} files to one message.",
                        next=[step("meta-forge setup send --help", "See the attachment limits.")])
     files, total = [], 0
     for value in values:
-        path = Path(value).expanduser()
-        if private_file(path, context):
-            raise CliError("invalid_request", f"{value} is one of Forge's private files or settings; it is never "
-                           "attached.", next=[step("meta-forge setup send --help", "See which files can be attached.")])
-        if path.suffix.lower() not in ATTACHMENT_SUFFIXES:
-            raise CliError("invalid_request", f"{value}: attach PNG, JPEG, WebP, GIF, text, Markdown, CSV, JSON "
-                           "or a text PDF.", next=[step("meta-forge setup send --help", "See which files can be attached.")])
+        given, path = named_file(context, value, option)
+        if given.suffix.lower() not in ATTACHMENT_SUFFIXES:
+            raise CliError("invalid_request", f"Attach PNG, JPEG, WebP, GIF, text, Markdown, CSV, JSON or a text "
+                           f"PDF with {option}.",
+                           next=[step("meta-forge setup send --help", "See which files can be attached.")])
         try:
             info = path.stat()
         except OSError:
-            raise CliError("usage", f"{value} cannot be read.",
+            raise CliError("usage", f"A file given to {option} cannot be read.",
                            next=[step("meta-forge setup send --help", "See how to attach files.")]) from None
         if not path.is_file() or not 1 <= info.st_size <= MAX_ATTACHMENT_BYTES:
-            raise CliError("invalid_request", f"{value}: each attachment is a nonempty file of at most 8 MiB.",
+            raise CliError("invalid_request", f"Each file given to {option} is a nonempty file of at most 8 MiB.",
                            next=[step("meta-forge setup send --help", "See the attachment limits.")])
         total += info.st_size
         if total > MAX_TURN_BYTES:
             raise CliError("invalid_request", "Attachments of one message together must be at most 16 MiB.",
                            next=[step("meta-forge setup send --help", "See the attachment limits.")])
-        files.append(("files", (path.name, path.read_bytes(), "application/octet-stream")))
+        try:
+            content = path.read_bytes()
+        except OSError:
+            raise CliError("usage", f"A file given to {option} cannot be read.",
+                           next=[step("meta-forge setup send --help", "See how to attach files.")]) from None
+        files.append(("files", (given.name, content, "application/octet-stream")))
     _, value = await client.post(guide_path(identity, "/attachments"), files=files)
     return list(value.get("attachments") or [])
 
 
-def message_text(args):
+def message_text(context, args):
     text = args.text or ""
     if args.text_file:
-        path = Path(args.text_file).expanduser()
+        _, path = named_file(context, args.text_file, "--text-file")
         try:
             with path.open("rb") as stream:
                 raw = stream.read(MAX_TEXT * 4 + 1)
             text = raw.decode("utf-8")
         except (OSError, UnicodeError):
-            raise CliError("usage", f"{args.text_file} cannot be read as UTF-8 text.",
+            raise CliError("usage", "The file given to --text-file cannot be read as UTF-8 text.",
                            next=[step("meta-forge setup send --help", "See the message options.")]) from None
     if len(text) > MAX_TEXT:
         raise CliError("usage", f"A message has at most {MAX_TEXT} characters.",
@@ -470,7 +515,7 @@ async def setup_send(context):
     require_version(state, args.version)
     require_idle(state)
     selected = option_ids(state.get("question"), args.answer)
-    text = message_text(args)
+    text = message_text(context, args)
     attachments = await upload(context, client, identity, args.attach) if args.attach else []
     body = turn_body(state, selected=selected, text=text, combine=args.combine, attachments=attachments)
     state, pending = await send_turn(context, client, identity, body, wait=context.wait)
@@ -665,13 +710,13 @@ async def plan_export(context):
 
 
 async def plan_validate(context):
-    path = Path(context.args.file).expanduser()
+    _, path = named_file(context, context.args.file, "plan validate")
     try:
         with path.open("rb") as stream:
             raw = stream.read(MAX_BLUEPRINT_BYTES + 1)
         value = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeError, ValueError):
-        raise CliError("usage", f"{context.args.file} is not a readable JSON blueprint file.",
+        raise CliError("usage", "The file given to plan validate is not a readable JSON blueprint file.",
                        next=[step("meta-forge plan export SETUP --out FILE", "Export a blueprint to start from.")]) from None
     if len(raw) > MAX_BLUEPRINT_BYTES or not isinstance(value, dict):
         raise CliError("usage", "A blueprint is one JSON object of at most 1 MB.",
@@ -772,7 +817,7 @@ async def chat_command(context):
                     if not rest:
                         out.line("Name a file: /attach FILE")
                         continue
-                    added = await upload(context, client, identity, [rest])
+                    added = await upload(context, client, identity, [rest], option="/attach")
                     pending.extend(added)
                     out.line(f"Attached {added[0].get('filename')}; it goes with your next message.")
                 elif command == "/revisit":

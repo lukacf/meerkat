@@ -2620,8 +2620,9 @@ export function parseErrorEvent(raw: unknown): ErrorEvent {
       if (context.cause === "budget_busy") {
         // The realm's background budget did not admit the side effect's run
         // within its wait: it did not run, and no attempt of it failed for
-        // that.
-        message = `the ${effect} of ${identity} (${runtimeId}) did not run: ${error}`;
+        // that; the attempts that failed before it are named.
+        const after = attempts > 0 ? ` after ${attempts} failed attempts` : "";
+        message = `the ${effect} of ${identity} (${runtimeId}) did not run${after}: ${error}`;
         break;
       }
       // A compaction harvest's error says itself whether a fallback harvest

@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   within its wait, and no attempt of it failed for that. Both are left out
   while the cause is `failed`, so records and events written before read as
   failed. The Python and TypeScript SDKs word such an event as a side
-  effect that did not run.
+  effect that did not run, after the attempts that failed before it when
+  there were any.
 
 ### Fixed
 
@@ -44,7 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   wait, ends unrun, recorded with the cause `budget_busy`: in a burst, the
   runs the budget admits within the wait go ahead and the rest end so. The
   discards stay in the session's memory scope, unless the retirement is a
-  delete, which drops that scope next.
+  delete, which drops that scope next. A harvest given up so is reported as
+  a run the budget skipped (`memory.budget.denied`); when its settled
+  batch's harvest had failed first, the record counts that attempt and
+  names its failure. When a run ends, the first waiting harvest to find the
+  budget free takes the run, so the others do not read their discards
+  again for it. A shutdown ends the wait at once: nothing is recorded, and
+  the harvest runs again at the next start.
 
 - A retirement's transcript distillation (a reset's, a role move's, an
   unlisting's, a rotation's) waits for a busy agent memory background

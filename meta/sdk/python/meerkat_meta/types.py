@@ -2433,8 +2433,10 @@ class ErrorEvent:
             if context.get("cause") == "budget_busy":
                 # The realm's background budget did not admit the side
                 # effect's run within its wait: it did not run, and no
-                # attempt of it failed for that.
-                message = f"the {effect} of {identity} ({runtime_id}) did not run: {error}"
+                # attempt of it failed for that; the attempts that failed
+                # before it are named.
+                after = f" after {attempts} failed attempts" if attempts else ""
+                message = f"the {effect} of {identity} ({runtime_id}) did not run{after}: {error}"
             else:
                 # A compaction harvest's error says itself whether a fallback
                 # harvest follows; any other side effect is not run again.

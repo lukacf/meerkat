@@ -71,7 +71,7 @@ use crate::identity_first::agent_memory::{
 };
 use crate::memory::completion::{CompletionStop, UNTERMINATED_STREAM, completion_stop};
 use crate::memory::factory_handle::FactoryModelClientHandle;
-use crate::memory::guards::{BackgroundBudget, BackgroundBudgetConfig, BudgetDenied};
+use crate::memory::guards::{BackgroundBudget, BackgroundBudgetConfig, BudgetDenied, BudgetPermit};
 use crate::memory::records::{
     EvidenceRef, ManifestTier, MemoryAuthor, MemoryKind, MemoryScope, NewMemoryRecord, RecordMeta,
 };
@@ -788,9 +788,10 @@ pub trait CompactionDiscardSource: Send + Sync {
 /// store** — sanctioned by §8.4; this is not a Meta retrieval index and
 /// stays outside the §12 bright line, which governs the bundled store.
 ///
-/// Cost note (D3): `HnswMemoryStore::open` rebuilds its in-RAM index from
-/// the SQLite rows on every open, so the store is opened lazily per
-/// harvest and dropped afterwards.
+/// Cost note: the store is opened per harvest and dropped afterwards.
+/// Opening it is cheap (each scope's index loads on its first use, and a
+/// harvest uses none), and the read below is a paged enumeration of the
+/// scope's rows in SQLite: a harvest costs that scan of the session's scope.
 ///
 /// Ask 8 (landed in meerkat 0.7.12): the harvest now reads the discard range
 /// via `MemoryStore::enumerate_scoped` — exact, provenance-ordered (durable
@@ -1418,7 +1419,7 @@ impl DistillerEngine {
     /// does, and hold it until the answer is dropped: rows that need the
     /// budget busy hold it so.
     #[cfg(test)]
-    pub(crate) fn hold_budget(&self) -> Result<crate::memory::guards::BudgetPermit, BudgetDenied> {
+    pub(crate) fn hold_budget(&self) -> Result<BudgetPermit, BudgetDenied> {
         self.budget.try_admit(&self.realm)
     }
 
@@ -1596,7 +1597,7 @@ impl DistillerEngine {
         follow_up: bool,
     ) -> DistillOutcome {
         match self
-            .distill_or_busy(identity, session_key, cause, discards, follow_up)
+            .distill_or_busy(identity, session_key, cause, discards, follow_up, None)
             .await
         {
             Ok(outcome) => outcome,
@@ -1608,10 +1609,13 @@ impl DistillerEngine {
     }
 
     /// One run ([`Self::distill_inner`]), then its bookkeeping, its
-    /// compaction follow-up with `follow_up`, and its log line. A run the
-    /// realm's background budget does not admit answers that denial,
-    /// unreported: its follow-up and its log line see it skipped, and its
-    /// caller reports the denial or waits for the budget to ask again.
+    /// compaction follow-up with `follow_up`, and its log line. The run is
+    /// `reserved`, when a wait took it for the caller
+    /// ([`Self::until_budget_admits`]); otherwise the realm's background
+    /// budget is asked for it. A run the budget does not admit answers that
+    /// denial, unreported: its follow-up and its log line see it skipped,
+    /// and its caller reports the denial or waits for the budget to take the
+    /// run for it.
     async fn distill_or_busy(
         self: &Arc<Self>,
         identity: &str,
@@ -1619,9 +1623,10 @@ impl DistillerEngine {
         cause: DistillCause,
         discards: Option<Vec<DiscardEntry>>,
         follow_up: bool,
+        reserved: Option<BudgetPermit>,
     ) -> Result<DistillOutcome, BudgetDenied> {
         let ran = self
-            .distill_inner(identity, session_key, cause, discards)
+            .distill_inner(identity, session_key, cause, discards, reserved)
             .await;
         self.with_window(identity, session_key, |state| {
             state.in_flight = false;
@@ -1674,13 +1679,16 @@ impl DistillerEngine {
     }
 
     /// One extraction run, or the realm's background budget's denial of it
-    /// (unreported: see [`Self::distill_or_busy`]).
+    /// (unreported: see [`Self::distill_or_busy`]). A `reserved` run is the
+    /// one a wait took for the caller: it is spent here, and given back
+    /// unspent when the run ends before its work.
     async fn distill_inner(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         cause: DistillCause,
         discards: Option<Vec<DiscardEntry>>,
+        reserved: Option<BudgetPermit>,
     ) -> Result<DistillOutcome, BudgetDenied> {
         // A transcript private to one person is never distilled, whatever
         // the cause: its memory would reach no one else, but nothing in it
@@ -1795,10 +1803,15 @@ impl DistillerEngine {
             }
         };
 
-        // §8.1 resource guard: consulted before every run. A denial is the
-        // caller's: [`Self::distill_now_with`] reports it loudly, a caller
-        // that waits for the budget asks again.
-        let _permit = self.budget.try_admit(&self.realm)?;
+        // §8.1 resource guard: consulted before every run, unless a wait
+        // took the run for the caller already. A denial is the caller's:
+        // [`Self::distill_now_with`] reports it loudly, a caller that waits
+        // for the budget has the wait take the run for it.
+        let mut permit = match reserved {
+            Some(permit) => permit,
+            None => self.budget.try_admit(&self.realm)?,
+        };
+        permit.spend();
 
         // §8.4 reset quarantine: mark the boundary in the tracker so the
         // store's write gate quarantines every record citing this session —
@@ -2026,7 +2039,7 @@ impl DistillerEngine {
         cause: DistillCause,
     ) {
         if let Err(BoundedRunError::Busy(denied)) = self
-            .distill_before_rotation_within_bound(identity, session_key, cause)
+            .distill_before_rotation_within_bound(identity, session_key, cause, None)
             .await
         {
             self.budget.report_denied(&self.realm, "distiller", &denied);
@@ -2036,16 +2049,18 @@ impl DistillerEngine {
     /// [`Self::distill_before_rotation`], answering whether the run ended
     /// within the pre-rotation bound: the realm's background budget's
     /// denial of the run, unreported ([`BoundedRunError::Busy`]: the caller
-    /// waits for the budget, [`Self::until_budget_admits`], and asks again,
-    /// or reports it), or the bound it did not end within.
+    /// has a wait take the run for it, [`Self::until_budget_admits`], and
+    /// asks again with it `reserved`, or reports the denial), or the bound it
+    /// did not end within.
     pub(crate) async fn distill_before_rotation_within_bound(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         cause: DistillCause,
+        reserved: Option<BudgetPermit>,
     ) -> Result<(), BoundedRunError> {
         let timeout = self.pre_rotation_timeout;
-        let run = self.distill_or_busy(identity, session_key, cause, None, true);
+        let run = self.distill_or_busy(identity, session_key, cause, None, true, reserved);
         match tokio::time::timeout(timeout, run).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(denied)) => Err(BoundedRunError::Busy(denied)),
@@ -2135,15 +2150,17 @@ impl DistillerEngine {
     /// compaction follow-up for a session that goes on; a retirement's
     /// harvest of a session it ends fires none (no life resumes it).
     /// Answers the run's outcome; the realm's background budget's denial of
-    /// the run, unreported ([`BoundedRunError::Busy`]: the caller waits for
-    /// the budget, [`Self::until_budget_admits`], and asks again, or reports
-    /// it); or the bound the run did not end within.
+    /// the run, unreported ([`BoundedRunError::Busy`]: the caller has a wait
+    /// take the run for it, [`Self::until_budget_admits`], and asks again
+    /// with it `reserved`, or reports the denial); or the bound the run did
+    /// not end within.
     pub(crate) async fn harvest_compaction_within_bound(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         discards: Option<Vec<DiscardEntry>>,
         follow_up: bool,
+        reserved: Option<BudgetPermit>,
     ) -> Result<DistillOutcome, BoundedRunError> {
         let timeout = self.pre_rotation_timeout;
         let harvest = self.distill_or_busy(
@@ -2152,6 +2169,7 @@ impl DistillerEngine {
             DistillCause::Compaction,
             discards,
             follow_up,
+            reserved,
         );
         if let Ok(ran) = tokio::time::timeout(timeout, harvest).await {
             return ran.map_err(BoundedRunError::Busy);
@@ -2180,12 +2198,23 @@ impl DistillerEngine {
         Err(BoundedRunError::TimedOut(timeout))
     }
 
-    /// Wait until the realm's background budget may admit a run, at most
-    /// `wait` ([`BackgroundBudget::until_admissible`]): for a caller whose
-    /// run the budget did not admit ([`BoundedRunError::Busy`]), before it
-    /// asks again. Answers the denial that stood when the wait ran out.
-    pub(crate) async fn until_budget_admits(&self, wait: Duration) -> Result<(), BudgetDenied> {
+    /// Wait until the realm's background budget admits a run, at most `wait`,
+    /// and take it for the caller ([`BackgroundBudget::until_admissible`]):
+    /// for a caller whose run the budget did not admit
+    /// ([`BoundedRunError::Busy`]), to ask again with. Answers the denial
+    /// that stood when the wait ran out.
+    pub(crate) async fn until_budget_admits(
+        &self,
+        wait: Duration,
+    ) -> Result<BudgetPermit, BudgetDenied> {
         self.budget.until_admissible(&self.realm, wait).await
+    }
+
+    /// Say loudly that a run the realm's background budget did not admit is
+    /// given up ([`BackgroundBudget::report_denied`]): for a caller that
+    /// waited for the budget and gives the run up on `denied`.
+    pub(crate) fn report_budget_denied(&self, denied: &BudgetDenied) {
+        self.budget.report_denied(&self.realm, "distiller", denied);
     }
 
     /// A compaction-cause harvest, detached and unbounded: of an answered
@@ -3312,11 +3341,17 @@ mod tests {
             range: Some((0, 2)),
         }];
         engine
-            .harvest_compaction_within_bound("identity:a", "sess-1", Some(discards.clone()), false)
+            .harvest_compaction_within_bound(
+                "identity:a",
+                "sess-1",
+                Some(discards.clone()),
+                false,
+                None,
+            )
             .await
             .expect("the window's one run");
         let busy = engine
-            .harvest_compaction_within_bound("identity:a", "sess-1", Some(discards), false)
+            .harvest_compaction_within_bound("identity:a", "sess-1", Some(discards), false, None)
             .await
             .expect_err("the window is spent");
         assert_eq!(
@@ -3649,6 +3684,7 @@ mod tests {
                 "sess-retired",
                 Some(discards.clone()),
                 false,
+                None,
             )
             .await
             .expect("the harvest ends within its bound");

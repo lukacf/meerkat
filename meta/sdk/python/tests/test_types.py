@@ -1496,7 +1496,7 @@ class TestErrorEvent:
                 "effect": "compaction_harvest",
                 "attempts": 0,
                 "error": "the realm's background budget did not admit the fallback harvest "
-                "of the compactions the session's memory holds within 300000 ms: "
+                "of the compactions the session's memory holds within 15000 ms: "
                 "concurrency ceiling reached (1 in flight)",
                 "cause": "budget_busy",
             }
@@ -1505,10 +1505,28 @@ class TestErrorEvent:
         assert r.message == (
             "the compaction_harvest of keeper (rt:keeper:2) did not run: "
             "the realm's background budget did not admit the fallback harvest "
-            "of the compactions the session's memory holds within 300000 ms: "
+            "of the compactions the session's memory holds within 15000 ms: "
             "concurrency ceiling reached (1 in flight)"
         )
         assert r.context["cause"] == "budget_busy"
+
+        after_failures = ErrorEvent.from_dict(
+            {
+                "category": "lifecycle_effect_failed",
+                "identity": "keeper",
+                "agent_runtime_id": "rt:keeper:2",
+                "effect": "compaction_harvest",
+                "attempts": 1,
+                "error": "the harvest of the settled compaction batch failed (timed out), "
+                "and the budget was busy",
+                "cause": "budget_busy",
+            }
+        )
+        assert after_failures.message == (
+            "the compaction_harvest of keeper (rt:keeper:2) did not run after 1 failed "
+            "attempts: the harvest of the settled compaction batch failed (timed out), "
+            "and the budget was busy"
+        )
 
     def test_lifecycle_projection_off_carries_its_detail(self):
         r = ErrorEvent.from_dict(

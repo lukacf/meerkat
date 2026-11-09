@@ -58,7 +58,9 @@
 //! may admit a run, at most [`EFFECT_BUDGET_WAIT`] in all, and one the
 //! budget still did not admit by then ends unrun, recorded with the cause
 //! [`LifecycleEffectFailureCause::BudgetBusy`]. While it waits, the
-//! side effects after it on its lane wait too, every identity's. An answer
+//! side effects after it on its lane wait too, every identity's. A shutdown
+//! ends such a wait at once: nothing is recorded for the side effect, and
+//! its page runs again at the next start. An answer
 //! the host gives (an error of the hook or of `after_create`) is final. A
 //! side effect that failed is recorded durably
 //! ([`crate::runtime::LifecycleEffectFailure`]) and reported on the error
@@ -239,8 +241,8 @@ use super::super::types::{
 use super::records::unix_ms_now;
 use super::{IdentityRuntime, IdentityRuntimeError, binding_spawned_for_identity};
 use crate::identity_first::agent_memory::DistillerRunError;
-use crate::memory::BudgetDenied;
 use crate::memory::distiller::{DiscardEntry, DistillCause};
+use crate::memory::{BudgetDenied, BudgetPermit};
 use crate::mob_handle_runtime::SessionCreatedContext;
 use crate::runtime::{
     LifecycleEffectFailure, LifecycleEffectFailureCause, LifecycleEffectIntent,
@@ -373,30 +375,56 @@ where
     }
 }
 
+/// Why a wait for the realm's agent memory background budget ended without
+/// a run the budget admitted.
+#[derive(Debug)]
+enum Unadmitted {
+    /// The budget did not admit a run within the wait: the denial that
+    /// stood when it ran out.
+    Busy(BudgetDenied),
+    /// The projection is stopping: the wait ended at once.
+    Stopped,
+}
+
+/// How a side effect whose run the realm's agent memory background budget
+/// admits ended short of its answer.
+#[derive(Debug, PartialEq, Eq)]
+enum Unanswered {
+    /// Its last attempt that was made failed, with this error.
+    Failed(String),
+    /// The budget did not admit its run within its wait.
+    Busy(BudgetDenied),
+    /// The projection stopped while it waited for the budget.
+    Stopped,
+}
+
 /// [`bounded`], for a side effect whose run the realm's agent memory
 /// background budget admits (a compaction harvest, a distillation). An
 /// attempt the budget did not admit ([`DistillerRunError::Busy`]) was not
-/// made: it does not count, and the side effect waits until the budget may
-/// admit a run (`admits`, at most until `wait_until`), then asks again.
-/// When the budget did not admit one by then, it ends with the budget's
-/// denial (`DistillerRunError::Busy`); an attempt that was made and failed
-/// counts, as in [`bounded`].
+/// made: it does not count, and the side effect waits until the budget
+/// admits a run (`admits`, at most until `wait_until`), which the wait
+/// takes for its next attempt (`attempt` is handed it). When the budget did
+/// not admit one by then, it ends with the budget's denial
+/// ([`Unanswered::Busy`]), and at once when the projection stops
+/// ([`Unanswered::Stopped`]); an attempt that was made and failed counts, as
+/// in [`bounded`].
 async fn bounded_admitted<T, F, Fut, W, WFut>(
     limits: EffectLimits,
     wait_until: tokio::time::Instant,
     mut attempt: F,
     mut admits: W,
-) -> Bounded<T, DistillerRunError>
+) -> Bounded<T, Unanswered>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(Option<BudgetPermit>) -> Fut,
     Fut: Future<Output = Result<T, DistillerRunError>>,
     W: FnMut(Duration) -> WFut,
-    WFut: Future<Output = Result<(), BudgetDenied>>,
+    WFut: Future<Output = Result<Option<BudgetPermit>, Unadmitted>>,
 {
     let allowed = limits.attempts.max(1);
     let mut attempts = 0;
+    let mut reserved = None;
     loop {
-        let failure = match tokio::time::timeout(limits.deadline, attempt()).await {
+        let failure = match tokio::time::timeout(limits.deadline, attempt(reserved.take())).await {
             Ok(Ok(answer)) => {
                 return Bounded {
                     attempts: attempts + 1,
@@ -406,16 +434,26 @@ where
             Ok(Err(DistillerRunError::Busy(denied))) => {
                 let wait = wait_until.saturating_duration_since(tokio::time::Instant::now());
                 let admitted = if wait.is_zero() {
-                    Err(denied)
+                    Err(Unadmitted::Busy(denied))
                 } else {
                     admits(wait).await
                 };
                 match admitted {
-                    Ok(()) => continue,
-                    Err(denied) => {
+                    // The wait took the run for the next attempt.
+                    Ok(taken) => {
+                        reserved = taken;
+                        continue;
+                    }
+                    Err(Unadmitted::Busy(denied)) => {
                         return Bounded {
                             attempts,
-                            outcome: Err(DistillerRunError::Busy(denied)),
+                            outcome: Err(Unanswered::Busy(denied)),
+                        };
+                    }
+                    Err(Unadmitted::Stopped) => {
+                        return Bounded {
+                            attempts,
+                            outcome: Err(Unanswered::Stopped),
                         };
                     }
                 }
@@ -430,11 +468,22 @@ where
         if attempts >= allowed {
             return Bounded {
                 attempts,
-                outcome: Err(DistillerRunError::Failed(failure)),
+                outcome: Err(Unanswered::Failed(failure)),
             };
         }
         tokio::time::sleep(limits.pause).await;
     }
+}
+
+/// What a side effect the projection's stop ended while it waited for the
+/// realm's background budget fails its page with: nothing is recorded or
+/// reported for it, and its page runs again at the next start.
+fn stopped_waiting(effect: LifecycleEffectKind) -> String {
+    format!(
+        "the projection stopped while the {} waited for the agent memory background budget; \
+         nothing is recorded for it, and its page runs again at the next start",
+        effect.as_str()
+    )
 }
 
 /// The identity runtime's lifecycle projection: where it stands in Core's
@@ -690,7 +739,8 @@ enum JobStop {
     /// They follow a predecessor's backlog, which still owes this identity
     /// side effects.
     Held(AgentIdentity),
-    /// A side effect's failure could not be recorded.
+    /// A side effect's failure could not be recorded, or the projection
+    /// stopped while a side effect waited for the realm's background budget.
     Failed(String),
 }
 
@@ -2477,9 +2527,15 @@ impl IdentityRuntime {
             return;
         }
         if let Err(error) = memory
-            .harvest_compaction_within_bound(identity, &session_key, discards, true)
+            .harvest_compaction_within_bound(identity, &session_key, discards, true, None)
             .await
         {
+            // A step's answer waits for this harvest, so it does not wait
+            // for the budget: a denial gives the run up, reported as a run
+            // the budget skipped.
+            if let DistillerRunError::Busy(denied) = &error {
+                memory.report_budget_denied(denied);
+            }
             // The session goes on: what it holds is read again, whether the
             // harvest failed or the realm's background budget did not admit
             // it.
@@ -2628,16 +2684,18 @@ impl IdentityRuntime {
     /// admit was not attempted: it waits for the budget
     /// ([`bounded_admitted`]), the batch's and its fallback's together at
     /// most the side effect's budget wait, and one the budget still did not
-    /// admit by then ends unrun, recorded with the cause
-    /// [`LifecycleEffectFailureCause::BudgetBusy`]. A harvest that fails (a
-    /// timeout, a failed read or extraction) is recorded as a failed
-    /// compaction harvest, under a key of its own (apart from the
-    /// retirement's distillation), and leaves one fallback harvest owed,
-    /// attempted like the other side effects (at most [`EFFECT_ATTEMPTS`]
-    /// times, each within its bound): a fallback that still fails, or that
-    /// the budget kept from running, replaces that record, and one that
-    /// harvested the discards removes it, so no record stands for a harvest
-    /// that was made good. Only a failure to record fails the page.
+    /// admit by then is given up ([`Self::give_up_on_a_busy_budget`]). A
+    /// harvest that fails (a timeout, a failed read or extraction) is
+    /// recorded as a failed compaction harvest, under a key of its own
+    /// (apart from the retirement's distillation), and leaves one fallback
+    /// harvest owed, attempted like the other side effects (at most
+    /// [`EFFECT_ATTEMPTS`] times, each within its bound): a fallback that
+    /// still fails replaces that record, so does one the budget kept from
+    /// running (its record then counts the batch's attempt and names its
+    /// failure), and one that harvested the discards removes it, so no
+    /// record stands for a harvest that was made good. Only a failure to
+    /// record, or the projection's stop while the harvest waits for the
+    /// budget (the page then runs again at the next start), fails the page.
     #[allow(clippy::too_many_arguments)]
     async fn harvest_owed_compaction(
         &self,
@@ -2652,7 +2710,7 @@ impl IdentityRuntime {
         // The batch's harvest and its fallback wait for the budget until
         // then, together.
         let wait_until = tokio::time::Instant::now() + limits.budget_wait;
-        let admits = move |wait: Duration| memory.until_budget_admits(wait);
+        let admits = move |wait: Duration| self.budget_admits(memory, wait);
         let harvest_failure =
             |attempts: u32, error: String, cause: LifecycleEffectFailureCause| FailedEffect {
                 identity,
@@ -2678,7 +2736,7 @@ impl IdentityRuntime {
                         ..limits
                     },
                     wait_until,
-                    || {
+                    |reserved| {
                         let (session, discards) = (batch_session.as_str(), discards.clone());
                         async move {
                             memory
@@ -2687,6 +2745,7 @@ impl IdentityRuntime {
                                     session,
                                     Some(discards),
                                     false,
+                                    reserved,
                                 )
                                 .await
                         }
@@ -2698,7 +2757,7 @@ impl IdentityRuntime {
                     Ok(()) => return Ok(()),
                     // The budget did not admit it within the harvest's
                     // wait, which leaves its fallback none.
-                    Err(DistillerRunError::Busy(denied)) => {
+                    Err(Unanswered::Busy(denied)) => {
                         let unrun = harvest_failure(
                             batch.attempts,
                             format!(
@@ -2708,16 +2767,19 @@ impl IdentityRuntime {
                             ),
                             LifecycleEffectFailureCause::BudgetBusy,
                         );
-                        self.record_lifecycle_effect_failure(owed, &unrun).await?;
-                        self.report_lifecycle_effect_failure(&unrun);
-                        return Ok(());
+                        return self
+                            .give_up_on_a_busy_budget(owed, &unrun, memory, &denied)
+                            .await;
                     }
-                    Err(DistillerRunError::Failed(error)) => Some(error),
+                    Err(Unanswered::Stopped) => {
+                        return Err(stopped_waiting(LifecycleEffectKind::CompactionHarvest));
+                    }
+                    Err(Unanswered::Failed(error)) => Some(error),
                 }
             }
             OwedCompaction::Fallback { failed, .. } => failed,
         };
-        let recorded = match earlier {
+        let recorded = match earlier.as_deref() {
             Some(error) => {
                 let failed = harvest_failure(
                     1,
@@ -2736,16 +2798,16 @@ impl IdentityRuntime {
         let fallback = bounded_admitted(
             limits,
             wait_until,
-            move || async move {
+            move |reserved| async move {
                 memory
-                    .harvest_compaction_within_bound(identity, session_key, None, false)
+                    .harvest_compaction_within_bound(identity, session_key, None, false, reserved)
                     .await
             },
             admits,
         )
         .await;
         match (fallback.outcome, recorded) {
-            (Err(DistillerRunError::Failed(error)), _) => {
+            (Err(Unanswered::Failed(error)), _) => {
                 let failed = harvest_failure(
                     fallback.attempts,
                     format!(
@@ -2757,24 +2819,71 @@ impl IdentityRuntime {
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
                 self.report_lifecycle_effect_failure(&failed);
             }
-            (Err(DistillerRunError::Busy(denied)), _) => {
-                let unrun = harvest_failure(
-                    fallback.attempts,
-                    format!(
-                        "the realm's background budget did not admit the fallback harvest of \
-                         the compactions the session's memory holds within {} ms: {denied}",
-                        limits.budget_wait.as_millis()
-                    ),
-                    LifecycleEffectFailureCause::BudgetBusy,
+            (Err(Unanswered::Busy(denied)), _) => {
+                let unrun = format!(
+                    "the realm's background budget did not admit the fallback harvest of the \
+                     compactions the session's memory holds within {} ms: {denied}",
+                    limits.budget_wait.as_millis()
                 );
-                self.record_lifecycle_effect_failure(owed, &unrun).await?;
-                self.report_lifecycle_effect_failure(&unrun);
+                // The record replaces the batch's failure, when there was
+                // one: it says so, and counts the batch's attempt.
+                let (attempts, error) = match earlier.as_deref() {
+                    Some(failed) => (
+                        fallback.attempts + 1,
+                        format!(
+                            "the harvest of the settled compaction batch failed ({failed}), \
+                             and {unrun}"
+                        ),
+                    ),
+                    None => (fallback.attempts, unrun),
+                };
+                let unrun =
+                    harvest_failure(attempts, error, LifecycleEffectFailureCause::BudgetBusy);
+                self.give_up_on_a_busy_budget(owed, &unrun, memory, &denied)
+                    .await?;
+            }
+            (Err(Unanswered::Stopped), _) => {
+                return Err(stopped_waiting(LifecycleEffectKind::CompactionHarvest));
             }
             // The fallback harvested the discards: the earlier failure's
             // record goes.
             (Ok(()), Some(recorded)) => self.clear_lifecycle_effect_failure(&recorded).await,
             (Ok(()), None) => {}
         }
+        Ok(())
+    }
+
+    /// Wait until the realm's background budget admits a run of `memory`'s
+    /// distiller, at most `wait`, and take that run for the caller's next
+    /// attempt; or end at once when the projection stops, since a shutdown
+    /// does not wait for the budget.
+    async fn budget_admits(
+        &self,
+        memory: &super::AgentMemoryRuntimeInjector,
+        wait: Duration,
+    ) -> Result<Option<BudgetPermit>, Unadmitted> {
+        let mut stopping = self.lifecycle_projection.stopping.subscribe();
+        tokio::select! {
+            admitted = memory.until_budget_admits(wait) => admitted.map_err(Unadmitted::Busy),
+            Ok(_) = stopping.wait_for(|stop| *stop) => Err(Unadmitted::Stopped),
+        }
+    }
+
+    /// Give `unrun` up, a side effect the realm's background budget did not
+    /// admit within its wait: the denial that gave it up is reported as a
+    /// run the budget skipped (its warning and `memory.budget.denied`), and
+    /// the side effect is recorded and reported with the cause
+    /// `budget_busy`. Only a failure to record fails the page.
+    async fn give_up_on_a_busy_budget(
+        &self,
+        owed: Owed<'_>,
+        unrun: &FailedEffect<'_>,
+        memory: &super::AgentMemoryRuntimeInjector,
+        denied: &BudgetDenied,
+    ) -> Result<(), String> {
+        memory.report_budget_denied(denied);
+        self.record_lifecycle_effect_failure(owed, unrun).await?;
+        self.report_lifecycle_effect_failure(unrun);
         Ok(())
     }
 
@@ -4173,7 +4282,9 @@ impl IdentityRuntime {
     }
 
     /// Run one side effect, bounded. Only a failure to record a failed side
-    /// effect fails the page.
+    /// effect fails the page, and the projection's stop while a side effect
+    /// waits for the realm's background budget (the page then runs again at
+    /// the next start).
     async fn run_lifecycle_effect(
         &self,
         identity: &AgentIdentity,
@@ -4310,43 +4421,60 @@ impl IdentityRuntime {
                             ..limits
                         },
                         tokio::time::Instant::now() + limits.budget_wait,
-                        move || {
+                        move |reserved| {
                             memory.distill_before_rotation_within_bound(
                                 identity,
                                 session_key,
                                 cause,
+                                reserved,
                             )
                         },
-                        move |wait: Duration| memory.until_budget_admits(wait),
+                        move |wait: Duration| self.budget_admits(memory, wait),
                     )
                     .await;
-                    let ended = match distilled.outcome {
-                        Ok(()) => None,
-                        Err(DistillerRunError::Failed(error)) => {
-                            Some((error, LifecycleEffectFailureCause::Failed))
-                        }
-                        Err(DistillerRunError::Busy(denied)) => Some((
-                            format!(
-                                "the realm's background budget did not admit the distillation \
-                                 within {} ms: {denied}",
-                                limits.budget_wait.as_millis()
-                            ),
-                            LifecycleEffectFailureCause::BudgetBusy,
-                        )),
-                    };
-                    if let Some((error, ended_by)) = ended {
-                        let failed = FailedEffect {
-                            identity,
-                            member: &retirement.member,
-                            generation: retirement.generation,
-                            session: retirement.session.as_ref(),
-                            effect: LifecycleEffectKind::Distillation,
-                            attempts: distilled.attempts,
-                            error,
-                            cause: ended_by,
+                    let distillation =
+                        |attempts: u32, error: String, ended_by: LifecycleEffectFailureCause| {
+                            FailedEffect {
+                                identity,
+                                member: &retirement.member,
+                                generation: retirement.generation,
+                                session: retirement.session.as_ref(),
+                                effect: LifecycleEffectKind::Distillation,
+                                attempts,
+                                error,
+                                cause: ended_by,
+                            }
                         };
-                        self.record_lifecycle_effect_failure(owed, &failed).await?;
-                        self.report_lifecycle_effect_failure(&failed);
+                    match distilled.outcome {
+                        Ok(()) => {}
+                        Err(Unanswered::Failed(error)) => {
+                            let failed = distillation(
+                                distilled.attempts,
+                                error,
+                                LifecycleEffectFailureCause::Failed,
+                            );
+                            self.record_lifecycle_effect_failure(owed, &failed).await?;
+                            self.report_lifecycle_effect_failure(&failed);
+                        }
+                        Err(Unanswered::Busy(denied)) => {
+                            let unrun = distillation(
+                                distilled.attempts,
+                                format!(
+                                    "the realm's background budget did not admit the \
+                                     distillation within {} ms: {denied}",
+                                    limits.budget_wait.as_millis()
+                                ),
+                                LifecycleEffectFailureCause::BudgetBusy,
+                            );
+                            self.give_up_on_a_busy_budget(owed, &unrun, memory, &denied)
+                                .await?;
+                        }
+                        // The identity's later side effects (a delete's
+                        // scope drop among them) wait for the next start
+                        // with it.
+                        Err(Unanswered::Stopped) => {
+                            return Err(stopped_waiting(LifecycleEffectKind::Distillation));
+                        }
                     }
                 }
                 if owes.drop_scope {
@@ -5105,7 +5233,7 @@ mod tests {
         let answered = bounded_admitted(
             limits,
             tokio::time::Instant::now() + limits.budget_wait,
-            move || async move {
+            move |_reserved| async move {
                 match calls.fetch_add(1, Ordering::SeqCst) {
                     0..=3 => Err(DistillerRunError::Busy(ceiling())),
                     4 => Err(DistillerRunError::Failed("extraction failed".to_string())),
@@ -5114,7 +5242,7 @@ mod tests {
             },
             move |_wait| async move {
                 waits.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), BudgetDenied>(())
+                Ok::<_, Unadmitted>(None)
             },
         )
         .await;
@@ -5130,37 +5258,86 @@ mod tests {
         );
     }
 
+    /// The run a wait took for the side effect is handed to its next
+    /// attempt, and only to that one.
+    #[tokio::test]
+    async fn the_run_a_wait_took_is_handed_to_the_next_attempt() {
+        let limits = budgeted_limits();
+        let budget = crate::memory::BackgroundBudget::new(crate::memory::BackgroundBudgetConfig {
+            runs_per_window: 10,
+            window: Duration::from_secs(60),
+            max_concurrent: 1,
+        });
+        let handed = StdMutex::new(Vec::new());
+        let handed = &handed;
+        let budget = &budget;
+        let answered = bounded_admitted(
+            limits,
+            tokio::time::Instant::now() + limits.budget_wait,
+            move |reserved: Option<BudgetPermit>| async move {
+                let mut handed = lock(handed);
+                handed.push(reserved.is_some());
+                if handed.len() == 1 {
+                    Err(DistillerRunError::Busy(ceiling()))
+                } else {
+                    Ok(())
+                }
+            },
+            move |wait| async move {
+                budget
+                    .until_admissible("realm-a", wait)
+                    .await
+                    .map(Some)
+                    .map_err(Unadmitted::Busy)
+            },
+        )
+        .await;
+        assert_eq!(answered.outcome, Ok(()));
+        assert_eq!(*lock(handed), vec![false, true]);
+    }
+
     /// A side effect the budget does not admit within its wait ends with the
     /// budget's denial, and no attempt; one whose wait is already spent ends
-    /// at its next denial, asking the budget nothing.
+    /// at its next denial, asking the budget nothing; one whose wait the
+    /// projection's stop ends ends stopped.
     #[tokio::test]
     async fn a_side_effect_the_budget_does_not_admit_within_its_wait_ends_busy() {
         let limits = budgeted_limits();
         let ended = bounded_admitted(
             limits,
             tokio::time::Instant::now() + limits.budget_wait,
-            || async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
-            |_wait| async { Err::<(), _>(ceiling()) },
+            |_reserved| async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
+            |_wait| async { Err::<Option<BudgetPermit>, _>(Unadmitted::Busy(ceiling())) },
         )
         .await;
         assert_eq!(ended.attempts, 0);
-        assert_eq!(ended.outcome, Err(DistillerRunError::Busy(ceiling())));
+        assert_eq!(ended.outcome, Err(Unanswered::Busy(ceiling())));
 
         let waits = std::sync::atomic::AtomicU32::new(0);
         let waits = &waits;
         let spent = bounded_admitted(
             limits,
             tokio::time::Instant::now(),
-            || async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
+            |_reserved| async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
             move |_wait| async move {
                 waits.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), BudgetDenied>(())
+                Ok::<_, Unadmitted>(None)
             },
         )
         .await;
         assert_eq!(spent.attempts, 0);
-        assert_eq!(spent.outcome, Err(DistillerRunError::Busy(ceiling())));
+        assert_eq!(spent.outcome, Err(Unanswered::Busy(ceiling())));
         assert_eq!(waits.load(Ordering::SeqCst), 0, "a spent wait asks nothing");
+
+        let stopped = bounded_admitted(
+            limits,
+            tokio::time::Instant::now() + limits.budget_wait,
+            |_reserved| async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
+            |_wait| async { Err::<Option<BudgetPermit>, _>(Unadmitted::Stopped) },
+        )
+        .await;
+        assert_eq!(stopped.attempts, 0);
+        assert_eq!(stopped.outcome, Err(Unanswered::Stopped));
     }
 
     /// A long run prunes the failures it records as it goes, not only at a

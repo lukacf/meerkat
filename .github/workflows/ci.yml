@@ -316,6 +316,8 @@ env:
   # Target set for the closure-check lane: "lib" checks lib and bin targets
   # of the closure; "all" adds every test target (--all-targets), which
   # measured 16 min after a meerkat-mob change and does not fit the budget.
+  # A row of the plan can still ask for every target (a product's part after
+  # a Core change; closure_check_rows in scripts/ci-cargo-lanes.mjs).
   CLOSURE_CHECK_TARGETS: lib
 
 jobs:
@@ -2460,10 +2462,12 @@ jobs:
     # job (51m49s on main push 41608949055) and waited for the stagger job.
     # Connect's part is the longest: 52m56s on release-branch push
     # 42321043843 and 59m21s of the old 60 on main push 42497143053. It
-    # gets 90 minutes, on a pull request too (whose plan holds no part).
+    # gets 90 minutes, on a pull request too (whose plan holds no part). A
+    # product's part after a Core change checks every target (the row's
+    # `targets`, see closure_check_rows), so it gets 120.
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.targets == 'all' && 120 || 90 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}
@@ -2507,6 +2511,7 @@ jobs:
         shell: bash
         env:
           CLOSURE: ${{ matrix.packages }}
+          ROW_TARGETS: ${{ matrix.targets }}
         run: |
           set -euo pipefail
           [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
@@ -2515,7 +2520,8 @@ jobs:
           # products' requests must not reach Core's.
           [[ "${CLOSURE}" != *";"* ]] || { echo "::error::a closure-check job holds more than one product's part"; exit 1; }
           targets=()
-          if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
+          # A product's part after a Core change checks its test targets too.
+          if [[ "${ROW_TARGETS}" == "all" || "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
             targets+=(--all-targets)
           fi
           # shellcheck disable=SC2086

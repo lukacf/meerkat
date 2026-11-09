@@ -650,7 +650,10 @@ and its CI must be green before a release tag (`require_ci_green`):
 - `closure-check` (push only): `cargo check --all-features` (lib and bin
   targets) over the reverse-dependency closure of the changed packages, one
   job per product's part of it (`closure_check_rows`), the parts in parallel
-  and with the first wave.
+  and with the first wave. When the plan reaches Core, a product's part
+  checks every target (`--all-targets`): a Core change can break a
+  product's test code alone, and these are the downstream rows Core's
+  product-scoped evidence depends on (with the products' rustdoc rows).
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings` for each row of the plan's `rustdoc_rows`:
   Core's members (`--workspace` excluding the products' packages) when the
@@ -711,7 +714,8 @@ and its CI must be green before a release tag (`require_ci_green`):
   `deferred_to_push`): the cold wasm build of the runtime's closure alone
   took about 20 minutes. On a push or dispatch `example-web` gets 50 minutes,
   `integration` 70 and `mcp-confinement-positive` 50 (a pull request keeps
-  25, 30 and 40), `feature-check` 60, `closure-check` 90, `clippy` and
+  25, 30 and 40), `feature-check` 60, `closure-check` 90 (120 for a
+  product's all-target part), `clippy` and
   `closure-tests` 120 (a pull request's Clippy 60) and `main-unit` 150:
   caps sized from cold runs after a meerkat-core change or a release
   version bump, which recompiles every workspace crate.

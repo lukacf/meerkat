@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `MetaRuntime.grantTool` resolves the gateway's `applies` beside the
+  grant (whether it applies to the member's running build: `now`,
+  `not_mounted` or `at_next_build`), and `listToolGrants` the member's
+  `gate` (`running` and `next_build`), now that the gateway answers them;
+  both are advisory, and the method docs name them. An older gateway leaves
+  them out.
+
 ## 0.9.11
 
 - `MetaRuntime.grantTool(identity, { tool | family, durationMs |

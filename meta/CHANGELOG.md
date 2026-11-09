@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Meta's grant answers report `applies` and the member's gate, as Meerkat's
+  own `tool_grants/grant` and `tool_grants/list` report them:
+  `meta/tool_grants/grant` answers `{grant, applies}`, whether the grant
+  applies to the member's running build (`now`, `not_mounted` or
+  `at_next_build`), and `meta/tool_grants/list` answers the member's `gate`
+  (`running`, what its live build gates, `null` while no build of it is
+  live on the gateway, and `next_build`, the gate its next build resolves).
+  A retired identity's list answers its grants without a gate. Both are
+  advisory, on the stdio gateway and on `POST /console/rpc`. The 0.9.11
+  known limitation "Meta's grant answers do not report `applies` or the
+  gate yet" no longer applies.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

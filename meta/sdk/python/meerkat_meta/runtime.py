@@ -2068,7 +2068,10 @@ class MetaRuntime:
         reference to the decision you made before issuing, as attribution.
         The grant applies across the member's respawns and the gateway's
         restarts, opens the tool at the member's next model request and wakes
-        nothing. Returns ``{"grant": {...}}``.
+        nothing. Returns ``{"grant": {...}, "applies": ...}``: ``applies``
+        says whether the grant applies to the member's running build
+        (``"now"``, ``"not_mounted"`` or ``"at_next_build"``). It is
+        advisory, and an older gateway leaves it out.
 
         Raises :class:`ToolGrantRequestRefusedError` for a refused request.
         """
@@ -2115,6 +2118,11 @@ class MetaRuntime:
         Ended (expired or revoked) grants are listed only with
         ``include_ended``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the gateway cannot read.
+        For an identity on the mob's roster the result also carries
+        ``"gate"``: ``"running"``, what the member's live build gates and the
+        names it ignored as not mounted (``None`` while no build of it is
+        live on the gateway), and ``"next_build"``, the gate its next build
+        resolves. The gate is advisory, and an older gateway leaves it out.
         """
         raw = await self._rpc(
             "meta/tool_grants/list",

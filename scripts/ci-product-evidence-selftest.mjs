@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 
 import {
+  EVIDENCE_INPUTS,
   EVIDENCE_VERSION,
   GATE_JOB,
   GATE_LANES,
@@ -21,6 +22,7 @@ import {
   TLC_AUDITS,
   acceptance,
   attestationOfRun,
+  listAttemptJobs,
   readZipEntry,
   recordEvidence,
 } from "./ci-product-evidence.mjs";
@@ -92,6 +94,53 @@ for (const [key] of jobs) {
 for (const name of Object.keys(SINGLE_JOBS)) {
   assert.ok([...jobs.keys()].some((key) => nameOf(key) === name), `SINGLE_JOBS names ${name}, which is no ci.yml job`);
 }
+// Each single job's product, pinned: moving a job to another product changes
+// which releases its failure can block, so it changes this list too.
+assert.deepEqual(
+  SINGLE_JOBS,
+  {
+    "Change classification": "core",
+    "Stagger the short rows": "core",
+    "Format + governance": "core",
+    "CI lane classifier selftest": "core",
+    "Path classifier selftest": "core",
+    "Generation ratchets": "core",
+    "Typed governance gates": "core",
+    "Typed governance gates (machine-authority docs)": "core",
+    "Governed JSONL": "core",
+    "MCP confinement positive (Linux)": "core",
+    "wasm32 check": "core",
+    "Python + TypeScript SDK suites": "core",
+    "Example web suites": "core",
+    "WASM timer ownership": "core",
+    "Bazel graph check": "core",
+    "Connect packaging, host adapters, SDK, Console panel and docs": "connect",
+  },
+  "every single job's product",
+);
+{
+  const evidence = recordEvidence({
+    rowProducts: {},
+    jobs: [
+      { name: "Bounded TLC audits (audits-a)", conclusion: "success" },
+      { name: "Published floor (core)", conclusion: "success" },
+      { name: "Published floor (meta)", conclusion: "success" },
+      { name: "Published floor (connect)", conclusion: "success" },
+    ],
+    failedLanes: [],
+    planErrors: 0,
+  });
+  assert.deepEqual(
+    evidence.jobs.map((entry) => [entry.name, entry.product]),
+    [
+      ["Bounded TLC audits (audits-a)", "core"],
+      ["Published floor (core)", "core"],
+      ["Published floor (meta)", "meta"],
+      ["Published floor (connect)", "connect"],
+    ],
+    "a TLC audit part is Core's and a published-floor row its product's",
+  );
+}
 // Every lane the gate's lane check names judges jobs that exist.
 const gateBlock = jobs.get("gate");
 const checked = new Set(
@@ -115,6 +164,28 @@ for (const [lane, spec] of Object.entries(GATE_LANES)) {
 for (const needle of ["flagged_lanes+=(", "plan_errors=$((plan_errors + 1))", "failed_lanes=", "plan_errors="]) {
   assert.ok(gateBlock.includes(needle), `the gate's lane check records ${needle}`);
 }
+// The attestation is green only when every gate step that can fail the gate
+// before it succeeded, the budget step included.
+assert.ok(gateBlock.includes("        id: budget\n"), "the budget step has an id the attestation reads");
+assert.ok(gateBlock.includes("          BUDGET_OUTCOME: ${{ steps.budget.outcome }}"), "the attestation reads the budget step");
+assert.match(
+  gateBlock,
+  /if \[\[ "\$\{LANES_OUTCOME\}" == "success" && .*"\$\{BUDGET_OUTCOME\}" == "success" \]\]; then\n\s+validation_result=success/,
+  "validation_result is success only when the lane check and the budget step succeeded",
+);
+// The record lists the attempt's jobs 30 a page, retrying a server error as
+// the budget step does, and knows the plan's count for each lane wave: every
+// count it reads is the one that lane job's `if:` reads.
+assert.ok(gateBlock.includes("          API_RETRY_DELAYS: 5 10 20\n"), "the record retries a server error");
+const waveCounts = /          WAVE_COUNTS: >-\n((?:            .*\n)+)/.exec(gateBlock);
+assert.ok(waveCounts, "the record step names the plan's wave counts");
+const counted = [...waveCounts[1].matchAll(/"([a-z-]+)": "\$\{\{ needs\.changes\.outputs\.([a-z_]+) \}\}"/g)];
+const countedJobs = Object.values(LANE_JOBS).flatMap((spec) => spec.jobs).filter((key) => !["closure-check", "rustdoc"].includes(key));
+assert.deepEqual(counted.map((match) => match[1]).sort(), [...countedJobs].sort(), "a count for every lane job that shares a lane's name");
+for (const [, key, output] of counted) {
+  assert.match(jobs.get(key) ?? "", new RegExp(`^    if: .*needs\\.changes\\.outputs\\.${output} != '0'`, "m"), `${key} runs on ${output}`);
+}
+JSON.parse(waveCounts[1].replace(/\$\{\{[^}]*\}\}/g, "0").replaceAll("\n", " "));
 
 // --- The rule --------------------------------------------------------------
 
@@ -140,7 +211,8 @@ function attestation({ jobs: list = GREEN, failedLanes = [], planErrors = 0, res
   };
 }
 const fail = (name, conclusion = "failure") => GREEN.map((entry) => (entry.name === name ? { ...entry, conclusion } : entry));
-const verdict = (record, product) => acceptance(record, product);
+// The judged commit changed none of the evidence's inputs (see below).
+const verdict = (record, product) => acceptance(record, product, { changedPaths: ["crates/meerkat-core/src/lib.rs"] });
 const expectRule = (label, record, expected) => {
   for (const [product, accepted] of Object.entries(expected)) {
     const { accepted: actual, reasons } = verdict(record, product);
@@ -148,7 +220,11 @@ const expectRule = (label, record, expected) => {
   }
 };
 
-expectRule("a green run", { schema_version: 4, validation_result: "success" }, { core: true, meta: true, connect: true });
+expectRule(
+  "a failed run whose attestation says every lane succeeded",
+  { schema_version: 4, validation_result: "success" },
+  { core: false, meta: false, connect: false },
+);
 expectRule(
   "a Connect row red (0.9.11)",
   attestation({ jobs: fail("Main unit tests (connect[console])"), failedLanes: ["Main unit tests"] }),
@@ -180,6 +256,19 @@ expectRule(
 expectRule(
   "a Core row cancelled",
   attestation({ jobs: fail("Clippy (core)", "cancelled"), failedLanes: ["Clippy"] }),
+  { core: false, meta: false },
+);
+// Each job is judged on its own too, not only through the lanes the gate
+// flagged: a Core row that failed in a lane the gate did not name still
+// refuses, beside a flagged Connect row.
+expectRule(
+  "a Core row red in a lane the gate did not flag",
+  attestation({
+    jobs: GREEN.map((entry) =>
+      ["Format + governance", "Main unit tests (connect[console])"].includes(entry.name) ? { ...entry, conclusion: "failure" } : entry,
+    ),
+    failedLanes: ["Main unit tests"],
+  }),
   { core: false, meta: false },
 );
 expectRule(
@@ -258,6 +347,37 @@ assert.match(
   "an accepted run names the failed rows",
 );
 
+// --- The judge ----------------------------------------------------------------
+
+// A run of commit R is judged by R's first parent's copy of this module (the
+// release gates read it with `git show`), as reused CI evidence is: R cannot
+// certify its own red run with an edited job-to-product table. The copy is
+// told what R changed against that parent and refuses when R changed what
+// decides the evidence (this module, the planner's row products, the
+// products file, ci.yml's gate), or when nobody told it.
+{
+  const red = attestation({ jobs: connectRed, failedLanes: ["Main unit tests"] });
+  assert.deepEqual(
+    [...EVIDENCE_INPUTS].sort(),
+    [".github/workflows/ci.yml", "ci/products.json", "scripts/ci-cargo-lanes.mjs", "scripts/ci-product-evidence.mjs", "scripts/ci-products.mjs"],
+    "the inputs that decide a run's product evidence",
+  );
+  assert.equal(acceptance(red, "core", { changedPaths: [] }).accepted, true, "a commit that changed nothing the evidence reads");
+  assert.equal(acceptance(red, "meta", { changedPaths: ["meta/README.md"] }).accepted, true, "a commit that changed other files");
+  for (const options of [undefined, {}, { changedPaths: null }, { changedPaths: "scripts/x.mjs" }]) {
+    const { accepted, reasons } = acceptance(red, "core", options);
+    assert.equal(accepted, false, `unknown changes refuse (${JSON.stringify(options)})`);
+    assert.match(reasons.join(" "), /changes against its first parent are unknown/);
+  }
+  for (const input of EVIDENCE_INPUTS) {
+    for (const product of ["core", "meta"]) {
+      const { accepted, reasons } = acceptance(red, product, { changedPaths: ["crates/meerkat-core/src/lib.rs", input] });
+      assert.equal(accepted, false, `a commit that changes ${input} refuses ${product}`);
+      assert.match(reasons.join(" "), new RegExp(`changes ${input.replaceAll(".", "\\.")}`));
+    }
+  }
+}
+
 // --- The record -------------------------------------------------------------
 
 {
@@ -297,8 +417,116 @@ assert.match(
   assert.equal(of["Published floor (other)"].product, null, "a floor row of no product stays unknown");
   assert.equal(of["Connect packaging, host adapters, SDK, Console panel and docs"].product, "connect");
   assert.deepEqual(of["Unknown job"], job("Unknown job", "pending", null));
-  assert.equal(acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core").accepted, false,
-    "a recorded downstream failure refuses Core");
+  const recorded = acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core", { changedPaths: [] });
+  assert.equal(recorded.accepted, false, "a recorded downstream failure refuses Core");
+  assert.match(recorded.reasons.join(" "), /core depends on job Clippy \(downstream meta\)/, "for that failure");
+  // Two rows that render one job name with different products: unknown.
+  const shared = recordEvidence({
+    rowProducts: {
+      main_unit: [{ name: "x", product: "core" }],
+      main_archive_run: [{ name: "x", product: "connect" }, { name: "y", product: "meta" }, { name: "y", product: "meta" }],
+    },
+    jobs: [{ name: "Main unit tests (x)", conclusion: "success" }, { name: "Main unit tests (y)", conclusion: "success" }],
+    failedLanes: [],
+    planErrors: 0,
+  });
+  assert.deepEqual(shared.jobs.map((entry) => entry.product), [null, "meta"], "a job name two rows of other products share is unknown");
+}
+
+// --- Unplanned waves ----------------------------------------------------------
+
+// GitHub lists a lane job its `if:` skipped under the job's unexpanded name
+// (run 42615640098: `Clippy (${{ matrix.name }})`). The record marks it an
+// unplanned wave when the plan's count for one of the jobs that render that
+// name is 0, so a red row of a product no release depends on, next to an
+// empty rest wave, is still judged; with no zero count it stays unknown.
+{
+  const rowProducts = {
+    closure_tests: [{ name: "tests connect 1/2", product: "connect" }, { name: "tests core 1/9", product: "core" }],
+  };
+  const listed = [
+    { name: "Change classification", conclusion: "success" },
+    { name: "Closure tests (tests connect 1/2)", conclusion: "failure" },
+    { name: "Closure tests (tests core 1/9)", conclusion: "success" },
+    { name: "Closure tests (${{ matrix.name }})", conclusion: "skipped" },
+  ];
+  const record = (waveCounts) =>
+    recordEvidence({ rowProducts, jobs: listed, failedLanes: ["Closure tests"], planErrors: 0, waveCounts });
+  const restEmpty = record({ "closure-tests": 2, "closure-tests-rest": 0 });
+  const skipped = restEmpty.jobs.find((entry) => entry.name.includes("${{"));
+  assert.deepEqual(skipped, { name: "Closure tests (${{ matrix.name }})", conclusion: "skipped", product: null, downstream: false, unplanned: true });
+  const judged = (evidence) =>
+    Object.fromEntries(
+      ["core", "meta"].map((product) => [
+        product,
+        acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, product, { changedPaths: [] }).accepted,
+      ]),
+    );
+  assert.deepEqual(judged(restEmpty), { core: true, meta: true }, "a Connect row red beside an empty rest wave");
+  for (const counts of [{ "closure-tests": 2, "closure-tests-rest": 1 }, {}, { "closure-tests": Number.NaN, "closure-tests-rest": Number.NaN }]) {
+    const evidence = record(counts);
+    assert.equal(evidence.jobs.find((entry) => entry.name.includes("${{")).unplanned, undefined, `no zero count: ${JSON.stringify(counts)}`);
+    assert.deepEqual(judged(evidence), { core: false, meta: false }, "an unknown skipped job in a flagged lane refuses");
+  }
+  // Only a skipped job is a wave the plan did not run.
+  const ran = recordEvidence({
+    rowProducts,
+    jobs: [{ name: "Closure tests (${{ matrix.name }})", conclusion: "failure" }],
+    failedLanes: ["Closure tests"],
+    planErrors: 0,
+    waveCounts: { "closure-tests-rest": 0 },
+  });
+  assert.equal(ran.jobs[0].unplanned, undefined, "a job that ran is never an unplanned wave");
+  // Two jobs render "Main unit tests (...)": either one's zero count counts.
+  const archive = recordEvidence({
+    rowProducts: {},
+    jobs: [{ name: "Main unit tests (${{ matrix.name }})", conclusion: "skipped" }],
+    failedLanes: [],
+    planErrors: 0,
+    waveCounts: { "main-unit": 3, "main-unit-rest": 2, "main-unit-archive-run": 0 },
+  });
+  assert.equal(archive.jobs[0].unplanned, true, "the archived run lane's empty wave");
+}
+
+// --- The job listing -----------------------------------------------------------
+
+{
+  const calls = [];
+  const sleeps = [];
+  const answers = (list) => (args) => {
+    calls.push(args);
+    return list.shift();
+  };
+  const ok = { status: 0, stdout: '{"name":"Clippy (core)","conclusion":"success"}\n{"name":"CI gate","conclusion":null}\n', stderr: "" };
+  const listed = listAttemptJobs({
+    repository: "o/r",
+    runId: 42,
+    attempt: 2,
+    delays: [5, 10, 20],
+    run: answers([{ status: 1, stdout: "", stderr: "gh: HTTP 502: Bad Gateway" }, { status: 1, stdout: "", stderr: "HTTP 503" }, ok]),
+    sleep: (seconds) => sleeps.push(seconds),
+  });
+  assert.deepEqual(listed, [{ name: "Clippy (core)", conclusion: "success" }, { name: "CI gate", conclusion: null }]);
+  assert.deepEqual(sleeps, [5, 10], "a server error is retried after each delay");
+  assert.deepEqual(calls[0], ["api", "--paginate", "repos/o/r/actions/runs/42/attempts/2/jobs?per_page=30", "--jq", ".jobs[] | {name, conclusion}"]);
+  assert.throws(
+    () => listAttemptJobs({ repository: "o/r", runId: 42, attempt: 2, delays: [5], run: answers([{ status: 1, stdout: "", stderr: "HTTP 404: Not Found" }]), sleep: () => {} }),
+    /HTTP 404/,
+    "any other failure fails at once",
+  );
+  assert.throws(
+    () =>
+      listAttemptJobs({
+        repository: "o/r",
+        runId: 42,
+        attempt: 2,
+        delays: [5],
+        run: answers([{ status: 1, stdout: "", stderr: "HTTP 502" }, { status: 1, stdout: "", stderr: "HTTP 502" }]),
+        sleep: () => {},
+      }),
+    /HTTP 502/,
+    "a server error after the last retry fails",
+  );
 }
 
 // --- The artifact reader ---------------------------------------------------

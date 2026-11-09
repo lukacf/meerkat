@@ -2320,6 +2320,8 @@ const core = {
 };
 process.env.RELEASE_SHA = scenario.sha;
 process.env.CI_BYPASS = scenario.bypass;
+process.env.RUNNER_TEMP = scenario.runner_temp;
+process.env.RELEASE_MODE = scenario.mode;
 (async () => {
   try {
     await new AsyncFunction("require", "github", "context", "core", body)(
@@ -2335,9 +2337,14 @@ process.env.CI_BYPASS = scenario.bypass;
 
 
 def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None, sha="deadbeef", bypass="false",
-                     attestations=(), reader=False):
-    """Run the gate in a scratch directory: `reader` copies the repository's
-    scripts/ci-product-evidence.mjs there (the job's sparse checkout), and
+                     attestations=(), reader=False, parent_reader="real", changed=(), mode="promote"):
+    """Run the gate in a scratch directory: `reader` gives the job the
+    product-scoped evidence reader, both the checkout's own copy of
+    scripts/ci-product-evidence.mjs (which must never judge: the release
+    commit could edit it) and, as `parent_reader` says, the copy of the
+    commit's first parent that the job writes under RUNNER_TEMP ("real";
+    "refusing", a copy whose rule refuses every run; None, a parent without
+    the reader), with `changed`, the commit's changed paths (None: unknown).
     `attestations` are the (run id, attempt, record) exact-tree attestations
     the ci.yml runs left."""
     artifacts = []
@@ -2347,16 +2354,29 @@ def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None,
             bundle.writestr("attestation.json", json.dumps(record))
         artifacts.append({"id": number, "run_id": run_id, "name": f"meerkat-ci-attestation-{sha}-{attempt}",
                           "expired": False, "zip": base64.b64encode(archive.getvalue()).decode("ascii")})
-    scenario = {"sha": sha, "bypass": bypass, "ci": ci,
-                "meta": {"push": meta_push or [[]], "workflow_dispatch": meta_dispatch or [[]]},
-                "jobs": jobs or {}, "artifacts": artifacts}
     with fixture_directory() as tmp:
+        runner_temp = tmp / "runner-temp"
+        scenario = {"sha": sha, "bypass": bypass, "ci": ci,
+                    "meta": {"push": meta_push or [[]], "workflow_dispatch": meta_dispatch or [[]]},
+                    "jobs": jobs or {}, "artifacts": artifacts, "runner_temp": str(runner_temp), "mode": mode}
         for name, text in (("harness.js", POLLING_GATE_HARNESS), ("gate.js", body),
                            ("scenario.json", json.dumps(scenario))):
             (tmp / name).write_text(text)
+        source = ROOT.parent / "scripts" / "ci-product-evidence.mjs"
+        parent = runner_temp / "ci-evidence-parent"
+        parent.mkdir(parents=True)
         if reader:
             (tmp / "scripts").mkdir()
-            shutil.copy(ROOT.parent / "scripts" / "ci-product-evidence.mjs", tmp / "scripts" / "ci-product-evidence.mjs")
+            shutil.copy(source, tmp / "scripts" / "ci-product-evidence.mjs")
+            if parent_reader == "real":
+                shutil.copy(source, parent / "ci-product-evidence.mjs")
+            elif parent_reader == "refusing":
+                shutil.copy(source, parent / "ci-product-evidence-real.mjs")
+                (parent / "ci-product-evidence.mjs").write_text(
+                    'export * from "./ci-product-evidence-real.mjs";\n'
+                    'export function acceptance() { return { accepted: false, reasons: ["this copy refuses"] }; }\n')
+        if changed is not None:
+            (parent / "changed-paths.txt").write_text("".join(f"{path}\n" for path in changed))
         subprocess.run(["node", str(tmp / "harness.js"), str(tmp / "gate.js"), str(tmp / "scenario.json"),
                         str(tmp / "result.json")], check=True, capture_output=True, text=True, cwd=tmp)
         return json.loads((tmp / "result.json").read_text())
@@ -2499,6 +2519,51 @@ class MetaCiGateTests(unittest.TestCase):
         result = self.gate([[red], [rerun], [{**red, "run_attempt": 2}]], reader=True,
                            attestations=((42, 1, self.scoped({"Clippy (core)": "core"})), (42, 2, self.scoped(connect))))
         self.accepted(result, attempt="2")
+
+    def test_a_candidate_waits_longer_for_its_release_merges_ci(self):
+        """A candidate starts at the release merge, beside that commit's own
+        cold exact-main CI run, so its gate waits up to 240 minutes; every
+        other mode starts after CI ran and waits up to 120."""
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        result = self.gate([[pending]], mode="candidate")
+        self.assertIn("has no green exact-main CI after 240 minutes", result["failed"])
+        self.assertGreaterEqual(result["elapsed_minutes"], 240)
+        for mode in ("promote", "existing"):
+            with self.subTest(mode=mode):
+                result = self.gate([[pending]], mode=mode)
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertLess(result["elapsed_minutes"], 240)
+
+    def test_the_floor_check_outlasts_its_wait_and_build(self):
+        """floor_check waits up to 60 minutes for Core's crates, then binds a
+        record and builds the floor (28 to 45 minutes measured): its runner
+        timeout leaves room for both, so a late Core publication ends in the
+        wait's own message."""
+        self.assertRegex(job_block("floor_check", META_RELEASE_WORKFLOW), r"\n    timeout-minutes: 120\n")
+
+    def test_a_red_run_is_judged_by_the_release_commits_parent_never_by_the_commit_itself(self):
+        """The release commit's first parent's copy of the reader judges a
+        red run, told what the commit changed: never the checkout's own copy,
+        which the commit could edit, and never a commit that changes what
+        decides the evidence or whose changes are unknown."""
+        red = {**self.CI, "conclusion": "failure"}
+        connect = {"Main unit tests (connect[console])": "connect"}
+        for case, options in (
+                ("the parent's copy refuses", {"parent_reader": "refusing"}),
+                ("the parent has no reader", {"parent_reader": None}),
+                ("the commit changes the reader",
+                 {"changed": ("crates/meerkat-core/src/lib.rs", "scripts/ci-product-evidence.mjs")}),
+                ("the commit changes the planner", {"changed": ("scripts/ci-cargo-lanes.mjs",)}),
+                ("the commit changes ci.yml", {"changed": (".github/workflows/ci.yml",)}),
+                ("the commit's changes are unknown", {"changed": None})):
+            with self.subTest(case=case):
+                result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True, **options)
+                self.assertIsNotNone(result["failed"], f"the gate accepted the red run: {result['outputs']}")
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertEqual(result["outputs"], {})
+        result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True,
+                           changed=("meta/README.md", "connect/README.md"))
+        self.accepted(result)
 
 
 def run_floor_wait(crates, index, *, version="0.8.31", appear_after=None):

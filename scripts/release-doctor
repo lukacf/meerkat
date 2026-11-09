@@ -329,6 +329,12 @@ else
   bad "Intel macOS release binaries must build on the BuildBuddy lane when it is selected (release-build-macos-x86, for a macOS version every supported Intel Mac runs), be run and inspected on Apple silicon before the binary build gate succeeds, and trail the critical assets (${macos_x86_contract//$'\n'/; })"
 fi
 
+if closures_contract="$(workflow_contract release-closures)"; then
+  pass "The release binaries and the Web SDK runtime compile no package under another product's root"
+else
+  bad "A release binary or the Web SDK runtime compiles a package under another product's root, which a reused prebuild may differ in (${closures_contract//$'\n'/; })"
+fi
+
 if baseline_contract="$(workflow_contract semver-baseline)"; then
   pass "Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 else

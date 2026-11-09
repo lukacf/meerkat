@@ -384,13 +384,22 @@ path changed between the two is a non-input of Core's release artifacts
 (`scripts/release-prebuild-equivalent`): a path under another product's root
 (except a `Cargo.toml` there, which the workspace resolves and
 `MODULE.bazel.lock` records), a product's changelog, or one of a short list of
-files only CI reads (the CI planner and its data). A release fix that touches
+files only CI reads (the CI planner and its data, each a `scripts/ci-*` file:
+the helper refuses every prebuild while it lists another). A release fix that touches
 only Connect, Meta, a changelog or the planner therefore reuses the prebuild
 of the release merge instead of rebuilding Core; any other path, an unreadable
 `ci/products.json` or a commit that is not an ancestor means a full build.
 `make release-doctor` checks that no release build job, local action or
-script it runs names such a path. The lookup prefers a run of exactly the tag
-commit, and the job summary lists every changed path with its reason;
+script it runs names such a path (following the scripts named there, the
+local actions, a module's relative imports and the files the npm scripts a
+build script runs execute with node; not a Make recipe or a cargo alias), and
+that the normal and build dependencies of the release binaries and the Web
+SDK runtime reach no package under a product's root. The lookup prefers a run of exactly the tag
+commit: while one is still under way it waits for that run rather than take
+an earlier commit's, and it never takes an earlier commit's run whose
+Windows or Intel macOS lane or full binary build gate already failed, timed
+out or was cancelled (the tag run could not publish the trailing archives).
+The job summary lists every changed path with its reason;
 the publishers verify the run
 attempt the lookup examined and refuse it if the run was re-run since;
 a gate that has not concluded yet is waited for, because the prebuild
@@ -432,8 +441,18 @@ SHA, CI workflow run and attempt, branch, and event to backend
 `github-hosted-cargo`, its aggregate `validation_result`, the selected lane
 `plan`, and every lane's `component_results`. The release gate downloads it
 from the successful exact-main workflow run (for a maintenance release, the
-push run on its release branch) and verifies every required field
-before tag-triggered publication starts. A release-projection run (plan mode
+push run on its release branch), or from a failed run of that kind whose
+attestation's `product_evidence` shows every failure in rows Core does not
+depend on, and verifies every required field
+before tag-triggered publication starts. Its `validation_result` is `success`
+only when every step of the CI gate before the attestation succeeded. The
+failed run is judged by the release commit's first parent's copy of
+`scripts/ci-product-evidence.mjs`, told the paths the commit changes against
+that parent; a commit that changes that script, the planner,
+`ci/products.json`, `scripts/ci-products.mjs` or `ci.yml` needs a green run,
+and so does every release whose product is Connect. Meta's gate and its
+candidate collection, promotion and recovery apply the same reader for Meta.
+A release-projection run (plan mode
 `release-projection`) also records `reused_test_evidence`: the first-parent
 commit and tree and the CI run and attempt it reused. The release gate then
 runs the parent's own copies of the classifier and the evidence script to
@@ -444,9 +463,11 @@ workspace, records every lane as successful and is not itself a reuse. The consu
 supported legacy schema-1 Cargo, schema-2 BuildBuddy, and schema-3
 BuildBuddy-plus-dense-Mob attestations; the current producer does not emit
 those formats.
-Manual recovery dispatches still require successful exact-main CI (for a
+Manual recovery dispatches still require exact-main CI (for a
 maintenance release, the push CI on its release branch) for the
-selected release commit. When release validation applies, the dispatch runs
+selected release commit: a successful run, or a failed one the product-scoped
+evidence accepts for Core as above (a dispatch does not verify the retained
+attestation again). When release validation applies, the dispatch runs
 the selected validation lane directly rather than requiring a retained **CI**
 attestation artifact. Narrow `assets`,
 `packages`, `web-sdk`, and `web-sdk-publish` modes repair one publication
@@ -504,6 +525,7 @@ head, which never reaches `main` before the tag.
 - A push to `release/<version>` writes the exact-tree CI attestation and,
   for a `Cargo.toml` or `CHANGELOG.md` change, the readiness push evidence,
   as a push to `main` does. `require_ci_green` accepts a successful push run
+  (or a failed one the product-scoped evidence accepts for Core)
   of `ci.yml` at exactly the release commit on `main` or on
   `release/<version>`, where `<version>` is the checked-out workspace version
   the tag is bound to, and requires the verified attestation's ref to be

@@ -179,11 +179,15 @@ nothing; `--execute --no-tag --no-push` makes the release commit). Candidate
 production must run from that final merged commit, not a PR head or an earlier
 build. Candidate runs may start as soon as the commit is on main: their build
 legs run beside the commit's `ci.yml` **push-to-main** run, and collection
-waits (up to 120 minutes) until that run, and a Meta CI run at the commit that
+waits (up to 240 minutes, since that run may start cold) until that run, and a
+Meta CI run at the commit that
 ran Meta's lanes, are green; a green re-run attempt counts. A red `ci.yml` run
 counts too when its attestation shows every failure in rows Meta does not
 depend on (Meta depends on Core's and Meta's rows; a Connect-only red row does
-not hold Meta back; the root's `scripts/ci-product-evidence.mjs` judges it).
+not hold Meta back; the root's `scripts/ci-product-evidence.mjs`, as the
+release commit's first parent has it, judges it, and refuses a commit that
+changes what decides that evidence). Collection, promotion, recovery and the
+published-release check re-check the bound CI run the same way.
 A candidate whose wait runs out binds nothing; dispatch a new one once CI is
 green.
 

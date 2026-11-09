@@ -29,8 +29,13 @@
 # The default leaves about 45 minutes over the slowest gate measured on the
 # backend tags select (v0.9.2's BuildBuddy prebuild: 94.7 minutes). A run one
 # of whose CRITICAL_JOBS (the jobs the gate needs) failed, timed out or was
-# cancelled is given up at once: its gate can no longer succeed. A usable run is
-# taken even while a run listed before it is still waited for.
+# cancelled is given up at once: its gate can no longer succeed. A usable run of
+# exactly the commit is taken even while a run listed before it is still
+# waited for. A run of an earlier commit is taken only while no run of exactly
+# the commit is still waited for (the exact commit's prebuild is preferred),
+# and never once one of its TRAILING_JOBS failed, timed out or was cancelled:
+# the tag run would publish its critical archives and then stop without the
+# trailing ones.
 #
 # The id is only a pointer, pinned to the attempt examined here: the
 # publishing jobs verify every archive and the Web SDK package against their
@@ -52,6 +57,14 @@ CRITICAL_JOBS=(
   "Build and package surface binaries via BuildBuddy"
   "Build Web SDK package"
   "Release critical binary build gate"
+)
+# The trailing lanes and the full binary build gate, display names, a glob for
+# the matrix legs.
+TRAILING_JOBS=(
+  "Release binary build gate"
+  "Cross-compile and package Windows surface binaries on Linux"
+  "Verify Windows binaries on a Windows runner"
+  "Cross-compile and package Intel macOS surface binaries on Apple silicon (*)"
 )
 
 usage() {
@@ -144,9 +157,10 @@ candidate_runs() {
 # The prebuild gate's conclusion: success, failure, ..., "pending" while it
 # has not concluded, "absent" when the run has no such job, or "doomed" when
 # it has not concluded but one of the CRITICAL_JOBS failed, timed out or was
-# cancelled.
+# cancelled; then a tab and the first of the TRAILING_JOBS that failed, timed
+# out or was cancelled ("<name>: <conclusion>"), empty when none did.
 prebuild_gate_state() {
-  local run_id="$1" listing name conclusion critical gate="absent" doomed=""
+  local run_id="$1" listing name conclusion critical pattern gate="absent" doomed="" trailing=""
   listing="$(gh api --paginate "repos/${repository}/actions/runs/${run_id}/jobs?per_page=100" \
     --jq '.jobs[] | [.name, (.conclusion // "pending")] | @tsv')" ||
     { log "cannot list the jobs of run ${run_id}"; exit 1; }
@@ -160,12 +174,18 @@ prebuild_gate_state() {
         doomed="${name}: ${conclusion}"
       fi
     done
+    for pattern in "${TRAILING_JOBS[@]}"; do
+      # shellcheck disable=SC2053 # a glob
+      if [[ -z "${trailing}" && "${name}" == ${pattern} && "${conclusion}" =~ ^(failure|timed_out|cancelled)$ ]]; then
+        trailing="${name}: ${conclusion}"
+      fi
+    done
   done <<<"${listing}"
   if [[ -n "${doomed}" && ( "${gate}" == "pending" || "${gate}" == "absent" ) ]]; then
     log "run ${run_id}: ${doomed}, so its ${PREBUILD_GATE_JOB} cannot pass; not waiting for it"
     gate="doomed"
   fi
-  printf '%s\n' "${gate}"
+  printf '%s\t%s\n' "${gate}" "${trailing}"
 }
 
 artifacts_downloadable() {
@@ -204,13 +224,17 @@ artifacts_downloadable() {
 while true; do
   runs="$(candidate_runs)"
   pending=0
+  exact_pending=0
   while IFS=$'\t' read -r run_id status started attempt sha; do
     [[ -n "${run_id}" ]] || continue
-    gate="$(prebuild_gate_state "${run_id}")"
+    state="$(prebuild_gate_state "${run_id}")"
+    gate="${state%%$'\t'*}"
+    trailing="${state#*$'\t'}"
     if [[ "${gate}" == "pending" || ( "${gate}" == "absent" && "${status}" != "completed" ) ]]; then
       if (($(date -u +%s) - started < wait_seconds)); then
         log "run ${run_id} for ${sha} is ${status} and its ${PREBUILD_GATE_JOB} has not concluded; waiting for it"
         pending=1
+        [[ "${sha}" != "${release_sha}" ]] || exact_pending=1
       else
         log "run ${run_id} for ${sha}: no ${PREBUILD_GATE_JOB} conclusion ${wait_seconds}s after it started; not waiting longer"
       fi
@@ -219,6 +243,18 @@ while true; do
     if [[ "${gate}" != "success" ]]; then
       log "run ${run_id}: ${PREBUILD_GATE_JOB} ${gate} (not a usable prebuild)"
       continue
+    fi
+    # The runs of exactly the release commit come first, so a run of an
+    # earlier commit is reached only after each of them was judged.
+    if [[ "${sha}" != "${release_sha}" ]]; then
+      if [[ "${exact_pending}" -eq 1 ]]; then
+        log "run ${run_id} for ${sha} is ready, but a prebuild of exactly ${release_sha} is still under way; waiting for that one"
+        continue
+      fi
+      if [[ -n "${trailing}" ]]; then
+        log "run ${run_id}: ${trailing}, so its trailing archives cannot be published; an earlier commit's prebuild is taken only whole"
+        continue
+      fi
     fi
     if ! artifacts_downloadable "${run_id}"; then
       continue

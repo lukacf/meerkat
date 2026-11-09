@@ -37,6 +37,8 @@ NON_INPUTS_PASS="PASS No release build job, local action or script names a path 
 NON_INPUTS_FAIL="FAIL A release build job, local action or script names a path a reused prebuild may differ in"
 MACOS_X86_PASS="PASS Intel macOS release binaries build on the BuildBuddy lane when it is selected, for a macOS version every supported Intel Mac runs, are run and inspected on Apple silicon, and trail the critical assets; the hosted cross-build builds them only on the GitHub-hosted backend"
 MACOS_X86_FAIL="FAIL Intel macOS release binaries must build on the BuildBuddy lane when it is selected"
+CLOSURES_PASS="PASS The release binaries and the Web SDK runtime compile no package under another product's root"
+CLOSURES_FAIL="FAIL A release binary or the Web SDK runtime compiles a package under another product's root"
 BASELINE_PASS="PASS Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 BASELINE_FAIL="FAIL The semver baseline rustdoc must stay off every path a user waits on"
 TRAILING_PASS="PASS Linux and macOS arm64 assets publish without waiting for the trailing Intel macOS and Windows lanes; no upload replaces a published asset"
@@ -1458,7 +1460,7 @@ run_doctor() {
 }
 
 run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-committed.log"
-for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$MACOS_X86_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
+for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$MACOS_X86_PASS" "$CLOSURES_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
   if ! grep -Fxq "$line" "${TEST_ROOT}/doctor-committed.log"; then
     fail "doctor does not report \`${line}\` for the committed workflow" \
       "$(cat "${TEST_ROOT}/doctor-committed.log")"
@@ -1526,6 +1528,72 @@ expect_tree_fail_named macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-u
 mutate_tree macos-x86-minimum-too-new "${TEST_ROOT}/macos-x86-minimum-too-new"
 expect_tree_fail_named macos-x86-minimum-too-new "${TEST_ROOT}/macos-x86-minimum-too-new" \
   "release-build-macos-x86 targets macOS 13.0, newer than the 11.0" buildbuddy-macos-x86
+
+# The prebuild closure follows a module's relative imports and the files the
+# npm scripts a build script runs execute with node: a product's root named
+# only there is found (here two steps from the Web SDK build script).
+closure_tree="${TEST_ROOT}/closure-tree"
+mkdir -p "${closure_tree}/scripts" "${closure_tree}/ci" "${closure_tree}/sdks/web/scripts"
+cp -R "${REPO_ROOT}/.github" "${closure_tree}/.github"
+cp "${REPO_ROOT}/scripts/release-prebuild-equivalent" "${REPO_ROOT}/scripts/release-build-web-sdk-package.sh" \
+  "${closure_tree}/scripts/"
+cp "${REPO_ROOT}/ci/products.json" "${closure_tree}/ci/"
+cp "${REPO_ROOT}/sdks/web/package.json" "${closure_tree}/sdks/web/"
+printf 'import "./reads-a-product.mjs";\n' >"${closure_tree}/sdks/web/scripts/build-wasm.mjs"
+printf 'export const notes = "connect/README.md";\n' >"${closure_tree}/sdks/web/scripts/reads-a-product.mjs"
+expect_tree_fail_named prebuild-closure-npm-import "${closure_tree}" \
+  "sdks/web/scripts/reads-a-product.mjs names connect/ (connect's root)" prebuild-non-inputs
+
+# A release binary or the Web SDK runtime whose normal or build dependencies
+# (path dependencies, transitively) reach a package under a product's root
+# fails the closures check and the doctor; a dev-dependency does not count.
+closures_metadata() {
+  "$PYTHON" - "$1" "$2" "$REPO_ROOT" <<'PYEOF'
+import json
+import sys
+
+destination, kind, root = sys.argv[1:4]
+
+
+def package(name, directory, dependencies=()):
+    return {"name": name, "manifest_path": f"{root}/{directory}/Cargo.toml",
+            "dependencies": [{"name": dep, "kind": dep_kind, "path": f"{root}/{dep_dir}"}
+                             for dep, dep_kind, dep_dir in dependencies]}
+
+
+edge = ("meerkat-meta", None if kind == "normal" else kind, "meta/crates/meerkat-meta")
+packages = [
+    package("rkat", "crates/meerkat-cli", [("meerkat", None, "crates/meerkat")]),
+    package("meerkat", "crates/meerkat", [edge]),
+    package("meerkat-meta", "meta/crates/meerkat-meta"),
+    *(package(name, f"crates/{name}") for name in ("meerkat-rpc", "meerkat-rest", "meerkat-mcp-server", "meerkat-web-runtime")),
+]
+with open(destination, "w", encoding="utf-8") as handle:
+    json.dump({"packages": packages}, handle)
+PYEOF
+}
+for kind in normal build dev; do
+  closures_metadata "${TEST_ROOT}/metadata-${kind}.json" "${kind}"
+  set +e
+  RELEASE_CONTRACT_CARGO_METADATA="${TEST_ROOT}/metadata-${kind}.json" \
+    "$PYTHON" "$CHECKER" --workflow "$WORKFLOW" release-closures >"${TEST_ROOT}/closures-${kind}.log" 2>&1
+  status=$?
+  set -e
+  if [[ "${kind}" == dev ]]; then
+    [[ "${status}" -eq 0 ]] || fail "closures-dev: a dev-dependency on a product's package was refused" \
+      "$(cat "${TEST_ROOT}/closures-${kind}.log")"
+    continue
+  fi
+  [[ "${status}" -ne 0 ]] || fail "closures-${kind}: a release binary that compiles a product's package was accepted"
+  grep -Fq "rkat's normal or build dependencies reach meerkat-meta (meta/crates/meerkat-meta/, under meta's root meta/) through meerkat" \
+    "${TEST_ROOT}/closures-${kind}.log" ||
+    fail "closures-${kind}: failure does not name the defect" "$(cat "${TEST_ROOT}/closures-${kind}.log")"
+done
+RELEASE_CONTRACT_CARGO_METADATA="${TEST_ROOT}/metadata-build.json" run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-closures.log"
+if ! grep -Fq "$CLOSURES_FAIL" "${TEST_ROOT}/doctor-closures.log"; then
+  fail "doctor does not report \`${CLOSURES_FAIL}\` for a release binary that compiles a product's package" \
+    "$(cat "${TEST_ROOT}/doctor-closures.log")"
+fi
 
 mutate semver-baseline-gates-homebrew "${TEST_ROOT}/doctor-baseline.yml"
 run_doctor "${TEST_ROOT}/doctor-baseline.yml" "${TEST_ROOT}/doctor-baseline.log"

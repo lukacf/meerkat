@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { LANE_JOBS } from "./ci-product-evidence.mjs";
 import {
   CI_ROW_STEPS,
   rowStepBindings,
@@ -1791,6 +1792,8 @@ for (const path of [
   for (const row of closureParts) {
     const count = row.packages.split(" ").filter((word) => word === "-p").length;
     assert.equal(row.name, `${row.product}, ${count} crates`, `${row.name} names its product and its crate count`);
+    // A Core change checks every target of the products' parts.
+    assert.equal(row.targets, row.product === CORE ? "lib" : "all", `${row.name} checks the targets its part needs`);
   }
   assert.equal(Number(lines.closure_check_count), closureParts.length);
   assert.equal(
@@ -2320,6 +2323,13 @@ for (const path of [
     "the closure check runs the plan's parts",
   );
   assert.ok(closureCheck.includes("          CLOSURE: ${{ matrix.packages }}"), "each closure-check job checks its own part");
+  // A row that asks for all targets gets --all-targets, and time for them.
+  assert.ok(closureCheck.includes("          ROW_TARGETS: ${{ matrix.targets }}"), "each closure-check job checks its row's targets");
+  assert.ok(
+    closureCheck.some((line) => line.includes('"${ROW_TARGETS}" == "all"')) &&
+      closureCheck.some((line) => line.includes("targets+=(--all-targets)")),
+    "a row whose targets are all checks every target",
+  );
   assert.ok(
     workflow.includes("      closure_check_matrix: ${{ steps.plan.outputs.closure_check_matrix }}\n"),
     "the classification job exports closure_check_matrix",
@@ -4064,6 +4074,12 @@ for (const path of [
     for (const [lane, size] of Object.entries(sizes)) {
       assert.equal(lanes[lane].length, size, `${paths}: row_products.${lane} lists every row`);
     }
+    // The CI gate's record joins each job to its row by the job's name, so
+    // no two rows of the plan may render the same name (main_unit and
+    // main_archive_run share the "Main unit tests (...)" template).
+    const rendered = Object.entries(lanes).flatMap(([lane, rows]) => rows.map((row) => LANE_JOBS[lane].name(row)));
+    const repeated = rendered.filter((name, index) => rendered.indexOf(name) !== index);
+    assert.deepEqual(repeated, [], `${paths}: rows of the plan share a job name`);
   }
   // A push runs no downstream Clippy row: the products' closure-check rows
   // type-check them against a changed Core, so those are the downstream
@@ -4081,6 +4097,33 @@ for (const path of [
   );
   const meta = planFor(["meta/crates/meerkat-meta/src/lib.rs"], ["--event", "push"]);
   assert.deepEqual(meta.row_products.closure_check.filter((row) => row.downstream), [], "without a Core change no row is downstream");
+  // A Core change can break a product's test targets, which no pull request
+  // row checks when it invalidates meerkat-mob's build: the products'
+  // closure-check rows, which Core depends on, then check every target of
+  // their part (Core's own part keeps its lib and bin targets), and a
+  // product's own change checks lib and bin targets only.
+  assert.deepEqual(
+    core.closure_check_rows.map((row) => [row.product, row.targets]),
+    core.closure_check_rows.map((row) => [row.product, row.product === "core" ? "lib" : "all"]),
+    "after a Core change the products' closure-check rows check all targets",
+  );
+  assert.deepEqual(
+    meta.closure_check_rows.map((row) => row.targets),
+    meta.closure_check_rows.map(() => "lib"),
+    "without a Core change a closure-check row checks lib and bin targets",
+  );
+  // The products' rustdoc rows document their links into Core items, so
+  // after a Core change they are downstream rows too.
+  assert.deepEqual(
+    [...new Set(core.row_products.rustdoc.filter((row) => row.downstream).map((row) => row.product))].sort(),
+    ["connect", "meta"],
+    "a Core change's product rustdoc rows are downstream rows",
+  );
+  assert.ok(
+    core.row_products.rustdoc.some((row) => row.product === "core" && !row.downstream),
+    "Core's own rustdoc rows are no downstream rows",
+  );
+  assert.deepEqual(meta.row_products.rustdoc.filter((row) => row.downstream), [], "without a Core change no rustdoc row is downstream");
 }
 
 // Bad arguments fail loudly.

@@ -150,24 +150,49 @@ jobs:
       run_id: ${{ steps.ci_run.outputs.run_id }}
       run_attempt: ${{ steps.ci_run.outputs.run_attempt }}
     steps:
-      # The release commit's product-scoped CI evidence reader: a failed
-      # exact-main run counts for Meta only when every failure sits in rows
-      # Meta does not depend on (Core's and Meta's rows count).
-      - name: Checkout the CI evidence reader
+      # A failed exact-main run counts for Meta only when every failure sits
+      # in rows Meta does not depend on (Core's and Meta's rows count), judged
+      # by the release commit's FIRST PARENT's copy of
+      # scripts/ci-product-evidence.mjs, as release.yml judges it for Core:
+      # the commit cannot certify its own red run with an edited
+      # job-to-product table. The reader also gets the paths the commit
+      # changes against that parent, and refuses a commit that changes what
+      # decides the evidence. A parent without the reader, or a failure to
+      # list the changes, leaves only a green run counting.
+      - name: Checkout the release commit and its parent
         if: ${{ needs.resolve_release.outputs.ci_bypass != 'true' }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.resolve_release.outputs.sha }}
           persist-credentials: false
-          sparse-checkout: |
-            scripts/ci-product-evidence.mjs
-          sparse-checkout-cone-mode: false
+          fetch-depth: 2
+      - name: Read the CI evidence reader of the release commit's parent
+        if: ${{ needs.resolve_release.outputs.ci_bypass != 'true' }}
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          parent_reader="${RUNNER_TEMP}/ci-evidence-parent"
+          mkdir -p "${parent_reader}"
+          if ! parent="$(git rev-parse --verify --quiet "${RELEASE_SHA}^1")"; then
+            echo "Release commit ${RELEASE_SHA} has no parent: only a green CI run counts."
+            exit 0
+          fi
+          if ! git show "${parent}:scripts/ci-product-evidence.mjs" > "${parent_reader}/ci-product-evidence.mjs"; then
+            rm -f "${parent_reader}/ci-product-evidence.mjs"
+            echo "${parent} has no product-scoped CI evidence reader: only a green CI run counts."
+            exit 0
+          fi
+          git diff --name-only "${parent}" "${RELEASE_SHA}" > "${parent_reader}/changed-paths.txt"
+          echo "A failed CI run of ${RELEASE_SHA} is judged by ${parent}'s reader; the commit changes $(wc -l < "${parent_reader}/changed-paths.txt") path(s)."
       - name: Wait for green exact-main CI and Meta CI at this commit
         id: ci_run
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
           CI_BYPASS: ${{ needs.resolve_release.outputs.ci_bypass }}
+          RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -176,7 +201,12 @@ jobs:
               core.info("Dry-run dispatch with no release_tag: nothing is published. Skipping the CI check.");
               return;
             }
-            const timeoutMs = 120 * 60 * 1000;
+            // A candidate starts at the release merge (make release-prebuild),
+            // beside that commit's own exact-main CI, whose cold run can take
+            // longer than 120 minutes (main-unit alone may take 150): it waits
+            // up to 240. Every other mode starts once CI ran and waits 120.
+            const timeoutMinutes = process.env.RELEASE_MODE === "candidate" ? 240 : 120;
+            const timeoutMs = timeoutMinutes * 60 * 1000;
             const pollMs = 30 * 1000;
             const started = Date.now();
             let cancelledReported = false;
@@ -235,15 +265,26 @@ jobs:
             // A failed exact-main run still counts for Meta when every
             // failure sits in rows Meta does not depend on (a Connect row,
             // say): its exact-tree attestation records each job's product, and
-            // the release commit's scripts/ci-product-evidence.mjs judges it,
-            // once per attempt. Anything it cannot attribute, or no reader,
-            // keeps waiting for a green run.
+            // the release commit's parent's scripts/ci-product-evidence.mjs
+            // (written by the step above with the commit's changed paths)
+            // judges it, once per attempt. Anything it cannot attribute, or no
+            // reader, keeps waiting for a green run.
+            const parentReader = require("path").join(process.env.RUNNER_TEMP || "", "ci-evidence-parent");
             let evidence = null;
             try {
-              const reader = require("path").resolve("scripts/ci-product-evidence.mjs");
+              const reader = require("path").join(parentReader, "ci-product-evidence.mjs");
               evidence = await import(require("url").pathToFileURL(reader).href);
             } catch (error) {
-              core.info(`No product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+              core.info(`The release commit's parent has no product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+            }
+            let changedPaths;
+            try {
+              changedPaths = require("fs")
+                .readFileSync(require("path").join(parentReader, "changed-paths.txt"), "utf8")
+                .split("\n")
+                .filter((line) => line.trim());
+            } catch (error) {
+              core.info(`The release commit's changed paths are unknown (${error.message}); only a green run counts.`);
             }
             const verdicts = new Map();
             async function metaScopedVerdict(run) {
@@ -256,7 +297,7 @@ jobs:
                       owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
                     });
                     verdict = attestation
-                      ? evidence.acceptance(attestation, "meta")
+                      ? evidence.acceptance(attestation, "meta", { changedPaths })
                       : { accepted: false, reasons: ["the attempt has no exact-tree attestation"] };
                   } catch (error) {
                     verdict = { accepted: false, reasons: [`unreadable attestation: ${error.message}`] };
@@ -326,9 +367,9 @@ jobs:
               if (Date.now() - started >= timeoutMs) {
                 core.setFailed(
                   success
-                    ? `Release commit ${ref} has no green Meta CI run that ran Meta's lanes after 120 minutes ` +
+                    ? `Release commit ${ref} has no green Meta CI run that ran Meta's lanes after ${timeoutMinutes} minutes ` +
                         `(${meta.count} run(s) found). Dispatch meta-ci.yml on main at this commit.`
-                    : `Release commit ${ref} has no green exact-main CI after 120 minutes (${runs.length} run(s) found). ` +
+                    : `Release commit ${ref} has no green exact-main CI after ${timeoutMinutes} minutes (${runs.length} run(s) found). ` +
                         `A tag is not evidence: fix the red, or re-run a cancelled run.`
                 );
                 return;
@@ -401,7 +442,10 @@ jobs:
       (needs.resolve_release.outputs.mode != 'candidate' ||
        needs.resolve_release.outputs.tier == 'core')
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # The 60-minute wait for Core's crates, then a floor record, a
+    # re-resolution and the floor build (28 to 45 minutes measured): a late
+    # Core publication ends in the wait's own message, not a runner timeout.
+    timeout-minutes: 120
     outputs:
       core_version: ${{ steps.declared.outputs.core_version }}
       record: ${{ steps.bind.outputs.record }}

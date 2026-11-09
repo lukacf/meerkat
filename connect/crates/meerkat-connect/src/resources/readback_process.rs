@@ -224,4 +224,52 @@ mod tests {
             if message == &readback_unavailable().to_string())
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readback_artifacts_stay_out_of_the_retained_setup_listing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::RealmOptions {
+            context_root: root.path().into(),
+            state_root: Some(root.path().join("state")),
+            user_config_root: Some(root.path().join("home")),
+        }
+        .resolve("work")
+        .unwrap();
+        // No owner can start, so the read reserves its artifacts and then fails.
+        let missing = root.path().join("missing");
+        let resources = InstalledResources {
+            root: missing.clone(),
+            python: missing.join("python3"),
+            prepare: missing.join("prepare.py"),
+        };
+        let request = serde_json::json!({"retained_installations":{"action":"list","cursor":null}});
+        assert!(resources.readback(&storage, &request).await.is_err());
+        let parent = storage
+            .locator
+            .state_root
+            .join(".meerkat-connect")
+            .join("work");
+        let names = std::fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        // The retained listing pages over the setup- entries here; reading it
+        // must not add one.
+        assert!(
+            !names.iter().any(|name| name.starts_with("setup-")),
+            "{names:?}"
+        );
+        let [name] = names.as_slice() else {
+            panic!("expected one readback artifact directory: {names:?}");
+        };
+        assert!(name.starts_with("readback-"), "{name}");
+        let directory = parent.join(name);
+        let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(
+            std::fs::read(directory.join("readback-request.json")).unwrap(),
+            serde_json::to_vec(&request).unwrap()
+        );
+    }
 }

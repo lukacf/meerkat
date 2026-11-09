@@ -9,6 +9,7 @@ import shutil
 from contextlib import nullcontext
 from pathlib import Path
 import sys
+import tempfile
 import threading
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -998,6 +999,79 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
                     self.assertEqual(len(entered),4)
                     self.assertEqual(sum(argv[1] == "export" for argv,_ in owner.runner.calls),1,
                         "only the originally admitted export ran; all later reads use check-export")
+
+
+class RetainedListingScanTests(unittest.TestCase):
+    """A listing page holds a candidate unless the listing has ended.
+
+    Twelve setup positions, of which only setup-03 and setup-09 hold a retained
+    request that names a service: even positions are unprepared artifact
+    directories, the other odd ones are preparations whose request names none.
+    Preparation, checkpoint and request reads are stubbed per position (one
+    workspace and one request each); the owner's enumeration, cursors and
+    paging are real.
+    """
+
+    MATCHES = ("setup-03", "setup-09")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="retained-listing-scan-")
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name).resolve(strict=True) / "state"
+        parent = self.state / ".meerkat-connect" / "work"
+        for directory in (self.state, parent.parent, parent):
+            directory.mkdir(mode=0o700)
+        for number in range(12):
+            setup = parent / ("setup-%02d" % number)
+            setup.mkdir(mode=0o700)
+            if number % 2:
+                (setup / "prepared").mkdir(mode=0o700)
+        self.workspace = "work-" + "a" * 32
+
+    def preparation(self, root, manifest, manifest_sha, host_module, parent, setup):
+        def summary(selected_root, entry):
+            if setup in self.MATCHES:
+                return {"family": "services", "profile": "slack", "validation_id": "b" * 32}
+            return None
+        return SimpleNamespace(setup=setup, record={"workspace": self.workspace},
+                               backend=SimpleNamespace(retained_request_summary=summary))
+
+    def checkpoint(self, context, workspace):
+        self.assertEqual(workspace, self.workspace)
+        job = "%032x" % int(context.setup.removeprefix("setup-"))
+        return (("checkpoint-" + context.setup).encode(), self.state / context.setup,
+                [{"id": job, "sha256": "c" * 64}])
+
+    def page(self, cursor):
+        request = {"realm": "work", "realm_state_root": str(self.state),
+                   "retained_installations": {"action": "list", "cursor": cursor}}
+        with patch.object(product, "retained_preparation", side_effect=self.preparation), \
+             patch.object(product, "retained_checkpoint", side_effect=self.checkpoint), \
+             patch.object(product, "retained_recheck"):
+            return product.retained_page(None, None, None, host, request, threading.Event())
+
+    def pages(self):
+        pages, cursors = [], []
+        while True:
+            page = self.page(cursors[-1] if cursors else None)
+            pages.append(page)
+            self.assertLessEqual(len(pages), 12)
+            if page["next_cursor"] is None:
+                return pages
+            self.assertNotIn(page["next_cursor"], cursors, "a cursor never repeats")
+            cursors.append(page["next_cursor"])
+
+    def found(self, pages):
+        return [row["locator"]["setup"] for page in pages for row in page["candidates"]]
+
+    def test_first_page_holds_the_first_match_and_paging_returns_each_match_once(self):
+        first = self.page(None)
+        self.assertEqual(self.found([first]), ["setup-03"])
+        pages = self.pages()
+        self.assertEqual(self.found(pages), list(self.MATCHES))
+        self.assertTrue(all(page["candidates"] for page in pages if page["next_cursor"] is not None),
+                        "a page is empty only at the end of the listing")
+        self.assertFalse(any(page["unconfirmed"] for page in pages))
 
 
 if __name__ == "__main__":

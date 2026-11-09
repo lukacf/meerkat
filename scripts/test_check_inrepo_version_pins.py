@@ -296,6 +296,28 @@ class WriteTests(GuardTest):
         self.assertIn("demo-meta==1.4.3", (self.repo.root / "connect/py/pyproject.toml").read_text())
 
 
+class BumpTests(unittest.TestCase):
+    """The version bumps move the pins this check reads, in the same commit."""
+
+    def test_the_release_hook_moves_and_stages_pins_before_its_parity_check(self):
+        hook = (SCRIPTS / "release-hook.sh").read_text()
+        write = '"$PYTHON" "$ROOT/scripts/check_inrepo_version_pins.py" --root "$ROOT" --write'
+        self.assertEqual(hook.count(write), 1)
+        self.assertLess(hook.index('"$ROOT/scripts/bump-sdk-versions.sh" "$VERSION"'), hook.index(write))
+        self.assertLess(hook.index(write), hook.index('"$ROOT/scripts/verify-version-parity.sh"'))
+        stage = 'git add -- "${MOVED_PIN_FILES[@]/#/$ROOT/}"'
+        self.assertEqual(hook.count(stage), 1)
+        self.assertLess(hook.index(stage), hook.index('echo "$VERSION" > "$SENTINEL"'))
+
+    def test_the_parity_check_runs_this_check(self):
+        parity = (SCRIPTS / "verify-version-parity.sh").read_text()
+        self.assertEqual(parity.count('"$ROOT/scripts/check_inrepo_version_pins.py" --root "$ROOT"'), 1)
+
+    def test_the_meta_sdk_bump_moves_the_pins_on_meta_packages(self):
+        bump = (SCRIPTS.parent / "meta/scripts/bump-sdk-versions.sh").read_text()
+        self.assertEqual(bump.count('"$TOPLEVEL/scripts/check_inrepo_version_pins.py" --root "$TOPLEVEL" --write'), 1)
+
+
 class CommandTests(unittest.TestCase):
     def test_the_command_reports_its_exit_codes(self):
         with tempfile.TemporaryDirectory(prefix="inrepo pins cli ") as directory:

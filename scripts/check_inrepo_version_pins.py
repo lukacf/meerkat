@@ -616,7 +616,7 @@ def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[A
 
 
 def move_version(text: str, pinned: str, expected: str) -> str:
-    return re.sub(rf"(?<![0-9.]){re.escape(pinned)}(?![0-9])", expected, text, count=1)
+    return re.sub(rf"(?<![0-9.]){re.escape(pinned)}(?![0-9]|\.[0-9])", expected, text, count=1)
 
 
 def manifest_file(path: str) -> bool:

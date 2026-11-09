@@ -38,13 +38,20 @@ them.
 ### Added
 
 - `meerkat-schedule`: `meerkat_schedule_list` takes two optional filters,
-  `phase` (`active` or `paused`) and `target_id` (a session, bound session,
-  identity, mob, member, source member, flow or host runnable id the target
-  names exactly), applied before the page cut: a page holds only matching
-  schedules and its cursor continues the same filtered listing. An agent can
-  find the schedules that run for one member without paging through every
-  schedule in the realm. `phase: "deleted"` and an empty `target_id` are
-  refused as invalid arguments.
+  `phase` (`active` or `paused`) and `target_id`, an id the schedule's target
+  names (its session, bound session, identity, mob, member, source member,
+  flow or host runnable id), matched exactly after surrounding whitespace is
+  trimmed. Both apply before the page cut, and through
+  `dispatch_schedule_list_where` after the host's own filter, so they never
+  list a schedule the host hides: a page holds only matching schedules and
+  its cursor continues the same filtered listing. A schedule a mob member
+  made for its own session (`current_session`) targets the member's
+  identity, `mob_member:` followed by a JSON key: pass that whole identity,
+  as the schedule's `target.identity` shows it, for example
+  `mob_member:{"schema":"meerkat.schedule.mob_member_identity.v2","mob_id":"team","member":"agent-a"}`;
+  the member id alone does not match it. `phase: "deleted"` and a
+  `target_id` that is empty or only whitespace are refused as invalid
+  arguments.
 
 ## [0.9.11] - 2026-11-09
 

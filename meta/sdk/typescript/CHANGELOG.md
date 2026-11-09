@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- `MetaRuntime.gatingWithdraw(pendingId, reason?)` calls
+  `meta/gating/withdraw` and returns `GatingWithdrawResult`: the host
+  withdraws a pending request it minted, with no decision. An escalated
+  request is followed to its live successor; `pendingId` names the id
+  withdrawn.
+
 ## 0.9.11
 
 - `MetaRuntime.grantTool(identity, { tool | family, durationMs |

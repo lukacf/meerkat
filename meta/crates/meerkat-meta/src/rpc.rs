@@ -2048,7 +2048,9 @@ fn console_read_timeout_response(
 /// `-32047` `candidate_launch`, on every RPC surface that serves them. Each
 /// retires a stored member, respawns or resets it, recomputes the roster or
 /// rewires members, which is the authoritative launch's to change; decides a
-/// pending gate, whose decision resumes the authoritative launch's work;
+/// pending gate, whose decision resumes the authoritative launch's work, or
+/// withdraws one, which settles a request the authoritative launch raised
+/// and still waits on;
 /// creates a session (a spawn, an ensure, a helper, a fork or an attach),
 /// which nothing holds and whose turns could reach a held member through
 /// peer comms; or admits input to a member or acts on its runs and session. A member input

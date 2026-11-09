@@ -1102,18 +1102,6 @@ pub struct GatingWithdrawRequest {
     pub reason: Option<String>,
 }
 
-/// Who withdraws a pending request. Only the requester side may: the trusted
-/// embedding host that minted it on the actor's behalf (its stdio RPC
-/// gateway, an in-process host), or an authenticated principal that is (or
-/// holds) the entry's `actor_id`. A decider never withdraws.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GatingWithdrawer {
-    /// The embedding host, which vouches for its own requests.
-    Host,
-    /// An authenticated principal; must be the entry's actor.
-    Principal(GatingDecider),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatingWithdrawResult {
     pub pending_id: String,
@@ -1122,7 +1110,7 @@ pub struct GatingWithdrawResult {
     /// Always `safe_draft`: a withdrawn request never runs.
     pub outcome: GatingOutcome,
     pub withdrawn_at_ms: u64,
-    /// `host`, or the withdrawing principal.
+    /// Always `host`: only the embedding host withdraws.
     pub withdrawn_by: String,
     #[serde(default)]
     pub reason: Option<String>,
@@ -1130,12 +1118,9 @@ pub struct GatingWithdrawResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatingWithdrawError {
-    /// Not pending: unknown, already decided, timed out or withdrawn.
+    /// Not pending: unknown, already decided, timed out or withdrawn (an
+    /// escalated request is followed to its live successor first).
     UnknownPendingId(String),
-    /// The withdrawing principal is not the entry's actor.
-    NotRequester { actor_id: String, provided: String },
-    /// An authenticated withdrawal named no principal.
-    EmptyPrincipal,
     /// The owner cannot mint the audit identity the withdrawal records.
     IdsUnavailable(GatingIdUnavailable),
 }
@@ -1144,13 +1129,6 @@ impl std::fmt::Display for GatingWithdrawError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownPendingId(id) => write!(f, "unknown pending id: {id}"),
-            Self::NotRequester { actor_id, provided } => {
-                write!(
-                    f,
-                    "only the requester {actor_id} may withdraw, not {provided}"
-                )
-            }
-            Self::EmptyPrincipal => write!(f, "withdrawing principal must not be empty"),
             Self::IdsUnavailable(reason) => write!(f, "{reason}"),
         }
     }

@@ -4442,8 +4442,11 @@ class MobHandle:
         """Withdraw a pending request this host minted (``meta/gating/withdraw``).
 
         Not a decision: the request leaves the queue with no approver, its
-        audit records ``request_withdrawn`` and nothing runs. A request that
-        was already decided, timed out or withdrawn answers an unknown id.
+        audit records ``request_withdrawn`` and nothing runs. An escalated
+        request is followed along its escalations to the live successor,
+        which is withdrawn; the result's ``pending_id`` names the id actually
+        withdrawn. A request that was already decided, timed out or withdrawn
+        (or whose escalation chain ended so) answers an unknown id.
         """
         params: dict[str, Any] = {"pending_id": pending_id}
         if reason is not None:

@@ -107,13 +107,6 @@ impl GatingParamsError {
             GatingParamsError::Withdrawal(GatingWithdrawError::UnknownPendingId(pending_id)) => {
                 format!("pending_id '{pending_id}' was not found")
             }
-            GatingParamsError::Withdrawal(GatingWithdrawError::NotRequester {
-                actor_id,
-                provided,
-            }) => format!("'{provided}' is not the requester '{actor_id}' and cannot withdraw"),
-            GatingParamsError::Withdrawal(GatingWithdrawError::EmptyPrincipal) => {
-                "withdrawing principal must not be empty".to_string()
-            }
             GatingParamsError::Withdrawal(GatingWithdrawError::IdsUnavailable(reason)) => {
                 format!("gating withdrawal cannot be recorded: {reason}")
             }

@@ -1159,36 +1159,53 @@ impl MetaRuntimeHandle {
 
     /// Withdraw a pending request as the embedding host (its stdio RPC
     /// gateway, an in-process host), which vouches for the requests it
-    /// minted. See [`Self::withdraw_gating_action_for`] for a principal.
+    /// minted. Not a decision: no approver is recorded and nothing runs.
+    /// Runs on the same owner as decisions and timeouts, so a request has
+    /// exactly one terminal outcome: after a withdrawal a decision gets an
+    /// unknown id, and after a decision or timeout a withdrawal does. An
+    /// escalated request is followed hop by hop along the `next_pending_id`
+    /// its escalations recorded to the live successor, which is withdrawn;
+    /// the result names the id actually withdrawn.
     pub fn withdraw_gating_action(
         &mut self,
         request: GatingWithdrawRequest,
     ) -> Result<GatingWithdrawResult, GatingWithdrawError> {
-        let result = self.withdraw_gating_action_as(request, &GatingWithdrawer::Host);
+        let result = self.withdraw_gating_action_as_host(request);
         self.flush_gating_notices();
         result
     }
 
-    /// Withdraw a pending request as `withdrawer`. A principal must be (or
-    /// hold) the entry's `actor_id`; a decider that is not the requester is
-    /// refused. Runs on the same owner as decisions and timeouts, so a
-    /// request has exactly one terminal outcome: after a withdrawal a
-    /// decision gets an unknown id, and after a decision or timeout a
-    /// withdrawal does.
-    pub fn withdraw_gating_action_for(
-        &mut self,
-        request: GatingWithdrawRequest,
-        withdrawer: &GatingWithdrawer,
-    ) -> Result<GatingWithdrawResult, GatingWithdrawError> {
-        let result = self.withdraw_gating_action_as(request, withdrawer);
-        self.flush_gating_notices();
-        result
+    /// The live end of an escalation chain from `pending_id`: the id itself
+    /// while it is pending, else the successor its `escalation_decided` audit
+    /// recorded, hop by hop. `None` when the chain ends in a verdict, a
+    /// timeout, a withdrawal, or an id the retained audit does not know.
+    fn live_successor(&self, pending_id: &str) -> Option<String> {
+        let mut current = pending_id.to_string();
+        // Each hop mints a new id, so a chain is at most as long as the audit.
+        for _ in 0..=self.gating_audit.len() {
+            if self.gating_pending.contains_key(&current) {
+                return Some(current);
+            }
+            let next = self.gating_audit.iter().rev().find_map(|entry| {
+                (entry.event_type == "escalation_decided"
+                    && entry.pending_id.as_deref() == Some(current.as_str()))
+                .then(|| {
+                    entry
+                        .detail
+                        .get("next_pending_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .flatten()
+            })?;
+            current = next;
+        }
+        None
     }
 
-    fn withdraw_gating_action_as(
+    fn withdraw_gating_action_as_host(
         &mut self,
         request: GatingWithdrawRequest,
-        withdrawer: &GatingWithdrawer,
     ) -> Result<GatingWithdrawResult, GatingWithdrawError> {
         let now_ms = current_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
@@ -1196,29 +1213,16 @@ impl MetaRuntimeHandle {
         // entry, its order, the ids and the audit exactly as they were.
         self.gating_ids_available(1)
             .map_err(GatingWithdrawError::IdsUnavailable)?;
-        let pending_id = request.pending_id.trim().to_string();
+        let requested_id = request.pending_id.trim().to_string();
+        let pending_id = self
+            .live_successor(&requested_id)
+            .ok_or_else(|| GatingWithdrawError::UnknownPendingId(requested_id.clone()))?;
         let entry = self
             .gating_pending
             .get(&pending_id)
             .cloned()
-            .ok_or_else(|| GatingWithdrawError::UnknownPendingId(pending_id.clone()))?;
-        let withdrawn_by = match withdrawer {
-            GatingWithdrawer::Host => "host".to_string(),
-            GatingWithdrawer::Principal(principal) => {
-                if principal.principal.trim().is_empty() {
-                    return Err(GatingWithdrawError::EmptyPrincipal);
-                }
-                if principal.principal != entry.actor_id
-                    && !principal.held_approver_ids.contains(&entry.actor_id)
-                {
-                    return Err(GatingWithdrawError::NotRequester {
-                        actor_id: entry.actor_id.clone(),
-                        provided: principal.principal.clone(),
-                    });
-                }
-                principal.principal.clone()
-            }
-        };
+            .ok_or_else(|| GatingWithdrawError::UnknownPendingId(requested_id.clone()))?;
+        let withdrawn_by = "host".to_string();
         let reason = request
             .reason
             .map(|reason| reason.trim().to_string())
@@ -1240,7 +1244,7 @@ impl MetaRuntimeHandle {
                 action_id: entry.action_id.clone(),
                 pending_id: Some(pending_id.clone()),
                 actor_id: entry.actor_id.clone(),
-                risk_tier: entry.risk_tier.clone(),
+                risk_tier: entry.risk_tier,
                 outcome: GatingOutcome::SafeDraft,
                 detail: serde_json::json!({
                     "reason": reason,
@@ -1707,6 +1711,7 @@ mod notification_disposition_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod withdraw_tests {
     use super::*;
     use std::sync::Mutex;
@@ -1880,50 +1885,130 @@ mod withdraw_tests {
     }
 
     #[test]
-    fn only_the_requester_principal_may_withdraw() {
+    fn withdrawing_an_escalated_request_withdraws_its_live_successor() {
         let mut owner = owner();
-        let pending_id = pend(&mut owner);
+        owner.set_gating_escalation_routes(GatingEscalationRoutes {
+            default: Some("person:deputy".to_string()),
+            ..GatingEscalationRoutes::default()
+        });
+        let original = pend(&mut owner);
+        let escalated = owner
+            .decide_gating_action(decide(&original, GatingDecision::Escalate))
+            .expect("escalated");
+        let successor = escalated.next_pending_id.expect("a successor");
+        // A second hop: the successor escalates again (the default route).
+        let mut second_hop = decide(&successor, GatingDecision::Escalate);
+        second_hop.approver_id = "person:deputy".to_string();
+        let successor_2 = owner
+            .decide_gating_action(second_hop)
+            .expect("escalated again")
+            .next_pending_id
+            .expect("a second successor");
+
+        let result = owner
+            .withdraw_gating_action(withdraw(&original, Some("obsolete")))
+            .expect("the requester withdraws the request it made");
+
+        assert_eq!(
+            result.pending_id, successor_2,
+            "names the id actually withdrawn"
+        );
+        assert!(owner.list_gating_pending().is_empty());
+        let rows: Vec<_> = owner
+            .gating_audit_entries(50)
+            .into_iter()
+            .filter(|entry| entry.event_type == "request_withdrawn")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pending_id.as_deref(), Some(successor_2.as_str()));
+        let mut late = decide(&successor_2, GatingDecision::Approve);
+        late.approver_id = "person:deputy".to_string();
+        assert_eq!(
+            owner.decide_gating_action(late),
+            Err(GatingDecideError::UnknownPendingId(successor_2.clone()))
+        );
+        // The chain is spent: the original, the middle hop and the end all answer unknown.
+        for id in [&original, &successor, &successor_2] {
+            assert_eq!(
+                owner.withdraw_gating_action(withdraw(id, None)),
+                Err(GatingWithdrawError::UnknownPendingId(id.clone()))
+            );
+        }
+    }
+
+    #[test]
+    fn an_escalation_chain_that_ended_in_a_verdict_answers_unknown() {
+        let mut owner = owner();
+        owner.set_gating_escalation_routes(GatingEscalationRoutes {
+            default: Some("person:deputy".to_string()),
+            ..GatingEscalationRoutes::default()
+        });
+        let original = pend(&mut owner);
+        let successor = owner
+            .decide_gating_action(decide(&original, GatingDecision::Escalate))
+            .expect("escalated")
+            .next_pending_id
+            .expect("a successor");
+        let mut reject = decide(&successor, GatingDecision::Reject);
+        reject.approver_id = "person:deputy".to_string();
+        owner.decide_gating_action(reject).expect("rejected");
         let before = owner.gating_state_snapshot();
 
-        let approver = GatingWithdrawer::Principal(GatingDecider {
-            principal: "owner@example.test".to_string(),
-            held_approver_ids: ["person:owner".to_string()].into_iter().collect(),
-        });
         assert_eq!(
-            owner.withdraw_gating_action_for(withdraw(&pending_id, None), &approver),
-            Err(GatingWithdrawError::NotRequester {
-                actor_id: "worker".to_string(),
-                provided: "owner@example.test".to_string(),
-            })
-        );
-        assert_eq!(
-            owner.withdraw_gating_action_for(
-                withdraw(&pending_id, None),
-                &GatingWithdrawer::Principal(GatingDecider::default()),
-            ),
-            Err(GatingWithdrawError::EmptyPrincipal)
+            owner.withdraw_gating_action(withdraw(&original, None)),
+            Err(GatingWithdrawError::UnknownPendingId(original.clone()))
         );
         assert_eq!(owner.gating_state_snapshot(), before);
+    }
 
-        let holder = GatingWithdrawer::Principal(GatingDecider {
-            principal: "service@example.test".to_string(),
-            held_approver_ids: ["worker".to_string()].into_iter().collect(),
-        });
-        let result = owner
-            .withdraw_gating_action_for(withdraw(&pending_id, None), &holder)
-            .expect("a principal holding the actor id withdraws");
-        assert_eq!(result.withdrawn_by, "service@example.test");
+    #[test]
+    fn restore_refuses_a_pending_entry_that_also_has_a_withdrawal() {
+        let mut first = owner();
+        let pending_id = pend(&mut first);
+        let open = first.gating_state_snapshot();
+        first
+            .withdraw_gating_action(withdraw(&pending_id, None))
+            .expect("withdrawn");
+        let mut forged = first.gating_state_snapshot();
+        // Put the withdrawn entry back next to its request_withdrawn row.
+        forged.pending = open.pending;
 
-        let other = pend(&mut owner);
-        let actor = GatingWithdrawer::Principal(GatingDecider {
-            principal: "worker".to_string(),
-            held_approver_ids: BTreeSet::new(),
-        });
-        assert!(
-            owner
-                .withdraw_gating_action_for(withdraw(&other, None), &actor)
-                .is_ok()
+        let mut second = owner();
+        assert_eq!(
+            second.restore_gating_state(forged),
+            Err(GatingStateRestoreError::InvalidSnapshot(
+                "resolved request is also pending"
+            ))
         );
+    }
+
+    #[test]
+    fn a_console_decision_after_a_host_withdrawal_is_refused() {
+        // The console decides through decide_gating_action_authorized; after
+        // the host withdrew the request it sees no entry and is refused.
+        let mut owner = owner();
+        let pending_id = pend(&mut owner);
+        owner
+            .withdraw_gating_action(withdraw(&pending_id, None))
+            .expect("withdrawn");
+        let before = owner.gating_state_snapshot();
+        let mut saw_entry = None;
+        let (result, _notices) = owner.decide_gating_action_authorized(
+            decide(&pending_id, GatingDecision::Approve),
+            |entry| {
+                saw_entry = Some(entry.is_some());
+                Ok::<_, ()>(GatingDecider {
+                    principal: "owner@example.test".to_string(),
+                    held_approver_ids: ["person:owner".to_string()].into_iter().collect(),
+                })
+            },
+        );
+        assert_eq!(saw_entry, Some(false));
+        assert_eq!(
+            result,
+            Ok(Err(GatingDecideError::UnknownPendingId(pending_id)))
+        );
+        assert_eq!(owner.gating_state_snapshot(), before);
     }
 
     #[test]

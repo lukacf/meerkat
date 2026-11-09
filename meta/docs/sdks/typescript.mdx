@@ -440,6 +440,11 @@ a field is absent or malformed. Unknown outcome strings are preserved.
 `nextPendingId` identifies an escalation successor; the SDK does not automatically
 retry or execute the action. See [Gating](/concepts/gating) for decision semantics.
 
+`handle.gatingWithdraw(pendingId, reason?)` withdraws a pending request this host
+minted, with no decision: it returns `pendingId`, `actionId`, `actorId`,
+`outcome` (`safe_draft`), `withdrawnAtMs`, `withdrawnBy` and `reason`. A request
+that was already decided, timed out or withdrawn is refused as an unknown id.
+
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.
 

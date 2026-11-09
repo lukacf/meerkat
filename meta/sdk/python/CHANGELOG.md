@@ -4,6 +4,14 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+### Added
+
+- `MetaRuntime.gating_withdraw(pending_id, reason=None)` calls
+  `meta/gating/withdraw` and returns `GatingWithdrawResult`: the host
+  withdraws a pending request it minted, with no decision. An escalated
+  request is followed to its live successor; `pending_id` names the id
+  withdrawn.
+
 ## 0.9.11
 
 - `MetaRuntime.grant_tool(identity, *, tool=None, family=None,

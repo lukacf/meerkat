@@ -809,7 +809,13 @@ fi
 # AcquireFromExpiring and AcquireFromExpired disabled, the refusal's
 # correlation guard removed, a restore that takes the record's generation,
 # and a publication that keeps the withdrawn publication time. 4 steps reach
-# every witness.
+# every witness. Its config is derived from the auth ci.cfg, whose profile
+# samples a restore's last_refresh and refresh_attempt: they set only the
+# state fields of those names, which nothing reads, and their whole domains
+# made the audit's bounded space generate 140 million states (797 s locally
+# with 4 TLC workers) instead of 13 million (87 s). Its --whole-domain mode
+# (by hand) explores their whole domains, reaches the same witnesses and
+# refuses the same mutants.
 source_credential_publication_audit="${workspace_root}/specs/machines/auth/source_credential_publication_audit.sh"
 if [[ ! -x "${source_credential_publication_audit}" ]]; then
   echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2
@@ -1716,7 +1722,10 @@ run_machine_verify() {
 # the scoped tool grant gate audit with --mutants (0.9.11), from audits-r:
 # 136 s locally with 4 TLC workers, not yet measured on a hosted runner,
 # about 170-255 s at audits-r's 1.24-1.88x, so about 740-955 s (394 s
-# locally), past the 720 s target below;
+# locally), past the 720 s target below. The 0.9.11 lease fixes grew the
+# source-credential publication audit to 797 s locally (the shard 1111 s,
+# and 3072 s on main push 42552143103) until the auth CI profile sampled
+# the restores' unread fields: 87 s, the shard 396 s locally;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
 # the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
 # (eleven runs, not yet measured hosted; the empty-resume residency audit's

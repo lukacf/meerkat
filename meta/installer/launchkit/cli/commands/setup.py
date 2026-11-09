@@ -182,6 +182,8 @@ async def send_turn(context, client, identity, body, *, wait):
     """POST one guide turn; wait for it when asked. Returns (state, pending)."""
     cursor = await latest_cursor(client, identity) if wait and (
         context.output.mode == "jsonl" or context.output.verbose) else None
+    context.resume = [step(f"meta-forge setup show {identity} --wait",
+                           "Read whether the guide received the message; it is never sent again for you.")]
     try:
         status, state = await client.post(guide_path(identity, "/respond"), json=body)
     except CliError as error:
@@ -189,8 +191,7 @@ async def send_turn(context, client, identity, body, *, wait):
         recovered = await recovered_turn(client, identity, body) if error.code == "outcome_unknown" else None
         if recovered is None:
             if error.code == "outcome_unknown" and not error.next:
-                error.next = [step(f"meta-forge setup show {identity} --wait",
-                                   "Read whether the guide received the message; it is never sent again for you.")]
+                error.next = list(context.resume)
             raise error from None
         state = recovered
         status = 202 if (state.get("operation") or {}).get("status") == "running" else 200
@@ -663,14 +664,15 @@ async def accept_plan(context, client, identity, expected_version=None):
     document = plan_document(state)
     digest = await approve(context, document, question="Accept this plan? Nothing is installed by accepting.",
                            approve_command=f"meta-forge plan accept {identity} --version {state['version']}")
+    context.resume = [step(f"meta-forge setup show {identity}", "Read whether the plan is accepted now."),
+                      step(f"meta-forge plan accept {identity}",
+                           "Accept it if it is still only proposed; an accepted plan is not accepted twice.")]
     try:
         _, accepted = await client.post(guide_path(identity, "/apply"), json={"version": state["version"]})
     except CliError as error:
         error = await classified(client, identity, state["version"], error)
         if error.code == "outcome_unknown" and not error.next:
-            error.next = [step(f"meta-forge setup show {identity}", "Read whether the plan is accepted now."),
-                          step(f"meta-forge plan accept {identity}",
-                               "Accept it if it is still only proposed; an accepted plan is not accepted twice.")]
+            error.next = list(context.resume)
         raise error from None
     return accepted, digest, False
 

@@ -347,16 +347,6 @@ class Context:
             delay = min(delay, left)
         await asyncio.sleep(max(delay, 0))
 
-    async def bounded(self, awaitable, what):
-        """Await one long request within --timeout."""
-        left = self.remaining()
-        if left is None:
-            return await awaitable
-        try:
-            return await asyncio.wait_for(awaitable, max(left, 0))
-        except asyncio.TimeoutError:
-            raise self.timed_out(what) from None
-
     async def client(self, *, compatible=True):
         if self._client is None:
             from importlib.util import find_spec
@@ -365,7 +355,8 @@ class Context:
                                next=[step("bash start.sh --prepare-only", "Prepare Forge's environment in its folder.")])
             from .client import ForgeClient, server_url
             self._client = ForgeClient(server_url(self.environ, self.option("server")), transport=self.transport,
-                                       trace=self.output.trace if self.output.verbose else None)
+                                       trace=self.output.trace if self.output.verbose else None,
+                                       remaining=self.remaining, timed_out=self.timed_out)
         if compatible and self._client.capabilities is None:
             await self._client.check_compatible(cli_version())
         return self._client

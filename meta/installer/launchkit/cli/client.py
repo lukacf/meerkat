@@ -3,10 +3,12 @@
 The client never imports or runs Forge's services in its own process. It reads
 no proxy, netrc or certificate settings from the environment (trust_env=False),
 sends no Origin header, and talks only to a loopback address, which is all the
-server's host check admits.
+server's host check admits. Every request is bounded by the command's
+--timeout, when it has one.
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 from urllib.parse import urlsplit
@@ -63,11 +65,14 @@ def short(identity):
 class ForgeClient:
     """One Forge server conversation for the duration of a command."""
 
-    def __init__(self, base_url, *, transport=None, trace=None):
+    def __init__(self, base_url, *, transport=None, trace=None, remaining=None, timed_out=None):
         import httpx
         self.httpx = httpx
         self.base_url = base_url
         self.trace = trace
+        # The command's --timeout: the seconds left, and the typed outcome when none are.
+        self.remaining = remaining
+        self.timed_out = timed_out
         self.http = httpx.AsyncClient(base_url=base_url, transport=transport, trust_env=False,
                                       follow_redirects=False, timeout=httpx.Timeout(READ_SECONDS, connect=10.0))
         self.capabilities = None
@@ -81,6 +86,19 @@ class ForgeClient:
                         next=[step("meta-forge serve", "Start Forge from its folder in another terminal, then retry."),
                               step("meta-forge doctor", "Check the port and the local Forge setup.")])
 
+    async def within_timeout(self, awaitable, what):
+        """Await one request within the command's --timeout, when it has one (wait_timeout, exit 87)."""
+        left = self.remaining() if self.remaining is not None else None
+        if left is None:
+            return await awaitable
+        if left <= 0:
+            awaitable.close()
+            raise self.timed_out(what)
+        try:
+            return await asyncio.wait_for(awaitable, left)
+        except asyncio.TimeoutError:
+            raise self.timed_out(what) from None
+
     async def request(self, method, path, *, json=None, params=None, files=None, read_timeout=READ_SECONDS,
                       expect="json"):
         """Send one request; return (status, payload) for 2xx, else raise a typed error."""
@@ -89,7 +107,9 @@ class ForgeClient:
         if self.trace:
             self.trace(f"> {method} {path}")
         try:
-            response = await self.http.request(method, path, json=json, params=params, files=files, timeout=timeout)
+            response = await self.within_timeout(
+                self.http.request(method, path, json=json, params=params, files=files, timeout=timeout),
+                f"waiting for Forge to answer {method} {path}")
         except (httpx.ConnectError, httpx.ConnectTimeout):
             raise self.unavailable() from None
         except httpx.TimeoutException:

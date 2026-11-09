@@ -19,7 +19,10 @@ name: Nightly
 #                       every machine-authority change)
 #   machine-verify-deep - Deep-profile TLC (deep.cfg, witnesses, coverage
 #                       audit) over the compositions that fit the 900 s
-#                       per-run cap; a capped run fails as TLC INCOMPLETE
+#                       per-run cap; a capped run fails as TLC INCOMPLETE.
+#                       Then the AuthMachine source-credential publication
+#                       audit over the whole domains of the inputs its CI
+#                       profile samples, which ci.yml's audit runs sampled
 #   sdk-host          - Python + TypeScript SDK suites, unconditional
 #   gcp-buildbuddy    - the whole BuildBuddy/Bazel graph in `full-fresh`
 #                       mode: prebuild, fmt/static, native nextest lanes,
@@ -50,7 +53,8 @@ name: Nightly
 #      runs under !cancelled(), so a red job never skips the rest:
 #        release-packaging (143-304 min) > meta-docs-lag (2)
 #        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
-#          machine-verify-deep (3-8)
+#          machine-verify-deep (3-8, and about 40 for its whole-domain
+#          audit)
 #        feature-matrix (170-267) > workspace-int (134-240)
 #        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
 #          e2e-fast (3-34) > sdk-host (3-52)
@@ -58,12 +62,13 @@ name: Nightly
 #          (30-63) > dense-topology (24-70) > wasm-contract (4-26)
 # Minutes are the range over the 2026-11-01 to 11-07 runs, a job that ran
 # out of time counted at its limit and a run that lost its runner left
-# out; most jobs swing several-fold from night to night. machine-verify's
-# and workspace-unit's are estimates for their current settings, and
-# workspace-int's and dense-topology's upper ends are their limits. The
-# longest chain, feature-matrix > workspace-int, takes up to about eight
-# and a half hours, and nightly took 4 h 46 min to 7 h 23 min. A new job
-# joins the shortest chain; a new chain is a new slot.
+# out; most jobs swing several-fold from night to night. machine-verify's,
+# workspace-unit's and the whole-domain audit's are estimates for their
+# current settings, and workspace-int's and dense-topology's upper ends are
+# their limits. The longest chain, feature-matrix > workspace-int, takes
+# up to about eight and a half hours, and nightly took 4 h 46 min to
+# 7 h 23 min. A new job joins the shortest chain; a new chain is a new
+# slot.
 #
 # A red run on main opens or updates the "Nightly failures" issue through
 # nightly-failure-issue.yml, which starts once this workflow's run has
@@ -438,6 +443,19 @@ jobs:
 
       - name: Deep composition verification (900 s per-run cap)
         run: make machine-verify-deep-compositions
+
+      # The auth CI profile samples a restore's last_refresh and
+      # refresh_attempt, which set only the state fields of those names, and
+      # nothing reads those, so the source-credential publication audit that
+      # ci.yml's audits-s shard runs explores one value of each. Here it
+      # explores their whole domains, the space it explored before the
+      # samples, and refuses its five seeded defects: 786 s locally with 4
+      # TLC workers, an estimated 40 minutes on this runner.
+      - name: Source-credential publication audit over the whole domains
+        if: ${{ !cancelled() }}
+        env:
+          TLC_WORKERS: "4"
+        run: specs/machines/auth/source_credential_publication_audit.sh 5 --mutants --whole-domain
 
   sdk-host:
     name: Python + TypeScript SDK suites

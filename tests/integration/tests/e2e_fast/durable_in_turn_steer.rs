@@ -441,7 +441,11 @@ async fn open_reply_realm(root: &std::path::Path) -> meerkat::PersistenceBundle 
 }
 
 fn mob_definition(mob_id: &str) -> MobDefinition {
-    serde_json::from_value(json!({
+    serde_json::from_value(mob_definition_json(mob_id)).expect("durable steer mob definition")
+}
+
+fn mob_definition_json(mob_id: &str) -> Value {
+    json!({
         "id": mob_id,
         "profiles": {
             "keeper": {
@@ -452,8 +456,7 @@ fn mob_definition(mob_id: &str) -> MobDefinition {
             }
         },
         "wiring": { "auto_wire_orchestrator": false, "role_wiring": [] }
-    }))
-    .expect("durable steer mob definition")
+    })
 }
 
 /// Dispatch one RPC call and return its result; an error fails the test.
@@ -1356,8 +1359,14 @@ async fn e2e_fast_identical_unkeyed_steers_from_two_connections_each_name_their_
     }));
 
     let mob_id = format!("durable-steer-twins-{}", uuid::Uuid::new_v4().simple());
+    // External sends (`mob/member_send`) reach only a profile that admits
+    // external work.
+    let mut definition = mob_definition_json(&mob_id);
+    definition["profiles"]["keeper"]["external_addressable"] = json!(true);
     let mob_id = mob_state
-        .mob_create_definition(mob_definition(&mob_id))
+        .mob_create_definition(
+            serde_json::from_value(definition).expect("externally addressable mob definition"),
+        )
         .await
         .expect("create mob");
     let handle: MobHandle = mob_state.handle_for(&mob_id).await.expect("mob handle");

@@ -2311,7 +2311,7 @@ mod durable_console_state {
 
         fn client() -> reqwest::blocking::Client {
             reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .timeout(Duration::from_mins(1))
                 .build()
                 .expect("HTTP client")
         }
@@ -2340,7 +2340,7 @@ mod durable_console_state {
                     .expect("signal the gateway")
                     .success()
             );
-            let deadline = Instant::now() + Duration::from_secs(60);
+            let deadline = Instant::now() + Duration::from_mins(1);
             let status = loop {
                 if let Some(status) = self.child.try_wait().expect("gateway exit status") {
                     break status;
@@ -2598,6 +2598,19 @@ mod durable_console_state {
             "meta/mob_labels/set",
             json!({ "labels": { "restart-row": "before" } }),
         );
+        // The console writes a change's audit row on the server, at most two
+        // seconds after its answer: the restart comes once the row is there.
+        let audited = |gateway: &Gateway| {
+            gateway.call(&person, "meta/console/audit", json!({ "log": "changes" }))
+        };
+        assert!(
+            eventually(Duration::from_secs(10), || {
+                audited(&first)["records"]
+                    .to_string()
+                    .contains("meta/mob_labels/set")
+            }),
+            "the change is in the console audit before the restart"
+        );
         first.stop();
 
         let second = Gateway::start(workspace.path(), &host_config);
@@ -2606,7 +2619,7 @@ mod durable_console_state {
             vec![pending],
             "the approval is still pending after a restart"
         );
-        let audit = second.call(&person, "meta/console/audit", json!({ "log": "changes" }));
+        let audit = audited(&second);
         assert_eq!(audit["retention"], "durable", "{audit}");
         assert!(
             audit["records"].to_string().contains("meta/mob_labels/set"),

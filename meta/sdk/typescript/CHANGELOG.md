@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `parseErrorEvent` words a `lifecycle_effect_failed` event whose `cause`
+  is `budget_busy` as a side effect that did not run ("the
+  compaction_harvest of ... did not run: ..."): the realm's agent memory
+  background budget did not admit its run within its wait, and no attempt
+  of it failed. `context.cause` carries the cause; an event without one
+  reads as before.
+
 ## 0.9.11
 
 - `MetaRuntime.grantTool(identity, { tool | family, durationMs |

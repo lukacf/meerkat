@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
+  (`LifecycleEffectFailureCause`, `#[serde(default)]`, left off the wire
+  while it is `failed`, so a serialized event reads as before). A host that
+  builds the variant literally adds `cause:
+  LifecycleEffectFailureCause::Failed`, and one that destructures it without
+  `..` names the field.
+
+### Added
+
+- `LifecycleEffectFailureCause` (`failed`, `budget_busy`), carried by
+  `LifecycleEffectFailure::cause` and by `cause` on
+  `lifecycle_effect_failed`: `budget_busy` says the side effect did not run
+  because the realm's agent memory background budget did not admit its run
+  within its wait, and no attempt of it failed for that. Both are left out
+  while the cause is `failed`, so records and events written before read as
+  failed. The Python and TypeScript SDKs word such an event as a side
+  effect that did not run.
+
+### Fixed
+
+- A retirement's harvest of the compactions its session holds no longer
+  ends failed because the realm's agent memory background budget was busy.
+  The budget admits one distiller run at a time, and each denial counted as
+  a failed attempt: a burst of retirements (resets of several identities, a
+  roster pass that unlists several) ended most harvests failed within two
+  seconds, after three denials, and nothing harvested their discards. A
+  denial is now no attempt: the harvest waits for the budget, asking again
+  each time a distiller run ends or the budget's hour's window frees a run,
+  five minutes in all. Only a harvest the budget still did not admit by
+  then, or at once one whose window frees no run within that wait, ends
+  unrun, recorded with the cause `budget_busy`; the session's memory keeps
+  its discards unless the retirement is a delete.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

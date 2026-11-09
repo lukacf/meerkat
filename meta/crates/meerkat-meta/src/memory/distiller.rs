@@ -71,7 +71,7 @@ use crate::identity_first::agent_memory::{
 };
 use crate::memory::completion::{CompletionStop, UNTERMINATED_STREAM, completion_stop};
 use crate::memory::factory_handle::FactoryModelClientHandle;
-use crate::memory::guards::{BackgroundBudget, BackgroundBudgetConfig};
+use crate::memory::guards::{BackgroundBudget, BackgroundBudgetConfig, BudgetDenied};
 use crate::memory::records::{
     EvidenceRef, ManifestTier, MemoryAuthor, MemoryKind, MemoryScope, NewMemoryRecord, RecordMeta,
 };
@@ -1306,6 +1306,25 @@ impl DistillOutcome {
             }
         }
     }
+
+    /// The skip of a run the realm's background budget did not admit.
+    fn budget_denied(denied: &BudgetDenied) -> Self {
+        Self::Skipped {
+            reason: format!("budget denied: {denied}"),
+        }
+    }
+}
+
+/// Why a bounded run of the engine answered no outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BoundedRunError {
+    /// The realm's background budget did not admit the run, so it was not
+    /// made. The denial is not reported: the caller waits for the budget
+    /// ([`DistillerEngine::until_budget_admits`]) and asks again, or reports
+    /// it when it gives the run up.
+    Busy(BudgetDenied),
+    /// The run did not end within this bound.
+    TimedOut(Duration),
 }
 
 /// Post-compaction follow-up hook (§8.6 trigger sequencing): invoked with
@@ -1558,7 +1577,8 @@ impl DistillerEngine {
     /// [`Self::distill_now`]; a compaction-cause run given `discards`
     /// harvests them instead of reading the discard source, and fires the
     /// compaction follow-up only with `follow_up` (a retirement's harvest
-    /// of a session it ends fires none).
+    /// of a session it ends fires none). A run the realm's background budget
+    /// does not admit is skipped, and the denial reported.
     async fn distill_now_with(
         self: &Arc<Self>,
         identity: &str,
@@ -1567,12 +1587,45 @@ impl DistillerEngine {
         discards: Option<Vec<DiscardEntry>>,
         follow_up: bool,
     ) -> DistillOutcome {
-        let outcome = self
+        match self
+            .distill_or_busy(identity, session_key, cause, discards, follow_up)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(denied) => {
+                self.budget.report_denied(&self.realm, "distiller", &denied);
+                DistillOutcome::budget_denied(&denied)
+            }
+        }
+    }
+
+    /// One run ([`Self::distill_inner`]), then its bookkeeping, its
+    /// compaction follow-up with `follow_up`, and its log line. A run the
+    /// realm's background budget does not admit answers that denial,
+    /// unreported: its follow-up and its log line see it skipped, and its
+    /// caller reports the denial or waits for the budget to ask again.
+    async fn distill_or_busy(
+        self: &Arc<Self>,
+        identity: &str,
+        session_key: &str,
+        cause: DistillCause,
+        discards: Option<Vec<DiscardEntry>>,
+        follow_up: bool,
+    ) -> Result<DistillOutcome, BudgetDenied> {
+        let ran = self
             .distill_inner(identity, session_key, cause, discards)
             .await;
         self.with_window(identity, session_key, |state| {
             state.in_flight = false;
         });
+        let skipped;
+        let outcome = match &ran {
+            Ok(outcome) => outcome,
+            Err(denied) => {
+                skipped = DistillOutcome::budget_denied(denied);
+                &skipped
+            }
+        };
         if follow_up && cause == DistillCause::Compaction {
             let follow_up = self
                 .compaction_follow_up
@@ -1580,10 +1633,10 @@ impl DistillerEngine {
                 .unwrap_or_else(|err| err.into_inner())
                 .clone();
             if let Some(follow_up) = follow_up {
-                follow_up(identity, session_key, &outcome);
+                follow_up(identity, session_key, outcome);
             }
         }
-        match &outcome {
+        match outcome {
             DistillOutcome::Skipped { reason } => {
                 tracing::debug!(
                     identity,
@@ -1609,16 +1662,18 @@ impl DistillerEngine {
                 );
             }
         }
-        outcome
+        ran
     }
 
+    /// One extraction run, or the realm's background budget's denial of it
+    /// (unreported: see [`Self::distill_or_busy`]).
     async fn distill_inner(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         cause: DistillCause,
         discards: Option<Vec<DiscardEntry>>,
-    ) -> DistillOutcome {
+    ) -> Result<DistillOutcome, BudgetDenied> {
         // A transcript private to one person is never distilled, whatever
         // the cause: its memory would reach no one else, but nothing in it
         // may leave it. A session whose privacy cannot be read is not
@@ -1626,14 +1681,14 @@ impl DistillerEngine {
         match self.transcripts.private_to_a_person(session_key).await {
             Ok(false) => {}
             Ok(true) => {
-                return DistillOutcome::Skipped {
+                return Ok(DistillOutcome::Skipped {
                     reason: SKIP_PRIVATE_SESSION.to_string(),
-                };
+                });
             }
             Err(err) => {
-                return DistillOutcome::Skipped {
+                return Ok(DistillOutcome::Skipped {
                     reason: format!("whether the session is private could not be read: {err}"),
-                };
+                });
             }
         }
         let (cursor, recorder_wrote, generation) =
@@ -1651,9 +1706,9 @@ impl DistillerEngine {
                     Some(entries) => entries,
                     None => {
                         let Some(compaction) = self.compaction.as_ref() else {
-                            return DistillOutcome::Skipped {
+                            return Ok(DistillOutcome::Skipped {
                                 reason: SKIP_NO_DISCARD_SOURCE.to_string(),
-                            };
+                            });
                         };
                         match compaction
                             .read_discards(session_key, COMPACTION_HARVEST_LIMIT)
@@ -1667,17 +1722,17 @@ impl DistillerEngine {
                                     error = %err,
                                     "agent memory distiller: compaction harvest failed"
                                 );
-                                return DistillOutcome::Skipped {
+                                return Ok(DistillOutcome::Skipped {
                                     reason: format!("compaction harvest failed: {err}"),
-                                };
+                                });
                             }
                         }
                     }
                 };
                 if entries.is_empty() {
-                    return DistillOutcome::Skipped {
+                    return Ok(DistillOutcome::Skipped {
                         reason: SKIP_NO_DISCARDS.to_string(),
-                    };
+                    });
                 }
                 let range = discard_evidence_range(&entries);
                 // Discards predate the current transcript head (they were
@@ -1688,9 +1743,9 @@ impl DistillerEngine {
                 let slice = match self.transcripts.read(session_key, cursor).await {
                     Ok(Some(slice)) => slice,
                     Ok(None) => {
-                        return DistillOutcome::Skipped {
+                        return Ok(DistillOutcome::Skipped {
                             reason: "session not found in the session store".to_string(),
-                        };
+                        });
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -1699,15 +1754,15 @@ impl DistillerEngine {
                             error = %err,
                             "agent memory distiller: transcript read failed"
                         );
-                        return DistillOutcome::Skipped {
+                        return Ok(DistillOutcome::Skipped {
                             reason: format!("transcript read failed: {err}"),
-                        };
+                        });
                     }
                 };
                 if slice.messages.is_empty() {
-                    return DistillOutcome::Skipped {
+                    return Ok(DistillOutcome::Skipped {
                         reason: "empty evidence window".to_string(),
-                    };
+                    });
                 }
                 if cause == DistillCause::Interactions && recorder_wrote {
                     // CC's mutual-exclusion trick: the agent already curated
@@ -1717,9 +1772,9 @@ impl DistillerEngine {
                         state.recorder_wrote = false;
                         state.completed_runs = 0;
                     });
-                    return DistillOutcome::Skipped {
+                    return Ok(DistillOutcome::Skipped {
                         reason: "recorder wrote in window (mutual exclusion)".to_string(),
-                    };
+                    });
                 }
                 let range = Some((slice.start_index, slice.end_index.saturating_sub(1)));
                 let head_revision = slice.head_revision.clone();
@@ -1732,15 +1787,10 @@ impl DistillerEngine {
             }
         };
 
-        // §8.1 resource guard: consulted before every run, loud on deny.
-        let _permit = match self.budget.try_acquire(&self.realm, "distiller") {
-            Ok(permit) => permit,
-            Err(denied) => {
-                return DistillOutcome::Skipped {
-                    reason: format!("budget denied: {denied}"),
-                };
-            }
-        };
+        // §8.1 resource guard: consulted before every run. A denial is the
+        // caller's: [`Self::distill_now_with`] reports it loudly, a caller
+        // that waits for the budget asks again.
+        let _permit = self.budget.try_admit(&self.realm)?;
 
         // §8.4 reset quarantine: mark the boundary in the tracker so the
         // store's write gate quarantines every record citing this session —
@@ -1760,9 +1810,9 @@ impl DistillerEngine {
             Ok(manifest) => manifest,
             Err(err) => {
                 tracing::warn!(identity, error = %err, "agent memory distiller: manifest read failed");
-                return DistillOutcome::Skipped {
+                return Ok(DistillOutcome::Skipped {
                     reason: format!("manifest read failed: {err}"),
-                };
+                });
             }
         };
         let tombstones = match self
@@ -1777,9 +1827,9 @@ impl DistillerEngine {
             Ok(tombstones) => tombstones,
             Err(err) => {
                 tracing::warn!(identity, error = %err, "agent memory distiller: tombstone read failed");
-                return DistillOutcome::Skipped {
+                return Ok(DistillOutcome::Skipped {
                     reason: format!("tombstone read failed: {err}"),
-                };
+                });
             }
         };
 
@@ -1787,9 +1837,9 @@ impl DistillerEngine {
             Ok(client) => client,
             Err(err) => {
                 tracing::warn!(identity, error = %err, "agent memory distiller: client acquisition failed");
-                return DistillOutcome::Skipped {
+                return Ok(DistillOutcome::Skipped {
                     reason: format!("client acquisition failed: {err}"),
-                };
+                });
             }
         };
         let raw_ops = match extract(
@@ -1823,17 +1873,17 @@ impl DistillerEngine {
                     Ok(ops) => ops,
                     Err(err) => {
                         tracing::warn!(identity, error = %err, "agent memory distiller: extraction failed");
-                        return DistillOutcome::Skipped {
+                        return Ok(DistillOutcome::Skipped {
                             reason: format!("extraction failed: {err}"),
-                        };
+                        });
                     }
                 }
             }
             Err(err) => {
                 tracing::warn!(identity, error = %err, "agent memory distiller: extraction failed");
-                return DistillOutcome::Skipped {
+                return Ok(DistillOutcome::Skipped {
                     reason: format!("extraction failed: {err}"),
-                };
+                });
             }
         };
 
@@ -1904,11 +1954,11 @@ impl DistillerEngine {
             }
             state.last_run_at = Some(Instant::now());
         });
-        DistillOutcome::Completed {
+        Ok(DistillOutcome::Completed {
             run_id,
             written,
             quarantined,
-        }
+        })
     }
 
     fn build_record(
@@ -2066,24 +2116,27 @@ impl DistillerEngine {
     /// `CompactionCompleted` harvest reads them. `follow_up` fires the
     /// compaction follow-up for a session that goes on; a retirement's
     /// harvest of a session it ends fires none (no life resumes it).
-    /// Answers the run's outcome, or the bound it did not end within.
+    /// Answers the run's outcome; the realm's background budget's denial of
+    /// the run, unreported ([`BoundedRunError::Busy`]: the caller waits for
+    /// the budget, [`Self::until_budget_admits`], and asks again, or reports
+    /// it); or the bound the run did not end within.
     pub(crate) async fn harvest_compaction_within_bound(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         discards: Option<Vec<DiscardEntry>>,
         follow_up: bool,
-    ) -> Result<DistillOutcome, Duration> {
+    ) -> Result<DistillOutcome, BoundedRunError> {
         let timeout = self.pre_rotation_timeout;
-        let harvest = self.distill_now_with(
+        let harvest = self.distill_or_busy(
             identity,
             session_key,
             DistillCause::Compaction,
             discards,
             follow_up,
         );
-        if let Ok(outcome) = tokio::time::timeout(timeout, harvest).await {
-            return Ok(outcome);
+        if let Ok(ran) = tokio::time::timeout(timeout, harvest).await {
+            return ran.map_err(BoundedRunError::Busy);
         }
         tracing::warn!(
             identity,
@@ -2106,7 +2159,15 @@ impl DistillerEngine {
                 },
             );
         }
-        Err(timeout)
+        Err(BoundedRunError::TimedOut(timeout))
+    }
+
+    /// Wait until the realm's background budget may admit a run, at most
+    /// `wait` ([`BackgroundBudget::until_admissible`]): for a caller whose
+    /// run the budget did not admit ([`BoundedRunError::Busy`]), before it
+    /// asks again. Answers the denial that stood when the wait ran out.
+    pub(crate) async fn until_budget_admits(&self, wait: Duration) -> Result<(), BudgetDenied> {
+        self.budget.until_admissible(&self.realm, wait).await
     }
 
     /// A compaction-cause harvest, detached and unbounded: of an answered
@@ -3204,6 +3265,63 @@ mod tests {
         assert!(
             matches!(&second, DistillOutcome::Skipped { reason } if reason.contains("budget denied")),
             "{second:?}"
+        );
+    }
+
+    /// A bounded harvest the realm's background budget does not admit
+    /// answers that denial, typed and unreported: its caller waits for the
+    /// budget and asks again, or reports it. A run of `distill_now` the
+    /// budget does not admit is skipped and reported.
+    #[tokio::test]
+    async fn a_bounded_harvest_the_budget_does_not_admit_answers_busy_unreported() {
+        let provider = Arc::new(CapturingProvider::default());
+        let (engine, _client) = engine_with(
+            vec![NOOP_REPLY, NOOP_REPLY],
+            provider,
+            Some(slice(&[("user", "a")])),
+            Vec::new(),
+            None,
+            DistillerConfig {
+                enabled: true,
+                runs_per_hour: 1,
+                ..DistillerConfig::default()
+            },
+        );
+        let sink = Arc::new(crate::memory::events::CollectingEventSink::new());
+        engine.set_event_sink(sink.clone());
+        let discards = vec![DiscardEntry {
+            content: "discarded: wrapper reminder".to_string(),
+            range: Some((0, 2)),
+        }];
+        engine
+            .harvest_compaction_within_bound("identity:a", "sess-1", Some(discards.clone()), false)
+            .await
+            .expect("the window's one run");
+        let busy = engine
+            .harvest_compaction_within_bound("identity:a", "sess-1", Some(discards), false)
+            .await
+            .expect_err("the window is spent");
+        assert_eq!(
+            busy,
+            BoundedRunError::Busy(BudgetDenied::WindowExhausted { used: 1, cap: 1 })
+        );
+        assert!(
+            !sink.types().contains(&"memory.budget.denied"),
+            "a denial its caller may wait out is not reported: {:?}",
+            sink.types()
+        );
+
+        let skipped = engine
+            .distill_now("identity:a", "sess-1", DistillCause::Retire)
+            .await;
+        assert!(
+            matches!(&skipped, DistillOutcome::Skipped { reason } if reason.contains("budget denied")),
+            "{skipped:?}"
+        );
+        assert!(
+            sink.types().contains(&"memory.budget.denied"),
+            "a run given up is reported: {:?}",
+            sink.types()
         );
     }
 

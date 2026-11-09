@@ -7163,6 +7163,95 @@ async fn a_reset_s_harvest_waits_for_a_busy_budget_and_harvests_once_it_frees() 
     );
 }
 
+/// A reset's harvest the realm's background budget does not admit within
+/// the harvest's wait ends unrun, with a cause of its own: the record and
+/// the error hook say `budget_busy`, no attempt of it failed, and the event
+/// reads that the harvest did not run, not that it failed. The session's
+/// discards never reached the model.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_harvest_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_cause() {
+    let alice = identity("personal:alice");
+    let retired = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    runtime.set_lifecycle_effect_limits(Duration::from_secs(30), 2);
+    runtime.set_lifecycle_effect_budget_wait(Duration::from_millis(300));
+    register_live(&runtime, &core.core, spec(&alice), 0, retired.clone())
+        .await
+        .expect("registered live");
+    let errors = Arc::new(StdMutex::new(Vec::new()));
+    runtime.set_error_hook(Some(keeping_errors(&errors)));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let discards = Arc::new(OneDiscardEach::default());
+    let model = Arc::new(GatedModel::new());
+    let (memory, distiller) = memory_harvesting(memory_dir.path(), &reads, &discards, &model);
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    let holder = hold_the_budget(&distiller, &model).await;
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    // The harvest waits out its wait, and the projection goes on.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        runtime.settle_lifecycle_projection(),
+    )
+    .await
+    .expect("the harvest's wait ends");
+
+    let failures = runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let unrun = &failures[0];
+    assert_eq!(
+        (unrun.effect, unrun.cause, unrun.attempts),
+        (
+            crate::runtime::LifecycleEffectKind::CompactionHarvest,
+            crate::runtime::LifecycleEffectFailureCause::BudgetBusy,
+            0
+        ),
+        "{unrun:?}"
+    );
+    assert!(
+        unrun.error.contains("did not admit")
+            && unrun.error.contains("concurrency ceiling reached"),
+        "{unrun:?}"
+    );
+    let reported = lock(&errors)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    let wire = serde_json::to_value(&reported[0]).expect("the event serializes");
+    assert_eq!(wire["cause"], "budget_busy", "{wire}");
+    assert_eq!(wire["attempts"], 0, "{wire}");
+    let worded = reported[0].to_string();
+    assert!(
+        worded.contains("did not run") && !worded.contains("failed after"),
+        "{worded}"
+    );
+    assert!(
+        !model.was_shown(&discard_of(&retired.to_string())),
+        "the session's discards never reached the model"
+    );
+
+    model.open();
+    holder.await.expect("the budget holder's run");
+}
+
 /// The retirement hook of an incarnation a Meta step ended is called only
 /// once that step answered. The projection takes what the step kept for the
 /// hook (the registration it read before Core was asked, settled after Core

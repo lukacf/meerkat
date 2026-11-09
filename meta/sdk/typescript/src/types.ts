@@ -2617,6 +2617,13 @@ export function parseErrorEvent(raw: unknown): ErrorEvent {
       const runtimeId = String(context.agent_runtime_id ?? "");
       const effect = String(context.effect ?? "");
       const attempts = Number(context.attempts ?? 0);
+      if (context.cause === "budget_busy") {
+        // The realm's background budget did not admit the side effect's run
+        // within its wait: it did not run, and no attempt of it failed for
+        // that.
+        message = `the ${effect} of ${identity} (${runtimeId}) did not run: ${error}`;
+        break;
+      }
       // A compaction harvest's error says itself whether a fallback harvest
       // follows; any other side effect is not run again.
       const settled = effect === "compaction_harvest" ? "" : ", and is not run again";

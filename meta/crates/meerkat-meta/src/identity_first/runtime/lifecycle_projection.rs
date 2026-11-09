@@ -52,7 +52,12 @@
 //! harvest of the compactions a retired session holds is attempted once
 //! with the batch the step's settle answered, then, when that failed or no
 //! batch came back, through a read of the session's memory, at most
-//! [`EFFECT_ATTEMPTS`] times, each within that bound. An answer
+//! [`EFFECT_ATTEMPTS`] times, each within that bound. A harvest the realm's
+//! agent memory background budget does not admit was not attempted: it
+//! waits for the budget, asking again each time it may admit a run, at
+//! most [`EFFECT_BUDGET_WAIT`] in all, and one the budget still did not
+//! admit by then ends unrun, recorded with the cause
+//! [`LifecycleEffectFailureCause::BudgetBusy`]. An answer
 //! the host gives (an error of the hook or of `after_create`) is final. A
 //! side effect that failed is recorded durably
 //! ([`crate::runtime::LifecycleEffectFailure`]) and reported on the error
@@ -232,11 +237,14 @@ use super::super::types::{
 };
 use super::records::unix_ms_now;
 use super::{IdentityRuntime, IdentityRuntimeError, binding_spawned_for_identity};
+use crate::identity_first::agent_memory::DistillerRunError;
+use crate::memory::BudgetDenied;
 use crate::memory::distiller::{DiscardEntry, DistillCause};
 use crate::mob_handle_runtime::SessionCreatedContext;
 use crate::runtime::{
-    LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
-    LifecycleIntentKey, LifecycleProjectionBacklog, LifecycleProjectionCursor,
+    LifecycleEffectFailure, LifecycleEffectFailureCause, LifecycleEffectIntent,
+    LifecycleEffectKind, LifecycleEffectVerb, LifecycleIntentKey, LifecycleProjectionBacklog,
+    LifecycleProjectionCursor,
 };
 use crate::unified_runtime::types::ErrorEvent;
 
@@ -260,6 +268,18 @@ const EFFECT_ATTEMPTS: u32 = 3;
 
 /// The pause between two attempts of one side effect.
 const EFFECT_RETRY_PAUSE: Duration = Duration::from_secs(1);
+
+/// The longest a side effect whose run the realm's agent memory background
+/// budget admits (a compaction harvest) waits for that budget, in all. The
+/// budget admits one distiller run of a realm at a time, and a lane runs up
+/// to [`EFFECT_CONCURRENCY`] identities' side effects at once, each
+/// retirement owing up to two distiller runs (its harvest and its
+/// distillation): a lane's burst of retirements (resets across a mob, a
+/// roster pass that unlists several identities) queues some thirty runs,
+/// which at the few seconds a run takes are through in a few minutes. The
+/// bound also caps how long a budget that no run frees (a run that does
+/// not end) holds a side effect, and the side effects after it, back.
+const EFFECT_BUDGET_WAIT: Duration = Duration::from_mins(5);
 
 /// How many runs in a row may fail before the projection reads as stalled.
 const STALLED_AFTER_FAILED_RUNS: u32 = 3;
@@ -290,12 +310,14 @@ fn lock<T>(mutex: &StdMutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The bounds of each side effect: a deadline per attempt, the attempts,
-/// and the pause between two of them.
+/// the pause between two of them, and how long one whose run the realm's
+/// background budget admits waits for that budget in all.
 #[derive(Debug, Clone, Copy)]
 struct EffectLimits {
     deadline: Duration,
     attempts: u32,
     pause: Duration,
+    budget_wait: Duration,
 }
 
 impl Default for EffectLimits {
@@ -304,15 +326,16 @@ impl Default for EffectLimits {
             deadline: EFFECT_DEADLINE,
             attempts: EFFECT_ATTEMPTS,
             pause: EFFECT_RETRY_PAUSE,
+            budget_wait: EFFECT_BUDGET_WAIT,
         }
     }
 }
 
-/// What a bounded side effect came to: its answer, or what its last attempt
-/// failed with, and how many attempts were made.
-struct Bounded<T> {
+/// What a bounded side effect came to: its answer, or what ended it, and
+/// how many attempts were made.
+struct Bounded<T, E = String> {
     attempts: u32,
-    outcome: Result<T, String>,
+    outcome: Result<T, E>,
 }
 
 /// Run `attempt` until it answers, at most `limits.attempts` times, each
@@ -345,6 +368,70 @@ where
             return Bounded {
                 attempts,
                 outcome: Err(failure),
+            };
+        }
+        tokio::time::sleep(limits.pause).await;
+    }
+}
+
+/// [`bounded`], for a side effect whose run the realm's agent memory
+/// background budget admits (a compaction harvest). An attempt the budget
+/// did not admit ([`DistillerRunError::Busy`]) was not made: it does not
+/// count, and the side effect waits until the budget may admit a run
+/// (`admits`, at most until `wait_until`), then asks again. When the budget
+/// did not admit one by then, it ends with the budget's denial
+/// (`DistillerRunError::Busy`); an attempt that was made and failed counts,
+/// as in [`bounded`].
+async fn bounded_admitted<T, F, Fut, W, WFut>(
+    limits: EffectLimits,
+    wait_until: tokio::time::Instant,
+    mut attempt: F,
+    mut admits: W,
+) -> Bounded<T, DistillerRunError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, DistillerRunError>>,
+    W: FnMut(Duration) -> WFut,
+    WFut: Future<Output = Result<(), BudgetDenied>>,
+{
+    let allowed = limits.attempts.max(1);
+    let mut attempts = 0;
+    loop {
+        let failure = match tokio::time::timeout(limits.deadline, attempt()).await {
+            Ok(Ok(answer)) => {
+                return Bounded {
+                    attempts: attempts + 1,
+                    outcome: Ok(answer),
+                };
+            }
+            Ok(Err(DistillerRunError::Busy(denied))) => {
+                let wait = wait_until.saturating_duration_since(tokio::time::Instant::now());
+                let admitted = if wait.is_zero() {
+                    Err(denied)
+                } else {
+                    admits(wait).await
+                };
+                match admitted {
+                    Ok(()) => continue,
+                    Err(denied) => {
+                        return Bounded {
+                            attempts,
+                            outcome: Err(DistillerRunError::Busy(denied)),
+                        };
+                    }
+                }
+            }
+            Ok(Err(DistillerRunError::Failed(error))) => error,
+            Err(_) => format!(
+                "timed out: no answer within {} ms",
+                limits.deadline.as_millis()
+            ),
+        };
+        attempts += 1;
+        if attempts >= allowed {
+            return Bounded {
+                attempts,
+                outcome: Err(DistillerRunError::Failed(failure)),
             };
         }
         tokio::time::sleep(limits.pause).await;
@@ -1010,7 +1097,8 @@ struct Owed<'a> {
     cursor: u64,
 }
 
-/// A side effect that failed, before it is recorded.
+/// A side effect that failed, or that the realm's background budget kept
+/// from running (`cause`), before it is recorded.
 struct FailedEffect<'a> {
     identity: &'a AgentIdentity,
     member: &'a meerkat_mob::AgentIdentity,
@@ -1019,6 +1107,7 @@ struct FailedEffect<'a> {
     effect: LifecycleEffectKind,
     attempts: u32,
     error: String,
+    cause: LifecycleEffectFailureCause,
 }
 
 /// Where a side effect stands in the journal: the event that owes it, and
@@ -2392,12 +2481,15 @@ impl IdentityRuntime {
             .harvest_compaction_within_bound(identity, &session_key, discards, true)
             .await
         {
+            // The session goes on: what it holds is read again, whether the
+            // harvest failed or the realm's background budget did not admit
+            // it.
             tracing::warn!(
                 %identity,
                 session_key = %session_key,
                 %error,
-                "the compaction harvest of a session a refused step keeps failed; the \
-                 session's next compaction or retirement reads its memory again"
+                "the compaction harvest of a session a refused step keeps did not harvest it; \
+                 the session's next compaction or retirement reads its memory again"
             );
         }
     }
@@ -2533,15 +2625,20 @@ impl IdentityRuntime {
     /// after its archive, settled it: a settle that failed or ran past the
     /// retirement's deadline, and the roster's unlisting, which is no
     /// rotation, leave the batch owed in Core, and the read finds none of
-    /// it. A harvest that fails (a timeout, a denial of the realm's budget,
-    /// a failed read or extraction) is recorded as a failed compaction
-    /// harvest, under a key of its own (apart from the retirement's
-    /// distillation), and leaves one fallback harvest owed, attempted like
-    /// the other side effects (at most [`EFFECT_ATTEMPTS`] times, each
-    /// within its bound): a fallback that still fails replaces that record,
-    /// and one that harvested the discards removes it, so no record stands
-    /// for a harvest that was made good. Only a failure to record fails the
-    /// page.
+    /// it. A harvest the realm's agent memory background budget does not
+    /// admit was not attempted: it waits for the budget
+    /// ([`bounded_admitted`]), the batch's and its fallback's together at
+    /// most the side effect's budget wait, and one the budget still did not
+    /// admit by then ends unrun, recorded with the cause
+    /// [`LifecycleEffectFailureCause::BudgetBusy`]. A harvest that fails (a
+    /// timeout, a failed read or extraction) is recorded as a failed
+    /// compaction harvest, under a key of its own (apart from the
+    /// retirement's distillation), and leaves one fallback harvest owed,
+    /// attempted like the other side effects (at most [`EFFECT_ATTEMPTS`]
+    /// times, each within its bound): a fallback that still fails, or that
+    /// the budget kept from running, replaces that record, and one that
+    /// harvested the discards removes it, so no record stands for a harvest
+    /// that was made good. Only a failure to record fails the page.
     #[allow(clippy::too_many_arguments)]
     async fn harvest_owed_compaction(
         &self,
@@ -2553,29 +2650,73 @@ impl IdentityRuntime {
         owed: Owed<'_>,
         limits: EffectLimits,
     ) -> Result<(), String> {
+        // The batch's harvest and its fallback wait for the budget until
+        // then, together.
+        let wait_until = tokio::time::Instant::now() + limits.budget_wait;
+        let admits = move |wait: Duration| memory.until_budget_admits(wait);
+        let harvest_failure =
+            |attempts: u32, error: String, cause: LifecycleEffectFailureCause| FailedEffect {
+                identity,
+                member: &retirement.member,
+                generation: retirement.generation,
+                session: retirement.session.as_ref(),
+                effect: LifecycleEffectKind::CompactionHarvest,
+                attempts,
+                error,
+                cause,
+            };
         // No life resumes the retired session: its harvest fires no
         // compaction follow-up.
         let earlier = match owed_compaction {
             OwedCompaction::Batch {
                 session_key: batch_session,
                 discards,
-            } => match memory
-                .harvest_compaction_within_bound(identity, &batch_session, Some(discards), false)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(error) => Some(error),
-            },
+            } => {
+                // Attempted once, once the budget admits it.
+                let batch = bounded_admitted(
+                    EffectLimits {
+                        attempts: 1,
+                        ..limits
+                    },
+                    wait_until,
+                    || {
+                        let (session, discards) = (batch_session.as_str(), discards.clone());
+                        async move {
+                            memory
+                                .harvest_compaction_within_bound(
+                                    identity,
+                                    session,
+                                    Some(discards),
+                                    false,
+                                )
+                                .await
+                        }
+                    },
+                    admits,
+                )
+                .await;
+                match batch.outcome {
+                    Ok(()) => return Ok(()),
+                    // The budget did not admit it within the harvest's
+                    // wait, which leaves its fallback none.
+                    Err(DistillerRunError::Busy(denied)) => {
+                        let unrun = harvest_failure(
+                            batch.attempts,
+                            format!(
+                                "the realm's background budget did not admit the harvest of \
+                                 the settled compaction batch within {} ms: {denied}",
+                                limits.budget_wait.as_millis()
+                            ),
+                            LifecycleEffectFailureCause::BudgetBusy,
+                        );
+                        self.record_lifecycle_effect_failure(owed, &unrun).await?;
+                        self.report_lifecycle_effect_failure(&unrun);
+                        return Ok(());
+                    }
+                    Err(DistillerRunError::Failed(error)) => Some(error),
+                }
+            }
             OwedCompaction::Fallback { failed, .. } => failed,
-        };
-        let harvest_failure = |attempts: u32, error: String| FailedEffect {
-            identity,
-            member: &retirement.member,
-            generation: retirement.generation,
-            session: retirement.session.as_ref(),
-            effect: LifecycleEffectKind::CompactionHarvest,
-            attempts,
-            error,
         };
         let recorded = match earlier {
             Some(error) => {
@@ -2585,6 +2726,7 @@ impl IdentityRuntime {
                         "the harvest of the settled compaction batch failed ({error}); a \
                          fallback harvest of the session's memory follows"
                     ),
+                    LifecycleEffectFailureCause::Failed,
                 );
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
                 self.report_lifecycle_effect_failure(&failed);
@@ -2592,23 +2734,42 @@ impl IdentityRuntime {
             }
             None => None,
         };
-        let fallback = bounded(limits, move || async move {
-            memory
-                .harvest_compaction_within_bound(identity, session_key, None, false)
-                .await
-        })
+        let fallback = bounded_admitted(
+            limits,
+            wait_until,
+            move || async move {
+                memory
+                    .harvest_compaction_within_bound(identity, session_key, None, false)
+                    .await
+            },
+            admits,
+        )
         .await;
         match (fallback.outcome, recorded) {
-            (Err(error), _) => {
+            (Err(DistillerRunError::Failed(error)), _) => {
                 let failed = harvest_failure(
                     fallback.attempts,
                     format!(
                         "the fallback harvest of the compactions the session's memory holds \
                          failed: {error}"
                     ),
+                    LifecycleEffectFailureCause::Failed,
                 );
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
                 self.report_lifecycle_effect_failure(&failed);
+            }
+            (Err(DistillerRunError::Busy(denied)), _) => {
+                let unrun = harvest_failure(
+                    fallback.attempts,
+                    format!(
+                        "the realm's background budget did not admit the fallback harvest of \
+                         the compactions the session's memory holds within {} ms: {denied}",
+                        limits.budget_wait.as_millis()
+                    ),
+                    LifecycleEffectFailureCause::BudgetBusy,
+                );
+                self.record_lifecycle_effect_failure(owed, &unrun).await?;
+                self.report_lifecycle_effect_failure(&unrun);
             }
             // The fallback harvested the discards: the earlier failure's
             // record goes.
@@ -4078,6 +4239,7 @@ impl IdentityRuntime {
                     effect: LifecycleEffectKind::AfterCreate,
                     attempts: told.attempts,
                     error,
+                    cause: LifecycleEffectFailureCause::Failed,
                 };
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
                 self.report_lifecycle_effect_failure(&failed);
@@ -4156,6 +4318,7 @@ impl IdentityRuntime {
                             "timed out: the distillation did not finish within {} ms",
                             bound.as_millis()
                         ),
+                        cause: LifecycleEffectFailureCause::Failed,
                     };
                     self.record_lifecycle_effect_failure(owed, &failed).await?;
                     self.report_lifecycle_effect_failure(&failed);
@@ -4197,6 +4360,7 @@ impl IdentityRuntime {
                         effect: LifecycleEffectKind::ExitInterview,
                         attempts: queued.attempts,
                         error,
+                        cause: LifecycleEffectFailureCause::Failed,
                     };
                     self.record_lifecycle_effect_failure(owed, &failed).await?;
                     self.report_lifecycle_effect_failure(&failed);
@@ -4264,6 +4428,7 @@ impl IdentityRuntime {
             effect: LifecycleEffectKind::RetirementHook,
             attempts: hooked.attempts,
             error: error.clone(),
+            cause: LifecycleEffectFailureCause::Failed,
         };
         self.record_lifecycle_effect_failure(owed, &failed).await?;
         self.emit_error(super::retired_member_release_failed(&member, error));
@@ -4278,14 +4443,25 @@ impl IdentityRuntime {
         owed: Owed<'_>,
         failed: &FailedEffect<'_>,
     ) -> Result<(), String> {
-        tracing::warn!(
-            identity = %failed.identity,
-            generation = failed.generation,
-            effect = failed.effect.as_str(),
-            attempts = failed.attempts,
-            error = %failed.error,
-            "a lifecycle side effect failed; it is recorded, and the projection goes on"
-        );
+        match failed.cause {
+            LifecycleEffectFailureCause::BudgetBusy => tracing::warn!(
+                identity = %failed.identity,
+                generation = failed.generation,
+                effect = failed.effect.as_str(),
+                attempts = failed.attempts,
+                error = %failed.error,
+                "a lifecycle side effect did not run: the realm's background budget did not \
+                 admit it within its wait; it is recorded, and the projection goes on"
+            ),
+            _ => tracing::warn!(
+                identity = %failed.identity,
+                generation = failed.generation,
+                effect = failed.effect.as_str(),
+                attempts = failed.attempts,
+                error = %failed.error,
+                "a lifecycle side effect failed; it is recorded, and the projection goes on"
+            ),
+        }
         let (store, mob_id) = self.identity_record_store();
         store
             .record_lifecycle_effect_failure(
@@ -4300,7 +4476,8 @@ impl IdentityRuntime {
                     failed.error.clone(),
                     unix_ms_now(),
                 )
-                .with_session(failed.session.cloned()),
+                .with_session(failed.session.cloned())
+                .with_cause(failed.cause),
             )
             .await
             .map_err(|error| {
@@ -4334,6 +4511,7 @@ impl IdentityRuntime {
             effect: failed.effect.as_str().to_string(),
             attempts: failed.attempts,
             error: failed.error.clone(),
+            cause: failed.cause,
         });
     }
 
@@ -4396,11 +4574,17 @@ impl IdentityRuntime {
     /// one at most `attempts` times: rows that wait for a bound use short
     /// ones.
     pub(crate) fn set_lifecycle_effect_limits(&self, deadline: Duration, attempts: u32) {
-        *lock(&self.lifecycle_projection.limits) = EffectLimits {
-            deadline,
-            attempts,
-            pause: Duration::from_millis(10),
-        };
+        let mut limits = lock(&self.lifecycle_projection.limits);
+        limits.deadline = deadline;
+        limits.attempts = attempts;
+        limits.pause = Duration::from_millis(10);
+    }
+
+    /// Let a side effect whose run the realm's background budget admits wait
+    /// for that budget at most `wait` in all: rows that wait the wait out use
+    /// a short one.
+    pub(crate) fn set_lifecycle_effect_budget_wait(&self, wait: Duration) {
+        lock(&self.lifecycle_projection.limits).budget_wait = wait;
     }
 
     /// Run the backlog lane once, as its task does at each sweep: whether it
@@ -4826,6 +5010,7 @@ mod tests {
             deadline: Duration::from_millis(20),
             attempts: 3,
             pause: Duration::from_millis(1),
+            budget_wait: Duration::from_secs(1),
         };
         let calls = std::sync::atomic::AtomicU32::new(0);
         let calls = &calls;
@@ -4863,6 +5048,95 @@ mod tests {
         assert!(written.outcome.is_ok());
     }
 
+    /// The limits of the rows of a side effect whose run the realm's
+    /// background budget admits.
+    fn budgeted_limits() -> EffectLimits {
+        EffectLimits {
+            deadline: Duration::from_secs(5),
+            attempts: 2,
+            pause: Duration::from_millis(1),
+            budget_wait: Duration::from_secs(5),
+        }
+    }
+
+    /// The budget's answer while one run of the realm is in flight.
+    fn ceiling() -> BudgetDenied {
+        BudgetDenied::ConcurrencyCeiling { cap: 1 }
+    }
+
+    /// An attempt the realm's background budget did not admit is no
+    /// attempt: the side effect waits for the budget and asks again, and
+    /// only the attempts that ran count toward its bound.
+    #[tokio::test]
+    async fn a_budget_denial_is_no_attempt_and_the_side_effect_waits_for_the_budget() {
+        let limits = budgeted_limits();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let calls = &calls;
+        let waits = std::sync::atomic::AtomicU32::new(0);
+        let waits = &waits;
+        // Four busy answers, then a failure, then the answer: more busy
+        // answers than the side effect has attempts.
+        let answered = bounded_admitted(
+            limits,
+            tokio::time::Instant::now() + limits.budget_wait,
+            move || async move {
+                match calls.fetch_add(1, Ordering::SeqCst) {
+                    0..=3 => Err(DistillerRunError::Busy(ceiling())),
+                    4 => Err(DistillerRunError::Failed("extraction failed".to_string())),
+                    _ => Ok(()),
+                }
+            },
+            move |_wait| async move {
+                waits.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), BudgetDenied>(())
+            },
+        )
+        .await;
+        assert_eq!(answered.outcome, Ok(()));
+        assert_eq!(
+            answered.attempts, 2,
+            "the failure and the answer count, no busy answer does"
+        );
+        assert_eq!(
+            waits.load(Ordering::SeqCst),
+            4,
+            "each busy answer waits for the budget"
+        );
+    }
+
+    /// A side effect the budget does not admit within its wait ends with the
+    /// budget's denial, and no attempt; one whose wait is already spent ends
+    /// at its next denial, asking the budget nothing.
+    #[tokio::test]
+    async fn a_side_effect_the_budget_does_not_admit_within_its_wait_ends_busy() {
+        let limits = budgeted_limits();
+        let ended = bounded_admitted(
+            limits,
+            tokio::time::Instant::now() + limits.budget_wait,
+            || async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
+            |_wait| async { Err::<(), _>(ceiling()) },
+        )
+        .await;
+        assert_eq!(ended.attempts, 0);
+        assert_eq!(ended.outcome, Err(DistillerRunError::Busy(ceiling())));
+
+        let waits = std::sync::atomic::AtomicU32::new(0);
+        let waits = &waits;
+        let spent = bounded_admitted(
+            limits,
+            tokio::time::Instant::now(),
+            || async { Err::<(), _>(DistillerRunError::Busy(ceiling())) },
+            move |_wait| async move {
+                waits.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), BudgetDenied>(())
+            },
+        )
+        .await;
+        assert_eq!(spent.attempts, 0);
+        assert_eq!(spent.outcome, Err(DistillerRunError::Busy(ceiling())));
+        assert_eq!(waits.load(Ordering::SeqCst), 0, "a spent wait asks nothing");
+    }
+
     /// A long run prunes the failures it records as it goes, not only at a
     /// start: the store never holds more than the kept failures and one
     /// prune's worth, however many side effects the run gives up on.
@@ -4898,6 +5172,7 @@ mod tests {
                 effect: LifecycleEffectKind::AfterCreate,
                 attempts: 3,
                 error: "timed out".to_string(),
+                cause: LifecycleEffectFailureCause::Failed,
             };
             runtime
                 .record_lifecycle_effect_failure(

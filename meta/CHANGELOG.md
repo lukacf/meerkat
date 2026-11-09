@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `binding` and an optional `profile`) in its launcher-selected model route and
   names it in each of its profiles, which Core's mob profiles apply.
 
+### Fixed
+
+- Forge: **Rebuild with updated runtime** on an application built without a
+  selected product runtime (an ordinary application an earlier Forge built)
+  compiled a new package for MobKit 0.8.47. It now rebuilds the application on
+  the Meta runtime Forge started with, keeping its application source, and a
+  Forge without a selected Meta runtime refuses the rebuild and says so.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

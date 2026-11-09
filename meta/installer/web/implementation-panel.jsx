@@ -371,7 +371,7 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
         body.preserve_design = true;
       } else if (refreshFramework) {
         body.refresh_framework = true;
-        body.request ||= "Rebuild this application using the current MobKit runtime. Preserve its requested behavior, agent design and authored application code. Verify the refreshed application and run independent review.";
+        body.request ||= "Rebuild this application using the current runtime. Preserve its requested behavior, agent design and authored application code. Verify the refreshed application and run independent review.";
         body.request += `\n\nRefresh the runtime in build ${submitted.previousBuildId}.`;
       }
       const next = await request(implementationUrl(submitted.guideId), {

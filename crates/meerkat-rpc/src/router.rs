@@ -5151,9 +5151,29 @@ impl MethodRouter {
                 adapter.input_state(&session_id, &input_id).await
             }
             meerkat_contracts::SessionInputStateSelector::IdempotencyKey(key) => {
-                adapter
-                    .input_state_by_idempotency_key(&session_id, key)
-                    .await
+                // A key a wire caller supplied is stored in the caller
+                // namespace (`IdempotencyKey::caller`), so that form is read
+                // first. Only when it names no input is the key read as it
+                // is, which keeps a key a host gave the Rust API, and a
+                // receipt's `delivery_id`, readable. Both reads stay in this
+                // session's index. A caller key equal to a raw key of the
+                // same session reads the caller's input.
+                let by_caller = match meerkat_runtime::IdempotencyKey::caller(key) {
+                    Ok(caller) => {
+                        adapter
+                            .input_state_by_idempotency_key(&session_id, &caller.0)
+                            .await
+                    }
+                    Err(_) => Ok(None),
+                };
+                match by_caller {
+                    Ok(None) => {
+                        adapter
+                            .input_state_by_idempotency_key(&session_id, key)
+                            .await
+                    }
+                    found => found,
+                }
             }
         };
         match stored {

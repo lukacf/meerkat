@@ -68,6 +68,20 @@ them.
   (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
   answer without it.
 
+### Fixed
+
+- `meerkat-rpc`: `session/input_status` with `{"by": "idempotency_key"}`
+  finds an input that `session/external_event` admitted under the key its
+  caller supplied. The event route stores such a key in the caller namespace
+  (`caller:<key>`), which the lookup did not read, so it answered no `state`
+  for every caller key. The lookup now reads the caller form of the key
+  first and, only when that names no input, the key as it is: a key a host
+  gave the Rust API, and a receipt's `delivery_id`, stay readable. Both reads
+  stay in the session's own index. A keyed `mob/member_send` is read through
+  its receipt (`continuation.status`, or `session/input_status` by its
+  `delivery_id` or `input_id`), not by its caller key. Affects 0.9.5 through
+  0.9.11.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

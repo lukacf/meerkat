@@ -5,6 +5,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
+  from 0.9.11 below 0.10.0 (`>=0.9.11 <0.10.0`; it accepted them from 0.9.10):
+  the package is built and tested with the SDKs of its own release, and each
+  release moves the floor to its version. Its development dependencies link
+  `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout instead of
+  installing the published 0.9.10 packages, so source builds and tests run
+  against the SDKs of the same commit; build the repository's
+  `sdks/typescript` and `meta/sdk/typescript` first (see BUILDING.md).
+
 ### Fixed
 
 - `toolkit_installed_service_candidates` no longer returns run after run of

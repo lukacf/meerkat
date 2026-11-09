@@ -13,9 +13,9 @@ pins them at `=0.9.11`, the release this Connect is built with. Record the
 checkout's commit with the build record; it names the Connect, Core and Meta
 source together.
 
-The [TypeScript manifest](sdk/typescript/package.json) and
-[lock](sdk/typescript/package-lock.json) select `@rkat/sdk` 0.9.10 and
-`@rkat/meta-sdk` 0.9.10. The [Python native-host extra](sdk/python/pyproject.toml)
+The [TypeScript manifest](sdk/typescript/package.json) links `@rkat/sdk` and
+`@rkat/meta-sdk` from this checkout (the repository's `sdks/typescript` and `meta/sdk/typescript`),
+so its build and tests use the SDKs of the same commit. The [Python native-host extra](sdk/python/pyproject.toml)
 selects `meerkat-meta==0.9.11`. See [SDKs](#sdks) for package versions and validation.
 
 Use the [development build instructions](#build-a-compatible-development-checkout)
@@ -334,7 +334,7 @@ GitHub release assets; no Toolkit registry upload is required.
 
 For current development, use Connect's `sdk/python` and `sdk/typescript` from
 the same finalized Connect source as the native binaries. The TypeScript
-manifest and lock select published `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10;
+manifest links `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout;
 the Python native-host extra selects `meerkat-meta==0.9.11`. Package installation
 and SDK component checks do not qualify native or installed execution.
 
@@ -376,10 +376,10 @@ for exact results, the upstream correction's status and remaining installed qual
 Connect's [Python metadata](sdk/python/pyproject.toml) is 0.9.11, with the native-host
 extra requiring `meerkat-meta==0.9.11`. Connect's own
 [TypeScript package version](sdk/typescript/package.json) is 0.9.11; its
-development dependencies are `@rkat/meta-sdk` 0.9.10 and `@rkat/sdk` 0.9.10,
-and its optional peers accept both from 0.9.10 below 0.10.0
-(`>=0.9.10 <0.10.0`). The [TypeScript lock](sdk/typescript/package-lock.json) selects
-those published tarballs and their actual integrity hashes. The
+development dependencies link `@rkat/meta-sdk` and `@rkat/sdk` from this checkout
+(`file:` dependencies on the repository's `meta/sdk/typescript` and `sdks/typescript`), and its
+optional peers accept both from 0.9.11 below 0.10.0 (`>=0.9.11 <0.10.0`). The
+[TypeScript lock](sdk/typescript/package-lock.json) records those links. The
 `10e5b80` validation
 records the earlier 0.9.5 dependency update; missing-distribution checks from
 that checkpoint are historical. The current declarations do not select the
@@ -392,8 +392,12 @@ Python optional extras select service and native-host dependencies.
 `sdk/agno/stage.py` and `sdk/services/stage.py` project explicit source allowlists
 from that tree into separate adopted distributions.
 
-For TypeScript source, run `npm ci --ignore-scripts`, `npm run build`, then
-`npm pack --ignore-scripts` in `sdk/typescript`. Activepieces has its own package
+For TypeScript source, first build the two linked SDKs of the checkout:
+`npm install --ignore-scripts` and `npm run build` in the repository's
+`sdks/typescript`, then `npm ci --ignore-scripts` and `npm run build` in its
+`meta/sdk/typescript`. Then run
+`npm ci --ignore-scripts`, `npm run build` and `npm pack --ignore-scripts` in
+`sdk/typescript`. Activepieces has its own package
 and scripts under `sdk/activepieces`; its build requires the checked-in vendor
 manifest, source and license tree. Keep those hashed upstream inputs intact.
 

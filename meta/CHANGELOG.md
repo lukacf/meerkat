@@ -48,10 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   delete, which drops that scope next. A harvest given up so is reported as
   a run the budget skipped (`memory.budget.denied`); when its settled
   batch's harvest had failed first, the record counts that attempt and
-  names its failure. When a run ends, the first waiting harvest to find the
-  budget free takes the run, so the others do not read their discards
-  again for it. A shutdown ends the wait at once: nothing is recorded, and
-  over a durable metadata store the harvest runs again at the next start.
+  names its failure, and so it does for an attempt of its fallback harvest
+  that failed before the budget kept the next one from running. When a run
+  ends, the first waiting harvest to find the budget free takes the run, so
+  the others do not read their discards again for it. A shutdown ends the
+  wait at once: nothing is recorded, and over a durable metadata store the
+  harvest runs again at the next start.
 
 - A retirement's transcript distillation (a reset's, a role move's, an
   unlisting's, a rotation's) waits for a busy agent memory background

@@ -83,8 +83,9 @@ output rather than only the number.
 class Parser(argparse.ArgumentParser):
     """Usage errors become typed outcomes instead of exiting the process.
 
-    They name arguments, options and choices, never a value typed on the
-    command line: a value may be a secret typed in the wrong place.
+    They name arguments, options and choices of the command line itself, never a value typed on it and never an
+    unknown option's name: either may be a secret typed in the wrong place ("--" glued to a key reads like an
+    option's name).
     """
 
     def error(self, message):
@@ -114,10 +115,13 @@ def action_label(action):
 
 
 def usage_message(parser, message):
-    """argparse's message, keeping argument names, options and choices only."""
+    """argparse's message, keeping argument names, options and choices of the command line only."""
     if message.startswith(UNRECOGNIZED):
-        names = [name for name in map(option_name, message[len(UNRECOGNIZED):].split()) if name]
-        return "unrecognized arguments" + (f" {' '.join(names)}" if names else "") + " (values not shown)"
+        tokens = message[len(UNRECOGNIZED):].split()
+        kinds = [kind for kind, present in (("an unknown option", any(token.startswith("-") for token in tokens)),
+                                            ("an extra argument", any(not token.startswith("-") for token in tokens)))
+                 if present]
+        return "unrecognized arguments: " + (" and ".join(kinds) or "an extra argument") + " (not shown)"
     match = AMBIGUOUS.fullmatch(message)
     if match:
         name = option_name(match.group("option"))
@@ -158,9 +162,10 @@ def without_values(detail, argv, parser):
     line's own words; otherwise one that names nothing typed. It holds whatever wording another Python
     release gives argparse's messages."""
     words = vocabulary(parser)
+    options = [word for word in words if word.startswith("-")]
     for token in argv:
-        if option_name(token) == token:
-            continue  # an option's name alone, which messages may name
+        if token.startswith("-") and any(option.startswith(token) for option in options):
+            continue  # a known option or an abbreviation of one, which messages may name
         parts = [token, *([token.split("=", 1)[1]] if token.startswith("-") and "=" in token else []),
                  *([token[2:]] if token.startswith("-") and not token.startswith("--") else [])]
         if any(len(part) >= 4 and part not in words and part in detail for part in parts):

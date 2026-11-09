@@ -155,13 +155,13 @@ errors without formatting them.
 
 The source package links its development dependencies `@rkat/meta-sdk` and
 `@rkat/sdk` from the repository's own checkout (`meta/sdk/typescript` and
-`sdks/typescript`), and its optional peers accept both from 0.9.11 below 0.10.0
-(`>=0.9.11 <0.10.0`). The npm lock records those links; with both SDKs built,
+`sdks/typescript`), and its optional peers accept both from Toolkit's own version
+below the next minor release. The npm lock records those links; with both SDKs built,
 `npm ci --ignore-scripts` installs that selection before Toolkit's build and
 tests, which therefore run against the SDKs of the same commit. The native-host
 control module imports Meta directly and does not skip when it is absent.
 
-Toolkit's own package version is 0.9.11. This source update does not replace
+Toolkit's own package version is the checkout's Connect version. This source update does not replace
 an existing release asset or qualify an installed application. Other native
 development compositions must record their matching SDK source and actual
 staged bytes as described in [BUILDING.md](../../BUILDING.md#sdks).

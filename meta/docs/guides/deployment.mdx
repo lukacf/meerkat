@@ -293,13 +293,16 @@ that store:
   metadata store durable: a gateway killed between a step and its side
   effects runs them at its next start, and a graceful shutdown that ran out
   of its share of the drain window leaves the rest for the next start.
-- `meta_gateway` keeps its metadata in memory (its storage census reports
-  the `metadata` slot `declared_ephemeral`), so its side effects are run at
-  least once within the process only: a kill loses those still owed, and the
-  next start projects from the journal's head.
+- `rpc_gateway` without a state directory keeps its metadata in memory (its
+  storage census reports the `metadata` slot `declared_ephemeral`), so its
+  side effects are run at least once within the process only: a kill loses
+  those still owed, and the next start projects from the journal's head.
 - The first start of a release that projects the journal begins at the
   journal's head: side effects an earlier release still owed when it stopped
   (it kept them in memory) are not run.
+
+`meta_gateway` runs none of these side effects: it composes no customizer, no
+retirement hook and no agent memory.
 
 A retirement that distills the session it ends, or drops its memory scope,
 first harvests the compactions that session holds: a delete, a reset, a

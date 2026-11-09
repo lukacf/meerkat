@@ -400,10 +400,9 @@ that never answers delays later side effects by at most its bound. Calls are
 attempted at least once: a gateway stopped between the seat and the call
 (killed, or a shutdown whose share of the drain window closed first) makes
 it at its next start when its metadata store is durable (`rpc_gateway` over
-a state directory or a host store realm, `meta_gateway` with persistent
-sessions; a launch that keeps it in memory holds it within the process
-only), and one stopped during the call
-may make it again, so key what it does by the session. The context's `model`
+a state directory or a host store realm; a launch that keeps it in memory
+holds it within the process only), and one stopped during the call may make
+it again, so key what it does by the session. The context's `model`
 is the build's model, else the model of the profile when the mob definition
 declares it inline; it is empty for a realm-bound profile the build sets no
 model for. A call made at a later start reports the identity's roster labels

@@ -249,9 +249,19 @@ impl GatewayRuntimeBootstrapPlan {
     /// state directory, which `meta_gateway` with persistent sessions gives
     /// the console profile as the stdio profile takes it at
     /// [`Self::stdio_rpc`]. The runtime keeps its console audit log, its
-    /// attention list, the gating owner's state and its mob event cursor
-    /// there, so a store that keeps them across restarts keeps them across a
-    /// restart of the gateway.
+    /// attention list, the gating owner's state, its mob event cursor and
+    /// its spawned members' idle-retire opt-ins there, so a store that keeps
+    /// them across restarts keeps them across a restart of the gateway.
+    ///
+    /// A launch that keeps its state across restarts wires two more parts,
+    /// as `meta_gateway` does: the state directory's console log, installed
+    /// right after the bootstrap (`UnifiedRuntime::set_console_log_store`),
+    /// which keeps the console's requests and their threads; and, with an
+    /// identity runtime, its identity records in this store
+    /// (`gateway_wiring::keep_identity_records_in_runtime_metadata`).
+    /// Without the console log, the attention list outlives the requests its
+    /// items answer: a restart forgets their threads, and a reply to one of
+    /// them is refused as an unknown thread.
     pub fn with_persistent_metadata(
         mut self,
         persistent_metadata: Arc<dyn PersistentMetadataStore>,

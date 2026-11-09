@@ -2002,10 +2002,11 @@ fn meta_gateway_starts_an_existing_dotted_state_directory() {
 }
 
 /// A persistent `meta_gateway` keeps its metadata (the console audit log,
-/// the attention list, the gating owner's state) and its console log (the
-/// console's requests and their answers) in its state directory, so a
-/// restart keeps them. Each row starts the real binary twice over one state
-/// directory, signed in as one person, its members on a loopback model.
+/// the attention list, the gating owner's state, the identity records) and
+/// its console log (the console's requests and their answers) in its state
+/// directory, so a restart keeps them. Each row starts the real binary twice
+/// over one state directory, signed in as one person, its members on a
+/// loopback model.
 #[cfg(unix)]
 mod durable_console_state {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -2482,7 +2483,9 @@ mod durable_console_state {
     /// answered once: the send is settled delivered, the timeline holds the
     /// request and its answer once, and the same request again (the same
     /// idempotency key) is answered from the first send, without asking the
-    /// model again.
+    /// model again. The identity's tool record a warm wrote before the
+    /// restart answers its resolved tools after it, while Core holds the
+    /// member Dormant.
     #[test]
     fn a_console_request_and_its_answer_survive_a_restart() {
         let log = Arc::new(Mutex::new(ModelLog::default()));
@@ -2524,9 +2527,29 @@ mod durable_console_state {
             timeline(&first, &person)
         );
         assert_eq!(asked(&log, QUESTION), 1, "the model is asked once");
+        // A warm writes the identity's tool record, one of the identity
+        // records the state directory's metadata store keeps.
+        let warmed = first.call(
+            &person,
+            "meta/identity/warm",
+            json!({ "identity": IDENTITY }),
+        );
         first.stop();
 
         let second = Gateway::start(workspace.path(), &host_config);
+        // Read before anything wakes the member: Core holds it Dormant, so
+        // its resolved tools are the tool record the warm wrote.
+        let resolved = second.call(
+            &person,
+            "meta/identity/resolved_tools",
+            json!({ "identity": IDENTITY }),
+        );
+        let mut recorded = warmed.clone();
+        recorded["tools_source"] = json!("recorded");
+        assert_eq!(
+            resolved, recorded,
+            "the tool record written before the restart answers after it (warmed: {warmed})"
+        );
         let (status, recovered) = second.post("/console/send/recover", &person, &recover);
         assert_eq!(
             (

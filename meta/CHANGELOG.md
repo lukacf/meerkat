@@ -23,19 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`meta_metadata.sqlite3` and `meta_console.sqlite3`, the stores
   `rpc_gateway` keeps there with `persistent_state`), so a restart keeps
   them. It kept both in memory, and a restart forgot them:
-  - a console request made before a restart stays known: its send settles,
-    a resend with the same idempotency key is answered from the first send
-    (the Console offers to send an uncertain request again), and its thread
-    stays recorded, so a private reply to it from a host's reply route
-    reaches its person once instead of being refused as an unknown thread;
+  - a console request made before a restart stays known: its send and its
+    answer stay in the timeline, and a resend with the same idempotency key
+    is answered from the first send and not run again (the Console offers to
+    send an uncertain request again);
   - the attention list, the console audit log and the gating state (pending
     approvals and the gating audit) survive a restart, and their reads
     report `retention: durable`;
-  - the identity records and the lifecycle side effects an identity still
-    owes survive a restart, so a gateway stopped between a lifecycle step
-    and its side effects runs them at its next start;
-  - the mob event cursor survives a restart, so the events written while the
-    gateway was down are projected at its next start.
+  - an identity's tool record (`meta/identity/warm` writes it) survives a
+    restart, so `meta/identity/resolved_tools` still answers a Dormant
+    member's tools from it.
   The storage census reports the `console` and `metadata` slots
   persistent. A store that does not open refuses `meta/init` with `-32014`.
   The first start after the upgrade begins with both stores empty, as every

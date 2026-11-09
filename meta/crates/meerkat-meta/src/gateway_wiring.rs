@@ -73,6 +73,12 @@ pub fn identity_mob_handle(runtime: &crate::UnifiedRuntime) -> meerkat_mob::MobH
 /// store the stdio gateway and `UnifiedRuntimeBuilder` give their identity
 /// runtime. On a launch whose metadata store is its state directory's, a
 /// restart keeps them; without this call they are kept for the process only.
+///
+/// Call it once, with the runtime `identity_runtime` serves, right after the
+/// identity runtime is built and before its identity context is installed
+/// (`UnifiedRuntime::install_and_bootstrap_identity_first_context`): the
+/// records written before the call stay in the identity runtime's own
+/// store, for the process only, and nothing reads them after it.
 pub fn keep_identity_records_in_runtime_metadata(
     identity_runtime: &IdentityRuntime,
     runtime: &crate::UnifiedRuntime,

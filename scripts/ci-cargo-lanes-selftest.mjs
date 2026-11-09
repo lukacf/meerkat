@@ -4131,8 +4131,8 @@ for (const path of [
   assert.deepEqual(core.row_products.clippy.filter((row) => row.downstream), [], "a push has no downstream Clippy row");
   assert.deepEqual(
     core.row_products.closure_check.filter((row) => row.downstream).map((row) => row.product).sort(),
-    ["connect", "meta"],
-    "a Core change's downstream type-check rows are the products' closure-check rows",
+    ["connect", "connect", "meta", "meta"],
+    "a Core change's downstream type-check rows are the products' closure-check rows, every feature and default features",
   );
   assert.ok(
     core.row_products.closure_check.some((row) => row.product === "core" && !row.downstream),

@@ -652,8 +652,11 @@ and its CI must be green before a release tag (`require_ci_green`):
   job per product's part of it (`closure_check_rows`), the parts in parallel
   and with the first wave. When the plan reaches Core, a product's part
   checks every target (`--all-targets`): a Core change can break a
-  product's test code alone, and these are the downstream rows Core's
-  product-scoped evidence depends on (with the products' rustdoc rows).
+  product's test code alone. A second job then checks that part again with
+  the product's default features: `--all-features` never compiles the code
+  a product builds only without one of its features, and that code can
+  call Core too. These are the downstream rows Core's product-scoped
+  evidence depends on (with the products' rustdoc rows).
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings` for each row of the plan's `rustdoc_rows`:
   Core's members (`--workspace` excluding the products' packages) when the

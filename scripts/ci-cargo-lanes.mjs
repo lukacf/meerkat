@@ -3083,16 +3083,27 @@ function plan(args) {
   // (`targets: "all"`): a Core change can break a product's test code alone,
   // and when it invalidates meerkat-mob's build no pull-request row checks
   // that (the `downstream <product>` Clippy row goes to the push, which runs
-  // none). These are the downstream rows Core's product-scoped evidence
-  // depends on. Core's own part, and a product's part without a Core
-  // change, check lib and bin targets.
-  result.closure_check_rows = byProduct(result.closure).map(([product, names]) => ({
-    name: `${product}, ${names.length} crates`,
-    product,
-    packages: names,
-    package_flags: names.map((name) => `-p ${name}`).join(" "),
-    targets: result.core_changed && product !== CORE ? "all" : "lib",
-  }));
+  // none). Each part is checked with every feature (`features: "all"`), and
+  // a product's part after a Core change a second time, in a row of its own,
+  // with the product's default features (`features: "default"`, what its own
+  // unit and test rows build): --all-features never compiles the code a
+  // product builds only without one of its features (meerkat-meta calls
+  // Core's precheck_identity only without openai-live). These are the
+  // downstream rows Core's product-scoped evidence depends on. Core's own
+  // part, and a product's part without a Core change, check lib and bin
+  // targets with every feature.
+  result.closure_check_rows = byProduct(result.closure).flatMap(([product, names]) => {
+    const downstream = result.core_changed && product !== CORE;
+    const row = {
+      name: `${product}, ${names.length} crates`,
+      product,
+      packages: names,
+      package_flags: names.map((name) => `-p ${name}`).join(" "),
+      targets: downstream ? "all" : "lib",
+      features: "all",
+    };
+    return downstream ? [row, { ...row, name: `${row.name}, default features`, features: "default" }] : [row];
+  });
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   // The compile-only checks of the closure, and the two exact-profile lanes
   // (governed JSONL compiles meerkat-rpc's lib test, the confinement lane
@@ -3348,7 +3359,8 @@ function plan(args) {
   // their package's product. The downstream type-check rows say so: a pull
   // request's `downstream <product>` Clippy rows and, when the plan reaches
   // Core, the products' closure-check rows, which type-check every target of
-  // them against the changed Core (a push runs no downstream Clippy row), and
+  // them against the changed Core, with every feature and with the
+  // product's default features (a push runs no downstream Clippy row), and
   // the products' rustdoc rows, which document their links into Core items.
   const rowProduct = (row) => {
     if (row.product) return row.product;
@@ -3656,7 +3668,13 @@ function githubOutput(result) {
     "closure_check_matrix",
     JSON.stringify({
       include: closureCheckRows.length > 0
-        ? closureCheckRows.map((row) => ({ name: row.name, product: row.product, packages: row.package_flags, targets: row.targets }))
+        ? closureCheckRows.map((row) => ({
+            name: row.name,
+            product: row.product,
+            packages: row.package_flags,
+            targets: row.targets,
+            features: row.features,
+          }))
         : [{ name: "none", product: "none", packages: "" }],
     }),
   );

@@ -9,7 +9,8 @@
 //   - core: Core's rows and the downstream type-check rows (rows the planner
 //     marks downstream: a pull request's `downstream <product>` Clippy rows
 //     and, when the plan reaches Core, the products' closure-check rows,
-//     which then check every target, and their rustdoc rows);
+//     which then check every target with every feature and with the
+//     product's default features, and their rustdoc rows);
 //   - meta: Core's and Meta's rows;
 //   - connect: every row, i.e. only a run whose validation_result is success.
 // A green run needs no judgment: the gates take it as before, and a failed

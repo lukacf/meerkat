@@ -387,7 +387,11 @@ of the release merge instead of rebuilding Core; any other path, an unreadable
 `ci/products.json` or a commit that is not an ancestor means a full build.
 `make release-doctor` checks that no release build job, local action or
 script it runs names such a path. The lookup prefers a run of exactly the tag
-commit, and the job summary lists every changed path with its reason;
+commit: while one is still under way it waits for that run rather than take
+an earlier commit's, and it never takes an earlier commit's run whose
+Windows or Intel macOS lane or full binary build gate already failed, timed
+out or was cancelled (the tag run could not publish the trailing archives).
+The job summary lists every changed path with its reason;
 the publishers verify the run
 attempt the lookup examined and refuse it if the run was re-run since;
 a gate that has not concluded yet is waited for, because the prebuild

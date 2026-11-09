@@ -2,13 +2,15 @@
 # Self-test for scripts/release-find-prebuild with a stubbed `gh` (no network).
 #
 # The lookup decides whether a tag run rebuilds every release artifact or
-# publishes a pre-tag prebuild's: it must select only a prebuild of exactly
+# publishes a pre-tag prebuild's: it must select only a prebuild that serves
 # the release commit (release.yml, workflow_dispatch, main, this repository,
 # a successful "Release prebuild gate", downloadable critical artifacts), as
 # soon as that gate passed even while the run's trailing lanes still build,
-# prefer the newest, wait for a gate that has not concluded unless a job it
-# needs already failed, and fail loudly when the API fails instead of
-# reporting "no prebuild".
+# prefer one of exactly the release commit (waiting for one still under way)
+# and then the newest, never take an earlier commit's whose trailing lanes
+# failed, wait for a gate that has not concluded unless a job it needs
+# already failed, and fail loudly when the API fails instead of reporting
+# "no prebuild".
 
 set -euo pipefail
 

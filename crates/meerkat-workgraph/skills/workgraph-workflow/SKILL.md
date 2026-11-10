@@ -23,6 +23,16 @@ scratch space and not semantic memory.
   Include your typed owner and the current `expected_revision`. Set
   `lease_seconds` for a lease, or omit it for no expiry. The tool computes
   expiry from the store's claim observation time.
+- Claim works only on an `open` item, or on an `in_progress` item whose lease
+  has expired. A `blocks` edge keeps the dependent item `open`: it is not ready
+  until its blocker is `completed`, and becomes claimable then. `workgraph_block`
+  is different: it sets the item's status to `blocked`, which cannot be claimed,
+  and there is currently no transition back to `open` (an update keeps it
+  `blocked`). Use it only for work that should stay parked until it is closed.
+- Closing is not a way to unblock. `completed` needs the titled outcome to have
+  actually happened. Cancelling, or replacing the work with a new item, must be a
+  real decision: keep the history (attach evidence, link the replacement) and do
+  not create a duplicate of work that already exists.
 - If a write fails with a stale revision, reload the item with `workgraph_get`
   or `workgraph_snapshot`, reconsider the current state, then retry only if the
   work still makes sense.

@@ -342,9 +342,8 @@ pub(super) fn dump(mirror: &AnnouncementMirror) -> BTreeMap<String, Vec<String>>
                     .query_map([], |row| {
                         (0..columns)
                             .map(|index| {
-                                row.get_ref(index).map(|value| {
-                                    format!("{:?}", rusqlite::types::Value::from(value))
-                                })
+                                row.get::<_, rusqlite::types::Value>(index)
+                                    .map(|value| format!("{value:?}"))
                             })
                             .collect::<rusqlite::Result<Vec<_>>>()
                             .map(|values| values.join(" | "))

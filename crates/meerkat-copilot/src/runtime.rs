@@ -4720,8 +4720,7 @@ mod tests {
         /// model, whichever spelling the request used: the dotted entry for
         /// a catalog id, the same id for the account's own spelling and for
         /// OpenAI and Gemini ids the account lists as the catalog does. A
-        /// model the list does not resolve keeps the requested id, and so
-        /// does an account whose list is not loaded.
+        /// model the list does not resolve keeps the requested id.
         #[test]
         fn a_route_names_the_accounts_id_for_its_model() {
             let state = account_with(account_list());
@@ -4758,12 +4757,29 @@ mod tests {
                 .wire_model(),
                 "claude-opus-5-5"
             );
+        }
 
+        /// While an account holds a token and no model list (its first
+        /// listing failed, or a mint's listing failed without refusing the
+        /// token), its routes know nothing about its models: access is
+        /// unknown, no account capabilities apply, and a request names the
+        /// id the session asked for, the catalog spelling included. Pinned
+        /// as it is, so that a change to this state is a deliberate one.
+        #[test]
+        fn an_account_without_its_list_names_the_requested_id() {
             let unlisted = account_with(Vec::new());
             unlisted.cache.write().as_mut().expect("cache").models = None;
-            let unknown = route(&unlisted, Provider::Anthropic, "claude-opus-5-5");
-            assert_eq!(unknown.access, CopilotModelAccess::Unknown);
-            assert_eq!(unknown.wire_model(), "claude-opus-5-5");
+            for (provider, requested) in [
+                (Provider::Anthropic, "claude-opus-5-5"),
+                (Provider::Anthropic, "claude-opus-5.5"),
+                (Provider::OpenAI, "gpt-5.5"),
+                (Provider::Gemini, "gemini-3.8-flash"),
+            ] {
+                let unknown = route(&unlisted, provider, requested);
+                assert_eq!(unknown.access, CopilotModelAccess::Unknown, "{requested}");
+                assert_eq!(unknown.capabilities, None, "{requested}");
+                assert_eq!(unknown.wire_model(), requested);
+            }
         }
 
         /// An account that lists both spellings of one id serves each

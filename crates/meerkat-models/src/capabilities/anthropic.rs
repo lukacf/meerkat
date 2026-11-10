@@ -140,12 +140,17 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     https://platform.claude.com/docs/en/models/fable-5-2/overview
     //   - Models overview (not listed for the output-300k-2026-03-24 beta):
     //     https://platform.claude.com/docs/en/models/overview
-    //   - Platforms, each with the id claude-fable-5-2: the Claude API,
-    //     Claude Platform on AWS, Claude Models on Google Cloud (Anthropic
-    //     managed and Google managed) and Microsoft Foundry (on Anthropic
-    //     infrastructure); not Amazon Bedrock. The catalog keeps no
-    //     per-platform list: the client sends the id unchanged on every
-    //     backend.
+    //   - Platforms: the Claude API, Claude Platform on AWS, Claude Models on
+    //     Google Cloud (Anthropic managed and Google managed) and Microsoft
+    //     Foundry (on Anthropic infrastructure), each with the id
+    //     claude-fable-5-2; and Amazon Bedrock, only through the inference
+    //     profiles global.anthropic.claude-fable-5-2 (global) and
+    //     us.anthropic.claude-fable-5-2 (US geographic). Bedrock offers no
+    //     in-region access, so the bare anthropic.claude-fable-5-2 does not
+    //     run. The catalog keeps no per-platform list: the client sends the id
+    //     unchanged on every backend, so a Bedrock caller declares a profile
+    //     id.
+    //     https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5-2.html
     //   - What's new (`{type: "enabled"}` with `budget_tokens` and
     //     `{type: "disabled"}` both return 400; a `tool_choice` of `any` or
     //     a named tool returns 400; the five effort levels `low` to `max`;
@@ -174,10 +179,13 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     // specifications and prices, but Anthropic serves it only to
     // organizations it has verified, on the Claude API, Claude Models on
     // Google Cloud (Anthropic managed and Google managed) and Microsoft
-    // Foundry (on Anthropic infrastructure); not on Claude Platform on AWS
-    // and not on Amazon Bedrock. Like Claude Mythos 5.1 it is not a catalog
-    // row: it runs as a model id with no catalog row.
+    // Foundry (on Anthropic infrastructure), and on Amazon Bedrock only
+    // through the inference profiles global.anthropic.claude-mythos-5-2 and
+    // us.anthropic.claude-mythos-5-2; not on Claude Platform on AWS. Like
+    // Claude Mythos 5.1 it is not a catalog row: it runs as a model id with
+    // no catalog row.
     // https://platform.claude.com/docs/en/models/mythos-5-2/overview
+    // https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5-2.html
     ModelCapabilities {
         id: "claude-fable-5-2",
         provider: Provider::Anthropic,

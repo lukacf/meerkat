@@ -56,6 +56,14 @@ them.
   with a struct literal sets the new field or ends the literal with
   `..Default::default()`; `None` is an entry that states no levels.
 
+- `meerkat-core`: `SelfHostedModelConfig` and `SelfHostedServerRef` each
+  gain the public field `reasoning_effort_levels:
+  Option<Vec<EffortLevel>>` (see Added). Code that builds either with a
+  struct literal sets the new field: `None` declares no levels, and a
+  `SelfHostedModelConfig` literal may end with `..Default::default()`
+  instead. A config that does not declare the field parses and serializes
+  as before.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
@@ -162,6 +170,69 @@ them.
   account lists a route's model under (the ID the route's requests name),
   and `same_account_model_id(left, right)`, whether two IDs name the same
   model on a GitHub Copilot account (see Fixed).
+
+- `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
+  `meerkat-copilot`, `meerkat-llm-core`, `meerkat`: every LLM client a
+  factory builds reports, without I/O, the route it serves through
+  `reasoning_route()` (the accessor above): the provider-matrix backend,
+  the provider API, and the reasoning effort levels the route itself
+  states. Nothing reads the reports yet, and no request changes.
+  - OpenAI: `OpenAiClient` reports the Responses API on the backend of its
+    wire. `OpenAiCompatibleClient` reports the API of its mode on the
+    backend it was declared for (`with_openai_backend`, or the new
+    `with_self_hosted_backend`), and no route when no backend was
+    declared. `OpenAiRealtimeTextAdapter` reports the realtime API.
+  - Claude: `AnthropicClient` reports the Messages API on the backend the
+    new `AnthropicClientBuilder::backend` records. The builder starts from
+    `anthropic_api`, and the provider runtime names the backend of every
+    client it builds.
+  - Gemini: `GeminiClient` reports `generateContent` on the backend it was
+    built for; the GitHub Copilot route's Gemini client reports Chat
+    Completions on the Copilot backend.
+  - GitHub Copilot: a session's routed client reports the endpoint the
+    account's model list gives the model, and what the model's entry
+    states: its levels (`Stated`), `NotStated` for an entry that states
+    none, and `ListUnavailable` while the account holds no list (the route
+    is then on its family's optimistic endpoint). The entry is the one the
+    route resolved for the session's model, so a catalog ID the account
+    writes with a dot reads that entry. A model the list does not serve
+    has no route to report. On the Messages endpoint an entry that states
+    levels and also states `adaptive_thinking: false` is reported as
+    `NotStated`.
+  - Wrappers forward: the fallback client reports its active candidate's
+    route, and the selected-target wrapper and the Copilot account
+    capability gate report their client's. `TestClient` reports a route a
+    test sets with the new `with_reasoning_route`.
+
+  A client of your own reports no route until it implements
+  `reasoning_route()`, and a wrapper of your own hides its client's route
+  until it forwards the call.
+
+- `meerkat-openai`: the Responses client honours the request-local marker
+  `OpenAiProviderTag.reasoning_effort_resolved`. A level on a request that
+  carries the marker is not checked against the model's direct-API catalog
+  row, and for a model whose reasoning payload the catalog does not enable
+  (no row, or a row without reasoning) it is sent as
+  `reasoning: {"effort": "<level>"}` with no `summary` and no `include`.
+  Nothing sets the marker yet. A level without it behaves as before: it is
+  checked against the row, and dropped for a model without a reasoning
+  row. A request without a marked level builds the same body as before.
+
+- `meerkat-core`, `meerkat-openai`, `meerkat`: an operator can declare the
+  reasoning effort levels a self-hosted model accepts, with
+  `reasoning_effort_levels = ["low", "medium", "high"]` under
+  `[self_hosted.models.<id>]`
+  (`SelfHostedModelConfig.reasoning_effort_levels`). Omitted declares
+  none; an empty list declares that the model takes no effort level; a
+  word that is not a level (`none`, `minimal`, `low`, `medium`, `high`,
+  `xhigh`, `max`) does not parse. Declaring levels needs
+  `supports_reasoning = true`: config validation refuses a declaration
+  without it. Config layers merge the field by presence. The model
+  registry holds each declared level once, from `none` to `max`
+  (`SelfHostedServerRef.reasoning_effort_levels`), and the model's client
+  reports them with its route
+  (`OpenAiCompatibleClient::with_operator_reasoning_effort_levels`).
+  Nothing else reads the declaration yet, and no request changes.
 
 ### Changed
 

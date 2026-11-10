@@ -27525,6 +27525,91 @@ message = "review"
         Ok(())
     }
 
+    /// `meta/reset_all` does not fail on a store-owned identity (created at
+    /// runtime, or adopted into store custody): Meta's reset refuses it
+    /// before anything acts, as Core's MobMachine drives it, and the call
+    /// reports it in its own `store_owned` list with its kind
+    /// (`identity_store_owned`), not under `failed`. Nothing of it is reset.
+    ///
+    /// RED before the list: the call failed `-32000` "reset_all failed for
+    /// one or more identities", with the store-owned identity under `failed`.
+    #[tokio::test]
+    async fn reset_all_reports_a_store_owned_identity_apart_and_does_not_fail()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-reset-all-store-owned").await?;
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "console-reset-all-store-owned".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let created = AgentIdentity::parse("console-store-owned")?;
+        crate::identity_first::core_test_bridge::bind_live(
+            &core_bridge.core,
+            &created,
+            &ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )?;
+        core_bridge.hold_created(&created, "worker");
+        // A door registered the identity created at runtime from its row.
+        assert!(
+            identity_runtime
+                .admit_unregistered_name(&created)
+                .await
+                .map_err(|error| error.to_string())?,
+            "the door registers the created identity"
+        );
+
+        let response = Box::pin(handle_console_runtime_rpc(
+            &runtime,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(identity_runtime.clone()),
+            None,
+            None,
+            rpc_request("meta/reset_all"),
+            true,
+        ))
+        .await;
+        assert!(
+            response.get("error").is_none_or(Value::is_null),
+            "a store-owned identity does not fail the call: {response:#?}"
+        );
+        let result = &response["result"];
+        assert_eq!(result["failed"], json!([]), "{response:#?}");
+        assert_eq!(result["reset"], json!([]), "{response:#?}");
+        let store_owned = result["store_owned"]
+            .as_array()
+            .ok_or_else(|| format!("reset_all lists its store-owned identities: {response:#?}"))?;
+        assert_eq!(
+            store_owned
+                .iter()
+                .map(|row| (row["identity"].clone(), row["kind"].clone()))
+                .collect::<Vec<_>>(),
+            vec![(json!("console-store-owned"), json!("identity_store_owned"))],
+            "{response:#?}"
+        );
+        assert!(
+            core_bridge.releases().is_empty(),
+            "nothing of the store-owned identity is reset"
+        );
+        assert!(
+            core_bridge.core.live_member(&created)?.is_some(),
+            "Core's member of the store-owned identity is untouched"
+        );
+        let _ = runtime.handle().stop().await;
+        Ok(())
+    }
+
     /// A mob refusal from `meta/force_cancel_member` reaches a console caller
     /// with meerkat's typed code and data, the rendering
     /// `meta/stop_member_run` uses, instead of a `-32000` with the refusal

@@ -5713,6 +5713,116 @@ external_addressable = true
         Ok(())
     }
 
+    /// A dispatch by name to a name this runtime has not registered answers
+    /// the identity door's typed refusal, as a send does, never a blanket
+    /// unknown identity: an entry a host declared, before this runtime's
+    /// roster pass registers it, and a read of Core's entry that Core could
+    /// not serve refuse retryable (`-32052`, `identity_history_unavailable`);
+    /// a name whose record Core cannot read refuses as unreadable (`-32014`);
+    /// a removed identity and a name Core holds for no identity are unknown
+    /// (`-32001`). Nothing is delivered.
+    ///
+    /// RED before the dispatch door propagated its admission's refusal: it
+    /// answered every one of them `-32001`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_to_a_name_this_runtime_has_not_registered_answers_the_doors_typed_refusal()
+    -> Result<(), String> {
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let parse = |name: &str| {
+            crate::identity_first::AgentIdentity::parse(name)
+                .map_err(|err| format!("a valid identity: {err:?}"))
+        };
+        let declared = parse("dispatch-declared")?;
+        let removed = parse("dispatch-removed")?;
+        let unreadable = parse("dispatch-unreadable")?;
+        let nobody = parse("dispatch-nobody")?;
+        bridge.hold_declared(&declared);
+        bridge.hold_removed(&removed);
+        bridge.hold_unreadable(&unreadable);
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "dispatch-to-an-unregistered-name".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+        let retryable = |name: &str| {
+            (
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                Some(serde_json::json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": name,
+                    "retryable": true,
+                })),
+            )
+        };
+        let unknown = (-32001, None);
+        let unreadable_answer = (
+            crate::rpc::STORAGE_RESOLUTION_CODE,
+            Some(serde_json::json!({
+                "kind": "identity_name_unreadable",
+                "identity": "dispatch-unreadable",
+                "remedy": "repair_or_upgrade",
+                "retryable": false,
+            })),
+        );
+        let dispatch = |name: crate::identity_first::AgentIdentity| {
+            let identity_rt = identity_rt.clone();
+            async move {
+                identity_rt
+                    .dispatch(
+                        &name,
+                        &crate::identity_first::DispatchInput::system("hello"),
+                    )
+                    .await
+                    .err()
+                    .map(|refused| {
+                        (
+                            crate::rpc::identity_error_code(&refused),
+                            refused.structured_data(),
+                        )
+                    })
+            }
+        };
+        for (name, expected) in [
+            (&declared, retryable("dispatch-declared")),
+            (&removed, unknown.clone()),
+            (&unreadable, unreadable_answer),
+            (&nobody, unknown),
+        ] {
+            assert_eq!(
+                dispatch(name.clone()).await,
+                Some(expected),
+                "{name}: the dispatch door's typed refusal"
+            );
+        }
+
+        // Every read of Core's entry fails: the dispatch to a name this
+        // runtime has not registered is refused retryable, never as an
+        // unknown identity.
+        bridge.fail_entry_reads(0, u64::MAX);
+        assert_eq!(
+            dispatch(parse("dispatch-plain")?).await,
+            Some(retryable("dispatch-plain")),
+            "a read Core could not serve refuses the dispatch retryable"
+        );
+        if !bridge.delivered().is_empty() {
+            return Err("nothing reaches a member through a refused door".to_string());
+        }
+        Ok(())
+    }
+
     /// A send by name to a member seated before identity entries existed
     /// (its spawn row carries a legacy identity mark: the legacy identity
     /// label naming it, or the durable-identity continuity marker), which

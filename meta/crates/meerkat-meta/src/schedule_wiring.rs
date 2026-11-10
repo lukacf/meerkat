@@ -4726,6 +4726,279 @@ comms = true
         runtime.shutdown().await;
     }
 
+    /// A schedule fire's internal door over a real Core mob `mob_id`: the
+    /// runtime, an identity runtime over the production `MobSessionBridge`
+    /// that has run no roster pass (it registered nothing), the internal
+    /// door, and one planned occurrence. Core creates `sched-keeper` at
+    /// runtime from `request`, and archives it when `archive` is set.
+    struct CreatedIdentityFire {
+        runtime: crate::UnifiedRuntime,
+        host: InternalDeliveryScheduleMobHost,
+        occurrence: Occurrence,
+        delivery: meerkat::ScheduleDeliveryIdentity,
+        _temp_dir: tempfile::TempDir,
+    }
+
+    async fn created_identity_fire(
+        mob_id: &str,
+        request: meerkat_mob::CreatedIdentityRequest,
+        archive: bool,
+    ) -> CreatedIdentityFire {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let factory = AgentFactory::new(temp_dir.path()).comms(true);
+        let session_service = Arc::new(meerkat::build_ephemeral_service(
+            factory,
+            Config::default(),
+            4,
+        ));
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.general]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.general.tools]
+comms = true
+"#
+        ))
+        .expect("schedule test mob definition");
+        let mob_spec = crate::mob_handle_runtime::MobBootstrapSpec::new(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            session_service,
+        )
+        .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(CountingLlmClient {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            })),
+        });
+        let runtime = crate::UnifiedRuntime::bootstrap(
+            mob_spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: mob_id.to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("bootstrap schedule test runtime");
+        let handle = runtime.mob_handle();
+        let operation = |name: &str| {
+            meerkat_mob::IdentityOperation::new(
+                name,
+                meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+            )
+        };
+        let allow = || {
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            )
+        };
+        let created = handle
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    operation("create-sched-keeper"),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![request],
+                ),
+                allow(),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{created:?}"
+        );
+        if archive {
+            let archived = handle
+                .archive_identity(
+                    meerkat_mob::IdentityArchiveChange::new(
+                        operation("archive-sched-keeper"),
+                        meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                        "sched-keeper",
+                    ),
+                    allow(),
+                )
+                .await;
+            assert!(
+                matches!(
+                    archived,
+                    Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+                ),
+                "{archived:?}"
+            );
+        }
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("identity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: mob_id.to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(crate::identity_first::MobSessionBridge::new(
+                    handle.clone(),
+                ))),
+                default_timeout: None,
+            },
+        ));
+        let schedule = Schedule::new(CreateScheduleRequest {
+            name: Some("identity-created".to_string()),
+            description: None,
+            trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("deliver".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("schedule");
+        let occurrence = Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("occurrence");
+        let host = InternalDeliveryScheduleMobHost {
+            inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
+            handle: runtime.mob_handle(),
+            identity_runtime: Some(identity_runtime),
+        };
+        let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        CreatedIdentityFire {
+            runtime,
+            host,
+            occurrence,
+            delivery,
+            _temp_dir: temp_dir,
+        }
+    }
+
+    /// A schedule fire addressed to an identity created at runtime that Core
+    /// archived is answered at the internal door from Core's entry: the fire
+    /// ends for good, typed, its detail naming the archive and Core's
+    /// `unarchive_identity`, which seats it again. Nothing reaches a member.
+    ///
+    /// RED before the refusal read Core's entry: the fire ended with "in
+    /// state Dormant", naming neither the archive nor its way back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_schedule_fire_to_an_archived_identity_created_at_runtime_ends_typed_naming_its_unarchive()
+     {
+        let fire = created_identity_fire(
+            "schedule-created-archived",
+            meerkat_mob::CreatedIdentityRequest::new(meerkat_mob::CreatedIdentitySpec::new(
+                "sched-keeper",
+                "general",
+            )),
+            true,
+        )
+        .await;
+        let dispatch = fire
+            .host
+            .deliver_internal_member_prompt(
+                &fire.occurrence,
+                &fire.delivery,
+                "schedule-created-archived",
+                "sched-keeper",
+                &meerkat_core::ContentInput::Text("deliver".to_string()),
+            )
+            .await
+            .expect("the identity's door answers the fire, never a member door")
+            .expect("a final refusal ends the fire, it is not deferred");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.delivery_failure_reason,
+            Some(meerkat::DeliveryFailureReason::RuntimeRejected),
+            "{:?}",
+            terminal.detail
+        );
+        let detail = terminal.detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("is archived") && detail.contains("unarchive_identity"),
+            "the fire's refusal names the archive and its unarchive: {detail}"
+        );
+        fire.runtime.shutdown().await;
+    }
+
+    /// A schedule fire addressed to an identity created at runtime that
+    /// awaits its host's preparation (Core seats no member of it until the
+    /// host settles it) is answered at the internal door from Core's entry,
+    /// retryable: the occurrence stays reclaimable
+    /// (`DeliveryRepairDeferred`), and the fire is delivered once Core seats
+    /// the identity. Nothing reaches a member now.
+    ///
+    /// RED before the refusal read Core's entry: the fire ended for good,
+    /// "in state Dormant".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_schedule_fire_to_an_identity_created_at_runtime_awaiting_its_preparation_stays_reclaimable()
+     {
+        let fire = created_identity_fire(
+            "schedule-created-preparing",
+            meerkat_mob::CreatedIdentityRequest::new(meerkat_mob::CreatedIdentitySpec::new(
+                "sched-keeper",
+                "general",
+            ))
+            .with_preparation(meerkat_mob::IdentityPreparationMode::Required),
+            false,
+        )
+        .await;
+        match fire
+            .host
+            .deliver_internal_member_prompt(
+                &fire.occurrence,
+                &fire.delivery,
+                "schedule-created-preparing",
+                "sched-keeper",
+                &meerkat_core::ContentInput::Text("deliver".to_string()),
+            )
+            .await
+        {
+            Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred { detail, .. })) => {
+                assert!(
+                    detail.contains("sched-keeper") && detail.contains("preparation"),
+                    "{detail}"
+                );
+            }
+            Some(Err(other)) => panic!("the fire stays reclaimable, not {other:?}"),
+            Some(Ok(dispatch)) => panic!(
+                "the fire of an identity awaiting its preparation is deferred, not ended: {:?}",
+                dispatch.completion.await.map(|terminal| terminal.detail)
+            ),
+            None => panic!("the identity's refusal answers the fire, never a member door"),
+        }
+        fire.runtime.shutdown().await;
+    }
+
     /// A downstream app on 0.7.26 "last link" e2e: an agent-authored one-shot must
     /// DELIVER through the real schedule host — the full rpc_gateway chain
     /// (attach_schedule_tools_with_identity_targets → agent tool dispatch →

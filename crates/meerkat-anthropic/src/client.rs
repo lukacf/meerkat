@@ -5564,6 +5564,31 @@ mod tests {
         Ok(())
     }
 
+    /// A Claude effort read from caller input or a stored row in either
+    /// spelling (`xhigh`, `x_high`) is sent to Anthropic as `xhigh`.
+    #[test]
+    fn test_build_request_body_effort_xhigh_from_either_spelling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        for spelling in ["xhigh", "x_high"] {
+            let tag: meerkat_core::lifecycle::run_primitive::ProviderTag =
+                serde_json::from_value(serde_json::json!({
+                    "provider": "anthropic",
+                    "effort": spelling,
+                }))?;
+            let request = LlmRequest::new(
+                "claude-opus-4-8",
+                vec![Message::User(UserMessage::text("test".to_string()))],
+            )
+            .with_provider_params(tag);
+
+            let body = client.build_request_body(&request)?;
+
+            assert_eq!(body["output_config"]["effort"], "xhigh", "{spelling}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_build_request_body_effort_max_remains_anthropic_specific()
     -> Result<(), Box<dyn std::error::Error>> {

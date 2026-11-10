@@ -372,6 +372,12 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     each request, never sent to Anthropic. A generic `temperature` is omitted
     for models that reject sampling parameters.
 
+    `effort` sets the response effort: `low`, `medium`, `high`, `xhigh` or
+    `max`; each model's `params_schema` lists the levels it accepts. Every
+    request surface also accepts `x_high` as a spelling of `xhigh`, and
+    Meerkat sends `xhigh` to Claude either way. Responses, events and stored
+    records can carry either spelling, so a client reading them accepts both.
+
     Claude Fable 5.2, Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a
     replayed thinking block only while the system prompt, the tools and the
     earlier messages it was produced under are unchanged, and refuse a

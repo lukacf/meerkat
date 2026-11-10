@@ -304,7 +304,8 @@ event re-arms the window, so long-but-alive responses are unaffected. Set
 (`"120s"`) for an explicit window for every model. Like `call_timeout`, an
 omitted value inherits from the model profile: a model whose provider
 documents responses that can stay silent for minutes has its own catalog
-window (`gemini-4-argon`: 900 s, `gpt-5.5-pro`: 7200 s), a self-hosted model
+window (`gemini-4-carbon` and `gemini-4-argon`: 900 s, `gpt-5.5-pro`:
+7200 s), a self-hosted model
 can declare one with `stream_inactivity_timeout_secs` (at least 60 seconds;
 config validation refuses a shorter one), and every other model uses the
 built-in 300 s. The window is resolved for each LLM call, so a model change or

@@ -87,6 +87,10 @@ them.
 - Claude Fable 5.2 (`claude-fable-5-2`) is a recommended catalog model. The
   Anthropic default model stays `claude-opus-5-5`. See Added.
 
+- Gemini 4 Carbon (`gemini-4-carbon`) is a recommended catalog model, served
+  only on paid Gemini API tiers. The Gemini default model stays
+  `gemini-4-argon`. See Added.
+
 - `meerkat_schedule_list` filters by `phase` and `target_id` before its page
   cut. See Added.
 
@@ -138,6 +142,17 @@ them.
   (`claude-mythos-5-2`), which Anthropic serves only to organizations it
   has verified, is not a catalog model, as Claude Mythos 5.1 is not. The
   Anthropic default model stays `claude-opus-5-5`.
+
+- `meerkat-models`: Gemini 4 Carbon (`gemini-4-carbon`) is a recommended
+  catalog model with the limits and parameters of Gemini 4 Argon: a
+  1,048,576-token context window shared by input, thinking and output, 64K
+  output, text, image, video, audio and PDF input, thinking levels `low`,
+  `medium` and `high` (default `medium`), no sampling parameters, and
+  forced tool choice. An explicit `minimal` thinking level is refused
+  locally with the typed `LlmError::InvalidRequest`, or with
+  `BuildAgentError::Config` when it is a build parameter. Its call timeout
+  and stream-inactivity window are 900 s. Google serves it only on paid
+  Gemini API tiers. The Gemini default model stays `gemini-4-argon`.
 
 - `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
   identity applies to the member's running build (a grant's `applies`), and

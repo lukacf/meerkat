@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [24be5586ae58](https://github.com/lukacf/meerkat/commit/24be5586ae58bdb1763240fb5bfed7bb74d8ed46) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -448,7 +448,9 @@ granted = await runtime.grant_tool(
     decision_ref="approval-7",           # your own record of the decision
 )
 grant_id = granted["grant"]["grant_id"]
-await runtime.list_tool_grants("agent-a", include_ended=True)
+granted["applies"]                   # "now", "not_mounted" or "at_next_build"
+listed = await runtime.list_tool_grants("agent-a", include_ended=True)
+listed.get("gate")                   # {"running": ..., "next_build": ...}
 await runtime.tool_grant_audit("agent-a", limit=50)
 await runtime.revoke_tool_grant(grant_id, reason="done")
 
@@ -459,8 +461,11 @@ except ToolGrantRequestRefusedError as error:
 ```
 
 Name exactly one of `tool` and `family`, and exactly one of `duration_ms`
-and `expires_at_ms`. Every refusal raises `ToolGrantRequestRefusedError`; its
-kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+and `expires_at_ms`. A grant answers `applies`, whether it applies to the
+member's running build, and a list answers the member's `gate` (none for a
+retired identity); both are advisory. Every refusal raises
+`ToolGrantRequestRefusedError`; its kinds are
+`TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/meta/api/rpc#scoped-tool-grants).
 
 ### Realm MCP administration

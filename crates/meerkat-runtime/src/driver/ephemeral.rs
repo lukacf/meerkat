@@ -10338,6 +10338,90 @@ mod tests {
         );
     }
 
+    /// The archive step holds each row's audit buffer from its last check
+    /// until it closed the buffer. The generated archive needs the machine
+    /// authority, so while the test holds that, the step is past its last
+    /// check and before the row's removal: an append made then waits, and is
+    /// refused once the row is archived.
+    #[tokio::test]
+    async fn an_audit_append_during_the_terminal_archive_waits_and_is_refused() {
+        use crate::input_audit::tests::{audit_buffer_is_held, try_stage_refusal_after_row_write};
+
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("archive-holds-audit"));
+        let input = prompt_input("archive me");
+        let input_id = input.id().clone();
+        driver.accept_input(input).await.unwrap();
+        driver
+            .abandon_all_non_terminal(InputAbandonReason::Stopped)
+            .unwrap();
+        let live = driver
+            .ledger()
+            .get(&input_id)
+            .expect("terminal row")
+            .authorization_audit
+            .clone();
+        assert!(live.is_empty());
+        let committed = [(
+            input_id.clone(),
+            live.freeze_for_persistence().expect("no record"),
+        )];
+        assert_eq!(
+            driver
+                .archivable_terminal_input_ids_in(std::slice::from_ref(&input_id))
+                .expect("terminal row"),
+            vec![input_id.clone()]
+        );
+        let session_id = meerkat_core::types::SessionId::new();
+        let run_id = RunId::new();
+        let authority = driver.shared_dsl_authority();
+        let (answered, answer) = std::sync::mpsc::channel();
+        let archived = std::thread::scope(|threads| {
+            let machine_held = authority.lock().expect("generated owner");
+            let archive =
+                threads.spawn(|| driver.archive_terminal_inputs_with_committed_audit(&committed));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !audit_buffer_is_held(&live) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the archive holds the row's audit buffer while the generated archive runs"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            threads.spawn(|| {
+                answered
+                    .send(try_stage_refusal_after_row_write(
+                        &live,
+                        &input_id,
+                        &session_id,
+                        &run_id,
+                    ))
+                    .expect("the test waits for the answer");
+            });
+            assert_eq!(
+                answer
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .map(|appended| appended.is_ok()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "the append waits while the archive holds the buffer"
+            );
+            drop(machine_held);
+            archive.join().expect("archive thread")
+        });
+        assert_eq!(
+            archived.expect("the held archive"),
+            super::CommittedAuditArchive::Archived
+        );
+        assert!(driver.ledger().get(&input_id).is_none());
+        assert!(
+            answer
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the append returns once the archive released the buffer")
+                .is_err(),
+            "the archived row's audit buffer refuses the record"
+        );
+        assert!(live.is_empty());
+    }
+
     #[tokio::test]
     async fn dsl_preview_preserves_poisoned_live_authority_and_generated_guards() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("poisoned-preview"));

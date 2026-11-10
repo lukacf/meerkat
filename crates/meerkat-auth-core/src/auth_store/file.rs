@@ -6,7 +6,9 @@
 //! credentials live at `<root>/<realm_id>/account~<account_id>.json`.
 //! Permissions on Unix: a realm directory the store creates is 0o700, set
 //! explicitly whatever the process umask, and credential files are 0o600. A
-//! save writes `<stem>.json.tmp` and renames it onto the target.
+//! save writes `<stem>.json.tmp` and renames it onto the target; a save whose
+//! write, sync or rename fails publishes nothing (the stored credential stays
+//! as it was) and removes that temporary file.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
 //!
@@ -71,9 +73,19 @@ impl FileTokenStore {
         let mut bytes = serde_json::to_vec_pretty(tokens)?;
         bytes.push(b'\n');
 
-        write_file_with_mode(&tmp_path, &bytes).await?;
-        tokio::fs::rename(&tmp_path, &final_path).await?;
-        Ok(())
+        let published = async {
+            write_file_with_mode(&tmp_path, &bytes).await?;
+            tokio::fs::rename(&tmp_path, &final_path).await?;
+            Ok::<(), TokenStoreError>(())
+        }
+        .await;
+        if published.is_err() {
+            // Nothing was published: the stored credential is as it was. The
+            // temporary file is this save's own, and may hold part of the
+            // new credential.
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
+        published
     }
 
     /// Remove `key`'s file, for a caller that already required its fence. A
@@ -268,8 +280,6 @@ pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 async fn write_file_with_mode(path: &Path, bytes: &[u8]) -> Result<(), TokenStoreError> {
-    use tokio::io::AsyncWriteExt;
-
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -277,23 +287,37 @@ async fn write_file_with_mode(path: &Path, bytes: &[u8]) -> Result<(), TokenStor
         .mode(0o600)
         .open(path)
         .await?;
-    file.write_all(bytes).await?;
-    file.sync_all().await?;
+    write_and_sync(&mut file, bytes).await?;
     Ok(())
 }
 
 #[cfg(not(unix))]
 async fn write_file_with_mode(path: &Path, bytes: &[u8]) -> Result<(), TokenStoreError> {
-    use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)
         .await?;
-    file.write_all(bytes).await?;
-    file.sync_all().await?;
+    write_and_sync(&mut file, bytes).await?;
     Ok(())
+}
+
+/// Write `bytes` to `file` and sync it, reporting a write the operating
+/// system refused.
+///
+/// tokio's `File` hands a write to the blocking pool and returns before it
+/// ran, and `sync_all` waits for that write but keeps its error for the next
+/// write or flush instead of returning it. The flush is what reports a write
+/// refused by a file size limit, a quota, a full filesystem or an I/O error:
+/// without it the sync of the empty file succeeds and the caller renames that
+/// file onto the stored credential.
+async fn write_and_sync(file: &mut tokio::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    file.sync_all().await
 }
 
 #[cfg(test)]

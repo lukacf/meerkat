@@ -33,6 +33,8 @@ mod operator_instruction_fold_tests;
 mod operator_instruction_run_start_tests;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod operator_instruction_turn_tests;
+#[cfg(all(test, feature = "workspace-tests"))]
+mod reasoning_effort_guard_tests;
 pub(crate) mod reasoning_preference;
 #[cfg(all(test, feature = "workspace-tests"))]
 mod round_commit_tests;

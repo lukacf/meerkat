@@ -4811,6 +4811,83 @@ fn validate_member_turn_carriers(
     })
 }
 
+#[cfg(test)]
+mod turn_reasoning_effort_carrier_tests {
+    use super::{turn_metadata_requests_llm_reconfigure, unsupported_turn_metadata_fields};
+    use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    use meerkat_core::types::HandlingMode;
+
+    fn level_only(level: TurnMetadataOverride<EffortLevel>) -> RuntimeTurnMetadata {
+        RuntimeTurnMetadata {
+            reasoning_effort: Some(level),
+            ..Default::default()
+        }
+    }
+
+    /// A delivery path that carries no turn metadata (a remotely hosted
+    /// member, a peer-only member, an autonomous inbox) refuses a turn that
+    /// names the reasoning effort level, set or clear, by name: it is never
+    /// dropped on the way.
+    #[test]
+    fn turn_reasoning_effort_is_refused_where_the_lane_carries_no_turn_metadata() {
+        for level in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            let metadata = level_only(level);
+            for (allow_render_metadata, allow_interaction_id, allow_transient_turn_context) in [
+                (false, true, true),
+                (false, false, true),
+                (true, true, false),
+            ] {
+                assert_eq!(
+                    unsupported_turn_metadata_fields(
+                        &metadata,
+                        HandlingMode::Queue,
+                        allow_render_metadata,
+                        allow_interaction_id,
+                        allow_transient_turn_context,
+                    ),
+                    vec!["reasoning_effort"]
+                );
+            }
+        }
+        assert!(
+            unsupported_turn_metadata_fields(
+                &RuntimeTurnMetadata::default(),
+                HandlingMode::Queue,
+                false,
+                false,
+                true,
+            )
+            .is_empty()
+        );
+    }
+
+    /// The level is a per-turn LLM identity field: a turn that names it
+    /// needs the queued executor boundary, so a running Steer refuses it
+    /// like a model or params override.
+    #[test]
+    fn turn_reasoning_effort_requests_an_llm_reconfigure() {
+        assert!(turn_metadata_requests_llm_reconfigure(&level_only(
+            TurnMetadataOverride::Set(EffortLevel::High)
+        )));
+        assert!(turn_metadata_requests_llm_reconfigure(&level_only(
+            TurnMetadataOverride::Clear
+        )));
+        assert!(!turn_metadata_requests_llm_reconfigure(
+            &RuntimeTurnMetadata::default()
+        ));
+        assert!(turn_metadata_requests_llm_reconfigure(
+            &RuntimeTurnMetadata {
+                provider_params: Some(TurnMetadataOverride::Clear),
+                ..Default::default()
+            }
+        ));
+    }
+}
+
 fn placed_submit_interaction_id(
     supplied: Option<meerkat_core::interaction::InteractionId>,
 ) -> Result<meerkat_core::interaction::InteractionId, MobError> {

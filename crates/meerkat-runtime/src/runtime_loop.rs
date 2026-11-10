@@ -13094,6 +13094,87 @@ mod tests {
         true
     }
 
+    /// A contributor whose metadata carries the turn's reasoning effort
+    /// level (set or clear) set reasoning explicitly: it supersedes the
+    /// batch's soft preferences, in any order; the field itself survives the
+    /// fold; and two different turn levels in one batch are a conflict.
+    #[test]
+    fn batch_and_join_rules() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ReasoningBatchDisposition, RequestReasoningPreference, RuntimeTurnMetadata,
+            TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        let input_with = |metadata: RuntimeTurnMetadata| {
+            let mut input = make_prompt("batched");
+            if let Input::Prompt(prompt) = &mut input {
+                prompt.turn_metadata = Some(metadata);
+            }
+            (InputId::new(), input)
+        };
+        let turn_level = |level: TurnMetadataOverride<EffortLevel>| {
+            input_with(RuntimeTurnMetadata {
+                reasoning_effort: Some(level),
+                ..Default::default()
+            })
+        };
+        let prefers = |level| {
+            input_with(RuntimeTurnMetadata {
+                request_reasoning: Some(RequestReasoningPreference::set(level).expect("level")),
+                ..Default::default()
+            })
+        };
+        let fold = |inputs: Vec<(InputId, Input)>| {
+            let semantics = inputs
+                .iter()
+                .map(|(_, input)| admission_semantics(input))
+                .collect::<Vec<_>>();
+            merge_batch_turn_metadata(&inputs, &semantics)
+        };
+
+        for level in [
+            TurnMetadataOverride::Set(EffortLevel::High),
+            TurnMetadataOverride::Clear,
+        ] {
+            for inputs in [
+                vec![turn_level(level.clone()), prefers(EffortLevel::Low)],
+                vec![prefers(EffortLevel::Low), turn_level(level.clone())],
+            ] {
+                let metadata = fold(inputs)
+                    .expect("a turn level and a preference fold")
+                    .expect("metadata");
+                assert_eq!(
+                    metadata.request_reasoning_disposition,
+                    Some(ReasoningBatchDisposition::SupersededByExplicit),
+                    "{level:?}"
+                );
+                assert_eq!(metadata.reasoning_effort, Some(level.clone()));
+            }
+        }
+
+        // Without a preference in the batch there is no disposition, and the
+        // turn level is carried.
+        let metadata = fold(vec![turn_level(TurnMetadataOverride::Set(
+            EffortLevel::High,
+        ))])
+        .expect("one turn level folds")
+        .expect("metadata");
+        assert_eq!(metadata.request_reasoning_disposition, None);
+        assert_eq!(
+            metadata.reasoning_effort,
+            Some(TurnMetadataOverride::Set(EffortLevel::High))
+        );
+
+        // Two different turn levels in one batch are a typed conflict.
+        let conflict = fold(vec![
+            turn_level(TurnMetadataOverride::Set(EffortLevel::High)),
+            turn_level(TurnMetadataOverride::Set(EffortLevel::Low)),
+        ])
+        .expect_err("two turn levels in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+    }
+
     #[test]
     fn merged_turn_metadata_clears_distinct_transcript_identities() {
         let mut first = make_peer_message("peer-1", "hello");

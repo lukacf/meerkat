@@ -3797,4 +3797,129 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn reasoning_effort_round_trips_through_params_identity_and_wire() {
+        let params = ProviderParamsOverride {
+            temperature: Some(0.5),
+            reasoning_effort: Some(EffortLevel::Xhigh),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"temperature": 0.5, "reasoning_effort": "xhigh"})
+        );
+        assert_eq!(
+            serde_json::from_value::<ProviderParamsOverride>(json).unwrap(),
+            params
+        );
+
+        // Params written without the level read as no level and write the
+        // same JSON again.
+        let stored = serde_json::json!({"temperature": 0.5});
+        let read: ProviderParamsOverride = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(read.reasoning_effort, None);
+        assert_eq!(serde_json::to_value(&read).unwrap(), stored);
+
+        // The level is an explicit reasoning setting, and a params value
+        // that holds only the level is not empty.
+        let level_only = ProviderParamsOverride {
+            reasoning_effort: Some(EffortLevel::Low),
+            ..Default::default()
+        };
+        assert!(level_only.sets_reasoning());
+        assert!(!level_only.is_empty());
+        assert!(!ProviderParamsOverride::default().sets_reasoning());
+        assert!(ProviderParamsOverride::default().is_empty());
+
+        // `x_high` is not a level; the refusal lists the levels.
+        let error = serde_json::from_value::<ProviderParamsOverride>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+
+        // The turn field: set, clear and absent, each through JSON.
+        for (turn, json) in [
+            (
+                Some(TurnMetadataOverride::Set(EffortLevel::Medium)),
+                serde_json::json!({"reasoning_effort": {"action": "set", "value": "medium"}}),
+            ),
+            (
+                Some(TurnMetadataOverride::Clear),
+                serde_json::json!({"reasoning_effort": {"action": "clear"}}),
+            ),
+            (None, serde_json::json!({})),
+        ] {
+            let metadata = RuntimeTurnMetadata {
+                reasoning_effort: turn,
+                ..Default::default()
+            };
+            assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<RuntimeTurnMetadata>(json).unwrap(),
+                metadata
+            );
+            assert_eq!(metadata.is_empty(), metadata.reasoning_effort.is_none());
+        }
+        let error = serde_json::from_value::<RuntimeTurnMetadata>(
+            serde_json::json!({"reasoning_effort": "x_high"}),
+        )
+        .expect_err("`x_high` is not a level on a turn either")
+        .to_string();
+        assert!(error.contains("`xhigh`"), "{error}");
+    }
+
+    #[test]
+    fn batch_and_join_rules() {
+        let level = |level: Option<TurnMetadataOverride<EffortLevel>>| RuntimeTurnMetadata {
+            reasoning_effort: level,
+            ..Default::default()
+        };
+        let set = |value| Some(TurnMetadataOverride::Set(value));
+        let clear = Some(TurnMetadataOverride::Clear);
+
+        // Two different turn levels in one batch conflict.
+        let mut merged = level(set(EffortLevel::Low));
+        let conflict = merged
+            .merge(level(set(EffortLevel::High)))
+            .expect_err("two levels in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+        // A set and a clear conflict too.
+        let mut merged = level(set(EffortLevel::Low));
+        let conflict = merged
+            .merge(level(clear.clone()))
+            .expect_err("a set and a clear in one batch conflict");
+        assert_eq!(conflict.field, "reasoning_effort");
+
+        // Equal levels merge, and an input without the field takes the
+        // other's.
+        let mut merged = level(set(EffortLevel::High));
+        merged.merge(level(set(EffortLevel::High))).unwrap();
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+        let mut merged = level(None);
+        merged.merge(level(clear.clone())).unwrap();
+        assert_eq!(merged.reasoning_effort, clear);
+        let mut merged = level(set(EffortLevel::High));
+        merged.merge(level(None)).unwrap();
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+
+        // The level is independent of `provider_params`: a batch may carry
+        // both, each merged by its own field.
+        let mut merged = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Clear),
+            ..Default::default()
+        };
+        merged.merge(level(set(EffortLevel::High))).unwrap();
+        assert_eq!(merged.provider_params, Some(TurnMetadataOverride::Clear));
+        assert_eq!(merged.reasoning_effort, set(EffortLevel::High));
+
+        // An input that carries the field is model routing: it takes its own
+        // turn and never joins a running one.
+        assert!(level(None).joins_running_turn());
+        assert!(!level(set(EffortLevel::High)).joins_running_turn());
+        assert!(!level(clear).joins_running_turn());
+    }
 }

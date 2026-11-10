@@ -690,6 +690,7 @@ test_suite(
         "//crates/meerkat-core:rct_contracts_test",
         "//crates/meerkat-core:realm_connection_config_test",
         "//crates/meerkat-core:realm_hosting_config_test",
+        "//crates/meerkat-core:reasoning_effort_durable_form_test",
         "//crates/meerkat-core:runtime_turn_metadata_typed_round_trip_test",
         "//crates/meerkat-core:session_document_strict_read_parity_test",
         "//crates/meerkat-core:source_identity_resolve_enforces_lifecycle_test",

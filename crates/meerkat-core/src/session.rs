@@ -138,6 +138,8 @@ pub mod model_routing_handoff_staging;
 mod operator_instructions;
 #[cfg(test)]
 mod operator_instructions_tests;
+#[cfg(test)]
+mod reasoning_effort_carrier_tests;
 mod system_prompt_update;
 mod system_row_prune;
 #[cfg(test)]

@@ -996,6 +996,65 @@ mod tests {
         Ok(())
     }
 
+    /// A client that does not implement the route accessor reports no route,
+    /// and the adapter reports none for it.
+    #[test]
+    fn clients_report_no_route_by_default() {
+        let client = Arc::new(ScriptedClient { events: Vec::new() });
+        assert!(LlmClient::reasoning_route(client.as_ref()).is_none());
+
+        let adapter = LlmClientAdapter::new(client, "test-model".to_string());
+        assert!(AgentLlmClient::reasoning_route(&adapter).is_none());
+    }
+
+    /// The adapter reports exactly the route its client reports.
+    #[test]
+    fn adapter_forwards_the_route_its_client_reports() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        struct RoutedClient {
+            observation: ReasoningRouteObservation,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+        impl LlmClient for RoutedClient {
+            fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                Some(self.observation.clone())
+            }
+
+            fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+                Box::pin(stream::iter(Vec::new()))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Other
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        let observation = ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api: ModelApi::Responses,
+            account: AccountLevelStatement::Stated(vec![EffortLevel::Low, EffortLevel::High]),
+            operator_levels: None,
+        };
+        let adapter = LlmClientAdapter::new(
+            Arc::new(RoutedClient {
+                observation: observation.clone(),
+            }),
+            "test-model".to_string(),
+        );
+        assert_eq!(AgentLlmClient::reasoning_route(&adapter), Some(observation));
+    }
+
     #[tokio::test]
     async fn identity_bound_adapter_projects_wildcard_host_declared_usage() -> Result<(), String> {
         let adapter = LlmClientAdapter::try_for_provider_identity(

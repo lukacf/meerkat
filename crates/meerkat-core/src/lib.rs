@@ -159,6 +159,7 @@ pub mod realm_admission;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
+pub mod reasoning_effort;
 pub mod redact;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

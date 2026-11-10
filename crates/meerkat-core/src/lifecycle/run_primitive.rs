@@ -3448,6 +3448,95 @@ mod tests {
         assert_eq!(foreign, before, "another family shares no defaults");
     }
 
+    /// The resolved marker lives on one request's own copy of the tag: it is
+    /// never written to a serialized form, never read from one, and never
+    /// taken from a default during a merge.
+    #[test]
+    fn the_resolved_marker_is_request_local() {
+        let marked = OpenAiProviderTag {
+            reasoning_effort: Some(ReasoningEffort::High),
+            reasoning_effort_resolved: true,
+            ..Default::default()
+        };
+        assert!(!OpenAiProviderTag::default().reasoning_effort_resolved);
+
+        let serialized = serde_json::to_value(&marked).expect("the tag serializes");
+        assert_eq!(serialized, serde_json::json!({"reasoning_effort": "high"}));
+        let read_back: OpenAiProviderTag =
+            serde_json::from_value(serialized).expect("the tag reads back");
+        assert!(!read_back.reasoning_effort_resolved);
+        assert_eq!(read_back.reasoning_effort, Some(ReasoningEffort::High));
+
+        let via_params = serde_json::to_value(ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(marked.clone())),
+            ..Default::default()
+        })
+        .expect("params serialize");
+        assert_eq!(
+            via_params,
+            serde_json::json!({
+                "provider_tag": {"provider": "openai", "reasoning_effort": "high"}
+            })
+        );
+
+        assert!(
+            serde_json::from_value::<OpenAiProviderTag>(serde_json::json!({
+                "reasoning_effort": "high",
+                "reasoning_effort_resolved": true
+            }))
+            .is_err(),
+            "a serialized form cannot carry the marker"
+        );
+
+        // A default's marker is ignored: the target keeps its own.
+        let marked_default = ProviderTag::OpenAi(marked.clone());
+        let mut unmarked_target = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        });
+        unmarked_target
+            .merge_missing_from(&marked_default)
+            .expect("same provider family merges");
+        assert_eq!(
+            unmarked_target,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                seed: Some(7),
+                reasoning_effort: Some(ReasoningEffort::High),
+                reasoning_effort_resolved: false,
+                ..Default::default()
+            })
+        );
+
+        let unmarked_default = ProviderTag::OpenAi(OpenAiProviderTag {
+            seed: Some(7),
+            ..Default::default()
+        });
+        let mut marked_target = ProviderTag::OpenAi(marked.clone());
+        marked_target
+            .merge_missing_from(&unmarked_default)
+            .expect("same provider family merges");
+        assert_eq!(
+            marked_target,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                seed: Some(7),
+                reasoning_effort: Some(ReasoningEffort::High),
+                reasoning_effort_resolved: true,
+                ..Default::default()
+            })
+        );
+
+        // Clearing build defaults leaves the target's marker alone too.
+        let mut cleared = ProviderTag::OpenAi(marked);
+        cleared.clear_matching_defaults(&marked_default);
+        assert_eq!(
+            cleared,
+            ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort_resolved: true,
+                ..Default::default()
+            })
+        );
+    }
+
     /// Anthropic cache knobs live on the typed provider tag. The nested form is
     /// the documented profile / request shape; a flat `cache_control` key is
     /// rejected by `deny_unknown_fields` before any agent boots.

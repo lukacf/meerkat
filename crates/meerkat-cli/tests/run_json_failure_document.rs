@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const DEADLINE: Duration = Duration::from_secs(120);
+const DEADLINE: Duration = Duration::from_mins(2);
 const REALM: &str = "json-failure";
 const MODEL: &str = "loopback-model";
 /// The variable a static-bearer route of these rows reads its token from.
@@ -178,13 +178,11 @@ fn start_loopback(script: Script) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback server");
     let port = listener.local_addr().expect("loopback address").port();
     std::thread::spawn(move || {
-        let mut request_index = 0usize;
-        for socket in listener.incoming() {
+        for (request_index, socket) in listener.incoming().enumerate() {
             let Ok(socket) = socket else {
                 return;
             };
             serve(socket, &script, request_index);
-            request_index += 1;
         }
     });
     port

@@ -927,4 +927,133 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("exceeds maximum"));
     }
+
+    // ---- The engine's own directory, `<project root>/.rkat` ----
+
+    /// The save was refused as a write into the engine's own directory, with
+    /// the typed invalid-arguments error and its generic text.
+    fn assert_engine_refusal(result: &Result<ToolOutput, BuiltinToolError>, case: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(BuiltinToolError::InvalidArgs(reason)) if reason.contains("engine's own directory")
+            ),
+            "{case}: expected the engine directory refusal, got {result:?}"
+        );
+    }
+
+    /// `blob_save_file` refuses every path under `.rkat`: one that would
+    /// create the directory, every spelling of one, and an overwrite of a
+    /// file the engine keeps there.
+    #[tokio::test]
+    async fn save_file_refuses_the_engine_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (store, blob_id) = seeded_store().await;
+        let tool = BlobSaveFileTool::new(root.clone(), store);
+
+        let result = tool
+            .call(json!({"blob_id": blob_id.as_str(), "path": ".rkat/realms/ws-1/runtime.sqlite3"}))
+            .await;
+        assert_engine_refusal(&result, "a path that would create .rkat");
+        assert!(!root.join(".rkat").exists(), "no directory was created");
+
+        tokio::fs::create_dir_all(root.join(".rkat")).await.unwrap();
+        tokio::fs::write(root.join(".rkat/config.toml"), b"kept")
+            .await
+            .unwrap();
+        let absolute = root.join(".rkat/absolute.bin");
+        for form in [
+            ".rkat/plain.bin".to_owned(),
+            "./.rkat/dot.bin".to_owned(),
+            "out/../.rkat/parent.bin".to_owned(),
+            absolute.display().to_string(),
+            ".RKAT/upper.bin".to_owned(),
+            ".Rkat/mixed.bin".to_owned(),
+        ] {
+            let result = tool
+                .call(json!({"blob_id": blob_id.as_str(), "path": form, "overwrite": true}))
+                .await;
+            assert_engine_refusal(&result, &form);
+        }
+        let result = tool
+            .call(json!({"blob_id": blob_id.as_str(), "path": ".rkat/config.toml", "overwrite": true}))
+            .await;
+        assert_engine_refusal(&result, "overwrite of an engine file");
+        assert_eq!(
+            tokio::fs::read(root.join(".rkat/config.toml"))
+                .await
+                .unwrap(),
+            b"kept"
+        );
+        let mut entries = tokio::fs::read_dir(root.join(".rkat")).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name());
+        }
+        assert_eq!(
+            names,
+            ["config.toml"],
+            "nothing else was written under .rkat"
+        );
+        assert!(!root.join(".RKAT").exists() && !root.join(".Rkat").exists());
+    }
+
+    /// A symbolic link inside the project does not open `.rkat` to a save,
+    /// and a link whose target does not exist is not written through: the
+    /// write would create the target, a path outside the project root
+    /// included.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_file_refuses_links_into_the_engine_directory_and_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap();
+        tokio::fs::create_dir_all(root.join(".rkat")).await.unwrap();
+        tokio::fs::write(root.join(".rkat/config.toml"), b"kept")
+            .await
+            .unwrap();
+        symlink(root.join(".rkat"), root.join("settings")).unwrap();
+        symlink(".rkat/config.toml", root.join("alias.toml")).unwrap();
+        symlink(outside.join("created.bin"), root.join("outside-link")).unwrap();
+        let (store, blob_id) = seeded_store().await;
+        let tool = BlobSaveFileTool::new(root.clone(), store);
+
+        let result = tool
+            .call(json!({"blob_id": blob_id.as_str(), "path": "settings/planted.bin"}))
+            .await;
+        assert_engine_refusal(&result, "a directory link into .rkat");
+        assert!(!root.join(".rkat/planted.bin").exists());
+
+        let result = tool
+            .call(json!({"blob_id": blob_id.as_str(), "path": "alias.toml", "overwrite": true}))
+            .await;
+        assert_engine_refusal(&result, "a file link into .rkat");
+        assert_eq!(
+            tokio::fs::read(root.join(".rkat/config.toml"))
+                .await
+                .unwrap(),
+            b"kept"
+        );
+
+        for overwrite in [true, false] {
+            let result = tool
+                .call(json!({"blob_id": blob_id.as_str(), "path": "outside-link", "overwrite": overwrite}))
+                .await;
+            assert!(
+                matches!(
+                    &result,
+                    Err(BuiltinToolError::InvalidArgs(reason)) if reason.contains("symbolic link")
+                ),
+                "a dangling link (overwrite={overwrite}): expected the dangling link refusal, got {result:?}"
+            );
+            assert!(
+                !outside.join("created.bin").exists(),
+                "the save (overwrite={overwrite}) created a file outside the project root"
+            );
+        }
+    }
 }

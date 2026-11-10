@@ -1108,4 +1108,247 @@ mod tests {
             "fine\n"
         );
     }
+
+    // ---- The engine's own directory, `<project root>/.rkat` ----
+
+    /// A project root as the tool is given it by a host: canonical.
+    fn project() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        (dir, root)
+    }
+
+    /// One call through the tool, as the dispatcher makes it.
+    async fn call_patch(root: &Path, body: &str) -> Result<ToolOutput, BuiltinToolError> {
+        ApplyPatchTool::new(root.to_path_buf())
+            .call(json!({ "patch": wrap_patch(body) }))
+            .await
+    }
+
+    /// The call was refused as a write into the engine's own directory, with
+    /// the typed invalid-arguments error and its generic text.
+    fn assert_engine_refusal(result: &Result<ToolOutput, BuiltinToolError>, case: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(BuiltinToolError::InvalidArgs(reason)) if reason.contains("engine's own directory")
+            ),
+            "{case}: expected the engine directory refusal, got {result:?}"
+        );
+    }
+
+    /// The call was refused because its path goes through a symbolic link
+    /// that leads nowhere.
+    fn assert_dangling_link_refusal(result: &Result<ToolOutput, BuiltinToolError>, case: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(BuiltinToolError::InvalidArgs(reason)) if reason.contains("symbolic link")
+            ),
+            "{case}: expected the dangling link refusal, got {result:?}"
+        );
+    }
+
+    /// The first write would create `.rkat`: it is refused on the path's
+    /// components, and nothing is created.
+    #[tokio::test]
+    async fn engine_directory_that_does_not_exist_yet_is_refused() {
+        let (_dir, root) = project();
+        let result = call_patch(&root, "*** Add File: .rkat/mcp.toml\n+[[servers]]").await;
+        assert_engine_refusal(&result, "add .rkat/mcp.toml");
+        assert!(!root.join(".rkat").exists(), "no directory was created");
+
+        let result = call_patch(&root, "*** Add File: .rkat\n+a file named like it").await;
+        assert_engine_refusal(&result, "add a file named .rkat");
+        assert!(!root.join(".rkat").exists(), "no file was created");
+    }
+
+    /// Every spelling of a path under `.rkat` is refused: relative, with
+    /// `.` and `..`, absolute, and in another letter case (a case-insensitive
+    /// filesystem opens the same directory).
+    #[tokio::test]
+    async fn engine_directory_is_refused_in_every_path_form() {
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join(".rkat")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let absolute = root.join(".rkat/absolute.toml");
+        let forms = [
+            ".rkat/plain.toml".to_owned(),
+            "./.rkat/dot.toml".to_owned(),
+            "src/../.rkat/parent.toml".to_owned(),
+            ".rkat/realms/../../.rkat/twice.toml".to_owned(),
+            absolute.display().to_string(),
+            ".RKAT/upper.toml".to_owned(),
+            ".Rkat/mixed.toml".to_owned(),
+            ".rkat/realms/ws-1/config.toml".to_owned(),
+        ];
+        for form in forms {
+            let result = call_patch(&root, &format!("*** Add File: {form}\n+planted")).await;
+            assert_engine_refusal(&result, &form);
+        }
+        assert_eq!(
+            std::fs::read_dir(root.join(".rkat")).unwrap().count(),
+            0,
+            "nothing was written under .rkat"
+        );
+        for other_case in [".RKAT", ".Rkat"] {
+            assert!(
+                !root.join(other_case).exists(),
+                "{other_case} was not created"
+            );
+        }
+    }
+
+    /// A symbolic link inside the project that leads into `.rkat` does not
+    /// open it: a directory link, and a file link to one of its files.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_into_the_engine_directory_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join(".rkat")).unwrap();
+        std::fs::write(root.join(".rkat/config.toml"), "kept = true\n").unwrap();
+        symlink(root.join(".rkat"), root.join("settings")).unwrap();
+        symlink(".rkat/config.toml", root.join("alias.toml")).unwrap();
+
+        let result = call_patch(&root, "*** Add File: settings/mcp.toml\n+[[servers]]").await;
+        assert_engine_refusal(&result, "add through a directory link");
+        assert!(!root.join(".rkat/mcp.toml").exists());
+
+        let result = call_patch(
+            &root,
+            "*** Update File: alias.toml\n@@\n-kept = true\n+kept = false",
+        )
+        .await;
+        assert_engine_refusal(&result, "update through a file link");
+        let result = call_patch(&root, "*** Delete File: settings/config.toml").await;
+        assert_engine_refusal(&result, "delete through a directory link");
+        assert_eq!(
+            std::fs::read_to_string(root.join(".rkat/config.toml")).unwrap(),
+            "kept = true\n"
+        );
+    }
+
+    /// Update, delete and both ends of a move are refused, and the tree is
+    /// unchanged: no engine file is changed, removed, moved out or replaced.
+    #[tokio::test]
+    async fn update_delete_and_move_of_engine_files_are_refused() {
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join(".rkat")).unwrap();
+        std::fs::write(root.join(".rkat/config.toml"), "kept = true\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "note\n").unwrap();
+
+        let cases = [
+            (
+                "update",
+                "*** Update File: .rkat/config.toml\n@@\n-kept = true\n+kept = false",
+            ),
+            ("delete", "*** Delete File: .rkat/config.toml"),
+            (
+                "move out of .rkat",
+                "*** Update File: .rkat/config.toml\n*** Move to: taken.toml\n@@\n-kept = true\n+kept = false",
+            ),
+            (
+                "move into .rkat",
+                "*** Update File: notes.txt\n*** Move to: .rkat/hooks.toml\n@@\n-note\n+hook",
+            ),
+        ];
+        for (case, body) in cases {
+            let result = call_patch(&root, body).await;
+            assert_engine_refusal(&result, case);
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join(".rkat/config.toml")).unwrap(),
+            "kept = true\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "note\n"
+        );
+        assert!(!root.join("taken.toml").exists());
+        assert!(!root.join(".rkat/hooks.toml").exists());
+    }
+
+    /// A patch with one engine target applies nothing: the refusal precedes
+    /// the first write, wherever in the patch the target stands.
+    #[tokio::test]
+    async fn a_patch_with_one_engine_target_applies_nothing() {
+        let (_dir, root) = project();
+        std::fs::write(root.join("old.txt"), "old\n").unwrap();
+        std::fs::write(root.join("edit.txt"), "before\n").unwrap();
+
+        let result = call_patch(
+            &root,
+            "*** Add File: first.txt\n+first\n*** Update File: edit.txt\n@@\n-before\n+after\n*** Delete File: old.txt\n*** Add File: .rkat/mcp.toml\n+[[servers]]\n*** Add File: last.txt\n+last",
+        )
+        .await;
+        assert_engine_refusal(&result, "multi-file patch");
+        assert!(
+            !root.join("first.txt").exists(),
+            "an earlier add was applied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("edit.txt")).unwrap(),
+            "before\n",
+            "an earlier update was applied"
+        );
+        assert!(
+            root.join("old.txt").exists(),
+            "an earlier delete was applied"
+        );
+        assert!(!root.join(".rkat").exists());
+        assert!(!root.join("last.txt").exists());
+    }
+
+    /// A symbolic link whose target does not exist is not a path to write
+    /// through: the write would create the target, wherever it points, the
+    /// engine's directory and a path outside the project root included.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dangling_symlink_is_not_written_through() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        let outside_dir = tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("notes.txt"), "note\n").unwrap();
+        symlink(outside.join("created.txt"), root.join("outside-link")).unwrap();
+        symlink(".rkat/mcp.toml", root.join("engine-link")).unwrap();
+        symlink(outside.join("missing-dir"), root.join("dir-link")).unwrap();
+
+        let result = call_patch(&root, "*** Add File: outside-link\n+escaped").await;
+        assert_dangling_link_refusal(&result, "add through a link to outside the root");
+        assert!(
+            !outside.join("created.txt").exists(),
+            "the add created a file outside the project root"
+        );
+
+        let result = call_patch(
+            &root,
+            "*** Update File: notes.txt\n*** Move to: outside-link\n@@\n-note\n+escaped",
+        )
+        .await;
+        assert_dangling_link_refusal(&result, "move onto a link to outside the root");
+        assert!(
+            !outside.join("created.txt").exists(),
+            "the move created a file outside the project root"
+        );
+        assert!(
+            root.join("notes.txt").exists(),
+            "the move source was removed"
+        );
+
+        std::fs::create_dir_all(root.join(".rkat")).unwrap();
+        let result = call_patch(&root, "*** Add File: engine-link\n+[[servers]]").await;
+        assert!(result.is_err(), "add through a link into .rkat: {result:?}");
+        assert!(
+            !root.join(".rkat/mcp.toml").exists(),
+            "the add created a file in the engine's directory"
+        );
+
+        let result = call_patch(&root, "*** Add File: dir-link/new.txt\n+escaped").await;
+        assert_dangling_link_refusal(&result, "add below a dangling directory link");
+        assert!(!outside.join("missing-dir").exists());
+    }
 }

@@ -1131,3 +1131,83 @@ async fn a_refused_credential_command_is_not_replaced_by_another_credential() {
         "{refused}"
     );
 }
+
+// ---- The in-process file tools and the engine's own files ----
+
+/// A factory with the built-in tools and no shell, as a host's default tool
+/// preset builds it, working in `root`.
+fn file_tool_factory(root: &Path) -> AgentFactory {
+    AgentFactory::new(root.join("sessions"))
+        .session_store(Arc::new(meerkat_store::MemoryStore::new()))
+        .runtime_root(root.join("runtime"))
+        .project_root(root)
+        .builtins(true)
+        .shell(false)
+}
+
+/// One run in which the scripted model calls `apply_patch` once with
+/// `patch`: whether the result it got back is an error, and its text.
+async fn apply_patch_through(factory: AgentFactory, patch: String) -> (bool, String) {
+    let client = Arc::new(ScriptedClient::new(
+        "apply_patch",
+        json!({ "patch": patch }),
+    ));
+    let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+    build.llm_client_override = Some(client.clone());
+    let mut agent = tokio::time::timeout(
+        Duration::from_secs(15),
+        factory.build_agent(build, &Config::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.run("Apply the patch".to_string().into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut results = client.returned_results();
+    assert_eq!(results.len(), 1, "one apply_patch result: {results:?}");
+    results.remove(0)
+}
+
+fn add_file_patch(path: &str) -> String {
+    format!("*** Begin Patch\n*** Add File: {path}\n+planted\n*** End Patch")
+}
+
+/// The call came back to the model as the refusal of a write into the
+/// engine's own files, an ordinary tool error.
+fn assert_engine_file_refusal(result: &(bool, String), case: &str) {
+    assert!(
+        result.0 && result.1.contains("engine's own directory"),
+        "{case}: expected the engine directory refusal as a tool error, got {result:?}"
+    );
+}
+
+/// A host that declares nothing still keeps `<project root>/.rkat` from the
+/// file tools: a session with the built-in tools and no shell cannot write
+/// the project's MCP servers, hooks, skills or a realm kept there, and an
+/// ordinary project file is still written.
+#[tokio::test]
+async fn file_tools_refuse_the_engine_directory_without_host_cooperation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    for path in [
+        ".rkat/mcp.toml",
+        ".rkat/config.toml",
+        ".rkat/skills/planted/SKILL.md",
+        ".rkat/realms/ws-0000000000000000/config.toml",
+    ] {
+        let result = apply_patch_through(file_tool_factory(&root), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, path);
+        assert!(!root.join(".rkat").exists(), "{path}: .rkat was created");
+    }
+    let result = apply_patch_through(file_tool_factory(&root), add_file_patch("src/lib.rs")).await;
+    assert!(!result.0, "an ordinary project file is written: {result:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+        "planted\n"
+    );
+}

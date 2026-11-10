@@ -64,6 +64,8 @@ pub mod live;
 mod prompt_cache_backend_gate_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "live"))]
 pub mod public_live;
+#[cfg(test)]
+mod reasoning_route_tests;
 pub(crate) mod request_support;
 mod responses_output;
 pub mod runtime;

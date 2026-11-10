@@ -811,6 +811,23 @@ mod tests {
         assert!(!rendered.contains(SECRET), "secret leaked: {rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
     }
+
+    /// The realtime text adapter serves the OpenAI API's realtime route, on
+    /// which no account list and no operator states effort levels.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        assert_eq!(
+            OpenAiRealtimeTextAdapter::new("test-key").reasoning_route(),
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::OpenAi(
+                    meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi
+                ),
+                api: meerkat_core::ModelApi::Realtime,
+                account: meerkat_core::AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            })
+        );
+    }
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ImageData, MediaType,
         ProviderImageMetadata, RevisedPromptDisposition, ServerToolKind, SystemMessage,

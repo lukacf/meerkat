@@ -114,6 +114,13 @@ pub struct OpenAiCompatibleClient {
     /// ([`meerkat_core::provider_matrix::OpenAiBackendKind::admits_prompt_cache_fields`]),
     /// so a server outside the OpenAI backend matrix receives none.
     openai_backend: Option<meerkat_core::provider_matrix::OpenAiBackendKind>,
+    /// The self-hosted backend kind this client was built for; see
+    /// [`Self::with_self_hosted_backend`].
+    self_hosted_backend: Option<meerkat_core::provider_matrix::SelfHostedBackendKind>,
+    /// The reasoning effort levels the operator declared for the model; see
+    /// [`Self::with_operator_reasoning_effort_levels`].
+    operator_reasoning_effort_levels:
+        Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
     /// GitHub Copilot's Chat Completions stream discipline; see
     /// [`Self::with_copilot_chat_stream`].
     copilot_chat_stream: bool,
@@ -181,6 +188,8 @@ impl OpenAiCompatibleClient {
             post_finish_trailer_window: DEFAULT_POST_FINISH_TRAILER_WINDOW,
             static_credential: false,
             openai_backend: None,
+            self_hosted_backend: None,
+            operator_reasoning_effort_levels: None,
             copilot_chat_stream: false,
         }
     }
@@ -207,6 +216,35 @@ impl OpenAiCompatibleClient {
         backend: meerkat_core::provider_matrix::OpenAiBackendKind,
     ) -> Self {
         self.openai_backend = Some(backend);
+        self
+    }
+
+    /// Declare the self-hosted backend kind this client was built for: the
+    /// backend of the connection that resolved its server (`self_hosted` or
+    /// `openai_compatible`). The client reports it as its route
+    /// (`LlmClient::reasoning_route`) and nothing else reads it: no request
+    /// changes with it. A client declared for an OpenAI backend
+    /// ([`Self::with_openai_backend`]) reports that backend instead.
+    #[must_use]
+    pub fn with_self_hosted_backend(
+        mut self,
+        backend: meerkat_core::provider_matrix::SelfHostedBackendKind,
+    ) -> Self {
+        self.self_hosted_backend = Some(backend);
+        self
+    }
+
+    /// The reasoning effort levels the operator declared for this client's
+    /// model (`[self_hosted.models.<id>] reasoning_effort_levels`, as the
+    /// model registry holds them), or `None` when the operator declared
+    /// none. The client reports them with its route, as it was given them,
+    /// and nothing else reads them: no request changes with them.
+    #[must_use]
+    pub fn with_operator_reasoning_effort_levels(
+        mut self,
+        levels: Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
+    ) -> Self {
+        self.operator_reasoning_effort_levels = levels;
         self
     }
 
@@ -1439,12 +1477,19 @@ impl LlmClient for OpenAiCompatibleClient {
         }
     }
 
-    /// The API of this client's mode on the backend it was declared for
-    /// ([`Self::with_openai_backend`]). A client that was not told which
-    /// backend it speaks to reports no route: nothing infers one from a
-    /// base URL.
+    /// The API of this client's mode on the backend it was declared for: an
+    /// OpenAI backend ([`Self::with_openai_backend`]), else a self-hosted
+    /// backend kind ([`Self::with_self_hosted_backend`]), with the levels
+    /// the operator declared for the model
+    /// ([`Self::with_operator_reasoning_effort_levels`]). A client that was
+    /// not told which backend it speaks to reports no route: nothing infers
+    /// one from a base URL.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
-        let backend = meerkat_core::ReasoningBackend::OpenAi(self.openai_backend?);
+        let backend = match (self.openai_backend, self.self_hosted_backend) {
+            (Some(backend), _) => meerkat_core::ReasoningBackend::OpenAi(backend),
+            (None, Some(backend)) => meerkat_core::ReasoningBackend::SelfHosted(backend),
+            (None, None) => return None,
+        };
         Some(meerkat_core::ReasoningRouteObservation {
             backend,
             api: match self.mode {
@@ -1452,7 +1497,7 @@ impl LlmClient for OpenAiCompatibleClient {
                 OpenAiCompatibleMode::ChatCompletions => meerkat_core::ModelApi::ChatCompletions,
             },
             account: meerkat_core::AccountLevelStatement::NotApplicable,
-            operator_levels: None,
+            operator_levels: self.operator_reasoning_effort_levels.clone(),
         })
     }
 

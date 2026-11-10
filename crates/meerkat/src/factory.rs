@@ -3647,6 +3647,9 @@ struct SelfHostedClientSpec {
     supports_reasoning: bool,
     supports_image_input: bool,
     supports_image_tool_results: bool,
+    /// The reasoning effort levels the operator declared for the model, as
+    /// the registry entry holds them.
+    reasoning_effort_levels: Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>>,
 }
 
 struct SelfHostedClientBuild {
@@ -7780,6 +7783,7 @@ impl AgentFactory {
             supports_reasoning: profile.supports_reasoning,
             supports_image_input: profile.image_input,
             supports_image_tool_results: profile.image_tool_results,
+            reasoning_effort_levels: self_hosted.reasoning_effort_levels.clone(),
         })
     }
 
@@ -7851,22 +7855,33 @@ impl AgentFactory {
             // Authorizer-backed auth is refused above, so the credential is
             // fixed here: the resolved static secret, or none for an
             // authless server.
-            let client: Arc<dyn LlmClient> = Arc::new(
-                OpenAiCompatibleClient::new_with_options(
-                    spec.mode,
-                    spec.remote_model,
-                    base_url,
-                    bearer_token,
-                    OpenAiCompatibleClientOptions {
-                        supports_temperature: spec.supports_temperature,
-                        supports_thinking: spec.supports_thinking,
-                        supports_reasoning: spec.supports_reasoning,
-                        supports_image_tool_results: spec.supports_image_tool_results,
-                    },
-                )
-                .with_image_input_support(spec.supports_image_input)
-                .with_static_credential(),
-            );
+            let client = OpenAiCompatibleClient::new_with_options(
+                spec.mode,
+                spec.remote_model,
+                base_url,
+                bearer_token,
+                OpenAiCompatibleClientOptions {
+                    supports_temperature: spec.supports_temperature,
+                    supports_thinking: spec.supports_thinking,
+                    supports_reasoning: spec.supports_reasoning,
+                    supports_image_tool_results: spec.supports_image_tool_results,
+                },
+            )
+            .with_image_input_support(spec.supports_image_input)
+            .with_static_credential()
+            .with_operator_reasoning_effort_levels(spec.reasoning_effort_levels);
+            // The route the client reports names the backend of the
+            // connection that resolved its server. A connection that names
+            // no self-hosted backend declares none, and the client then
+            // reports no route.
+            let client: Arc<dyn LlmClient> = Arc::new(match connection.backend {
+                meerkat_providers::NormalizedBackendKind::SelfHosted(backend) => {
+                    client.with_self_hosted_backend(backend)
+                }
+                meerkat_providers::NormalizedBackendKind::OpenAi(_)
+                | meerkat_providers::NormalizedBackendKind::Anthropic(_)
+                | meerkat_providers::NormalizedBackendKind::Google(_) => client,
+            });
             // The selected target the session identity will carry: the
             // durable binding it records, and the actual resolved backend
             // and credential owner, as for a registry-built client.
@@ -21996,6 +22011,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
         config
@@ -22116,6 +22132,7 @@ mod tests {
             supports_web_search: false,
             call_timeout_secs: Some(600),
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         }
     }
 
@@ -25171,6 +25188,7 @@ mod tests {
                 supports_web_search: false,
                 call_timeout_secs: Some(600),
                 stream_inactivity_timeout_secs: None,
+                reasoning_effort_levels: None,
             },
         );
 

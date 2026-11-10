@@ -859,6 +859,10 @@ impl Config {
                         merged.stream_inactivity_timeout_secs =
                             model_layer.stream_inactivity_timeout_secs;
                     }
+                    if model_table.contains_key("reasoning_effort_levels") {
+                        merged.reasoning_effort_levels =
+                            model_layer.reasoning_effort_levels.clone();
+                    }
                     merged_models.insert(model_id.clone(), merged);
                 }
                 self.self_hosted.models = merged_models;
@@ -1654,6 +1658,42 @@ pub struct SelfHostedModelConfig {
     /// [`crate::MIN_MODEL_STREAM_INACTIVITY_TIMEOUT`] (60 s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_inactivity_timeout_secs: Option<u64>,
+    /// The reasoning effort levels the operator declares this model accepts
+    /// (for example `["low", "medium", "high"]`), for the provider-neutral
+    /// `reasoning_effort` option: a self-hosted server publishes no list of
+    /// its own, so the operator's declaration is the only statement of the
+    /// levels. Omitted declares none. An empty list declares that the model
+    /// takes no effort level. Declaring levels requires
+    /// `supports_reasoning = true`; config validation refuses a declaration
+    /// without it. The effective model registry holds each declared level
+    /// once, from `none` to `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_levels: Option<Vec<crate::model_profile::capabilities::EffortLevel>>,
+}
+
+impl SelfHostedModelConfig {
+    /// The declared reasoning effort levels as the effective model registry
+    /// holds them: each level once, from `none` to `max`. A declaration on a
+    /// model that does not declare `supports_reasoning` is refused, an empty
+    /// one included: the operator stated levels for a model the same entry
+    /// says takes no reasoning control.
+    pub(crate) fn declared_reasoning_effort_levels(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<Vec<crate::model_profile::capabilities::EffortLevel>>, ConfigError> {
+        let Some(levels) = self.reasoning_effort_levels.as_ref() else {
+            return Ok(None);
+        };
+        if !self.supports_reasoning {
+            return Err(ConfigError::Validation(format!(
+                "self_hosted.models.{model_id}.reasoning_effort_levels is declared, but the \
+                 model does not declare supports_reasoning = true; reasoning effort levels can \
+                 be declared only for a model that supports reasoning"
+            )));
+        }
+        let levels: std::collections::BTreeSet<_> = levels.iter().copied().collect();
+        Ok(Some(levels.into_iter().collect()))
+    }
 }
 
 impl Default for SelfHostedModelConfig {
@@ -1676,6 +1716,7 @@ impl Default for SelfHostedModelConfig {
             supports_web_search: false,
             call_timeout_secs: None,
             stream_inactivity_timeout_secs: None,
+            reasoning_effort_levels: None,
         }
     }
 }
@@ -5245,10 +5286,9 @@ reasoning_effort_levels = []
                     "[self_hosted.models.plain]\nreasoning_effort_levels = {declaration}\n"
                 ))
                 .expect("the layer parses");
-            let error = match refused.validate(catalog) {
-                Ok(()) => panic!("{declaration}: levels without supports_reasoning must fail"),
-                Err(error) => error,
-            };
+            let error = refused
+                .validate(catalog)
+                .expect_err("levels declared without supports_reasoning must fail");
             assert!(matches!(error, ConfigError::Validation(_)), "{error}");
             assert_eq!(
                 error.to_string(),

@@ -1508,19 +1508,20 @@ mod tests {
     }
 
     /// The reasoning effort levels an account's model list states per model,
-    /// in `capabilities.supports.reasoning_effort`. The sample list is
-    /// hand-written in the shape of the service's list: it names no real
-    /// model and no account, and carries only the fields Meerkat reads.
+    /// in `capabilities.supports.reasoning_effort`. The fixture list
+    /// (`fixtures/copilot_models_generic.json`) is hand-written and generic:
+    /// invented entries in the shape of the service's list, with only the
+    /// fields Meerkat reads. It names no real model and no account.
     mod listed_effort_levels {
         use super::*;
         use meerkat_core::model_profile::capabilities::EffortLevel;
-        use std::collections::BTreeSet;
+        use meerkat_core::model_profile::capabilities::EffortLevel as Level;
 
-        const SAMPLE_LIST: &str = include_str!("fixtures/copilot_models_sample.json");
+        const FIXTURE_LIST: &str = include_str!("fixtures/copilot_models_generic.json");
 
-        fn sample_list() -> Vec<CopilotModel> {
-            serde_json::from_str::<CopilotModelsEnvelope>(SAMPLE_LIST)
-                .expect("the sample list parses")
+        fn fixture_list() -> Vec<CopilotModel> {
+            serde_json::from_str::<CopilotModelsEnvelope>(FIXTURE_LIST)
+                .expect("the fixture list parses")
                 .data
         }
 
@@ -1537,45 +1538,65 @@ mod tests {
             listed.data[0].capabilities.supports.stated_effort_levels()
         }
 
+        /// The fixture list parses, and every entry states exactly what the
+        /// fixture writes for it: the ladder with `none`, the ladder without
+        /// it, `low` to `high`, a statement with a word that names no level
+        /// (left out of the levels, kept in the statement), an empty
+        /// statement, and no statement.
         #[test]
-        fn the_sample_list_states_levels_for_8_of_13_models() {
-            use EffortLevel as Level;
-            let models = sample_list();
-            assert_eq!(models.len(), 13);
-            let stated: Vec<Vec<EffortLevel>> = models
+        fn the_fixture_list_states_levels_per_model() {
+            let models = fixture_list();
+            let stated: Vec<(&str, Option<Vec<EffortLevel>>)> = models
                 .iter()
-                .filter_map(|model| model.capabilities.supports.stated_effort_levels())
+                .map(|model| {
+                    (
+                        model.id.as_str(),
+                        model.capabilities.supports.stated_effort_levels(),
+                    )
+                })
                 .collect();
-            assert_eq!(stated.len(), 8, "models that state levels");
-            assert_eq!(models.len() - stated.len(), 5, "models that state none");
-            let distinct: BTreeSet<Vec<EffortLevel>> = stated.into_iter().collect();
+            let low_to_max = vec![
+                Level::Low,
+                Level::Medium,
+                Level::High,
+                Level::Xhigh,
+                Level::Max,
+            ];
+            let low_to_high = vec![Level::Low, Level::Medium, Level::High];
             assert_eq!(
-                distinct,
-                BTreeSet::from([
-                    vec![
-                        Level::None,
-                        Level::Low,
-                        Level::Medium,
-                        Level::High,
-                        Level::Xhigh,
-                        Level::Max
-                    ],
-                    vec![
-                        Level::None,
-                        Level::Low,
-                        Level::Medium,
-                        Level::High,
-                        Level::Xhigh
-                    ],
-                    vec![
-                        Level::Low,
-                        Level::Medium,
-                        Level::High,
-                        Level::Xhigh,
-                        Level::Max
-                    ],
-                    vec![Level::Low, Level::Medium, Level::High, Level::Xhigh],
-                    vec![Level::Low, Level::Medium, Level::High],
+                stated,
+                [
+                    (
+                        "fixture-responses-a",
+                        Some(vec![
+                            Level::None,
+                            Level::Low,
+                            Level::Medium,
+                            Level::High,
+                            Level::Xhigh,
+                            Level::Max,
+                        ])
+                    ),
+                    ("fixture-responses-b", Some(low_to_max.clone())),
+                    ("fixture-responses-c", Some(low_to_high.clone())),
+                    ("fixture-messages-a", Some(low_to_max)),
+                    ("fixture-messages-b", None),
+                    ("fixture-chat-a", Some(low_to_high)),
+                    ("fixture-chat-b", Some(Vec::new())),
+                    ("fixture-legacy-a", None),
+                ]
+            );
+            let with_unknown_word = models
+                .iter()
+                .find(|model| model.id == "fixture-responses-c")
+                .expect("the fixture's entry with a word that names no level");
+            assert_eq!(
+                with_unknown_word.capabilities.supports.reasoning_effort,
+                Some(vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                    "ultra".to_string(),
                 ])
             );
         }
@@ -1722,33 +1743,91 @@ mod tests {
             assert_eq!(read_back, silent);
         }
 
-        /// In the sample list every model the OpenAI family reaches on
-        /// Responses states at least one level, and every model whose entry
-        /// states no endpoint list states none.
+        /// The statement belongs to the entry, whatever endpoint serves the
+        /// model: the fixture's Responses, Messages and Chat Completions
+        /// entries each give the statement written for them through the
+        /// account's snapshot, and the entry that states neither an endpoint
+        /// list nor levels gives none.
         #[test]
-        fn every_model_served_on_responses_in_the_sample_list_states_levels() {
-            let models = sample_list();
+        fn fixture_entries_keep_their_statement_on_every_endpoint() {
             let snapshot =
-                CopilotModelSnapshot::from_models(models.clone()).expect("unique model ids");
-            let mut on_responses = 0;
-            let mut without_endpoints = 0;
-            for model in &models {
-                let offering = snapshot.model(&model.id).expect("listed model");
-                let stated = offering.capabilities.supports.stated_effort_levels();
-                if offering.route_for(Provider::OpenAI) == Some(CopilotEndpoint::Responses) {
-                    on_responses += 1;
-                    assert!(
-                        stated.as_ref().is_some_and(|levels| !levels.is_empty()),
-                        "{} is served on Responses and states {stated:?}",
-                        model.id
-                    );
-                }
-                if offering.supported_endpoints.is_none() {
-                    without_endpoints += 1;
-                    assert_eq!(stated, None, "{} states no endpoint list", model.id);
-                }
+                CopilotModelSnapshot::from_models(fixture_list()).expect("unique model ids");
+            let listed = |id: &str| snapshot.model(id).expect("a fixture entry");
+
+            let on_responses = listed("fixture-responses-a");
+            assert_eq!(
+                on_responses.route_for(Provider::OpenAI),
+                Some(CopilotEndpoint::Responses)
+            );
+            assert_eq!(
+                on_responses.capabilities.supports.stated_effort_levels(),
+                Some(vec![
+                    Level::None,
+                    Level::Low,
+                    Level::Medium,
+                    Level::High,
+                    Level::Xhigh,
+                    Level::Max,
+                ])
+            );
+
+            let on_messages = listed("fixture-messages-a");
+            assert_eq!(
+                on_messages.route_for(Provider::Anthropic),
+                Some(CopilotEndpoint::Messages)
+            );
+            assert_eq!(
+                on_messages.capabilities.supports.adaptive_thinking,
+                Some(true)
+            );
+            assert_eq!(
+                on_messages.capabilities.supports.stated_effort_levels(),
+                Some(vec![
+                    Level::Low,
+                    Level::Medium,
+                    Level::High,
+                    Level::Xhigh,
+                    Level::Max,
+                ])
+            );
+
+            let budget_only = listed("fixture-messages-b");
+            assert_eq!(
+                budget_only.route_for(Provider::Anthropic),
+                Some(CopilotEndpoint::Messages)
+            );
+            assert_eq!(
+                (
+                    budget_only.capabilities.supports.min_thinking_budget,
+                    budget_only.capabilities.supports.max_thinking_budget,
+                ),
+                (Some(1000), Some(20000))
+            );
+            assert_eq!(
+                budget_only.capabilities.supports.stated_effort_levels(),
+                None
+            );
+
+            let on_chat_completions = listed("fixture-chat-a");
+            for provider in [Provider::Gemini, Provider::OpenAI] {
+                assert_eq!(
+                    on_chat_completions.route_for(provider),
+                    Some(CopilotEndpoint::ChatCompletions),
+                    "{provider:?}"
+                );
             }
-            assert_eq!((on_responses, without_endpoints), (5, 3));
+            assert_eq!(
+                on_chat_completions
+                    .capabilities
+                    .supports
+                    .stated_effort_levels(),
+                Some(vec![Level::Low, Level::Medium, Level::High])
+            );
+
+            let silent = listed("fixture-legacy-a");
+            assert_eq!(silent.supported_endpoints, None);
+            assert_eq!(silent.capabilities.supports.reasoning_effort, None);
+            assert_eq!(silent.capabilities.supports.stated_effort_levels(), None);
         }
     }
 }

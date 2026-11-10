@@ -1,0 +1,189 @@
+{
+  "data": [
+    {
+      "id": "fixture-responses-a",
+      "vendor": "FixtureVendor One",
+      "name": "Fixture Responses A",
+      "version": "fixture-responses-a",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 300000,
+          "max_output_tokens": 60000,
+          "max_prompt_tokens": 240000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "structured_outputs": true,
+          "reasoning_effort": ["none", "low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "fixture-responses-b",
+      "vendor": "FixtureVendor One",
+      "name": "Fixture Responses B",
+      "version": "fixture-responses-b",
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 220000,
+          "max_output_tokens": 44000,
+          "max_prompt_tokens": 176000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "structured_outputs": true,
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "fixture-responses-c",
+      "vendor": "FixtureVendor Two",
+      "name": "Fixture Responses C",
+      "version": "fixture-responses-c",
+      "model_picker_enabled": false,
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 100000,
+          "max_output_tokens": 20000,
+          "max_prompt_tokens": 80000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true,
+          "reasoning_effort": ["low", "medium", "high", "ultra"]
+        }
+      }
+    },
+    {
+      "id": "fixture-messages-a",
+      "vendor": "FixtureVendor Three",
+      "name": "Fixture Messages A",
+      "version": "fixture-messages-a",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/v1/messages", "/chat/completions"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 300000,
+          "max_output_tokens": 60000,
+          "max_prompt_tokens": 240000,
+          "max_non_streaming_output_tokens": 10000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "adaptive_thinking": true,
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "fixture-messages-b",
+      "vendor": "FixtureVendor Three",
+      "name": "Fixture Messages B",
+      "version": "fixture-messages-b",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/v1/messages"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 100000,
+          "max_output_tokens": 20000,
+          "max_prompt_tokens": 80000,
+          "max_non_streaming_output_tokens": 10000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "max_thinking_budget": 20000,
+          "min_thinking_budget": 1000
+        }
+      }
+    },
+    {
+      "id": "fixture-chat-a",
+      "vendor": "FixtureVendor Four",
+      "name": "Fixture Chat A",
+      "version": "fixture-chat-a",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/chat/completions"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 220000,
+          "max_output_tokens": 44000,
+          "max_prompt_tokens": 176000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "reasoning_effort": ["low", "medium", "high"]
+        }
+      }
+    },
+    {
+      "id": "fixture-chat-b",
+      "vendor": "FixtureVendor Four",
+      "name": "Fixture Chat B",
+      "version": "fixture-chat-b",
+      "model_picker_enabled": false,
+      "supported_endpoints": ["/chat/completions"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 100000,
+          "max_output_tokens": 20000,
+          "max_prompt_tokens": 80000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true,
+          "reasoning_effort": []
+        }
+      }
+    },
+    {
+      "id": "fixture-legacy-a",
+      "vendor": "FixtureVendor One",
+      "name": "Fixture Legacy A",
+      "version": "fixture-legacy-a",
+      "model_picker_enabled": false,
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 50000,
+          "max_output_tokens": 5000,
+          "max_prompt_tokens": 45000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true
+        }
+      }
+    }
+  ]
+}

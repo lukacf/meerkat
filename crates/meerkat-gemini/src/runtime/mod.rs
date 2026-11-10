@@ -471,6 +471,19 @@ impl LlmClient for GeminiCopilotChatClient {
         self.inner.prepare_controller_credential().await
     }
 
+    /// Chat Completions on the Copilot backend of the Gemini family. This
+    /// client answers for itself: the Chat Completions client it wraps is
+    /// built for another family and does not know this route. The GitHub
+    /// Copilot routed client adds the account's statement.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Google(GoogleBackendKind::Copilot),
+            api: meerkat_core::ModelApi::ChatCompletions,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     fn stream_prepared<'a>(
         &'a self,
         request: &'a meerkat_llm_core::PreparedLlmRequest,

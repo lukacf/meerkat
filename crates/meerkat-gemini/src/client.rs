@@ -2534,6 +2534,17 @@ impl LlmClient for GeminiClient {
         )
     }
 
+    /// The `generateContent` API on the backend this client was built for.
+    /// No account list and no operator levels are this client's to state.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::Google(self.google_backend_kind),
+            api: meerkat_core::ModelApi::GenerateContent,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_gemini_replay_messages(messages)
     }

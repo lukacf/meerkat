@@ -7264,7 +7264,7 @@ mod skill_activation_effect_tests {
             crate::TurnTerminalCauseKind::RetryExhausted
         );
         agent.terminal_error_metadata = Some(retry_exhausted);
-        agent.runtime_started_run_id = snapshot.terminal_run_id.clone();
+        agent.runtime_started_run_id = snapshot.terminal_run_id;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
         agent.record_runtime_terminal_failure_witness(&error);
 

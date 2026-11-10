@@ -6030,7 +6030,7 @@ mod tests {
                 AgentErrorReason::LlmProviderError {
                     provider_error_kind: LlmProviderErrorKind::ServerOverloaded,
                     provider_error_retryability: LlmProviderErrorRetryability::Retryable,
-                    provider_error: details.clone(),
+                    provider_error: details,
                 },
             ),
         ] {

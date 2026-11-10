@@ -34480,12 +34480,12 @@ mod tests {
             _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
         ) -> Result<super::LlmStreamResult, AgentError> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let (provider, reason, message) = self
+            let &(provider, ref reason, message) = self
                 .script
                 .get(call)
                 .or_else(|| self.script.last())
                 .expect("a scripted failure");
-            Err(AgentError::llm(*provider, reason.clone(), *message))
+            Err(AgentError::llm(provider, reason.clone(), message))
         }
 
         fn provider(&self) -> crate::provider::Provider {

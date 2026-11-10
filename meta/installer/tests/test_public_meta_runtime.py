@@ -16,8 +16,11 @@ from launchkit.blueprint import starter_blueprint
 from launchkit.schema import DEFAULT_MODELS
 
 VERSION = public_meta_runtime.VERSION
-FIXTURES = Path(__file__).parent / "fixtures/meta_release_0_9_6"
+# The release's checksum and index manifests, binary sizes and the storage
+# reports its meta_gateway wrote, recorded from the pinned release.
+FIXTURES = Path(__file__).parent / f"fixtures/meta_release_{VERSION.replace('.', '_')}"
 TEMPLATES = Path(__file__).resolve().parents[1] / "launchkit/templates"
+MONOREPO_META = "https://github.com/lukacf/meerkat/releases/download/meta-v"
 UNIX_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin",
     "x86_64-apple-darwin")
 
@@ -90,7 +93,7 @@ def test_agent_team_dependencies_urls_and_receipts_name_no_mobkit_runtime(tmp_pa
     install = files["install.sh"].content
     assert "meerkat-mobkit" not in install and "mobkit_gateway" not in install
     module = gateway_installer(tmp_path, monkeypatch, "x86_64-unknown-linux-gnu")
-    assert module.RELEASE_URL == f"https://github.com/lukacf/meerkat-meta/releases/download/v{VERSION}"
+    assert module.RELEASE_URL == f"{MONOREPO_META}{VERSION}" == public_meta_runtime.RELEASE_URL
     assert all("mobkit" not in prefix for prefix in module.BINARIES.values())
     assert set(module.BINARIES) == {"rpc_gateway", "meta_gateway"}
 
@@ -192,7 +195,7 @@ def test_meta_install_reads_the_meta_release_and_writes_its_receipts(tmp_path, m
     module = gateway_installer(tmp_path, monkeypatch, target)
     calls = official_meta_assets(module, target, monkeypatch)
     module.main()
-    release = f"https://github.com/lukacf/meerkat-meta/releases/download/v{VERSION}/"
+    release = f"{MONOREPO_META}{VERSION}/"
     manifest = "checksums-trailing.sha256" if target == "x86_64-apple-darwin" else "checksums.sha256"
     assert calls == [release + manifest, release + f"meta-rpc-gateway-{VERSION}-{target}.tar.gz",
         release + f"meta-gateway-{VERSION}-{target}.tar.gz"]
@@ -202,24 +205,19 @@ def test_meta_install_reads_the_meta_release_and_writes_its_receipts(tmp_path, m
         receipt = json.loads((tmp_path / ".bin" / (name + ".receipt.json")).read_text())
         assert receipt["version"] == VERSION and receipt["release_url"] == release.rstrip("/")
         assert receipt["archive"] == f"{prefix}-{VERSION}-{target}.tar.gz"
-    # The pinned 0.9.6 binaries fit the Meta bound (rpc_gateway is about 520 MiB).
+    # The pinned release's binaries fit the Meta bound (rpc_gateway is about 531 MiB at 0.9.11).
     sizes = json.loads((FIXTURES / "SOURCE.json").read_text())["binaries"]["x86_64-unknown-linux-gnu"]
     assert max(sizes.values()) < module.MAX_BINARY_BYTES
 
 
-STANDALONE_META = "https://github.com/lukacf/meerkat-meta/releases/download/v"
-MONOREPO_META = "https://github.com/lukacf/meerkat/releases/download/meta-v"
-
-
-# Meta releases up to 0.9.7 stay in the standalone repository under v tags
-# (0.9.7, the last of them, was published there); later ones come from the
-# monorepo under meta-v tags (its v tags are Core's).
+# Meta releases from 0.9.8 on are the monorepo's, under meta-v tags (its v tags
+# are Core's); a 0.8 package keeps MobKit's own releases. No package this Forge
+# compiles names an earlier Meta release, and release_url refuses one.
 @pytest.mark.parametrize("version,release", [
     ("0.8.47", "https://github.com/lukacf/meerkat-mobkit/releases/download/v0.8.47"),
-    ("0.9.4", STANDALONE_META + "0.9.4"), ("0.9.6", STANDALONE_META + "0.9.6"),
-    ("0.9.7", STANDALONE_META + "0.9.7"), ("0.9.8", MONOREPO_META + "0.9.8"),
+    ("0.9.8", MONOREPO_META + "0.9.8"), ("0.9.11", MONOREPO_META + "0.9.11"),
     ("0.10.0", MONOREPO_META + "0.10.0"), ("1.0.0", MONOREPO_META + "1.0.0")])
-def test_meta_versions_download_from_the_repository_that_released_them(tmp_path, monkeypatch, version, release):
+def test_meta_versions_download_from_the_monorepo(tmp_path, monkeypatch, version, release):
     module = gateway_installer(tmp_path, monkeypatch, "x86_64-unknown-linux-gnu", version)
     meta = version != "0.8.47"
     assert module.RELEASE_URL == release
@@ -228,11 +226,16 @@ def test_meta_versions_download_from_the_repository_that_released_them(tmp_path,
         assert public_meta_runtime.release_url(version) == release
 
 
-@pytest.mark.parametrize("version,release", [("0.9.4", STANDALONE_META + "0.9.4"),
-    ("0.9.6", STANDALONE_META + "0.9.6"), ("0.9.7", STANDALONE_META + "0.9.7"),
-    ("0.9.8", MONOREPO_META + "0.9.8")])
-def test_meta_install_reads_its_release_and_keeps_the_receipt_shape(tmp_path, monkeypatch, version, release):
+@pytest.mark.parametrize("version", ["0.9.0", "0.9.4", "0.9.6", "0.9.7"])
+def test_agent_teams_install_no_release_from_the_standalone_repository(version):
+    with pytest.raises(ValueError, match="released before the monorepo"):
+        public_meta_runtime.release_url(version)
+
+
+@pytest.mark.parametrize("version", ["0.9.8", VERSION])
+def test_meta_install_reads_its_release_and_keeps_the_receipt_shape(tmp_path, monkeypatch, version):
     target = "x86_64-unknown-linux-gnu"
+    release = f"{MONOREPO_META}{version}"
     module = gateway_installer(tmp_path, monkeypatch, target, version)
     calls = official_meta_assets(module, target, monkeypatch)
     module.main()
@@ -278,7 +281,7 @@ def storage():
 
 
 def meta_project(root, plan):
-    """A package whose .bin/meta_gateway replays reports recorded from the 0.9.6 tool."""
+    """A package whose .bin/meta_gateway replays reports recorded from the pinned release's tool."""
     (root / "deployment.json").write_text(json.dumps({"slug": "test-team", "mobkitVersion": VERSION}))
     (root / ".bin").mkdir()
     tool = root / ".bin/meta_gateway"

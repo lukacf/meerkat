@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   itself. cargo-deny matches rmcp 1.8 by version alone, so `meta/deny.toml`
   ignores the advisory until Core moves to rmcp 3.9 or later.
 
+### Upgrade
+
+- Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
+  from (0.9.11), so an existing Forge folder starts a fresh setup team in its
+  state directory on its first start. Saved setups, proposals, provider
+  settings and installed applications stay, and the previous setup team's
+  state is kept unchanged, but the new team does not recall earlier
+  conversations. To carry them over, follow the installer README's "Work with
+  the setup team" before that first start.
+
 ### Added
 
 - `meta/gating/withdraw {pending_id, reason?}`: the embedding host
@@ -67,6 +77,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a withdrawn promotion gate as expired: the stage is discarded and a
   proposal-sourced gate's proposal stays held (re-dreamable), as after a
   timeout.
+
+- Forge runs the Meerkat release it is built from instead of older pinned
+  releases. Its Guide runs that release's Meta and Core (0.9.11; until now
+  Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
+  published Meta from the monorepo's `meta-v` release (0.9.11; until now the
+  standalone repository's 0.9.6), and the protected application receiver
+  selects that release (until now Meta 0.9.7 with Core 0.9.8). A source
+  checkout installs its own `sdk/python` for the Guide, and a packaged Forge
+  carries the release's published `meerkat-meta` wheel and `rpc_gateway`, which
+  the release inputs pin. No older Meta wheel is vendored, and nothing
+  downloads a Meta runtime from the standalone repository.
+
+- Forge: the Guide accepts a profile auth binding (`auth_binding` with `realm`,
+  `binding` and an optional `profile`) in its launcher-selected model route and
+  names it in each of its profiles, which Core's mob profiles apply.
 
 ### Fixed
 
@@ -135,6 +160,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
   keeps both in memory, as before.
+
+- Forge: **Rebuild with updated runtime** on an application built without a
+  selected product runtime (an ordinary application an earlier Forge built)
+  compiled a new package for MobKit 0.8.47. It now rebuilds the application on
+  the Meta runtime Forge started with, keeping its application source, and a
+  Forge without a selected Meta runtime refuses the rebuild and says so.
 
 ## [0.9.11] - 2026-11-09
 

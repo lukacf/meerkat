@@ -3883,12 +3883,22 @@ committed as, and that continuation's delivery status when answered."""
 
 
 @dataclass
+class WireMemberInputAdmission:
+    """The member session's admission of a sent input: the same pair a keyed
+send's `admitted` status names. `input_id` is the id the runtime
+admitted, never a requested one."""
+    input_id: str
+    session_id: str
+
+
+@dataclass
 class MobMemberSendResult:
     """Response payload for host-side mob member delivery."""
     agent_identity: str
     handling_mode: WireHandlingMode
     member_ref: WireMemberRef
     mob_id: str
+    admission: Optional[WireMemberInputAdmission] = None
     continuation: Optional[WireContinuationReceipt] = None
 
 

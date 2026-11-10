@@ -257,7 +257,10 @@ idempotency_key=None)` take the same key, deduplicated for the member
 identity. A keyed send answers `continuation` (`delivery_id`,
 `committed_at_ms` and a `status` of `pending`, `admitted` with `session_id`
 and `input_id`, `stranded` or `refused`); see `mob/member_send` keys in the
-RPC reference.
+RPC reference. An unkeyed send answers `admission` (`session_id` and
+`input_id`) when the member's runtime admitted it before the send answered,
+so a client can tell its send from another client's send of the same
+content; see `mob/member_send` admission in the RPC reference.
 
 ### Transcript and input reconciliation
 

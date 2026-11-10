@@ -1,33 +1,33 @@
 {
   "assets": {
     "checksums-trailing.sha256": {
-      "bytes": 678,
-      "sha256": "163ba699bf976210d1289dba6c67ecccf1a1a977f9c11789a4210dc11c7b8c2f"
+      "bytes": 684,
+      "sha256": "7d2f66d66565dd6cd5d9ab31e1b31cb0c711c3be057687f55b57f0f8ec1bcff5"
     },
     "checksums.sha256": {
-      "bytes": 1053,
-      "sha256": "4220a48f21684e88952d9ce37678bd6fb18ce0db4c423190299a8f074db63988"
+      "bytes": 1062,
+      "sha256": "cc3f924deb01adf1e2bd1bc26adb8f9979d6358265cd7964c82b4e4c4181d033"
     },
     "index-trailing.json": {
-      "bytes": 455,
-      "sha256": "1320c3fcf1a4c29493e66ce0ff08b75141a77487aa0571b3b0ee083c5fcb2088"
+      "bytes": 468,
+      "sha256": "27d25518558b51507f98d28850e3ee21079f05f1146a4bbf30fb3524909c9278"
     },
     "index.json": {
-      "bytes": 640,
-      "sha256": "3a48338215e97f0a1e6080bbb88ef87635fb1f599494340a878d22e21855ed8a"
+      "bytes": 656,
+      "sha256": "83963f4ec91f6c2072aa85c58c9b3760575e0ef691f773a3d68b135a09bba682"
     }
   },
   "binaries": {
     "x86_64-unknown-linux-gnu": {
-      "meta_gateway": 532566584,
-      "rpc_gateway": 545707016
+      "meta_gateway": 538414056,
+      "rpc_gateway": 556749272
     }
   },
-  "release": "https://github.com/lukacf/meerkat-meta/releases/tag/v0.9.6",
+  "release": "https://github.com/lukacf/meerkat/releases/tag/meta-v0.9.11",
   "storage_reports": {
     "cases": {
       "boot-apply": "the same directory, --apply",
-      "boot-dry": "after the first boot of the starter agent team package on the 0.9.6 runtime (rpc_gateway, meerkat-meta 0.9.6), before its --apply, dry run",
+      "boot-dry": "after the first boot of the starter agent team package on the 0.9.11 runtime (rpc_gateway, meerkat-meta 0.9.11), before its --apply, dry run",
       "boot-dry2": "the same directory after --apply, dry run",
       "empty-dry": "a new empty state directory, dry run",
       "predecessor-dry": "a directory holding an empty mobkit_metadata.sqlite3, dry run"
@@ -56,6 +56,6 @@
         "sha256": "c25adad12f29803f4c954f5bcc90843fc01d3d31f108be58b2b59834cb367264"
       }
     },
-    "tool": "meta_gateway 0.9.6 x86_64-unknown-linux-gnu from meta-gateway-0.9.6-x86_64-unknown-linux-gnu.tar.gz"
+    "tool": "meta_gateway 0.9.11 x86_64-unknown-linux-gnu from meta-gateway-0.9.11-x86_64-unknown-linux-gnu.tar.gz"
   }
 }

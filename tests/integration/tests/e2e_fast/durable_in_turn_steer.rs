@@ -28,6 +28,12 @@
 //! their row once with its id, the steer is Consumed, and no model request
 //! runs.
 //!
+//! Two clients, each on its own connection, send the same unkeyed Steer
+//! through `mob/member_send` while the turn is held: each answer names the
+//! input the member's runtime admitted for that send, and each named input is
+//! applied exactly once by `boundary_append_applied`, so each client can tell
+//! which applied boundary carries its own steer.
+//!
 //! The scripted client is installed through BOTH
 //! `SessionRuntime::set_default_llm_client` and
 //! `MobMcpState::with_default_llm_client`.
@@ -69,6 +75,8 @@ const FLOW_STEP_TOKEN: &str = "DURABLE-FLOW-STEP-TOKEN-2A";
 const LATE_PEER_TOKEN: &str = "DURABLE-LATE-PEER-TOKEN-3B";
 const PEER_ASK_TOKEN: &str = "DURABLE-PEER-ASK-TOKEN-7F";
 const REPLY_TOKEN: &str = "DURABLE-PEER-REPLY-TOKEN-8G";
+/// The content both clients send in the two-connection scenario.
+const TWIN_STEER_TOKEN: &str = "DURABLE-TWIN-STEER-TOKEN-4H";
 const REPLY_REALM: &str = "durable-steer-reply-realm";
 const ORDERED_PEER_TOKENS: [&str; 3] = [
     "DURABLE-PEER-FIRST-4C",
@@ -333,18 +341,22 @@ async fn make_stack(
     client: Arc<dyn LlmClient>,
     gate_tools: Arc<dyn meerkat_core::AgentToolDispatcher>,
 ) -> (MethodRouter, Arc<MobMcpState>) {
+    let (router, mob_state, _runtime) =
+        make_stack_over(root, client, gate_tools, memory_persistence()).await;
+    (router, mob_state)
+}
+
+/// In-memory session, runtime and blob stores.
+fn memory_persistence() -> meerkat::PersistenceBundle {
     let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
     let blob_store: Arc<dyn meerkat_core::BlobStore> =
         Arc::new(meerkat_store::MemoryBlobStore::new());
-    let persistence = meerkat::PersistenceBundle::new(
+    meerkat::PersistenceBundle::new(
         store,
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
         blob_store,
     )
-    .expect("construct runtime authority");
-    let (router, mob_state, _runtime) =
-        make_stack_over(root, client, gate_tools, persistence).await;
-    (router, mob_state)
+    .expect("construct runtime authority")
 }
 
 /// [`make_stack`] over a caller's persistence, so a test can restart the
@@ -429,7 +441,11 @@ async fn open_reply_realm(root: &std::path::Path) -> meerkat::PersistenceBundle 
 }
 
 fn mob_definition(mob_id: &str) -> MobDefinition {
-    serde_json::from_value(json!({
+    serde_json::from_value(mob_definition_json(mob_id)).expect("durable steer mob definition")
+}
+
+fn mob_definition_json(mob_id: &str) -> Value {
+    json!({
         "id": mob_id,
         "profiles": {
             "keeper": {
@@ -440,8 +456,7 @@ fn mob_definition(mob_id: &str) -> MobDefinition {
             }
         },
         "wiring": { "auto_wire_orchestrator": false, "role_wiring": [] }
-    }))
-    .expect("durable steer mob definition")
+    })
 }
 
 /// Dispatch one RPC call and return its result; an error fails the test.
@@ -1294,4 +1309,152 @@ async fn e2e_fast_reply_to_a_joined_peer_steer_reaches_its_sender_and_survives_r
         before_restart,
         "no model request runs after the restart"
     );
+}
+
+/// Two clients, each on its own connection, send the same unkeyed Steer
+/// through `mob/member_send` while the target's turn is held at a tool call.
+/// Each answer names the input the target's runtime admitted for that send,
+/// the two names differ, and each named input is applied exactly once by
+/// `boundary_append_applied`: each client can match the applied boundary that
+/// carries its own steer.
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_fast_identical_unkeyed_steers_from_two_connections_each_name_their_applied_input() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let hold = Arc::new(Hold::default());
+    let client: Arc<dyn LlmClient> = Arc::new(ScriptedProvider {
+        requests: Arc::clone(&requests),
+        hold: Arc::clone(&hold),
+        gate: Gate::Tool,
+        reply_to_shown_delivery: None,
+    });
+    let gate_tools: Arc<dyn meerkat_core::AgentToolDispatcher> =
+        Arc::new(GateTools::new(Arc::clone(&hold), Duration::ZERO));
+    let (first, mob_state, runtime) = make_stack_over(
+        temp.path(),
+        client,
+        Arc::clone(&gate_tools),
+        memory_persistence(),
+    )
+    .await;
+    // A second connection's router over the same runtime and mob state, as
+    // the server builds one per connection. Building it installs the
+    // router's own mob tool factory, so the gate tools are wrapped around it
+    // again before the target is spawned.
+    let second_config: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+        Config::default(),
+        meerkat_models::canonical(),
+    ));
+    let second = MethodRouter::new_with_mob_state(
+        Arc::clone(&runtime),
+        second_config,
+        NotificationSink::noop(),
+        Arc::clone(&mob_state),
+    );
+    runtime.set_mob_tools(Arc::new(GateToolsFactory {
+        inner: Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+            Arc::clone(&mob_state),
+        )),
+        gate_tools,
+    }));
+
+    let mob_id = format!("durable-steer-twins-{}", uuid::Uuid::new_v4().simple());
+    // External sends (`mob/member_send`) reach only a profile that admits
+    // external work.
+    let mut definition = mob_definition_json(&mob_id);
+    definition["profiles"]["keeper"]["external_addressable"] = json!(true);
+    let mob_id = mob_state
+        .mob_create_definition(
+            serde_json::from_value(definition).expect("externally addressable mob definition"),
+        )
+        .await
+        .expect("create mob");
+    let handle: MobHandle = mob_state.handle_for(&mob_id).await.expect("mob handle");
+    handle
+        .spawn_spec(SpawnMemberSpec::new("keeper", AgentIdentity::from(TARGET)))
+        .await
+        .expect("spawn target");
+    let session = handle
+        .resolve_bridge_session_id(&AgentIdentity::from(TARGET))
+        .await
+        .expect("target session");
+    let mut events = meerkat_mob::MobSessionService::subscribe_session_events(
+        mob_state.session_service().as_ref(),
+        &session,
+    )
+    .await
+    .expect("subscribe to the target's session events");
+    let applied = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&applied);
+    let event_reader = tokio::spawn(async move {
+        while let Some(envelope) = futures::StreamExt::next(&mut events).await {
+            if let meerkat_core::AgentEvent::BoundaryAppendApplied { input_id, .. } =
+                envelope.payload
+            {
+                sink.lock().unwrap().push(input_id.to_string());
+            }
+        }
+    });
+
+    let (turn, _first_after_gate) = start_gated_turn(&handle, &hold, &requests).await;
+    let steer = json!({
+        "mob_id": mob_id.to_string(),
+        "agent_identity": TARGET,
+        "content": TWIN_STEER_TOKEN,
+        "handling_mode": "steer",
+    });
+    let answers = tokio::time::timeout(WAIT, async {
+        tokio::join!(
+            rpc(&first, "mob/member_send", steer.clone()),
+            rpc(&second, "mob/member_send", steer.clone()),
+        )
+    })
+    .await;
+    // Let the ingress prepare its boundary deliveries before releasing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    hold.released.store(true, Ordering::SeqCst);
+    let (first_answer, second_answer) =
+        answers.expect("both clients are answered while the turn is held");
+    let text = turn
+        .await
+        .expect("turn task")
+        .expect("turn completes in time")
+        .expect("turn succeeds");
+    assert_eq!(text, FINAL_TEXT);
+    settle(&requests).await;
+    event_reader.abort();
+    let applied = applied.lock().unwrap().clone();
+
+    let mut names = Vec::new();
+    for answer in [&first_answer, &second_answer] {
+        let admission = &answer["admission"];
+        let input_id = admission["input_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("each answer names the input it was admitted as: {answer}"))
+            .to_string();
+        assert_eq!(
+            admission["session_id"],
+            json!(session.to_string()),
+            "the admission names the target's session: {answer}"
+        );
+        names.push(input_id);
+    }
+    assert_ne!(
+        names[0], names[1],
+        "two sends of the same content are two inputs"
+    );
+    for name in &names {
+        assert_eq!(
+            applied.iter().filter(|applied| *applied == name).count(),
+            1,
+            "{name} is applied exactly once: {applied:?}"
+        );
+    }
+    let history = session_history(&first, &session).await;
+    assert_eq!(
+        history_token_positions(&history, TWIN_STEER_TOKEN).len(),
+        2,
+        "each steer is in the transcript once: {history:?}"
+    );
+    let _ = mob_state.mob_destroy(&mob_id).await;
 }

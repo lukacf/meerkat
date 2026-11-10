@@ -5941,6 +5941,32 @@ describe("Mob member host ingress", () => {
     );
   });
 
+  it("keeps the admission an unkeyed send's answer names", async () => {
+    const client = new MeerkatClient();
+    const admissions = [
+      { session_id: "session-1", input_id: "input-1" },
+      { session_id: "session-1" },
+    ];
+    client.request = async () => ({
+      mob_id: "mob-1",
+      agent_identity: "worker-1",
+      member_ref: makeMemberRef("mob-1", "worker-1"),
+      handling_mode: "steer",
+      admission: admissions.shift(),
+    });
+    const member = new Mob(client, "mob-1").member("worker-1");
+
+    const receipt = await member.send("same words", { handlingMode: "steer" });
+    assert.deepEqual(receipt.admission, { sessionId: "session-1", inputId: "input-1" });
+    await assert.rejects(
+      () => member.send("same words", { handlingMode: "steer" }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("invalid admission"),
+    );
+  });
+
   it("rejects member-send receipts missing runtime-owned agent identity", async () => {
     const client = new MeerkatClient();
     client.request = async () => ({

@@ -891,7 +891,7 @@ def test_generated_readme_names_the_cpython_of_a_compiled_closure():
             toolkit=SimpleNamespace(version="0.9.4"), meta_wheel=SimpleNamespace(sha256="1" * 64),
             toolkit_wheel=SimpleNamespace(sha256="2" * 64), assembly=SimpleNamespace(sha256="3" * 64),
             dependency_wheels=closure(*names).dependency_wheels)
-        return product_distribution.candidate_readme(guide, selected, "origin")
+        return product_distribution.candidate_readme(guide, selected, "origin", guide_wheel_sha256="4" * 64)
     compiled = readme("pydantic_core-2.27.2-cp311-cp311-manylinux_2_17_x86_64.whl",
         "cryptography-44.0.0-cp39-abi3-manylinux_2_28_x86_64.whl", "httpx-0.28.1-py3-none-any.whl")
     assert "You need a complete CPython 3.11 installation" in compiled
@@ -909,5 +909,6 @@ def test_generated_readme_names_the_product_declared_glibc_floor(floor, host):
         toolkit=SimpleNamespace(version="0.9.4"), meta_wheel=SimpleNamespace(sha256="1" * 64),
         toolkit_wheel=SimpleNamespace(sha256="2" * 64), assembly=SimpleNamespace(sha256="3" * 64),
         dependency_wheels=closure("httpx-0.28.1-py3-none-any.whl").dependency_wheels)
-    readme = product_distribution.candidate_readme(guide, selected, "origin", glibc_floor=floor)
+    readme = product_distribution.candidate_readme(guide, selected, "origin", guide_wheel_sha256="4" * 64,
+        glibc_floor=floor)
     assert f"Supported package destination: **{host}**." in readme and "2.39" not in readme

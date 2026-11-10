@@ -1,19 +1,20 @@
 """SDK tuple for the separately selected protected application receiver.
 
 The launcher verifies and installs its original application SDK wheel and
-source closure before selecting a receiver. These version constraints do not
-establish native qualification, byte provenance or transport custody. The
-ordinary packaged Guide retains its independent guide_sdk selection.
+source closure before selecting a receiver. The receiver runs the workspace's
+own Meta release, the one the Guide runs (guide_sdk), with the Core release of
+the same version. These version constraints do not establish native
+qualification, byte provenance or transport custody.
 """
 import re
 
-SELECTED_VERSION = "0.9.7"
-# Selected Meta v0.9.7 source df3f8a653117414a9399a69e0567413ce0dd3aaf,
-# crates/meerkat-meta/Cargo.toml dependencies.meerkat-core.version.
-CORE_REQUIREMENT = "=0.9.8"
+from . import guide_sdk
+
+SELECTED_VERSION = guide_sdk.SELECTED_VERSION
 
 
 def declared_core_version():
-    if type(CORE_REQUIREMENT) is not str or re.fullmatch(r"=[0-9]+\.[0-9]+\.[0-9]+", CORE_REQUIREMENT) is None:
-        raise ValueError("The receiver needs its selected Meta source's exact Core requirement.")
-    return CORE_REQUIREMENT[1:]
+    """The Core version of the receiver's Meta release: the same workspace version."""
+    if type(SELECTED_VERSION) is not str or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", SELECTED_VERSION) is None:
+        raise ValueError("The receiver needs the workspace's exact Meta version.")
+    return SELECTED_VERSION

@@ -52,6 +52,14 @@ class BuildSelectionUnavailable(DraftConflict):
     """Saved history cannot establish a trustworthy selected build."""
 
 
+class ApplicationRuntimeUnselected(DraftConflict):
+    """A new application package needs a selected runtime, and none is selected.
+
+    Forge compiles new application packages for the runtime its launcher
+    selected, never for the compiler's MobKit default.
+    """
+
+
 def implementation_decision_blockers(state):
     """Use the canonical brief, retaining legacy pre-brief admission semantics."""
     brief = state.get("brief")

@@ -35,6 +35,14 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-contracts`: `MobMemberSendResult` gains the field
+  `admission: Option<WireMemberInputAdmission>` (see Added). Code that builds
+  it with a struct literal sets the new field; `None` keeps the earlier
+  answer. On the wire the field is optional and left out when absent, so a
+  client that does not read it is unaffected.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
@@ -47,11 +55,16 @@ them.
   requests carry the `drop_block` control and the
   `thinking-binding-controls-2026-08-01` beta, as Claude Fable 5.1's do,
   and a session that moves onto Fable 5.2 keeps sending its earlier turns'
-  thinking. Anthropic does not serve it on Amazon Bedrock (see the
-  providers page). Claude Mythos 5.2 (`claude-mythos-5-2`), which
-  Anthropic serves only to organizations it has verified, is not a catalog
-  model, as Claude Mythos 5.1 is not. The Anthropic default model stays
-  `claude-opus-5-5`.
+  thinking. Anthropic serves it on Amazon Bedrock only through inference
+  profiles, the global profile `global.anthropic.claude-fable-5-2` or the
+  US geographic profile `us.anthropic.claude-fable-5-2`; Bedrock offers no
+  in-region access, so the bare `anthropic.claude-fable-5-2` does not run.
+  A profile id is a model id with no catalog row: its requests carry
+  neither the binding control nor its beta and replay only the thinking of
+  the turn in progress (see the providers page). Claude Mythos 5.2
+  (`claude-mythos-5-2`), which Anthropic serves only to organizations it
+  has verified, is not a catalog model, as Claude Mythos 5.1 is not. The
+  Anthropic default model stays `claude-opus-5-5`.
 
 - `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
   identity applies to the member's running build (a grant's `applies`), and
@@ -76,6 +89,35 @@ them.
   the member id alone does not match it. `phase: "deleted"` and a
   `target_id` that is empty or only whitespace are refused as invalid
   arguments.
+
+- `meerkat-mob`, `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`,
+  `meerkat-web-runtime`, the Python, TypeScript and Web SDKs: an unkeyed
+  `mob/member_send` names the input the member's runtime admitted for it, so
+  a client can tell its own send from another client's send of the same
+  content. The result carries `admission` (`WireMemberInputAdmission`:
+  `session_id` and `input_id`, the pair a keyed send's `admitted` status
+  names) when the member's runtime admitted the send before the send
+  answered; `input_id` is the id the runtime admitted, never a requested
+  one. Match it against `boundary_append_applied.input_id` and
+  `boundary_appends_discarded.input_ids`, or read the input with
+  `session/input_status`. It is absent for a keyed send (its `continuation`
+  status names its input), when the answer precedes runtime admission (an
+  autonomous member's inbox delivery), for a member that is not served by a
+  local runtime (not runtime-backed, peer-only or hosted elsewhere), and
+  from an older server. `mob/ingress_interaction`'s `delivery`, the public
+  MCP tool `meerkat_mob_member_send` and the Web runtime's `mob_member_send`
+  carry it too. In Rust, `MemberDeliveryReceipt` gains
+  `admission: Option<MemberInputAdmission>`, set by `MemberHandle::send` and
+  its variants, and `MemberInputAdmission` serializes and converts into
+  `WireMemberInputAdmission`. The SDKs keep it on the member-send receipt
+  (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
+  answer without it.
+
+### Changed
+
+- Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
+  (previously 10.12). They are built on the BuildBuddy release lane for macOS
+  11.0, and the release refuses one that needs a newer macOS.
 
 ### Fixed
 
@@ -106,6 +148,23 @@ them.
   rewrite with its replacement; any other difference from the stored row
   still refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
+- `meerkat-runtime`: two terminal paths no longer lose an authorization
+  audit observation recorded on a terminal input row after the row was last
+  written. Such an observation waits on the live row for the row's next
+  write, and these paths left it none. A row archived once its completion or
+  publication receipt was durable dropped an observation recorded after the
+  receipt's rewrite was built; the archive now writes such observations to
+  the stored row first, and if that write is refused, the session is marked
+  for a cold reload and the row is not archived. A terminal rewrite whose
+  caller was dropped after the store had committed it left the stored rows
+  rewritten and the live rows as they were, and once an observation was
+  recorded in between, every retry in the process failed with "terminal
+  completion finalization lost the exact durable CAS" (or the same error of
+  another terminal rewrite) until a restart; a retry now accepts a stored
+  row equal to its rewrite except for audit records the rewrite adds at the
+  end, and writes them. Any other difference from the stored row still
+  refuses the rewrite. Affects 0.8.52 through 0.9.11.
+
 - `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
   runtime store and drops it no longer breaks that realm's credential
   rotation and OAuth sign-ins. Every handle of one database shares the
@@ -115,6 +174,18 @@ them.
   available", every OAuth sign-in failed to start, and sign-ins that another
   process had persisted were not found. The authority now uses the newest
   handle of the store that is still open. Affects 0.6.0 through 0.9.11.
+
+- `meerkat-rpc`: `session/input_status` with `{"by": "idempotency_key"}`
+  finds an input that `session/external_event` admitted under the key its
+  caller supplied. The event route stores such a key in the caller namespace
+  (`caller:<key>`), which the lookup did not read, so it answered no `state`
+  for every caller key. The lookup now reads the caller form of the key
+  first and, only when that names no input, the key as it is: a key a host
+  gave the Rust API, and a receipt's `delivery_id`, stay readable. Both reads
+  stay in the session's own index. A keyed `mob/member_send` is read through
+  its receipt (`continuation.status`, or `session/input_status` by its
+  `delivery_id` or `input_id`), not by its caller key. Affects 0.9.5 through
+  0.9.11.
 
 ### Security
 

@@ -59,6 +59,7 @@ async fn submit(
         completion_tx: None,
         bounded_result_spec: None,
         llm_identity_applied_tx: None,
+        admission_tx: None,
         ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
         content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
         requester: None,

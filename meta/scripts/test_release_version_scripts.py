@@ -85,6 +85,15 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
         (self.root / "docs/sdks/rust.mdx").write_text(
             'meerkat-meta = "0.8.0"\n'
         )
+        # Meta Forge names Meta's version for its Guide and its development pin.
+        (self.root / "installer/launchkit").mkdir(parents=True)
+        (self.root / "installer/launchkit/guide_sdk.py").write_text(
+            '"""Fixture."""\nSELECTED_VERSION = "0.8.0"\n'
+        )
+        (self.root / "installer/pyproject.toml").write_text(
+            '[project]\nname = "meta-forge"\nversion = "0.3.1"\n'
+            'dependencies = [\n  "fastapi>=0.115,<1",\n  "meerkat-meta==0.8.0",\n]\n'
+        )
 
         self.run_command("git", "init", "-q")
         self.run_command("git", "config", "user.email", "test@example.com")
@@ -156,6 +165,13 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
             'meerkat-meta = "0.8.1"',
             (self.root / "docs/quickstart.mdx").read_text(),
         )
+        # Meta Forge's Guide version and development pin move with Meta's.
+        self.assertIn('SELECTED_VERSION = "0.8.1"', (self.root / "installer/launchkit/guide_sdk.py").read_text())
+        project = (self.root / "installer/pyproject.toml").read_text()
+        self.assertIn('"meerkat-meta==0.8.1"', project)
+        self.assertIn('version = "0.3.1"', project, "Forge's own version is not Meta's")
+        self.assertIn("installer/launchkit/guide_sdk.py", staged)
+        self.assertIn("installer/pyproject.toml", staged)
 
         self.run_command("scripts/verify-version-parity.sh")
 
@@ -264,6 +280,26 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
             "docs/sdks/rust.mdx install version mismatch (0.7.39 != 0.8.1)",
             result.stdout,
         )
+
+    def test_version_parity_rejects_a_stale_forge_guide_or_development_pin(self):
+        self.run_command("scripts/bump-sdk-versions.sh", "0.8.1")
+        self.run_command("scripts/verify-version-parity.sh")
+        guide = self.root / "installer/launchkit/guide_sdk.py"
+        project = self.root / "installer/pyproject.toml"
+        bumped = guide.read_text(), project.read_text()
+        for path, stale, message in (
+            (guide, '"""Fixture."""\nSELECTED_VERSION = "0.8.0"\n',
+             "Forge Guide Meta version mismatch (0.8.0 != 0.8.1)"),
+            (project, bumped[1].replace("meerkat-meta==0.8.1", "meerkat-meta==0.7.9"),
+             "Forge development Meta SDK pin mismatch (0.7.9 != 0.8.1)"),
+        ):
+            with self.subTest(path=path.name):
+                path.write_text(stale)
+                result = self.run_command("scripts/verify-version-parity.sh", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stdout)
+                guide.write_text(bumped[0])
+                project.write_text(bumped[1])
 
 
 if __name__ == "__main__":

@@ -269,13 +269,45 @@ jobs:
           fi
           echo "Version ${version} matches release tag ${release_tag}"
 
+      # A failed exact-main run is judged by the release commit's FIRST
+      # PARENT's copy of scripts/ci-product-evidence.mjs, as reused CI
+      # evidence is (see below): the commit cannot certify its own red run
+      # with an edited job-to-product table. The reader also gets the
+      # commit's changes against that parent, with their status and a rename
+      # as a deletion and an addition, and refuses a commit that changes what
+      # decides the evidence or moves a package. A parent without the reader,
+      # or a failure to list the changes, leaves only a green run counting.
+      - name: Read the CI evidence reader of the release commit's parent
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true') }}
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ steps.release_ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          parent_reader="${RUNNER_TEMP}/ci-evidence-parent"
+          mkdir -p "${parent_reader}"
+          if ! parent="$(git rev-parse --verify --quiet "${RELEASE_SHA}^1")"; then
+            echo "Release commit ${RELEASE_SHA} has no parent: only a green CI run counts."
+            exit 0
+          fi
+          if ! git show "${parent}:scripts/ci-product-evidence.mjs" > "${parent_reader}/ci-product-evidence.mjs"; then
+            rm -f "${parent_reader}/ci-product-evidence.mjs"
+            echo "${parent} has no product-scoped CI evidence reader: only a green CI run counts."
+            exit 0
+          fi
+          git diff --name-status --no-renames "${parent}" "${RELEASE_SHA}" > "${parent_reader}/changed-paths.txt"
+          echo "A failed CI run of ${RELEASE_SHA} is judged by ${parent}'s reader; the commit changes $(wc -l < "${parent_reader}/changed-paths.txt") path(s)."
+
       # The release commit needs a successful push run of ci.yml at exactly
       # that commit on main or on release/<version>, the release branch of
       # the checked-out workspace version: a maintenance release is cut from
       # an earlier release's tag and tagged on that branch without reaching
       # main. No other branch qualifies, and neither does a pull-request or
       # dispatched run. On a tag run the step above has bound the version to
-      # the tag.
+      # the tag. A failed run of that kind qualifies only when its attestation
+      # shows every failure in rows Core does not depend on
+      # (scripts/ci-product-evidence.mjs, the parent's copy written above;
+      # for example a Connect-only red row).
       - name: Require successful exact-main CI
         id: ci_run
         if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true') }}
@@ -338,6 +370,52 @@ jobs:
               return runs;
             }
 
+            // The product-scoped verdict for Core on one completed attempt,
+            // read once per attempt, by the release commit's parent's copy of
+            // the reader with the commit's changed paths (the step above).
+            const parentReader = require("path").join(process.env.RUNNER_TEMP || "", "ci-evidence-parent");
+            let evidence = null;
+            try {
+              const reader = require("path").join(parentReader, "ci-product-evidence.mjs");
+              evidence = await import(require("url").pathToFileURL(reader).href);
+            } catch (error) {
+              core.info(`The release commit's parent has no product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+            }
+            let changedPaths;
+            try {
+              changedPaths = fs
+                .readFileSync(require("path").join(parentReader, "changed-paths.txt"), "utf8")
+                .split("\n")
+                .filter((line) => line.trim());
+            } catch (error) {
+              core.info(`The release commit's changed paths are unknown (${error.message}); only a green run counts.`);
+            }
+            const verdicts = new Map();
+            async function coreScopedVerdict(run) {
+              const key = `${run.id}/${run.run_attempt}`;
+              if (!verdicts.has(key)) {
+                let verdict = { accepted: false, reasons: ["no product-scoped evidence reader"] };
+                if (evidence) {
+                  try {
+                    const attestation = await evidence.attestationOfRun(github, {
+                      owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
+                    });
+                    verdict = attestation
+                      ? evidence.acceptance(attestation, "core", { changedPaths })
+                      : { accepted: false, reasons: ["the attempt has no exact-tree attestation"] };
+                  } catch (error) {
+                    verdict = { accepted: false, reasons: [`unreadable attestation: ${error.message}`] };
+                  }
+                }
+                verdicts.set(key, verdict);
+                core.info(
+                  `CI attempt ${run.run_attempt} on ${run.head_branch} (${run.html_url}) ` +
+                    `${verdict.accepted ? "is" : "is not"} enough for Core: ${verdict.reasons.join("; ")}`
+                );
+              }
+              return verdicts.get(key);
+            }
+
             for (;;) {
               const runs = await listExactCommitPushRuns();
               if (runs.length > 0) {
@@ -358,6 +436,27 @@ jobs:
                 core.setOutput("run_id", String(success.id));
                 core.setOutput("run_attempt", String(success.run_attempt));
                 return;
+              }
+
+              // A failed run still lets Core release when every failure sits
+              // in rows Core does not depend on (only its own rows and the
+              // downstream type-check rows count): the run's exact-tree
+              // attestation records each job's product, and the release
+              // commit's parent's scripts/ci-product-evidence.mjs judges it.
+              // Anything it cannot attribute, a parent without that reader or
+              // a commit that changes what decides the evidence keeps waiting
+              // for a green run.
+              for (const run of runs.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "failure")) {
+                const verdict = await coreScopedVerdict(run);
+                if (verdict.accepted) {
+                  core.warning(
+                    `Push CI on ${run.head_branch} at ${ref} failed (${run.html_url}), only in rows Core does not depend on: ` +
+                      verdict.reasons.join("; ")
+                  );
+                  core.setOutput("run_id", String(run.id));
+                  core.setOutput("run_attempt", String(run.run_attempt));
+                  return;
+                }
               }
 
               // ci.yml lets a newer main commit supersede (cancel) an older
@@ -456,11 +555,19 @@ jobs:
                .component_results.github_hosted_dense_mob == "success") or
               (.schema_version == 4 and
                .validation_backend == "github-hosted-cargo" and
-               .validation_result == "success" and
+               (.validation_result == "success" or .validation_result == "failure") and
                .component_results.changes == "success" and
                .component_results.fmt_governance == "success" and
                .component_results.ratchets == "success"))' \
             "${attestation}"
+          # A failed run counts only when every failure sits in rows Core
+          # does not depend on (the lookup above selected it for that), judged
+          # again by the release commit's parent's copy of the reader.
+          if jq -e '.schema_version == 4 and .validation_result == "failure"' "${attestation}" >/dev/null; then
+            parent_reader="${RUNNER_TEMP}/ci-evidence-parent"
+            node "${parent_reader}/ci-product-evidence.mjs" accepts --product core \
+              --changed-paths "${parent_reader}/changed-paths.txt" "${attestation}"
+          fi
           schema="$(jq -r '.schema_version' "${attestation}")"
           echo "schema=${schema}" >> "${GITHUB_OUTPUT}"
           echo "Verified exact-tree CI attestation (schema ${schema}) for ${RELEASE_SHA} (${RELEASE_TREE})"
@@ -1043,21 +1150,26 @@ jobs:
             --release-sha "${release_sha}" \
             --changelog .semver-recovery-policy/CHANGELOG.md
 
-  # A tag run publishes the artifacts of a successful pre-tag prebuild of
-  # exactly its commit instead of rebuilding them: a release.yml run
-  # dispatched on main at the tag commit with prebuild_release_artifacts,
-  # whose Release prebuild gate succeeded (critical binaries and Web SDK
-  # package ready; its trailing lanes may still be running) and whose
-  # critical artifacts have not expired (scripts/release-find-prebuild; a
-  # gate that has not concluded is waited for unless a job it needs already
-  # failed). Its run id is the only thing reused: publish_github_release
-  # verifies every archive exactly as for an assets_run_id recovery (each one
-  # and its source stamp attested by release.yml at that commit on
-  # refs/heads/main, the run's binary build gate green, every binary
-  # embedding the release version), and publish_web_sdk verifies the package
-  # attestation and version. No prebuild: the tag builds as before.
+  # A tag run publishes the artifacts of a successful pre-tag prebuild instead
+  # of rebuilding them: a release.yml run dispatched on main with
+  # prebuild_release_artifacts at the tag commit or, failing a usable one, at
+  # an ancestor whose prebuild serves it (every path changed since is a
+  # non-input of Core's release artifacts: another product's root, a product
+  # changelog or a CI-only file, scripts/release-prebuild-equivalent), whose
+  # Release prebuild gate succeeded (critical binaries and Web SDK package
+  # ready; its trailing lanes may still be running) and whose critical
+  # artifacts have not expired (scripts/release-find-prebuild; a gate that
+  # has not concluded is waited for unless a job it needs already failed).
+  # Its run id is the only thing reused: publish_github_release verifies
+  # every archive exactly as for an assets_run_id recovery (each one and its
+  # source stamp attested by release.yml at that run's commit on
+  # refs/heads/main, the commit checked again to be the tag's or to serve
+  # it, the run's binary build gate green, every binary embedding the release
+  # version), and publish_web_sdk binds the package to that commit the same
+  # way and verifies its attestation and version. No prebuild: the tag builds
+  # as before.
   release_prebuild:
-    name: Find exact-commit release prebuild
+    name: Find a release prebuild for the tag commit
     needs: [require_ci_green]
     if: ${{ startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
@@ -1070,14 +1182,19 @@ jobs:
       # that attempt and refuse a prebuild re-run after the lookup.
       run_attempt: ${{ steps.lookup.outputs.run_attempt }}
     steps:
+      # The whole history lets the lookup compare an earlier commit's
+      # prebuild with the tag commit.
       - name: Checkout release tooling
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          fetch-depth: 0
           sparse-checkout: |
             scripts/release-find-prebuild
+            scripts/release-prebuild-equivalent
+            ci/products.json
           sparse-checkout-cone-mode: false
 
-      - name: Find a successful prebuild of the tag commit
+      - name: Find a successful prebuild that serves the tag commit
         id: lookup
         shell: bash
         env:
@@ -1098,12 +1215,23 @@ jobs:
           fi
           run_id="${run_id:-}"
           echo "run_attempt=${run_attempt:-}" >> "${GITHUB_OUTPUT}"
+          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${run_id}" ]]; then
             echo "Publishing the prebuilt artifacts of release run ${run_id} (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}); no binary or Web SDK build in this run."
+            # The commit the prebuild built, and every path changed since
+            # with the reason it is no input (the publishers check it again).
+            if prebuilt="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha)"; then
+              {
+                echo "### Release prebuild"
+                echo "Run ${run_id} attempt ${run_attempt}, tag commit ${release_sha}:"
+                echo '```'
+                scripts/release-prebuild-equivalent "${prebuilt}" "${release_sha}" || true
+                echo '```'
+              } >> "${GITHUB_STEP_SUMMARY}"
+            fi
           else
-            echo "No complete prebuild of ${release_sha}; this run builds every release artifact."
+            echo "No usable prebuild for ${release_sha}; this run builds every release artifact."
           fi
-          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
 
   build_binaries:
     name: Build and package surface binaries with GitHub-hosted runners (${{ matrix.surface.bin }}, ${{ matrix.platform.target }})
@@ -1111,9 +1239,10 @@ jobs:
     # Fallback lane for the critical platforms (Linux x86_64 and aarch64,
     # macOS arm64). Under the owner BuildBuddy split those three targets come
     # from build_binaries_buildbuddy and this job is skipped. The trailing
-    # platforms build in their own jobs whichever lane is selected: Windows
-    # (build_binaries_windows_cross) and Intel macOS
-    # (build_binaries_macos_x86_cross).
+    # platforms build in their own jobs: Windows
+    # (build_binaries_windows_cross) whichever lane is selected, Intel macOS
+    # in build_binaries_macos_x86_cross here and in
+    # build_binaries_buildbuddy_macos_x86 under the BuildBuddy split.
     if: >-
       always() &&
       !(github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
@@ -1607,15 +1736,17 @@ jobs:
 
   # Intel macOS is a trailing platform: its archives may reach the release
   # after the critical Linux and macOS arm64 ones (publish_github_release
-  # adds them, add-only). It is cross-compiled on an Apple silicon runner
-  # (macos-15) whichever lane builds the critical targets, one job per
-  # surface package so each binary keeps the feature set its own package
-  # resolves, as in the GitHub-hosted lane.
+  # adds them, add-only). On the GitHub-hosted backend it is cross-compiled
+  # on an Apple silicon runner (macos-15), one job per surface package so
+  # each binary keeps the feature set its own package resolves, as in the
+  # GitHub-hosted lane. On the BuildBuddy backend
+  # build_binaries_buildbuddy_macos_x86 builds it instead.
   build_binaries_macos_x86_cross:
     name: Cross-compile and package Intel macOS surface binaries on Apple silicon (${{ matrix.surface.bin }})
     needs: [require_ci_green, release_validate_gate, release_prebuild]
     if: >-
       always() &&
+      !(github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
       needs.require_ci_green.result == 'success' &&
       (needs.release_validate_gate.result == 'success' ||
        (github.event_name == 'workflow_dispatch' &&
@@ -2041,6 +2172,291 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Intel macOS on the BuildBuddy backend: scripts/buildbuddy-bazel-poc's
+  # release-build-macos-x86 cross-compiles the four surface binaries on the
+  # Apple-silicon executors of the macOS arm64 lane, for macOS 11.0. A job of
+  # its own, outside build_binaries_buildbuddy, so the critical gate and the
+  # critical publisher never wait for it: its archives trail with Windows
+  # (publish_github_release adds them once build_binaries_gate succeeded, which
+  # also requires verify_macos_x86_binaries). Names, stamps and attestations
+  # are those of every release build job.
+  build_binaries_buildbuddy_macos_x86:
+    name: Build and package Intel macOS surface binaries via BuildBuddy
+    needs: [require_ci_green, release_validate_gate, release_prebuild]
+    if: >-
+      always() &&
+      needs.require_ci_green.result == 'success' &&
+      (needs.release_validate_gate.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.publish_release_assets_only == 'true' ||
+         github.event.inputs.prebuild_release_artifacts == 'true') &&
+        needs.release_validate_gate.result == 'skipped')) &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.publish_release_assets_only == 'true' ||
+         github.event.inputs.prebuild_release_artifacts == 'true'))) &&
+      needs.release_prebuild.outputs.run_id == '' &&
+      (github.actor == 'lukacf' &&
+       ((github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.release_backend == 'buildbuddy') ||
+        (github.event_name != 'workflow_dispatch' &&
+         (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
+          vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.assets_run_id == '')
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && github.sha || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          persist-credentials: false
+
+      # As in build_binaries_buildbuddy: the setup action, the scripts it
+      # runs and the test-code marker guard come from the workflow's commit,
+      # and so does the Intel macOS inspection whose minimum the next step
+      # reads.
+      - name: Checkout release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions/setup-buildbuddy-ci/action.yml
+            scripts/check-macos-x86-release-binary
+            scripts/check-release-binary-markers
+            scripts/check-release-binary-sqlite-profile
+            scripts/ci-pin-rust-toolchain-env
+            scripts/install-buildbuddy-cli
+          sparse-checkout-cone-mode: false
+
+      # An asset recovery runs this workflow on an existing tag's tree, and
+      # so that tag's launcher. A tag cut before the launcher pinned the
+      # Intel minimum (release-build-macos-x86 without --macos_minimum_os)
+      # builds for the launcher's shared minimum, 13.0, which the inspection
+      # after the build refuses: refuse such a tree here, before anything
+      # builds, and name the GitHub-hosted backend, whose cross-build the
+      # inspection accepts, as the way to recover that tag.
+      - name: Refuse a release tree that builds Intel macOS for a newer macOS than the release accepts
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && needs.require_ci_green.outputs.prebuild_tag || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          bound="$(sed -n 's/^max_minos="\${MEERKAT_MACOS_X86_MAX_MINOS:-\([0-9.][0-9.]*\)}"$/\1/p' .release-tooling/scripts/check-macos-x86-release-binary)"
+          if [[ -z "${bound}" ]]; then
+            echo "::error::cannot read the newest macOS minimum scripts/check-macos-x86-release-binary accepts" >&2
+            exit 1
+          fi
+          # The minimum the checked-out launcher's Intel command sets, comments
+          # left out; none means the launcher's shared minimum applies.
+          minimum="$(awk '
+            /^  release-build-macos-x86\)$/ { inside = 1; next }
+            inside && /^    ;;$/ { exit }
+            inside && /^ *#/ { next }
+            inside && match($0, /--macos_minimum_os=[0-9.]+/) { print substr($0, RSTART + 19, RLENGTH - 19); exit }
+          ' scripts/buildbuddy-bazel-poc)"
+          recover="Recover ${RELEASE_TAG}'s assets on the GitHub-hosted backend: RELEASE_BACKEND=github-hosted VERSION=${RELEASE_TAG} make release-assets (release_backend=github-hosted)."
+          if [[ -z "${minimum}" ]]; then
+            echo "::error::${RELEASE_TAG}'s scripts/buildbuddy-bazel-poc sets no macOS minimum for release-build-macos-x86, so it builds the Intel macOS binaries for its shared minimum (13.0), newer than the ${bound} the Intel macOS inspection accepts. ${recover}" >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n%s\n' "${minimum}" "${bound}" | sort -V | head -n 1)" != "${minimum}" ]]; then
+            echo "::error::${RELEASE_TAG}'s scripts/buildbuddy-bazel-poc builds the Intel macOS binaries for macOS ${minimum}, newer than the ${bound} the Intel macOS inspection accepts. ${recover}" >&2
+            exit 1
+          fi
+          echo "${RELEASE_TAG}'s launcher builds the Intel macOS binaries for macOS ${minimum}; the inspection accepts ${bound} at most."
+
+      - uses: ./.release-tooling/.github/actions/setup-buildbuddy-ci
+        with:
+          profile: native
+          # The archives are attested: no cache entry another run saved may
+          # reach them (as in build_binaries_buildbuddy).
+          repository-cache: "false"
+
+      - name: Build the Intel macOS release binaries via BuildBuddy
+        shell: bash
+        env:
+          BUILDBUDDY_BAZEL_COMMAND: release-build-macos-x86
+          BUILDBUDDY_OUTPUT_LANE: release-build-x86_64-apple-darwin
+          BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-x86_64-apple-darwin
+          MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
+          BUILDBUDDY_RELEASE_JOBS: ${{ vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64' }}
+          TARGET: x86_64-apple-darwin
+        run: |
+          set +e
+          scripts/buildbuddy-bazel-poc --jobs="${BUILDBUDDY_RELEASE_JOBS}"
+          status="$?"
+          set -e
+
+          if [[ "${status}" -eq 38 ]]; then
+            echo "::warning::BuildBuddy build completed but BES upload failed; validating downloaded outputs before continuing"
+            BAZEL_BIN="${BUILDBUDDY_OUTPUT_BASE}/execroot/_main/bazel-out"
+            for rel_path in crates/meerkat-cli/rkat crates/meerkat-rpc/rkat_rpc_bin crates/meerkat-rest/rkat_rest_bin crates/meerkat-mcp-server/rkat_mcp_bin; do
+              if [[ -z "$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)" ]]; then
+                echo "BuildBuddy exited 38 and ${rel_path} is missing for ${TARGET}" >&2
+                exit "${status}"
+              fi
+            done
+            exit 0
+          fi
+
+          exit "${status}"
+
+      - name: Package artifacts
+        shell: bash
+        env:
+          TARGET: x86_64-apple-darwin
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && needs.require_ci_green.outputs.prebuild_tag || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          BB_OUTPUT_BASE: ${{ runner.temp }}/bb-release-x86_64-apple-darwin
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION//\//-}"
+          BAZEL_BIN="${BB_OUTPUT_BASE}/execroot/_main/bazel-out"
+          STAGE_ROOT="$(mktemp -d)"
+          trap 'rm -rf "${STAGE_ROOT}"' EXIT
+
+          declare -A BIN_PATHS=(
+            [rkat]="crates/meerkat-cli/rkat"
+            [rkat-rpc]="crates/meerkat-rpc/rkat_rpc_bin"
+            [rkat-rest]="crates/meerkat-rest/rkat_rest_bin"
+            [rkat-mcp]="crates/meerkat-mcp-server/rkat_mcp_bin"
+          )
+
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+            rel_path="${BIN_PATHS[$bin]}"
+            src="$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)"
+            artifact_name="${bin}-${VERSION}-${TARGET}.tar.gz"
+            if [[ -z "$src" ]]; then
+              echo "Missing binary for ${bin} (expected under ${BAZEL_BIN}/*/${rel_path})" >&2
+              exit 1
+            fi
+            stage_dir="${STAGE_ROOT}/${bin}"
+            mkdir -p "${stage_dir}"
+            cp "$src" "${stage_dir}/${bin}"
+            chmod +x "${stage_dir}/${bin}"
+            if ! grep -aF -- "$VERSION" "${stage_dir}/${bin}" >/dev/null; then
+              echo "Binary ${bin} for ${TARGET} does not embed release version ${VERSION}" >&2
+              exit 1
+            fi
+            # No release binary may carry compiled-in test code.
+            .release-tooling/scripts/check-release-binary-markers "${stage_dir}/${bin}"
+            tar -czf "${PWD}/dist/${artifact_name}" -C "${stage_dir}" "${bin}"
+            echo "packaged=${bin} -> dist/${artifact_name}"
+          done
+
+      # As in every release build job: each archive carries an attested stamp
+      # of the tree it was built from (see build_binaries_buildbuddy).
+      - name: Stamp archives with the checked-out release commit
+        id: source_commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && needs.require_ci_green.outputs.prebuild_tag || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          PREBUILD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' }}
+        run: |
+          set -euo pipefail
+          tree="$(git rev-parse HEAD)"
+          if [[ "${PREBUILD}" == "true" ]]; then
+            if [[ "${tree}" != "${GITHUB_SHA}" ]]; then
+              echo "checked-out tree ${tree} is not the dispatched prebuild commit ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+          else
+            if ! tag_commit="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}")"; then
+              git fetch --no-tags --depth=1 origin "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+              tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+            fi
+            if [[ "${tree}" != "${tag_commit}" ]]; then
+              echo "checked-out tree ${tree} is not the ${RELEASE_TAG} commit ${tag_commit}" >&2
+              exit 1
+            fi
+          fi
+          echo "source_commit=${tree}" >> "${GITHUB_OUTPUT}"
+          stamped=0
+          for archive in dist/*.tar.gz; do
+            [[ -f "${archive}" ]] || continue
+            printf '%s\n' "${tree}" > "${archive}.source-commit"
+            stamped=$((stamped + 1))
+          done
+          if [[ "${stamped}" -eq 0 ]]; then
+            echo "no release archives under dist/ to stamp" >&2
+            exit 1
+          fi
+          echo "stamped ${stamped} archive(s) with ${RELEASE_TAG} ${tree}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: meerkat-x86_64-apple-darwin-buildbuddy
+          path: dist/*
+          if-no-files-found: error
+
+  # The BuildBuddy Intel macOS binaries, run and inspected where they can
+  # run: on Apple silicon, under Rosetta, as the hosted cross-build checks
+  # its own (x86_64 only, the release version from --version, system
+  # libraries only, a minimum macOS every supported Intel Mac meets, no test
+  # code, the SQLite lock profile). Nothing here changes an archive.
+  verify_macos_x86_binaries:
+    name: Run and inspect the BuildBuddy Intel macOS binaries on Apple silicon
+    needs: [require_ci_green, build_binaries_buildbuddy_macos_x86]
+    if: always() && needs.build_binaries_buildbuddy_macos_x86.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tooling
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/check-macos-x86-release-binary
+            scripts/check-release-binary-markers
+            scripts/check-release-binary-sqlite-profile
+          sparse-checkout-cone-mode: false
+
+      - name: Download the Intel macOS archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: meerkat-x86_64-apple-darwin-buildbuddy
+          path: macos-x86
+
+      - name: Run and inspect each binary
+        shell: bash
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && needs.require_ci_green.outputs.prebuild_tag || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION//\//-}"
+          unpacked="$(mktemp -d)"
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+            archive="macos-x86/${bin}-${VERSION}-x86_64-apple-darwin.tar.gz"
+            [[ -f "${archive}" ]] || { echo "missing ${archive}" >&2; exit 1; }
+            mkdir -p "${unpacked}/${bin}"
+            tar -xzf "${archive}" -C "${unpacked}/${bin}"
+            binary="${unpacked}/${bin}/${bin}"
+            .release-tooling/scripts/check-macos-x86-release-binary "${binary}" "${VERSION}"
+            .release-tooling/scripts/check-release-binary-markers "${binary}"
+            if [[ "${bin}" == rkat ]]; then
+              .release-tooling/scripts/check-release-binary-sqlite-profile "${binary}"
+            fi
+          done
+          echo "ran and inspected the four Intel macOS binaries under Rosetta"
+
   # Linux (x86_64, aarch64) and macOS arm64 archives publish as soon as the
   # critical gate passes, on either lane: they are what the CLI install, the
   # SDKs' rkat-rpc bootstrap and a paired Meta release need. The trailing
@@ -2077,7 +2493,7 @@ jobs:
           pattern: meerkat-*
           path: release-artifacts
 
-      - name: Download the archives of the exact-commit prebuild
+      - name: Download the archives of the prebuild
         if: ${{ needs.release_prebuild.outputs.run_id != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -2177,9 +2593,11 @@ jobs:
           [[ "${checked}" -eq 12 ]] || { echo "expected 12 critical archives, checked ${checked}" >&2; exit 1; }
           echo "Every binary in ${checked} critical archives embeds ${version} and passes the test-code marker guard"
 
-      # The archives just verified were compiled from the tag's tree. Its
-      # built-binary test hooks must reach debug builds only: an older tree's
-      # binaries honour them and carry no marker the packaging scan can see.
+      # The archives just verified were compiled from the tag's tree, or from
+      # an earlier commit's whose changes since touch none of their inputs
+      # (scripts/release-prebuild-equivalent). The tag's built-binary test
+      # hooks must reach debug builds only: an older tree's binaries honour
+      # them and carry no marker the packaging scan can see.
       - name: Require the release tree to gate its test hooks
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -2196,6 +2614,51 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
           generate_release_notes: true
+          overwrite_files: false
+          tag_name: ${{ github.ref_name }}
+
+      # A tag that publishes an earlier commit's prebuild says so on the
+      # release: its archives' attestations and source stamps, and the Web
+      # SDK package's, name that prebuilt commit, not the tag's.
+      # prebuild-source-<version>.txt names both commits and the prebuild
+      # run, and lists every path changed between them with its reason
+      # (scripts/release-prebuild-equivalent). Add-only, as every upload.
+      - name: Describe the prebuilt commit of an earlier commit's prebuild
+        if: ${{ needs.release_prebuild.outputs.run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          PREBUILD_RUN_ID: ${{ needs.release_prebuild.outputs.run_id }}
+          PREBUILD_RUN_ATTEMPT: ${{ needs.release_prebuild.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          prebuilt="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PREBUILD_RUN_ID}" --jq .head_sha)"
+          if [[ "${prebuilt}" == "${tag_commit}" ]]; then
+            echo "The prebuild is of ${RELEASE_TAG}'s own commit ${tag_commit}."
+            exit 0
+          fi
+          version="${RELEASE_TAG#v}"
+          note="prebuild-source/prebuild-source-${version//\//-}.txt"
+          mkdir -p prebuild-source
+          {
+            echo "Release ${RELEASE_TAG} (commit ${tag_commit}) publishes the release archives and the @rkat/web"
+            echo "package that release.yml run ${PREBUILD_RUN_ID} (attempt ${PREBUILD_RUN_ATTEMPT}) prebuilt at commit ${prebuilt}."
+            echo "Their build attestations and source stamps name ${prebuilt}; verify an archive with"
+            echo "  gh attestation verify <archive> --repo ${GITHUB_REPOSITORY} --source-digest ${prebuilt}"
+            echo
+            scripts/release-prebuild-equivalent "${prebuilt}" "${tag_commit}"
+          } > "${note}"
+          echo "Describing the prebuilt commit in $(basename "${note}")"
+
+      # Nothing to upload when the prebuild is of the tag's own commit.
+      - name: Publish the prebuilt commit description
+        if: ${{ needs.release_prebuild.outputs.run_id != '' }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: prebuild-source/*.txt
+          draft: false
+          fail_on_unmatched_files: false
           overwrite_files: false
           tag_name: ${{ github.ref_name }}
 
@@ -2533,7 +2996,7 @@ jobs:
        (github.event_name == 'workflow_dispatch' &&
         (github.event.inputs.publish_release_assets_only == 'true' ||
          github.event.inputs.prebuild_release_artifacts == 'true')))
-    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, verify_windows_binaries, build_binaries_macos_x86_cross, release_prebuild]
+    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_windows_cross, verify_windows_binaries, build_binaries_macos_x86_cross, build_binaries_buildbuddy_macos_x86, verify_macos_x86_binaries, release_prebuild]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-24.04"') }}
     steps:
       - name: Check selected release binary backend
@@ -2549,7 +3012,8 @@ jobs:
           if [[ -n "${PREBUILD_RUN_ID}" ]]; then
             for result in "${{ needs.build_binaries.result }}" "${{ needs.build_binaries_buildbuddy.result }}" \
                           "${{ needs.build_binaries_windows_cross.result }}" "${{ needs.verify_windows_binaries.result }}" \
-                          "${{ needs.build_binaries_macos_x86_cross.result }}"; do
+                          "${{ needs.build_binaries_macos_x86_cross.result }}" "${{ needs.build_binaries_buildbuddy_macos_x86.result }}" \
+                          "${{ needs.verify_macos_x86_binaries.result }}"; do
               [[ "${result}" == "skipped" ]] || { echo "release_prebuild found run ${PREBUILD_RUN_ID}, but a build job ran (${result})" >&2; exit 1; }
             done
             echo "Publishing the prebuilt archives of release run ${PREBUILD_RUN_ID}; no build in this run."
@@ -2561,7 +3025,8 @@ jobs:
           if [[ -n "${ASSETS_RUN_ID}" ]]; then
             for result in "${{ needs.build_binaries.result }}" "${{ needs.build_binaries_buildbuddy.result }}" \
                           "${{ needs.build_binaries_windows_cross.result }}" "${{ needs.verify_windows_binaries.result }}" \
-                          "${{ needs.build_binaries_macos_x86_cross.result }}"; do
+                          "${{ needs.build_binaries_macos_x86_cross.result }}" "${{ needs.build_binaries_buildbuddy_macos_x86.result }}" \
+                          "${{ needs.verify_macos_x86_binaries.result }}"; do
               [[ "${result}" == "skipped" ]] || { echo "assets_run_id set, but a build job ran (${result})" >&2; exit 1; }
             done
             echo "Publishing the archives of release run ${ASSETS_RUN_ID}; no build in this run."
@@ -2573,29 +3038,36 @@ jobs:
           windows_cross_result="${{ needs.build_binaries_windows_cross.result }}"
           windows_verify_result="${{ needs.verify_windows_binaries.result }}"
           macos_x86_result="${{ needs.build_binaries_macos_x86_cross.result }}"
+          macos_x86_buildbuddy_result="${{ needs.build_binaries_buildbuddy_macos_x86.result }}"
+          macos_x86_verify_result="${{ needs.verify_macos_x86_binaries.result }}"
 
           # The trailing platforms build in their own jobs whichever lane
           # builds the critical ones: Windows is cross-compiled on Linux and
-          # verified on a Windows runner, Intel macOS is cross-compiled on
-          # Apple silicon.
+          # verified on a Windows runner; Intel macOS is built by the selected
+          # backend's lane below.
           echo "Windows cross-compile (Linux, cargo-xwin): ${windows_cross_result}"
           echo "Windows binary verification (windows-2025-vs2026): ${windows_verify_result}"
           [[ "${windows_cross_result}" == "success" && "${windows_verify_result}" == "success" ]] || exit 1
-          echo "Intel macOS cross-compile (Apple silicon): ${macos_x86_result}"
-          [[ "${macos_x86_result}" == "success" ]] || exit 1
 
           if [[ "${bb_selected}" == "true" ]]; then
-            # Owner lane split: BuildBuddy builds the critical platforms;
-            # the hosted fallback matrix is skipped.
+            # Owner lane split: BuildBuddy builds the critical platforms and
+            # Intel macOS (verified on Apple silicon); the hosted fallback
+            # matrix and the hosted Intel macOS cross-build are skipped.
             echo "BuildBuddy release binary build (Linux, macOS arm64) selected: ${buildbuddy_result}"
-            echo "GitHub-hosted fallback skipped: ${github_result}"
-            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "skipped" ]]
+            echo "BuildBuddy Intel macOS build: ${macos_x86_buildbuddy_result}; run and inspected on Apple silicon: ${macos_x86_verify_result}"
+            echo "GitHub-hosted fallback skipped: ${github_result}; hosted Intel macOS cross-build skipped: ${macos_x86_result}"
+            [[ "${buildbuddy_result}" == "success" && "${github_result}" == "skipped" &&
+               "${macos_x86_buildbuddy_result}" == "success" && "${macos_x86_verify_result}" == "success" &&
+               "${macos_x86_result}" == "skipped" ]]
             exit $?
           fi
 
           echo "GitHub-hosted release binary build (Linux, macOS arm64) selected: ${github_result}"
-          echo "BuildBuddy release binary build skipped: ${buildbuddy_result}"
-          [[ "${github_result}" == "success" && "${buildbuddy_result}" == "skipped" ]]
+          echo "Intel macOS cross-compile (Apple silicon): ${macos_x86_result}"
+          echo "BuildBuddy release binary builds skipped: ${buildbuddy_result}, ${macos_x86_buildbuddy_result}"
+          [[ "${github_result}" == "success" && "${buildbuddy_result}" == "skipped" &&
+             "${macos_x86_result}" == "success" && "${macos_x86_buildbuddy_result}" == "skipped" &&
+             "${macos_x86_verify_result}" == "skipped" ]]
 
   publish_github_release:
     name: Publish GitHub release assets
@@ -2691,7 +3163,7 @@ jobs:
       # A tag whose commit was prebuilt: the prebuild run's archives, stamps
       # and attestations; verify-release-asset-provenance --source-run binds
       # them to that run before anything is published.
-      - name: Download the archives of the exact-commit prebuild
+      - name: Download the archives of the prebuild
         if: ${{ needs.release_prebuild.outputs.run_id != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -2789,12 +3261,13 @@ jobs:
             exit 1
           fi
           if [[ -n "${PREBUILD_RUN_ID}" ]]; then
-            # The tag commit's pre-tag prebuild, verified exactly like an
+            # The tag's pre-tag prebuild, verified exactly like an
             # assets_run_id recovery: release.yml dispatched on main at a
             # commit in this tag's history with a green binary build gate,
             # every archive and its stamp attested by release.yml at that
-            # commit on refs/heads/main, and every stamp naming this tag's
-            # commit (release_prebuild only selects a run at exactly it).
+            # commit on refs/heads/main, and every stamp naming that commit,
+            # which must be this tag's commit or an ancestor whose prebuild
+            # serves it (scripts/release-prebuild-equivalent).
             scripts/verify-release-asset-provenance \
               --source-run "${PREBUILD_RUN_ID}" \
               --source-attempt "${PREBUILD_RUN_ATTEMPT}" \
@@ -2816,9 +3289,10 @@ jobs:
           fi
 
       # Every archive above, reused or rebuilt, was compiled from the tag's
-      # tree. Its built-binary test hooks must reach debug builds only: an
-      # older tree's binaries honour them and carry no marker the packaging
-      # scan can see, so an old tag's archives fail closed here.
+      # tree, or from an earlier commit's whose changes since touch none of
+      # their inputs. The tag's built-binary test hooks must reach debug
+      # builds only: an older tree's binaries honour them and carry no marker
+      # the packaging scan can see, so an old tag's archives fail closed here.
       - name: Require the release tree to gate its test hooks
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
@@ -3377,6 +3851,9 @@ jobs:
           # Bind helper scripts and package metadata to the same release as
           # the artifact, even when a later main dispatches the recovery job.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          # The history lets a prebuilt package of an earlier commit be
+          # compared with the release commit.
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -3457,14 +3934,33 @@ jobs:
             }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # A prebuilt package was built from the prebuild run's commit: this
+      # release's commit, or an ancestor whose prebuild serves it (every path
+      # changed since is a non-input of Core's release artifacts,
+      # scripts/release-prebuild-equivalent). Its stamp and its attestation
+      # must name that commit.
+      - name: Bind the prebuilt Web SDK package to its commit
+        id: package_source
+        if: ${{ needs.release_prebuild.outputs.run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREBUILD_RUN_ID: ${{ needs.release_prebuild.outputs.run_id }}
+          RELEASE_SHA: ${{ needs.require_ci_green.outputs.sha }}
+        run: |
+          set -euo pipefail
+          prebuilt="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PREBUILD_RUN_ID}" --jq .head_sha)"
+          scripts/release-prebuild-equivalent "${prebuilt}" "${RELEASE_SHA}"
+          echo "commit=${prebuilt}" >> "${GITHUB_OUTPUT}"
+
       # The package must have been built from this checkout, the commit
-      # Require green CI passed: the build job's stamp names its checkout,
-      # and the tarball must be the stamped one and carry this checkout's
-      # package name and version. An artifact without a stamp (built before
-      # stamping) is refused.
+      # Require green CI accepted, or from the prebuild commit bound above: the
+      # build job's stamp names its checkout, and the tarball must be the
+      # stamped one and carry this checkout's package name and version. An
+      # artifact without a stamp (built before stamping) is refused.
       - name: Verify Web SDK package source
         env:
           RELEASE_SHA: ${{ needs.require_ci_green.outputs.sha }}
+          PACKAGE_SOURCE: ${{ steps.package_source.outputs.commit || needs.require_ci_green.outputs.sha }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -3479,8 +3975,8 @@ jobs:
           stamp_tarball="$(jq -er .tarball "${stamp}")"
           stamp_sha256="$(jq -er .tarball_sha256 "${stamp}")"
           [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "Require green CI reported no release commit (${RELEASE_SHA:-empty})" >&2; exit 1; }
-          if [[ "${stamp_commit}" != "${RELEASE_SHA}" || "${RELEASE_SHA}" != "${head}" ]]; then
-            echo "Web SDK package source mismatch: stamp ${stamp_commit}, Require green CI ${RELEASE_SHA}, checkout ${head}" >&2
+          if [[ "${stamp_commit}" != "${PACKAGE_SOURCE}" || "${RELEASE_SHA}" != "${head}" ]]; then
+            echo "Web SDK package source mismatch: stamp ${stamp_commit}, expected ${PACKAGE_SOURCE}; Require green CI ${RELEASE_SHA}, checkout ${head}" >&2
             exit 1
           fi
           tarball_sha256="$(sha256sum "${tarball}" | cut -d' ' -f1)"
@@ -3496,14 +3992,15 @@ jobs:
           fi
           echo "Web SDK package ${expected} built from ${head} (sha256 ${tarball_sha256})"
 
-      # A package from the tag commit's pre-tag prebuild must be attested by
-      # release.yml at exactly this commit on refs/heads/main (the prebuild
-      # ran there) and pack this release's version.
+      # A package from a pre-tag prebuild must be attested by release.yml at
+      # exactly the prebuild's commit, bound above, on refs/heads/main (the
+      # prebuild ran there) and pack this release's version.
       - name: Verify the prebuilt Web SDK package
         if: ${{ needs.release_prebuild.outputs.run_id != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_SOURCE: ${{ steps.package_source.outputs.commit }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -3512,10 +4009,10 @@ jobs:
             echo "expected exactly one prebuilt @rkat/web package, found ${#packages[@]}" >&2
             exit 1
           fi
-          release_sha="$(git rev-parse HEAD)"
+          [[ "${PACKAGE_SOURCE}" =~ ^[0-9a-f]{40}$ ]] || { echo "no prebuild commit was bound (${PACKAGE_SOURCE:-empty})" >&2; exit 1; }
           gh attestation verify "${packages[0]}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --source-digest "${release_sha}" \
+            --source-digest "${PACKAGE_SOURCE}" \
             --source-ref refs/heads/main \
             --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
             >/dev/null
@@ -3525,7 +4022,7 @@ jobs:
             echo "prebuilt @rkat/web packs ${packed}, this release is ${expected}" >&2
             exit 1
           fi
-          echo "Verified prebuilt @rkat/web ${packed}: attested by release.yml at ${release_sha} on refs/heads/main"
+          echo "Verified prebuilt @rkat/web ${packed}: attested by release.yml at ${PACKAGE_SOURCE} on refs/heads/main"
 
       - name: Publish Web SDK
         env:

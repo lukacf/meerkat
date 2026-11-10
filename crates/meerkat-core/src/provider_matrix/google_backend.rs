@@ -1,7 +1,7 @@
 //! Google backend kinds (typed, provider-owned).
 
 use super::google_auth::GoogleAuthMethod;
-use crate::reasoning_effort::ReasoningLevelsSource;
+use crate::reasoning_effort::ReasoningFactsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GoogleBackendKind {
@@ -82,12 +82,12 @@ impl GoogleBackendKind {
     /// answers for itself: the account's model list states its levels, and
     /// the catalog row never does. The one owner of that decision; a new
     /// kind must decide (no wildcard arm).
-    pub fn reasoning_levels_source(self) -> ReasoningLevelsSource {
+    pub fn reasoning_levels_source(self) -> ReasoningFactsSource {
         match self {
             Self::GoogleGenAi | Self::VertexAi | Self::GoogleCodeAssist => {
-                ReasoningLevelsSource::Catalog
+                ReasoningFactsSource::Catalog
             }
-            Self::Copilot => ReasoningLevelsSource::Account,
+            Self::Copilot => ReasoningFactsSource::Account,
         }
     }
 }

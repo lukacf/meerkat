@@ -1,7 +1,7 @@
 //! Anthropic backend kinds (typed, provider-owned).
 
 use super::anthropic_auth::AnthropicAuthMethod;
-use crate::reasoning_effort::ReasoningLevelsSource;
+use crate::reasoning_effort::ReasoningFactsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnthropicBackendKind {
@@ -97,12 +97,12 @@ impl AnthropicBackendKind {
     /// Copilot answers for itself: the account's model list states its
     /// levels, and the catalog row never does. The one owner of that
     /// decision; a new kind must decide (no wildcard arm).
-    pub fn reasoning_levels_source(self) -> ReasoningLevelsSource {
+    pub fn reasoning_levels_source(self) -> ReasoningFactsSource {
         match self {
             Self::AnthropicApi | Self::Bedrock | Self::Vertex | Self::Foundry => {
-                ReasoningLevelsSource::Catalog
+                ReasoningFactsSource::Catalog
             }
-            Self::Copilot => ReasoningLevelsSource::Account,
+            Self::Copilot => ReasoningFactsSource::Account,
         }
     }
 }

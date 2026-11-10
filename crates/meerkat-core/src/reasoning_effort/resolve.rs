@@ -10,7 +10,7 @@
 use super::{
     AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
     ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortResolution,
-    ReasoningFactsSource, ReasoningLevelsSource, ReasoningRoute, ReasoningRouteObservation,
+    ReasoningFactsSource, ReasoningRoute, ReasoningRouteObservation,
 };
 use crate::Provider;
 use crate::lifecycle::run_primitive::{
@@ -34,8 +34,10 @@ pub enum ReasoningResolveMode {
     Preference,
 }
 
-/// What a requested level is resolved against.
+/// What a requested level is resolved against. Built with
+/// [`ReasoningResolveInput::new`]; the fields stay readable.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ReasoningResolveInput<'a> {
     /// The level to resolve.
     pub requested: EffortLevel,
@@ -50,6 +52,31 @@ pub struct ReasoningResolveInput<'a> {
     pub catalog_row: Option<&'a ModelCapabilities>,
     /// Who decided the level, as the resolution reports it.
     pub decided_by: ReasoningEffortDecidedBy,
+}
+
+impl<'a> ReasoningResolveInput<'a> {
+    /// The input for resolving `requested` for `model` of `provider`:
+    /// against `observation`, what the serving client observes about its
+    /// route (`None` when it reports none), and `catalog_row`, the model's
+    /// catalog row (`None` when the catalog has none). `decided_by` is
+    /// reported back in the resolution.
+    pub fn new(
+        requested: EffortLevel,
+        provider: Provider,
+        model: &'a str,
+        observation: Option<&'a ReasoningRouteObservation>,
+        catalog_row: Option<&'a ModelCapabilities>,
+        decided_by: ReasoningEffortDecidedBy,
+    ) -> Self {
+        Self {
+            requested,
+            provider,
+            model,
+            observation,
+            catalog_row,
+            decided_by,
+        }
+    }
 }
 
 /// What the source of a route's levels states for a model: the facts step
@@ -460,10 +487,10 @@ fn refusal(
         requested: input.requested,
         provider: input.provider,
         model: input.model.to_owned(),
-        route: Some(match input.observation {
-            Some(observation) => observation.route(),
+        route: match input.observation {
+            Some(observation) => Some(observation.route()),
             None => unobserved_route(input.provider),
-        }),
+        },
         reason,
         supported: facts.supported().map(<[EffortLevel]>::to_vec),
         facts: facts.source(),
@@ -472,9 +499,11 @@ fn refusal(
     }
 }
 
-/// The direct backend and API of a provider family; `None` for the two
-/// families that have no backend of their own to name.
-fn direct_route(provider: Provider) -> Option<(ReasoningBackend, ModelApi)> {
+/// The route of a provider family when no client observes one: the direct
+/// backend of the OpenAI, Anthropic and Gemini families on its own API, and
+/// the self-hosted backend on Chat Completions. `None` for a provider
+/// outside the families, which has no route of its own.
+fn family_route(provider: Provider) -> Option<(ReasoningBackend, ModelApi)> {
     match provider {
         Provider::OpenAI => Some((
             ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
@@ -488,28 +517,32 @@ fn direct_route(provider: Provider) -> Option<(ReasoningBackend, ModelApi)> {
             ReasoningBackend::Google(GoogleBackendKind::GoogleGenAi),
             ModelApi::GenerateContent,
         )),
-        Provider::SelfHosted | Provider::Other => None,
+        Provider::SelfHosted => Some((
+            ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+            ModelApi::ChatCompletions,
+        )),
+        Provider::Other => None,
     }
 }
 
 /// The route a refusal names when the client reports none: the family's
-/// direct route, and the self-hosted Chat Completions route for the two
-/// families without one.
-fn unobserved_route(provider: Provider) -> ReasoningRoute {
-    let (backend, api) = direct_route(provider).unwrap_or((
-        ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
-        ModelApi::ChatCompletions,
-    ));
-    ReasoningRoute::new(backend, api)
+/// own route. `None` for a provider outside the families: a route nobody
+/// observed is never guessed.
+fn unobserved_route(provider: Provider) -> Option<ReasoningRoute> {
+    family_route(provider).map(|(backend, api)| ReasoningRoute::new(backend, api))
 }
 
 /// The observation of a provider family's direct route
 /// (`openai_api/responses`, `anthropic_api/messages`,
 /// `google_genai/generate_content`), stating nothing beyond the route.
-/// `None` for the self-hosted family and for a provider outside the
+/// `None` for the self-hosted family, whose levels only its own client can
+/// report (the operator declares them), and for a provider outside the
 /// families.
 pub fn direct_route_observation(provider: Provider) -> Option<ReasoningRouteObservation> {
-    let (backend, api) = direct_route(provider)?;
+    let (backend, api) = match provider {
+        Provider::OpenAI | Provider::Anthropic | Provider::Gemini => family_route(provider)?,
+        Provider::SelfHosted | Provider::Other => return None,
+    };
     Some(ReasoningRouteObservation {
         backend,
         api,
@@ -590,21 +623,21 @@ pub fn supported_reasoning_levels(
     let Some(translation) = Translation::of(observation.backend, observation.api) else {
         return ReasoningLevelFacts::Stated {
             levels: Vec::new(),
-            source: source.into(),
+            source,
         };
     };
     let statement = match source {
-        ReasoningLevelsSource::Catalog => {
+        ReasoningFactsSource::Catalog => {
             catalog_statement(observation.backend, provider, catalog_row)
         }
-        ReasoningLevelsSource::Account => match &observation.account {
+        ReasoningFactsSource::Account => match &observation.account {
             AccountLevelStatement::Stated(levels) => Statement::Levels(levels),
             AccountLevelStatement::NotStated | AccountLevelStatement::NotApplicable => {
                 Statement::Unknown
             }
             AccountLevelStatement::ListUnavailable => Statement::Unavailable,
         },
-        ReasoningLevelsSource::Operator => match &observation.operator_levels {
+        ReasoningFactsSource::Operator => match &observation.operator_levels {
             Some(levels) => Statement::Levels(levels),
             None => Statement::Unknown,
         },
@@ -615,7 +648,7 @@ pub fn supported_reasoning_levels(
                 .into_iter()
                 .filter(|level| stated.contains(level) && translation.write_for(*level).is_some())
                 .collect(),
-            source: source.into(),
+            source,
         },
         Statement::Unknown => ReasoningLevelFacts::Unknown,
         Statement::Unavailable => ReasoningLevelFacts::Unavailable,

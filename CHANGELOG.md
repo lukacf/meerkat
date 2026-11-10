@@ -147,13 +147,14 @@ them.
   returns the typed `ReasoningEffortRefusal` and leaves the params
   untouched. The level sent is always the level requested.
   - Which source states a route's levels is decided per backend kind
-    (`reasoning_levels_source()` on the four provider-matrix backend kinds,
-    `ReasoningBackend::levels_source()`, answering the new
-    `ReasoningLevelsSource`): the catalog row on the direct OpenAI,
-    Anthropic and Gemini backends, the account's model list on the Copilot
-    backends (the catalog row is never a source of levels there), the
-    operator's declared levels on self-hosted and OpenAI-compatible
-    backends. `supported_reasoning_levels` is that step alone and answers
+    (`reasoning_levels_source()` on the four provider-matrix backend kinds
+    and `ReasoningBackend::levels_source()`, both answering
+    `ReasoningFactsSource`, the same type a refusal reports as `facts`): the
+    catalog row on the direct OpenAI, Anthropic and Gemini backends, the
+    account's model list on the Copilot backends (the catalog row is never
+    a source of levels there), the operator's declared levels on
+    self-hosted and OpenAI-compatible backends.
+    `supported_reasoning_levels` is that step alone and answers
     `ReasoningLevelFacts`: the stated levels the route can also express,
     unknown, or unavailable.
   - Each provider API takes the level in its own typed field: the OpenAI
@@ -163,15 +164,23 @@ them.
     (`low` to `high`). On the Copilot Messages route the level is written
     together with adaptive thinking, never alone, and a request that sets
     another thinking type is refused there at every level. The realtime API
-    takes no level.
+    and an API the backend's family does not speak take no level.
   - `ReasoningResolveMode::Strict` refuses a level that conflicts with
     another reasoning setting of the request (a different provider effort,
     a thinking budget, a thinking type the model caps, a raw reasoning
     body, reasoning turned off). `ReasoningResolveMode::Preference` is the
     existing owner-only reasoning preference, whose per-request lowering
     now runs through the same resolver with its outcomes unchanged.
-  - `direct_route_observation` gives the observation of a provider
-    family's direct route, for a client that reports none.
+    Upgrade note for when a request can name a level: beside a level, a
+    generic `thinking_budget_tokens` is refused on every route, OpenAI
+    routes included, where that field was accepted and had no effect
+    before; remove the budget or the level.
+  - `ReasoningResolveInput` is built with `ReasoningResolveInput::new` (it
+    is `#[non_exhaustive]`). `direct_route_observation` gives the
+    observation of a provider family's direct route, for a client that
+    reports none. A refusal raised with no observation names the family's
+    own route; for a provider outside the four families it names none
+    (`route: null`).
 
 ### Changed
 

@@ -55,14 +55,14 @@ fn apply(
         return Err(ReasoningNotAppliedReason::NoCatalogFact);
     };
     let observation = direct_route_observation(provider);
-    let input = ReasoningResolveInput {
-        requested: level,
+    let input = ReasoningResolveInput::new(
+        level,
         provider,
-        model: row.id,
-        observation: observation.as_ref(),
-        catalog_row: Some(row),
-        decided_by: ReasoningEffortDecidedBy::Preference,
-    };
+        row.id,
+        observation.as_ref(),
+        Some(row),
+        ReasoningEffortDecidedBy::Preference,
+    );
     match resolve_reasoning_effort(input, params, ReasoningResolveMode::Preference) {
         Ok(_) => Ok(()),
         Err(refusal) => Err(not_applied_reason(
@@ -74,8 +74,9 @@ fn apply(
 }
 
 /// The preference's reason for a refused level. `has_direct_route` is
-/// whether the provider has a direct route to judge the level on (the
-/// self-hosted family and a provider outside the families have none);
+/// whether the provider has a direct route observation to judge the level
+/// on (the self-hosted family and a provider outside the families have
+/// none);
 /// `another_providers_tag` is whether the request copy carries a tag that
 /// is not the provider's own.
 fn not_applied_reason(

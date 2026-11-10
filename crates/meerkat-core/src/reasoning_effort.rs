@@ -101,40 +101,14 @@ impl ReasoningBackend {
     }
 
     /// The source that states the effort levels this backend's routes
-    /// accept: the kind's own `reasoning_levels_source()`.
-    pub fn levels_source(self) -> ReasoningLevelsSource {
+    /// accept: the kind's own `reasoning_levels_source()`, the facts policy
+    /// of the provider matrix, decided per kind.
+    pub fn levels_source(self) -> ReasoningFactsSource {
         match self {
             Self::OpenAi(kind) => kind.reasoning_levels_source(),
             Self::Anthropic(kind) => kind.reasoning_levels_source(),
             Self::Google(kind) => kind.reasoning_levels_source(),
             Self::SelfHosted(kind) => kind.reasoning_levels_source(),
-        }
-    }
-}
-
-/// Which source states the effort levels a backend kind's routes accept:
-/// the facts policy of the provider matrix, decided per kind.
-///
-/// Typed and never serialized. The reported form is
-/// [`ReasoningFactsSource`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReasoningLevelsSource {
-    /// The model's catalog row: the backend forwards the provider's own API
-    /// to the provider's own validation.
-    Catalog,
-    /// The account's model list entry for the model: the backend answers
-    /// for itself, and the catalog row is never a source of its levels.
-    Account,
-    /// The levels the operator declared for the model.
-    Operator,
-}
-
-impl From<ReasoningLevelsSource> for ReasoningFactsSource {
-    fn from(source: ReasoningLevelsSource) -> Self {
-        match source {
-            ReasoningLevelsSource::Catalog => Self::Catalog,
-            ReasoningLevelsSource::Account => Self::Account,
-            ReasoningLevelsSource::Operator => Self::Operator,
         }
     }
 }
@@ -248,16 +222,21 @@ pub enum ReasoningEffortRefusalReason {
     ConflictingReasoningMode,
 }
 
-/// The source of the effort levels a route accepts for a model.
+/// The source of the effort levels a route accepts for a model. Each
+/// backend kind names its own (`reasoning_levels_source()` on the
+/// provider-matrix kinds, [`ReasoningBackend::levels_source`]); a refusal
+/// and a resolution report it as `facts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningFactsSource {
-    /// The model's catalog row.
+    /// The model's catalog row: the backend forwards the provider's own API
+    /// to the provider's own validation.
     Catalog,
-    /// The account's model list.
+    /// The account's model list entry for the model: the backend answers
+    /// for itself, and the catalog row is never a source of its levels.
     Account,
-    /// The operator's model configuration.
+    /// The levels the operator declared in the model's configuration.
     Operator,
 }
 

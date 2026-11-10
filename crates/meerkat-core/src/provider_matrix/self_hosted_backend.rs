@@ -1,7 +1,7 @@
 //! Self-hosted backend kinds (typed, provider-owned).
 
 use super::self_hosted_auth::SelfHostedAuthMethod;
-use crate::reasoning_effort::ReasoningLevelsSource;
+use crate::reasoning_effort::ReasoningFactsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SelfHostedBackendKind {
@@ -45,9 +45,9 @@ impl SelfHostedBackendKind {
     /// for a model: the levels the operator declared for it, on both kinds.
     /// There is no catalog and no account list here. The one owner of that
     /// decision; a new kind must decide (no wildcard arm).
-    pub fn reasoning_levels_source(self) -> ReasoningLevelsSource {
+    pub fn reasoning_levels_source(self) -> ReasoningFactsSource {
         match self {
-            Self::SelfHosted | Self::OpenAiCompatible => ReasoningLevelsSource::Operator,
+            Self::SelfHosted | Self::OpenAiCompatible => ReasoningFactsSource::Operator,
         }
     }
 }

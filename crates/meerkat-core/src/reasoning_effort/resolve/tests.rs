@@ -25,7 +25,7 @@ use crate::provider_matrix::{
 use crate::reasoning_effort::{
     AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
     ReasoningEffortRefusal, ReasoningEffortRefusalReason as Reason, ReasoningEffortResolution,
-    ReasoningFactsSource, ReasoningLevelsSource, ReasoningRoute, ReasoningRouteObservation,
+    ReasoningFactsSource, ReasoningRoute, ReasoningRouteObservation,
 };
 
 use EffortLevel::{High, Low, Max, Medium, Minimal, Xhigh};
@@ -194,17 +194,17 @@ fn resolve(
     params: &mut Option<ProviderParamsOverride>,
 ) -> Result<ReasoningEffortResolution, ReasoningEffortRefusal> {
     resolve_reasoning_effort(
-        ReasoningResolveInput {
+        ReasoningResolveInput::new(
             requested,
             provider,
-            model: MODEL,
+            MODEL,
             observation,
             catalog_row,
-            decided_by: match mode {
+            match mode {
                 ReasoningResolveMode::Strict => ReasoningEffortDecidedBy::Request,
                 ReasoningResolveMode::Preference => ReasoningEffortDecidedBy::Preference,
             },
-        },
+        ),
         params,
         mode,
     )
@@ -346,7 +346,7 @@ fn owned(fields: &[&str]) -> Vec<String> {
 /// new kind fails here until it has decided.
 #[test]
 fn policy_methods_are_exhaustive_per_kind() {
-    use ReasoningLevelsSource::{Account, Catalog, Operator};
+    use ReasoningFactsSource::{Account, Catalog, Operator};
 
     let openai = [
         (OpenAiBackendKind::OpenAiApi, Catalog),
@@ -399,19 +399,18 @@ fn policy_methods_are_exhaustive_per_kind() {
         assert_eq!(ReasoningBackend::SelfHosted(kind).levels_source(), source);
     }
 
-    // The policy source and the reported facts source are the same three.
-    assert_eq!(
-        ReasoningFactsSource::from(Catalog),
-        ReasoningFactsSource::Catalog
-    );
-    assert_eq!(
-        ReasoningFactsSource::from(Account),
-        ReasoningFactsSource::Account
-    );
-    assert_eq!(
-        ReasoningFactsSource::from(Operator),
-        ReasoningFactsSource::Operator
-    );
+    // The policy answers in the type a refusal and a resolution report as
+    // `facts`: there is one source vocabulary, not two.
+    for (source, wire) in [
+        (Catalog, "catalog"),
+        (Account, "account"),
+        (Operator, "operator"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(source).expect("a facts source serializes"),
+            serde_json::json!(wire)
+        );
+    }
 
     // The account's list is the source on exactly the Copilot kinds.
     for backend in backends() {
@@ -588,7 +587,7 @@ fn translation_table_covers_every_route_and_level() {
         );
         for (api, golden) in table {
             let (observation, catalog_row) = stating_everywhere(backend, api, &LADDER);
-            let facts = ReasoningFactsSource::from(backend.levels_source());
+            let facts = backend.levels_source();
             for level in LADDER {
                 cases += 1;
                 let context = format!("{}/{api} at {level:?}", backend.as_str());
@@ -649,7 +648,7 @@ fn the_realtime_api_takes_no_effort() {
             supported_reasoning_levels(family(backend), Some(&observation), catalog_row.as_ref()),
             ReasoningLevelFacts::Stated {
                 levels: Vec::new(),
-                source: backend.levels_source().into(),
+                source: backend.levels_source(),
             },
             "{}",
             backend.as_str()
@@ -2501,7 +2500,7 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
             );
             assert_eq!(
                 resolution.facts,
-                ReasoningFactsSource::from(observation.backend.levels_source()),
+                observation.backend.levels_source(),
                 "{context}"
             );
             assert_eq!(

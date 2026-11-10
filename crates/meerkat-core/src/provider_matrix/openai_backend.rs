@@ -1,7 +1,7 @@
 //! OpenAI backend kinds (typed, provider-owned).
 
 use super::openai_auth::OpenAiAuthMethod;
-use crate::reasoning_effort::ReasoningLevelsSource;
+use crate::reasoning_effort::ReasoningFactsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpenAiBackendKind {
@@ -106,12 +106,12 @@ impl OpenAiBackendKind {
     /// the catalog row never does. The one owner of that decision; the
     /// resolver of the provider-neutral `reasoning_effort` option reads it
     /// from here. A new kind must decide: the match has no wildcard arm.
-    pub fn reasoning_levels_source(self) -> ReasoningLevelsSource {
+    pub fn reasoning_levels_source(self) -> ReasoningFactsSource {
         match self {
             Self::OpenAiApi | Self::ChatGptBackend | Self::AzureOpenAi => {
-                ReasoningLevelsSource::Catalog
+                ReasoningFactsSource::Catalog
             }
-            Self::Copilot => ReasoningLevelsSource::Account,
+            Self::Copilot => ReasoningFactsSource::Account,
         }
     }
 

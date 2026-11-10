@@ -544,9 +544,8 @@ pub use reasoning_effort::{
     AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
     ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortReport,
     ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningLevelFacts,
-    ReasoningLevelsSource, ReasoningResolveInput, ReasoningResolveMode, ReasoningRoute,
-    ReasoningRouteObservation, direct_route_observation, resolve_reasoning_effort,
-    supported_reasoning_levels,
+    ReasoningResolveInput, ReasoningResolveMode, ReasoningRoute, ReasoningRouteObservation,
+    direct_route_observation, resolve_reasoning_effort, supported_reasoning_levels,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,

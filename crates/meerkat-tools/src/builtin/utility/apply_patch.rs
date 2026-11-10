@@ -1,5 +1,6 @@
 //! ApplyPatch tool for structured file edits within the project root.
 
+use super::protected_paths::ProtectedPaths;
 use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::ToolDef;
@@ -12,11 +13,25 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct ApplyPatchTool {
     project_root: PathBuf,
+    /// The paths this tool never writes: the engine's own directory under
+    /// the project root, and what the host declared as its own.
+    protected: ProtectedPaths,
 }
 
 impl ApplyPatchTool {
+    /// The tool rooted at `project_root`. It never writes
+    /// `<project_root>/.rkat`.
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
+        Self {
+            project_root,
+            protected: ProtectedPaths::default(),
+        }
+    }
+
+    /// The tool with the host's declared paths protected as well.
+    pub(crate) fn protecting(mut self, protected: ProtectedPaths) -> Self {
+        self.protected = protected;
+        self
     }
 }
 
@@ -81,6 +96,10 @@ enum ApplyPatchError {
     /// The native entry step before the first file change refused.
     #[error(transparent)]
     Entry(BuiltinToolError),
+    /// A path of the patch is one the file tools never write. The text is
+    /// the model-facing reason.
+    #[error("{0}")]
+    ProtectedPath(String),
 }
 
 #[derive(Debug, Error, PartialEq, Clone)]
@@ -193,10 +212,11 @@ impl ApplyPatchTool {
         let args: ApplyPatchArgs = serde_json::from_value(args)
             .map_err(|e| BuiltinToolError::invalid_args(format!("Invalid arguments: {e}")))?;
         let project_root = self.project_root.clone();
+        let protected = self.protected.clone();
         let patch = args.patch;
         let affected = tokio::task::spawn_blocking(move || {
             let mut entry = entry;
-            apply_patch(&project_root, &patch, &mut || {
+            apply_patch(&project_root, &protected, &patch, &mut || {
                 entry.enter().map_err(ApplyPatchError::Entry)
             })
         })
@@ -204,6 +224,7 @@ impl ApplyPatchTool {
         .map_err(|e| BuiltinToolError::execution_failed(format!("apply_patch task failed: {e}")))?
         .map_err(|e| match e {
             ApplyPatchError::Entry(error) => error,
+            ApplyPatchError::ProtectedPath(reason) => BuiltinToolError::invalid_args(reason),
             other => BuiltinToolError::execution_failed(other.to_string()),
         })?;
 
@@ -233,6 +254,7 @@ type PatchEntry<'a> = &'a mut dyn FnMut() -> Result<(), ApplyPatchError>;
 
 fn apply_patch(
     project_root: &Path,
+    protected: &ProtectedPaths,
     patch: &str,
     enter: PatchEntry<'_>,
 ) -> Result<AffectedPaths, ApplyPatchError> {
@@ -242,7 +264,7 @@ fn apply_patch(
             source,
         })?;
     let hunks = parse_patch(patch)?;
-    apply_hunks_to_files(&canonical_root, &hunks, enter)
+    apply_hunks_to_files(&canonical_root, protected, &hunks, enter)
 }
 
 fn parse_patch(patch: &str) -> Result<Vec<Hunk>, ParseError> {
@@ -467,6 +489,7 @@ fn parse_update_file_chunk(
 
 fn apply_hunks_to_files(
     project_root: &Path,
+    protected: &ProtectedPaths,
     hunks: &[Hunk],
     enter: PatchEntry<'_>,
 ) -> Result<AffectedPaths, ApplyPatchError> {
@@ -476,11 +499,31 @@ fn apply_hunks_to_files(
         ));
     }
 
+    // Every source and destination of the patch is resolved before the
+    // first change, so a patch that names a path this tool never writes (or
+    // one outside the project root) applies none of its operations. Each
+    // operation resolves its paths again when it runs.
+    for hunk in hunks {
+        match hunk {
+            Hunk::Add { path, .. } | Hunk::Delete { path } => {
+                resolve_patch_path(project_root, protected, path)?;
+            }
+            Hunk::Update {
+                path, move_path, ..
+            } => {
+                resolve_patch_path(project_root, protected, path)?;
+                if let Some(dest) = move_path {
+                    resolve_patch_path(project_root, protected, dest)?;
+                }
+            }
+        }
+    }
+
     let mut affected = AffectedPaths::default();
     for hunk in hunks {
         match hunk {
             Hunk::Add { path, contents } => {
-                let path = resolve_patch_path(project_root, path)?;
+                let path = resolve_patch_path(project_root, protected, path)?;
                 if path.exists() {
                     return Err(ApplyPatchError::ComputeReplacements(format!(
                         "Failed to write file {}",
@@ -504,7 +547,7 @@ fn apply_hunks_to_files(
                 affected.added.push(path);
             }
             Hunk::Delete { path } => {
-                let path = resolve_patch_path(project_root, path)?;
+                let path = resolve_patch_path(project_root, protected, path)?;
                 let metadata = std::fs::metadata(&path).map_err(|source| ApplyPatchError::Io {
                     context: format!("Failed to delete file {}", path.display()),
                     source,
@@ -527,11 +570,11 @@ fn apply_hunks_to_files(
                 move_path,
                 chunks,
             } => {
-                let path = resolve_patch_path(project_root, path)?;
+                let path = resolve_patch_path(project_root, protected, path)?;
                 let new_contents = derive_new_contents_from_chunks(&path, chunks)?;
 
                 if let Some(dest) = move_path {
-                    let dest = resolve_patch_path(project_root, dest)?;
+                    let dest = resolve_patch_path(project_root, protected, dest)?;
                     if dest.exists() && dest != path {
                         return Err(ApplyPatchError::Io {
                             context: format!("Failed to write file {}", dest.display()),
@@ -737,7 +780,11 @@ fn normalize_line(s: &str) -> String {
         .collect()
 }
 
-fn resolve_patch_path(project_root: &Path, relative: &Path) -> Result<PathBuf, ApplyPatchError> {
+fn resolve_patch_path(
+    project_root: &Path,
+    protected: &ProtectedPaths,
+    relative: &Path,
+) -> Result<PathBuf, ApplyPatchError> {
     let mut resolved = if relative.is_absolute() {
         PathBuf::new()
     } else {
@@ -783,6 +830,14 @@ fn resolve_patch_path(project_root: &Path, relative: &Path) -> Result<PathBuf, A
             relative.display()
         )));
     }
+
+    // Inside the root, the engine's own directory and the host's declared
+    // paths are not the project's to write, and a symbolic link that leads
+    // nowhere is not a path to write through (the fallback above resolves it
+    // to its parent, and the write would create its target).
+    protected
+        .admit_write(project_root, &resolved)
+        .map_err(|refusal| ApplyPatchError::ProtectedPath(refusal.reason(relative)))?;
 
     Ok(resolved)
 }
@@ -859,7 +914,7 @@ mod tests {
         let root = dir.path();
         let patch = wrap_patch("*** Add File: nested/new.txt\n+hello");
         let mut entries = 0usize;
-        let err = apply_patch(root, &patch, &mut || {
+        let err = apply_patch(root, &ProtectedPaths::default(), &patch, &mut || {
             entries += 1;
             Err(refused())
         })
@@ -879,7 +934,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let mut entries = 0usize;
-        apply_patch(root, "not a patch", &mut || {
+        apply_patch(root, &ProtectedPaths::default(), "not a patch", &mut || {
             entries += 1;
             Ok(())
         })
@@ -888,6 +943,7 @@ mod tests {
         std::fs::write(root.join("exists.txt"), "x").unwrap();
         apply_patch(
             root,
+            &ProtectedPaths::default(),
             &wrap_patch("*** Add File: exists.txt\n+y"),
             &mut || {
                 entries += 1;
@@ -900,7 +956,7 @@ mod tests {
         let patch = wrap_patch("*** Add File: a.txt\n+a\n*** Add File: b.txt\n+b");
         let mut entered = LeafEntry::none();
         let mut calls = 0usize;
-        apply_patch(root, &patch, &mut || {
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || {
             calls += 1;
             entered.enter().map_err(ApplyPatchError::Entry)
         })
@@ -924,7 +980,13 @@ mod tests {
         std::fs::write(root.join("src/old_name.rs"), "fn old_func() {}\n").unwrap();
         std::fs::write(root.join("src/deprecated.rs"), "// gone\n").unwrap();
 
-        let affected = apply_patch(root, APPLY_PATCH_EXAMPLE, &mut || Ok(())).unwrap();
+        let affected = apply_patch(
+            root,
+            &ProtectedPaths::default(),
+            APPLY_PATCH_EXAMPLE,
+            &mut || Ok(()),
+        )
+        .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(root.join("src/config.rs")).unwrap(),
@@ -1003,7 +1065,8 @@ mod tests {
             "*** Add File: nested/new.txt\n+hello\n+world\n*** Update File: source.txt\n*** Move to: moved.txt\n@@\n a\n-b\n+c\n*** Delete File: delete.txt",
         );
 
-        let affected = apply_patch(root, &patch, &mut || Ok(())).unwrap();
+        let affected =
+            apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.join("nested/new.txt")).unwrap(),
             "hello\nworld\n"
@@ -1028,7 +1091,7 @@ mod tests {
 
         let patch =
             wrap_patch("*** Update File: tail.txt\n@@\n alpha\n-beta\n+gamma\n*** End of File");
-        apply_patch(root, &patch, &mut || Ok(())).unwrap();
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\ngamma");
     }
@@ -1041,7 +1104,7 @@ mod tests {
         std::fs::write(&path, "import a\nimport z\n").unwrap();
 
         let patch = wrap_patch("*** Update File: imports.py\n@@ import a\n+import m");
-        apply_patch(root, &patch, &mut || Ok(())).unwrap();
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1053,7 +1116,10 @@ mod tests {
     fn rejects_escape_path() {
         let dir = tempdir().unwrap();
         let patch = wrap_patch("*** Add File: ../escape.txt\n+bad");
-        let err = apply_patch(dir.path(), &patch, &mut || Ok(())).expect_err("escape should fail");
+        let err = apply_patch(dir.path(), &ProtectedPaths::default(), &patch, &mut || {
+            Ok(())
+        })
+        .expect_err("escape should fail");
         assert!(err.to_string().contains("escapes the project root"));
     }
 
@@ -1066,7 +1132,7 @@ mod tests {
 
         let patch =
             wrap_patch("*** Update File: same.txt\n*** Move to: ./same.txt\n@@\n-before\n+after");
-        apply_patch(root, &patch, &mut || Ok(())).unwrap();
+        apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(())).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
     }
@@ -1091,8 +1157,8 @@ mod tests {
         symlink(outside.join("secret"), root.join("link")).unwrap();
 
         let patch = wrap_patch("*** Add File: link/loot.txt\n+pwned");
-        let err =
-            apply_patch(root, &patch, &mut || Ok(())).expect_err("symlink escape should fail");
+        let err = apply_patch(root, &ProtectedPaths::default(), &patch, &mut || Ok(()))
+            .expect_err("symlink escape should fail");
         assert!(
             err.to_string().contains("escapes the project root"),
             "expected typed containment rejection, got: {err}"
@@ -1102,7 +1168,8 @@ mod tests {
 
         // A normal in-root path through a real (non-escaping) directory still works.
         let patch_ok = wrap_patch("*** Add File: nested/ok.txt\n+fine");
-        apply_patch(root, &patch_ok, &mut || Ok(())).expect("in-root path should succeed");
+        apply_patch(root, &ProtectedPaths::default(), &patch_ok, &mut || Ok(()))
+            .expect("in-root path should succeed");
         assert_eq!(
             std::fs::read_to_string(root.join("nested/ok.txt")).unwrap(),
             "fine\n"
@@ -1350,5 +1417,113 @@ mod tests {
         let result = call_patch(&root, "*** Add File: dir-link/new.txt\n+escaped").await;
         assert_dangling_link_refusal(&result, "add below a dangling directory link");
         assert!(!outside.join("missing-dir").exists());
+    }
+
+    /// `.rkat` is the engine's only at the project root: a file whose name
+    /// merely starts with it, and a directory of that name deeper in the
+    /// project, are the project's own and stay writable. Updating an
+    /// ordinary file still reads it.
+    #[tokio::test]
+    async fn files_beside_the_engine_directory_stay_writable() {
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join(".rkat")).unwrap();
+        for path in [
+            ".rkatignore",
+            "src/.rkat.rs",
+            "vendor/tool/.rkat/notes.txt",
+            "rkat/config.toml",
+        ] {
+            let result = call_patch(&root, &format!("*** Add File: {path}\n+project file")).await;
+            assert!(result.is_ok(), "{path}: {result:?}");
+            assert_eq!(
+                std::fs::read_to_string(root.join(path)).unwrap(),
+                "project file\n"
+            );
+        }
+        let result = call_patch(
+            &root,
+            "*** Update File: vendor/tool/.rkat/notes.txt\n*** Move to: vendor/tool/.rkat/moved.txt\n@@\n-project file\n+moved",
+        )
+        .await;
+        assert!(result.is_ok(), "move inside a deeper .rkat: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("vendor/tool/.rkat/moved.txt")).unwrap(),
+            "moved\n"
+        );
+    }
+
+    /// The paths a host declared as its own are refused like the engine
+    /// directory, with everything under them, and a patch that names one
+    /// applies nothing.
+    #[tokio::test]
+    async fn host_declared_paths_are_refused_with_everything_under_them() {
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("state/realm")).unwrap();
+        std::fs::write(root.join("state/realm/config.toml"), "kept = true\n").unwrap();
+        let tool = ApplyPatchTool::new(root.clone()).protecting(ProtectedPaths::with_host_paths([
+            root.join("state"),
+            root.join("credentials"),
+        ]));
+        let call = |body: &'static str| {
+            let tool = tool.clone();
+            async move { tool.call(json!({ "patch": wrap_patch(body) })).await }
+        };
+
+        let result =
+            call("*** Update File: state/realm/config.toml\n@@\n-kept = true\n+kept = false").await;
+        assert_engine_refusal(&result, "update in the declared state root");
+        let result = call("*** Add File: credentials/token.json\n+{}").await;
+        assert_engine_refusal(
+            &result,
+            "add in a declared directory that does not exist yet",
+        );
+        let result =
+            call("*** Add File: notes.txt\n+note\n*** Delete File: state/realm/config.toml").await;
+        assert_engine_refusal(&result, "multi-file patch with a declared path");
+        assert!(
+            !root.join("notes.txt").exists(),
+            "an earlier add was applied"
+        );
+        assert!(!root.join("credentials").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("state/realm/config.toml")).unwrap(),
+            "kept = true\n"
+        );
+
+        let result = call("*** Add File: notes.txt\n+note").await;
+        assert!(
+            result.is_ok(),
+            "a file beside the declared paths: {result:?}"
+        );
+    }
+
+    /// The tool creates plain files and directories only: no operation
+    /// makes a symbolic or a hard link, so a session cannot first link a
+    /// path of its own to a protected file and then write through it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_operation_creates_plain_files_only() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_dir, root) = project();
+        std::fs::write(root.join("source.txt"), "a\n").unwrap();
+        let result = call_patch(
+            &root,
+            "*** Add File: nested/added.txt\n+added\n*** Update File: source.txt\n*** Move to: nested/moved.txt\n@@\n-a\n+b",
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        for path in ["nested/added.txt", "nested/moved.txt"] {
+            let entry = std::fs::symlink_metadata(root.join(path)).unwrap();
+            assert!(entry.file_type().is_file(), "{path} is a regular file");
+            assert_eq!(entry.nlink(), 1, "{path} has no second name");
+        }
+        assert!(
+            std::fs::symlink_metadata(root.join("nested"))
+                .unwrap()
+                .file_type()
+                .is_dir()
+        );
+        assert!(!root.join("source.txt").exists());
     }
 }

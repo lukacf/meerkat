@@ -1,5 +1,6 @@
 //! Blob file bridge tools.
 
+use super::protected_paths::ProtectedPaths;
 use crate::builtin::{BuiltinTool, BuiltinToolError, LeafEntry, ToolOutput};
 use async_trait::async_trait;
 use base64::Engine;
@@ -57,14 +58,26 @@ struct BlobInspectArgs {
 pub struct BlobSaveFileTool {
     project_root: PathBuf,
     blob_store: Arc<dyn BlobStore>,
+    /// The paths this tool never writes: the engine's own directory under
+    /// the project root, and what the host declared as its own.
+    protected: ProtectedPaths,
 }
 
 impl BlobSaveFileTool {
+    /// The tool rooted at `project_root`. It never writes
+    /// `<project_root>/.rkat`.
     pub fn new(project_root: PathBuf, blob_store: Arc<dyn BlobStore>) -> Self {
         Self {
             project_root,
             blob_store,
+            protected: ProtectedPaths::default(),
         }
+    }
+
+    /// The tool with the host's declared paths protected as well.
+    pub(crate) fn protecting(mut self, protected: ProtectedPaths) -> Self {
+        self.protected = protected;
+        self
     }
 }
 
@@ -353,6 +366,23 @@ impl BlobSaveFileTool {
             .map_err(|err| BuiltinToolError::invalid_args(err.to_string()))?;
         let user_path = PathBuf::from(&args.path);
         let resolved = resolve_project_path(&self.project_root, &user_path)?;
+        // Before the blob is read or anything is created: the engine's own
+        // directory and the host's declared paths are not the project's to
+        // write, and a symbolic link that leads nowhere is not a path to
+        // write through (the open would create its target).
+        {
+            let protected = self.protected.clone();
+            let project_root = self.project_root.clone();
+            let target = resolved.clone();
+            tokio::task::spawn_blocking(move || protected.admit_write(&project_root, &target))
+                .await
+                .map_err(|err| {
+                    BuiltinToolError::execution_failed(format!(
+                        "blob_save_file path check failed: {err}"
+                    ))
+                })?
+                .map_err(|refusal| BuiltinToolError::invalid_args(refusal.reason(&user_path)))?;
+        }
         let payload = self
             .blob_store
             .get(&BlobId::new(args.blob_id.clone()))
@@ -1053,6 +1083,102 @@ mod tests {
             assert!(
                 !outside.join("created.bin").exists(),
                 "the save (overwrite={overwrite}) created a file outside the project root"
+            );
+        }
+    }
+
+    /// Reading is not restricted: `blob_load_file` still loads a file the
+    /// engine keeps under `.rkat`, and a save beside `.rkat` (a deeper
+    /// directory of that name included) is still written.
+    #[tokio::test]
+    async fn reads_and_ordinary_saves_are_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        tokio::fs::create_dir_all(root.join(".rkat")).await.unwrap();
+        tokio::fs::write(root.join(".rkat/notes.txt"), b"readable")
+            .await
+            .unwrap();
+        let (store, blob_id) = seeded_store().await;
+        let load = BlobLoadFileTool::new(root.clone(), Arc::clone(&store));
+        let loaded = load
+            .call(json!({"path": ".rkat/notes.txt"}))
+            .await
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(loaded["bytes_read"], 8);
+
+        let save = BlobSaveFileTool::new(root.clone(), store);
+        for path in ["out.png", ".rkat.png", "assets/.rkat/out.png"] {
+            save.call(json!({"blob_id": blob_id.as_str(), "path": path}))
+                .await
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert_eq!(tokio::fs::read(root.join(path)).await.unwrap(), png_bytes());
+        }
+    }
+
+    /// The paths a host declared as its own are refused like the engine
+    /// directory. A host whose tools are rooted inside its own state root
+    /// (a server started without a context root) keeps its realm documents
+    /// and still lets ordinary files, a store file included, be written
+    /// there: the state root contains the project root, so it is not applied
+    /// as a whole. That the stores stay writable in that layout is a known
+    /// limit of this rule, stated in the tools reference; a host that wants
+    /// them out of reach gives its tools a context root.
+    #[tokio::test]
+    async fn save_file_refuses_host_declared_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (store, blob_id) = seeded_store().await;
+
+        // A project with the state root inside it.
+        let project = base.join("project");
+        tokio::fs::create_dir_all(project.join("state"))
+            .await
+            .unwrap();
+        let tool = BlobSaveFileTool::new(project.clone(), Arc::clone(&store))
+            .protecting(ProtectedPaths::with_host_paths([project.join("state")]));
+        let result = tool
+            .call(json!({"blob_id": blob_id.as_str(), "path": "state/realm/runtime.sqlite3"}))
+            .await;
+        assert_engine_refusal(&result, "a store under the declared state root");
+        assert!(!project.join("state/realm").exists());
+        tool.call(json!({"blob_id": blob_id.as_str(), "path": "out.png"}))
+            .await
+            .unwrap();
+
+        // The realm directory itself as the project root.
+        let state_root = base.join("realms");
+        let realm = state_root.join("realm-1");
+        tokio::fs::create_dir_all(&realm).await.unwrap();
+        tokio::fs::write(realm.join("config.toml"), b"kept")
+            .await
+            .unwrap();
+        let tool = BlobSaveFileTool::new(realm.clone(), store).protecting(
+            ProtectedPaths::with_host_paths([
+                state_root,
+                realm.join("config.toml"),
+                realm.join("authorization"),
+            ]),
+        );
+        for path in ["config.toml", "authorization/grant-owner.jsonl"] {
+            let result = tool
+                .call(json!({"blob_id": blob_id.as_str(), "path": path, "overwrite": true}))
+                .await;
+            assert_engine_refusal(&result, path);
+        }
+        assert_eq!(
+            tokio::fs::read(realm.join("config.toml")).await.unwrap(),
+            b"kept"
+        );
+        assert!(!realm.join("authorization").exists());
+        for path in ["out.png", "runtime.sqlite3"] {
+            tool.call(json!({"blob_id": blob_id.as_str(), "path": path}))
+                .await
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            assert_eq!(
+                tokio::fs::read(realm.join(path)).await.unwrap(),
+                png_bytes()
             );
         }
     }

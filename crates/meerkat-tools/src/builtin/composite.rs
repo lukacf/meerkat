@@ -5,6 +5,8 @@ use crate::builtin::shell::{DurableShellJobRuntime, JobManager, ShellConfig};
 #[cfg(feature = "skills")]
 use crate::builtin::skills::SkillToolSet;
 use crate::builtin::store::TaskStore;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::builtin::utility::protected_paths::ProtectedPaths;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
@@ -130,6 +132,11 @@ pub struct CompositeDispatcher {
     web_search_runtime: Option<WebSearchToolBinding>,
     #[cfg(not(target_arch = "wasm32"))]
     blob_tools: Option<BlobToolBinding>,
+    /// The paths this composite's file tools never write: the engine's own
+    /// directory under the project root, always, and what the host declared
+    /// with [`Self::protect_host_paths`].
+    #[cfg(not(target_arch = "wasm32"))]
+    protected_paths: ProtectedPaths,
     allowed_tools: HashSet<String>,
     /// This composite's process-local identity as the registration owner of
     /// its builtins: the key of the owner witness it attaches to the plan of
@@ -392,6 +399,7 @@ impl CompositeDispatcher {
             brain_swap_runtime: None,
             web_search_runtime: None,
             blob_tools: None,
+            protected_paths: ProtectedPaths::default(),
             allowed_tools,
             execution_authority_id: Self::next_execution_authority_id(),
             builtin_registration_epoch: 0,
@@ -508,6 +516,7 @@ impl CompositeDispatcher {
             brain_swap_runtime: None,
             web_search_runtime: None,
             blob_tools: None,
+            protected_paths: ProtectedPaths::default(),
             allowed_tools: HashSet::new(),
             execution_authority_id: Self::next_execution_authority_id(),
             builtin_registration_epoch: 0,
@@ -615,6 +624,46 @@ impl CompositeDispatcher {
         self.normalize_optional_builtin_order();
     }
 
+    /// Declare the paths the host keeps its own state and inputs in, so
+    /// this composite's in-process file tools (`apply_patch`,
+    /// `blob_save_file`) never write them: a realm state root, config
+    /// documents, MCP, hook and skill sources, a credential store. A
+    /// declared path that lies strictly inside the project root is refused
+    /// with everything under it; one that contains or equals the project
+    /// root is not applied, and a path that is not absolute is ignored.
+    /// The engine's own directory, `<project root>/.rkat`, is refused
+    /// without any declaration. Each call replaces the declared paths.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn protect_host_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.set_protected_paths(ProtectedPaths::with_host_paths(paths));
+    }
+
+    /// Rebuild this composite's file tools with `protected`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_protected_paths(&mut self, protected: ProtectedPaths) {
+        use crate::builtin::utility::ApplyPatchTool;
+        self.protected_paths = protected;
+        if let Some(project_root) = self.project_root.clone() {
+            for tool in &mut self.builtin_tools {
+                if tool.name() == "apply_patch" {
+                    *tool = Arc::new(
+                        ApplyPatchTool::new(project_root.clone())
+                            .protecting(self.protected_paths.clone()),
+                    );
+                }
+            }
+            // A replaced registration: no plan resolved before it runs on it.
+            self.builtin_registration_epoch += 1;
+        }
+        if let Some(blob_store) = self
+            .blob_tools
+            .as_ref()
+            .map(|binding| Arc::clone(&binding.blob_store))
+        {
+            self.register_blob_file_tools(blob_store);
+        }
+    }
+
     /// Register blob file bridge builtins backed by the session blob store.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn register_blob_file_tools(&mut self, blob_store: Arc<dyn BlobStore>) {
@@ -627,10 +676,10 @@ impl CompositeDispatcher {
         };
         use crate::builtin::utility::{BlobInspectTool, BlobLoadFileTool, BlobSaveFileTool};
         let tools: [Arc<dyn BuiltinTool>; 3] = [
-            Arc::new(BlobSaveFileTool::new(
-                project_root.clone(),
-                Arc::clone(&blob_store),
-            )),
+            Arc::new(
+                BlobSaveFileTool::new(project_root.clone(), Arc::clone(&blob_store))
+                    .protecting(self.protected_paths.clone()),
+            ),
             Arc::new(BlobLoadFileTool::new(project_root, Arc::clone(&blob_store))),
             Arc::new(BlobInspectTool::new(Arc::clone(&blob_store))),
         ];
@@ -1405,6 +1454,9 @@ impl AgentToolDispatcher for CompositeDispatcher {
             {
                 return Err(OpsLifecycleBindError::Unsupported);
             }
+
+            // The rebuilt file tools keep the paths the host declared.
+            rebound.set_protected_paths(owned.protected_paths.clone());
 
             #[cfg(feature = "skills")]
             if let Some(skill_tools) = owned.skill_tools.take() {
@@ -3386,6 +3438,149 @@ mod tests {
                 "{expected} should survive ops lifecycle rebinding; tools={names:?}"
             );
         }
+    }
+
+    /// One `apply_patch` add of `path` through the dispatcher.
+    async fn add_file_through(
+        dispatcher: &dyn AgentToolDispatcher,
+        path: &str,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        let args = serde_json::json!({
+            "patch": format!("*** Begin Patch\n*** Add File: {path}\n+content\n*** End Patch")
+        });
+        let call_json = serde_json::value::RawValue::from_string(args.to_string()).unwrap();
+        dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-path",
+                name: "apply_patch",
+                args: &call_json,
+            })
+            .await
+    }
+
+    fn assert_protected_path_refusal(
+        result: &Result<meerkat_core::ToolDispatchOutcome, ToolError>,
+        case: &str,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err(ToolError::InvalidArguments { name, reason })
+                    if name == "apply_patch" && reason.contains("engine's own directory")
+            ),
+            "{case}: expected the typed refusal, got {result:?}"
+        );
+    }
+
+    /// The composite's file tools refuse the engine's own directory with no
+    /// declaration, and the paths a host declares, whether the blob tools
+    /// were registered before or after the declaration. The refusal is the
+    /// typed invalid-arguments tool error.
+    #[tokio::test]
+    async fn file_tools_refuse_the_engine_directory_and_declared_host_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.clone()),
+            None,
+            None,
+            None,
+        )
+        .expect("composite dispatcher should build");
+
+        let result = add_file_through(&dispatcher, ".rkat/mcp.toml").await;
+        assert_protected_path_refusal(&result, "no declaration: .rkat");
+        add_file_through(&dispatcher, "state/realm/notes.txt")
+            .await
+            .expect("an undeclared directory is the project's own");
+
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob = store.put_image("image/png", "aGVsbG8=").await.unwrap();
+        dispatcher.register_blob_file_tools(Arc::clone(&store));
+        dispatcher.protect_host_paths([root.join("state")]);
+
+        let result = add_file_through(&dispatcher, "state/realm/config.toml").await;
+        assert_protected_path_refusal(&result, "declared state root");
+        let result = add_file_through(&dispatcher, ".rkat/mcp.toml").await;
+        assert_protected_path_refusal(&result, "declared paths keep the .rkat rule");
+        let save = |path: &'static str| {
+            let args = serde_json::json!({"blob_id": blob.blob_id.as_str(), "path": path});
+            serde_json::value::RawValue::from_string(args.to_string()).unwrap()
+        };
+        let call_json = save("state/realm/runtime.sqlite3");
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-save",
+                name: "blob_save_file",
+                args: &call_json,
+            })
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(ToolError::InvalidArguments { name, reason })
+                    if name == "blob_save_file" && reason.contains("engine's own directory")
+            ),
+            "blob tools registered before the declaration: {result:?}"
+        );
+        assert!(!root.join("state/realm/config.toml").exists());
+        assert!(!root.join("state/realm/runtime.sqlite3").exists());
+
+        // Registered after the declaration.
+        dispatcher.register_blob_file_tools(store);
+        let call_json = save("state/realm/jobs.sqlite3");
+        let result = dispatcher
+            .dispatch(ToolCallView {
+                id: "protected-save-2",
+                name: "blob_save_file",
+                args: &call_json,
+            })
+            .await;
+        assert!(
+            matches!(&result, Err(ToolError::InvalidArguments { .. })),
+            "blob tools registered after the declaration: {result:?}"
+        );
+        add_file_through(&dispatcher, "src/lib.rs")
+            .await
+            .expect("an ordinary project file is written");
+    }
+
+    /// A composite rebuilt for its session's ops lifecycle keeps the paths
+    /// the host declared: its new file tools refuse them as the old ones did.
+    #[tokio::test]
+    async fn declared_host_paths_survive_ops_lifecycle_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().canonicalize().unwrap();
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(root.clone()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+        )
+        .expect("composite dispatcher should build");
+        dispatcher.register_blob_file_tools(store);
+        dispatcher.protect_host_paths([root.join("state")]);
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .expect("ops lifecycle binding should rebuild the composite")
+            .into_dispatcher();
+
+        let result = add_file_through(rebound.as_ref(), "state/realm/config.toml").await;
+        assert_protected_path_refusal(&result, "declared state root after the rebind");
+        let result = add_file_through(rebound.as_ref(), ".rkat/mcp.toml").await;
+        assert_protected_path_refusal(&result, ".rkat after the rebind");
+        assert!(!root.join("state").exists());
+        add_file_through(rebound.as_ref(), "src/lib.rs")
+            .await
+            .expect("an ordinary project file is written");
     }
 
     #[tokio::test]

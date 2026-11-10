@@ -568,14 +568,22 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(meerkat::HostConfinement::credential_store_input),
     );
     host_confinement.admit_host_inputs(&host_inputs)?;
-    host_confinement.log_startup(
-        &host_inputs,
-        &meerkat::HostConfinement::convention_sources(
-            cli.context_root.as_deref(),
-            cli.user_config_root.as_deref(),
-        ),
+    let convention_sources = meerkat::HostConfinement::convention_sources(
+        cli.context_root.as_deref(),
+        cli.user_config_root.as_deref(),
     );
-    factory = factory.with_host_confinement(&host_confinement);
+    host_confinement.log_startup(&host_inputs, &convention_sources);
+    // The agents' in-process file tools never write the host's inputs, the
+    // realm's own documents or the convention sources, in any confinement
+    // mode. Without --context-root the tools are rooted in the realm
+    // directory: the realm documents are kept there too.
+    factory = factory
+        .with_host_confinement(&host_confinement)
+        .with_protected_host_inputs(
+            &host_inputs,
+            &meerkat::HostConfinement::realm_documents(&realm_paths.root),
+            &convention_sources,
+        );
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
 
@@ -929,13 +937,11 @@ async fn serve_stock_governed_jsonl(
             .and_then(meerkat::HostConfinement::credential_store_input),
     );
     host_confinement.admit_host_inputs(&host_inputs)?;
-    host_confinement.log_startup(
-        &host_inputs,
-        &meerkat::HostConfinement::convention_sources(
-            cli.context_root.as_deref(),
-            cli.user_config_root.as_deref(),
-        ),
+    let convention_sources = meerkat::HostConfinement::convention_sources(
+        cli.context_root.as_deref(),
+        cli.user_config_root.as_deref(),
     );
+    host_confinement.log_startup(&host_inputs, &convention_sources);
     // The fixed governed profile: model, the named callback tools and live
     // MCP attachment only. Skills and schedules are not part of it; every
     // other unsupported setting is refused by the governed setup.
@@ -1053,10 +1059,18 @@ async fn serve_stock_governed_jsonl(
     // through the same full factory as the controller, and this pipe's
     // operator decides R3, through the persistence's one approval issuer.
     // The reviewer resolves its own binding's credential as the host too, so
-    // it carries the same confinement.
+    // it carries the same confinement, and its file tools, if a profile
+    // gives it any, never write the host's inputs or the realm documents.
+    // (The governed connections themselves are built from the minimal
+    // factory with callback tools only: they mount no file tool.)
     let reviewer_factory = AgentFactory::new(realm_paths.root.clone())
         .runtime_root(realm_paths.root.clone())
-        .with_host_confinement(&host_confinement);
+        .with_host_confinement(&host_confinement)
+        .with_protected_host_inputs(
+            &host_inputs,
+            &meerkat::HostConfinement::realm_documents(&realm_paths.root),
+            &convention_sources,
+        );
     let setup = meerkat_rpc::governed_jsonl::stock::stock_governed_jsonl_setup_reviewed(
         &governance,
         config,

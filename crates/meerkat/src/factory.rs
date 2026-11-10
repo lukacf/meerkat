@@ -4094,6 +4094,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The paths the host declared as its own state and inputs with
+    /// [`Self::with_protected_host_inputs`]: the in-process file tools of
+    /// every dispatcher this factory builds never write them.
+    #[cfg(not(target_arch = "wasm32"))]
+    protected_host_paths: Vec<PathBuf>,
     /// The host's trust over the convention hook sources, installed with
     /// [`Self::with_hook_source_trust`]: asked about each source over the
     /// bytes the build read.
@@ -5417,6 +5422,8 @@ impl AgentFactory {
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
+            protected_host_paths: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
@@ -5628,6 +5635,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            protected_host_paths: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -5955,6 +5964,44 @@ impl AgentFactory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn host_confinement(&self) -> Option<&crate::HostConfinement> {
         self.host_confinement.as_ref()
+    }
+
+    /// Declare the host's own state and inputs to the in-process file
+    /// tools (`apply_patch`, `blob_save_file`) of every dispatcher this
+    /// factory builds, so a model's call never writes them: `inputs` and
+    /// `convention_sources` are the lists a host assembles for
+    /// [`crate::HostConfinement::admit_host_inputs`] and its startup report
+    /// ([`crate::HostConfinement::host_inputs`],
+    /// [`crate::HostConfinement::credential_store_input`],
+    /// [`crate::HostConfinement::convention_sources`]), and
+    /// `realm_documents` is [`crate::HostConfinement::realm_documents`] of
+    /// the realm it serves. Those tools run in the host process, so OS
+    /// process confinement does not reach them, whatever its mode.
+    ///
+    /// A declared path that lies strictly inside a dispatcher's project
+    /// root is refused with everything under it (a realm state root given
+    /// inside the project, a config document, a credential store). One
+    /// that contains or equals the project root is not applied, so a host
+    /// whose tools are rooted in its realm directory keeps the realm
+    /// documents and still lets other files be written there. A relative
+    /// path is taken from the process working directory, as the host
+    /// itself opens it. `<project root>/.rkat` is refused without this
+    /// call. Each call replaces the declared paths.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_protected_host_inputs(
+        mut self,
+        inputs: &[(crate::HostInput, PathBuf)],
+        realm_documents: &[PathBuf],
+        convention_sources: &[PathBuf],
+    ) -> Self {
+        self.protected_host_paths = inputs
+            .iter()
+            .map(|(_, path)| path)
+            .chain(realm_documents)
+            .chain(convention_sources)
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.clone()))
+            .collect();
+        self
     }
 
     /// How this factory's skill repositories meet its host confinement: the
@@ -7969,7 +8016,7 @@ impl AgentFactory {
         session_id: Option<String>,
         ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
-        CompositeDispatcher::new_with_ops_lifecycle(
+        let mut composite = CompositeDispatcher::new_with_ops_lifecycle(
             store,
             config,
             project_root,
@@ -7977,7 +8024,18 @@ impl AgentFactory {
             external,
             session_id,
             ops_lifecycle,
-        )
+        )?;
+        self.protect_host_paths_of(&mut composite);
+        Ok(composite)
+    }
+
+    /// Give `composite`'s file tools the paths this factory's host declared
+    /// ([`Self::with_protected_host_inputs`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn protect_host_paths_of(&self, composite: &mut CompositeDispatcher) {
+        if !self.protected_host_paths.is_empty() {
+            composite.protect_host_paths(self.protected_host_paths.iter().cloned());
+        }
     }
 
     /// Build a shared builtin dispatcher using the provided config.
@@ -8118,6 +8176,9 @@ impl AgentFactory {
             ops_lifecycle,
             durable_shell_runtime,
         )?;
+        // Before the blob file tools are registered: they are built with the
+        // declared paths.
+        self.protect_host_paths_of(&mut composite);
 
         #[cfg(feature = "skills")]
         if let Some(engine) = skill_engine {

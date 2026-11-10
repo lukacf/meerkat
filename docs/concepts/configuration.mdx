@@ -805,6 +805,13 @@ startup report says that a process the agent drives can still change the
 host's own inputs. `--confinement trusted-host` turns confinement off for the
 whole process, with no such guarantee.
 
+All of the above is about the processes an agent launches. The in-process
+file tools (`apply_patch`, `blob_save_file`) are not processes and are bound
+by a rule of their own, in every confinement mode and without confinement:
+they never write `<project root>/.rkat/` or any of the inputs and convention
+sources listed above that lie inside the project root. See
+[paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
+
 ### Administration
 
 Like [governance](#governance-settings), the section is administered by the

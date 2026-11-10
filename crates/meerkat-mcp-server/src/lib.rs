@@ -1651,13 +1651,11 @@ impl MeerkatMcpState {
                 .and_then(meerkat::HostConfinement::credential_store_input),
         );
         host_confinement.admit_host_inputs(&host_inputs)?;
-        host_confinement.log_startup(
-            &host_inputs,
-            &meerkat::HostConfinement::convention_sources(
-                conventions_context_root.as_deref(),
-                bootstrap.context.user_config_root.as_deref(),
-            ),
+        let convention_sources = meerkat::HostConfinement::convention_sources(
+            conventions_context_root.as_deref(),
+            bootstrap.context.user_config_root.as_deref(),
         );
+        host_confinement.log_startup(&host_inputs, &convention_sources);
         let mcp_stdio_launch_profile = host_mcp_stdio_launch_profile(&host_confinement);
 
         // Create factory with max-permissive flags; per-request overrides
@@ -1665,7 +1663,11 @@ impl MeerkatMcpState {
         // It builds no MCP router of its own (its sessions configure no
         // servers and its runtime carries no configured attachment
         // authority), so the host's attempt guards live with the routers
-        // this server builds below.
+        // this server builds below. The agents' in-process file tools never
+        // write the host's inputs, the realm's own documents or the
+        // convention sources, in any confinement mode; without a context
+        // root the tools are rooted in the realm directory, where the realm
+        // documents are kept too.
         let mut factory = AgentFactory::new(store_path)
             .session_store(session_store.clone())
             .runtime_root(realm_paths.root.clone())
@@ -1674,7 +1676,12 @@ impl MeerkatMcpState {
             .shell(true)
             .workgraph(true)
             .schedule(true)
-            .with_host_confinement(&host_confinement);
+            .with_host_confinement(&host_confinement)
+            .with_protected_host_inputs(
+                &host_inputs,
+                &meerkat::HostConfinement::realm_documents(&realm_paths.root),
+                &convention_sources,
+            );
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);
         }

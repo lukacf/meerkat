@@ -1211,3 +1211,144 @@ async fn file_tools_refuse_the_engine_directory_without_host_cooperation() {
         "planted\n"
     );
 }
+
+/// The lists a stock host assembles for a project whose own state and
+/// inputs all lie inside the project root, outside `.rkat`: the realm state
+/// root (`--state-root ./state`), the user config root (its document and
+/// `mcp.toml`), a context root below the project root (its `mcp.toml`,
+/// hooks and skills), and a file credential store.
+fn declared_in_project(root: &Path) -> AgentFactory {
+    let mut inputs = HostConfinement::host_inputs(
+        &root.join("state"),
+        Some(&root.join("home/.rkat/config.toml")),
+    );
+    inputs.push((
+        meerkat::HostInput::CredentialStore,
+        root.join("credentials"),
+    ));
+    let realm_documents = HostConfinement::realm_documents(&root.join("state/realm-1"));
+    let convention_sources =
+        HostConfinement::convention_sources(Some(&root.join("service")), Some(&root.join("home")));
+    file_tool_factory(root).with_protected_host_inputs(
+        &inputs,
+        &realm_documents,
+        &convention_sources,
+    )
+}
+
+/// Every path a host declares as its own state or input inside the project
+/// root is refused by the file tools, with everything under it, existing or
+/// not; a file beside each of them is still written.
+#[tokio::test]
+async fn file_tools_refuse_every_declared_host_input_inside_the_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    for (case, path) in [
+        (
+            "a realm config document under the state root",
+            "state/realm-1/config.toml",
+        ),
+        (
+            "another realm under the state root",
+            "state/parent/config.toml",
+        ),
+        ("a store under the state root", "state/realm-1/tasks.db"),
+        ("the user config document", "home/.rkat/config.toml"),
+        ("the user MCP file", "home/.rkat/mcp.toml"),
+        (
+            "the MCP file of a context root below the project root",
+            "service/.rkat/mcp.toml",
+        ),
+        (
+            "the hooks of that context root",
+            "service/.rkat/config.toml",
+        ),
+        (
+            "a skill of that context root",
+            "service/.rkat/skills/planted/SKILL.md",
+        ),
+        ("the credential store", "credentials/provider/token.json"),
+        (
+            "the engine directory, as without a declaration",
+            ".rkat/mcp.toml",
+        ),
+    ] {
+        let result = apply_patch_through(declared_in_project(&root), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, case);
+        assert!(!root.join(path).exists(), "{case}: {path} was written");
+    }
+    for path in [
+        "state.md",
+        "home/notes.txt",
+        "home/.rkat/notes.txt",
+        "service/src/main.rs",
+        "credentials.example",
+    ] {
+        let result = apply_patch_through(declared_in_project(&root), add_file_patch(path)).await;
+        assert!(!result.0, "{path} is the project's own: {result:?}");
+        assert!(root.join(path).is_file(), "{path} was written");
+    }
+}
+
+/// A server started without a context root roots its tools in the realm
+/// directory itself. The realm's own documents are refused there; the
+/// state root as a whole contains the project root and is not applied, so
+/// an ordinary file is written as before. The stores beside the documents
+/// stay writable in this layout (a store file is written below): that is
+/// the stated limit of the rule there, and a host that wants them out of
+/// reach gives its tools a context root.
+#[tokio::test]
+async fn file_tools_keep_the_realm_documents_where_the_realm_is_the_project_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let state_root = base.join("realms");
+    let realm = state_root.join("realm-1");
+    std::fs::create_dir_all(&realm).unwrap();
+    std::fs::write(realm.join("config.toml"), "kept = true\n").unwrap();
+    let factory = || {
+        let mut inputs =
+            HostConfinement::host_inputs(&state_root, Some(&base.join("user/.rkat/config.toml")));
+        inputs.push((
+            meerkat::HostInput::CredentialStore,
+            base.join("credentials"),
+        ));
+        AgentFactory::new(realm.clone())
+            .session_store(Arc::new(meerkat_store::MemoryStore::new()))
+            .runtime_root(realm.clone())
+            .project_root(realm.clone())
+            .builtins(true)
+            .shell(false)
+            .with_protected_host_inputs(
+                &inputs,
+                &HostConfinement::realm_documents(&realm),
+                &HostConfinement::convention_sources(None, Some(&base.join("user"))),
+            )
+    };
+    let update = "*** Begin Patch\n*** Update File: config.toml\n@@\n-kept = true\n+kept = false\n*** End Patch";
+    let result = apply_patch_through(factory(), update.to_string()).await;
+    assert_engine_file_refusal(&result, "the realm config document");
+    assert_eq!(
+        std::fs::read_to_string(realm.join("config.toml")).unwrap(),
+        "kept = true\n"
+    );
+    for (case, path) in [
+        ("the config generation sidecar", "config_state.json"),
+        ("the realm manifest", "realm_manifest.json"),
+        ("the grant owner store", "authorization/grant-owner.jsonl"),
+        ("the hooks read from the project root", ".rkat/config.toml"),
+        (
+            "the skills read from the project root",
+            ".rkat/skills/planted/SKILL.md",
+        ),
+        ("an MCP file at the project root", ".rkat/mcp.toml"),
+    ] {
+        let result = apply_patch_through(factory(), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, case);
+        assert!(!realm.join(path).exists(), "{case}: {path} was written");
+    }
+    for path in ["out.txt", "notes/config.toml", "tasks.db"] {
+        let result = apply_patch_through(factory(), add_file_patch(path)).await;
+        assert!(!result.0, "{path} is written as before: {result:?}");
+        assert!(realm.join(path).is_file(), "{path} was written");
+    }
+}

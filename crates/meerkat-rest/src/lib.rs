@@ -864,14 +864,22 @@ impl AppState {
         );
         host_inputs.extend(credential_store_input);
         host_confinement.admit_host_inputs(&host_inputs)?;
-        host_confinement.log_startup(
-            &host_inputs,
-            &meerkat::HostConfinement::convention_sources(
-                conventions_context_root.as_deref(),
-                bootstrap.context.user_config_root.as_deref(),
-            ),
+        let convention_sources = meerkat::HostConfinement::convention_sources(
+            conventions_context_root.as_deref(),
+            bootstrap.context.user_config_root.as_deref(),
         );
-        factory = factory.with_host_confinement(&host_confinement);
+        host_confinement.log_startup(&host_inputs, &convention_sources);
+        // The agents' in-process file tools never write the host's inputs,
+        // the realm's own documents or the convention sources, in any
+        // confinement mode. Without --context-root the tools are rooted in
+        // the instance root: the realm documents are kept there too.
+        factory = factory
+            .with_host_confinement(&host_confinement)
+            .with_protected_host_inputs(
+                &host_inputs,
+                &meerkat::HostConfinement::realm_documents(&realm_paths.root),
+                &convention_sources,
+            );
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);
         }

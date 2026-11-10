@@ -93,7 +93,17 @@ File:` sections, paths relative to the project root. `view_image {path}` reads
 PNG, JPEG, GIF, WebP or SVG up to 5 MB inside the project root, and is hidden
 when the model cannot take image tool results. `blob_save_file {blob_id, path,
 overwrite?}`, `blob_load_file {path, media_type?}` and `blob_inspect {blob_id}`
-move blobs to and from project files. `web_search {query, provider?,
+move blobs to and from project files. `apply_patch` and `blob_save_file` run
+in the host process and never write `<project root>/.rkat/` (the project's
+MCP servers, hooks, skills and, with the CLI's default layout, the realm) or
+a path the host declares as its own state or input (a realm state root given
+inside the project, the realm and user config documents, a file credential
+store), nor through a symbolic link whose target does not exist: the call is
+`invalid_arguments`, nothing is written, and a patch with one such path
+applies none of its operations. A Rust host declares its paths with
+`AgentFactory::with_protected_host_inputs`. A server without `--context-root`
+roots these tools in its realm directory: the realm's documents are refused
+there, its stores are not, so give such a server a context root. `web_search {query, provider?,
 context?}` is the fallback: offered only on an explicit enable when native
 search is not active (the model lacks it, or provider-native tools are off).
 

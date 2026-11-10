@@ -214,6 +214,13 @@ A project `mcp.toml` or `.rkat/config.toml` that a confined process can write
 is not trusted: its MCP servers and hooks are refused, and `rkat` says so on
 stderr.
 
+With or without confinement, the agent's file tools (`apply_patch`,
+`blob_save_file`) never write `<project>/.rkat/`, the realm state root or the
+other files `rkat` reads its own configuration from; see
+[paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
+Change them with `rkat mcp add`, `rkat config`, `rkat auth` and
+`rkat skill add`, or edit them yourself.
+
 ## Custom model registry entries
 
 Uncatalogued models served by a first-party API provider are declared once

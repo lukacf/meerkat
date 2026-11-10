@@ -4430,6 +4430,289 @@ async fn refresh_github_tokens(
 mod tests {
     use super::*;
 
+    /// A Copilot account lists Claude models that carry a minor version with
+    /// a dot (`claude-opus-5.5`), while the model catalog writes the same
+    /// models with a hyphen (`claude-opus-5-5`). Two ids name the same model
+    /// on an account when they are equal after every `.` is read as `-`; an
+    /// exact entry always wins. The account list here is hand-written.
+    mod separator_insensitive_model_ids {
+        use super::*;
+
+        /// One entry of the account's list. Its output limit tells the
+        /// entries apart in a route's capabilities.
+        fn listed(
+            id: &str,
+            endpoints: &[CopilotEndpoint],
+            max_output_tokens: u32,
+        ) -> crate::CopilotModel {
+            crate::CopilotModel {
+                id: id.to_string(),
+                vendor: None,
+                name: None,
+                version: None,
+                model_picker_enabled: Some(true),
+                capabilities: crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_output_tokens: Some(max_output_tokens),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                policy: None,
+                supported_endpoints: Some(endpoints.to_vec()),
+            }
+        }
+
+        /// An account list as Copilot writes one: dotted Claude and OpenAI
+        /// ids, a Claude id with no minor version, a Gemini id.
+        fn account_list() -> Vec<crate::CopilotModel> {
+            vec![
+                listed("claude-opus-5.5", &[CopilotEndpoint::Messages], 55_000),
+                listed("claude-fable-5.2", &[CopilotEndpoint::Messages], 52_000),
+                listed("claude-sonnet-5.5", &[CopilotEndpoint::Messages], 45_000),
+                listed("claude-opus-5", &[CopilotEndpoint::Messages], 50_000),
+                listed("gpt-5.5", &[CopilotEndpoint::Responses], 35_000),
+                listed(
+                    "gpt-5.4-mini",
+                    &[CopilotEndpoint::Responses, CopilotEndpoint::ChatCompletions],
+                    34_000,
+                ),
+                listed(
+                    "gemini-3.8-flash",
+                    &[CopilotEndpoint::ChatCompletions],
+                    38_000,
+                ),
+            ]
+        }
+
+        /// An account state that holds `models` as its loaded list.
+        fn account_with(models: Vec<crate::CopilotModel>) -> Arc<CopilotAccountState> {
+            let state = Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::OperatorToken,
+            ));
+            *state.cache.write() = Some(CachedCopilotToken {
+                generation: 1,
+                token: "fixture".to_string(),
+                source_generation: 1,
+                source_published_at_millis: None,
+                source_expires_at: None,
+                refresh_at: Utc::now() + Duration::hours(1),
+                expires_at: Utc::now() + Duration::hours(2),
+                api_base: "https://copilot.example.test".to_string(),
+                models: Some(Arc::new(
+                    CopilotModelSnapshot::from_models(models).expect("unique model ids"),
+                )),
+                model_discovery_refresh_at: None,
+                identity: None,
+                exchange_unavailable: None,
+            });
+            state
+        }
+
+        fn route(
+            state: &Arc<CopilotAccountState>,
+            provider: Provider,
+            model: &str,
+        ) -> CopilotRouteResolution {
+            resolve_route_for_state(state, provider, model).expect("the account holds a token")
+        }
+
+        fn output_limit(route: &CopilotRouteResolution) -> Option<u32> {
+            route
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.limits.max_output_tokens)
+        }
+
+        /// A catalog id resolves on the Anthropic route to the entry the
+        /// account writes with a dot, and the route carries that entry's
+        /// capabilities. `claude-opus-5-5` is also the model a Copilot
+        /// Anthropic route runs when a request names none.
+        #[test]
+        fn a_catalog_id_resolves_to_the_entry_the_account_writes_with_a_dot() {
+            let state = account_with(account_list());
+            for (catalog_id, entry_limit) in [
+                ("claude-opus-5-5", 55_000),
+                ("claude-fable-5-2", 52_000),
+                ("claude-sonnet-5-5", 45_000),
+            ] {
+                let route = route(&state, Provider::Anthropic, catalog_id);
+                assert_eq!(
+                    route.access,
+                    CopilotModelAccess::Available {
+                        endpoint: CopilotEndpoint::Messages
+                    },
+                    "{catalog_id}"
+                );
+                assert_eq!(output_limit(&route), Some(entry_limit), "{catalog_id}");
+            }
+        }
+
+        /// The account's own spelling keeps resolving, as it did.
+        #[test]
+        fn the_accounts_own_spelling_resolves_as_before() {
+            let state = account_with(account_list());
+            for (account_id, provider, endpoint, entry_limit) in [
+                (
+                    "claude-opus-5.5",
+                    Provider::Anthropic,
+                    CopilotEndpoint::Messages,
+                    55_000,
+                ),
+                (
+                    "claude-opus-5",
+                    Provider::Anthropic,
+                    CopilotEndpoint::Messages,
+                    50_000,
+                ),
+                (
+                    "gpt-5.5",
+                    Provider::OpenAI,
+                    CopilotEndpoint::Responses,
+                    35_000,
+                ),
+                (
+                    "gpt-5.4-mini",
+                    Provider::OpenAI,
+                    CopilotEndpoint::Responses,
+                    34_000,
+                ),
+                (
+                    "gemini-3.8-flash",
+                    Provider::Gemini,
+                    CopilotEndpoint::ChatCompletions,
+                    38_000,
+                ),
+            ] {
+                let route = route(&state, provider, account_id);
+                assert_eq!(
+                    route.access,
+                    CopilotModelAccess::Available { endpoint },
+                    "{account_id}"
+                );
+                assert_eq!(output_limit(&route), Some(entry_limit), "{account_id}");
+            }
+        }
+
+        /// An id the account lists exactly resolves to that entry, also when
+        /// another entry matches it separator-insensitively.
+        #[test]
+        fn an_exact_entry_wins_over_a_separator_insensitive_one() {
+            let mut models = account_list();
+            models.push(listed(
+                "claude-opus-5-5",
+                &[CopilotEndpoint::Messages],
+                11_000,
+            ));
+            let state = account_with(models);
+            assert_eq!(
+                output_limit(&route(&state, Provider::Anthropic, "claude-opus-5-5")),
+                Some(11_000)
+            );
+            assert_eq!(
+                output_limit(&route(&state, Provider::Anthropic, "claude-opus-5.5")),
+                Some(55_000)
+            );
+        }
+
+        /// Two entries match an id separator-insensitively and none exactly:
+        /// the route is refused, and the refusal names both.
+        #[test]
+        fn two_separator_insensitive_entries_are_refused_by_name() {
+            let mut models = account_list();
+            models.push(listed(
+                "claude-opus.5.5",
+                &[CopilotEndpoint::Messages],
+                12_000,
+            ));
+            let state = account_with(models);
+            let route = route(&state, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(route.access, CopilotModelAccess::Unavailable);
+            assert_eq!(route.capabilities, None);
+            assert_eq!(
+                route.unavailable_message(
+                    Provider::Anthropic,
+                    "claude-opus-5-5",
+                    CopilotEndpoint::Messages
+                ),
+                "Copilot account lists more than one model matching anthropic model \
+                 'claude-opus-5-5': claude-opus-5.5, claude-opus.5.5"
+            );
+        }
+
+        /// A model the account does not list under any spelling is refused
+        /// with the text it always had.
+        #[test]
+        fn an_absent_model_keeps_its_refusal_text() {
+            let state = account_with(account_list());
+            let anthropic = route(&state, Provider::Anthropic, "claude-opus-4-5");
+            assert_eq!(anthropic.access, CopilotModelAccess::Unavailable);
+            assert_eq!(
+                anthropic.unavailable_message(
+                    Provider::Anthropic,
+                    "claude-opus-4-5",
+                    CopilotEndpoint::Messages
+                ),
+                "Copilot account does not expose /v1/messages for anthropic model \
+                 'claude-opus-4-5'; available account models: claude-fable-5.2, claude-opus-5, \
+                 claude-opus-5.5, claude-sonnet-5.5"
+            );
+            let openai = route(&state, Provider::OpenAI, "gpt-5.6");
+            assert_eq!(openai.access, CopilotModelAccess::Unavailable);
+            assert_eq!(
+                openai.unavailable_message(Provider::OpenAI, "gpt-5.6", CopilotEndpoint::Responses),
+                "Copilot account does not expose /responses for openai model 'gpt-5.6'; \
+                 available account models: gemini-3.8-flash, gpt-5.4-mini, gpt-5.5"
+            );
+        }
+
+        /// The model list answers a build about a model the registry does
+        /// not define the same way: the entry the account writes with a dot
+        /// is offered under the hyphen spelling too, and an id that matches
+        /// two entries and none exactly is not offered.
+        #[test]
+        fn the_account_model_lookup_reads_the_same_rule() {
+            use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+            let credential = account_identity();
+            let mut models = account_list();
+            models.push(listed(
+                "account-model-1.5",
+                &[CopilotEndpoint::Responses],
+                15_000,
+            ));
+            let snapshot =
+                CopilotModelSnapshot::from_models(models.clone()).expect("unique model ids");
+            for spelling in ["account-model-1.5", "account-model-1-5"] {
+                match snapshot.account_model(&credential, spelling) {
+                    AccountModelLookup::Offered(definition) => {
+                        assert_eq!(definition.provider, Provider::OpenAI, "{spelling}");
+                        assert_eq!(definition.max_output_tokens, Some(15_000), "{spelling}");
+                    }
+                    other => panic!("{spelling} is offered: {other:?}"),
+                }
+            }
+
+            models.push(listed(
+                "account-model.1-5",
+                &[CopilotEndpoint::Responses],
+                16_000,
+            ));
+            let snapshot = CopilotModelSnapshot::from_models(models).expect("unique model ids");
+            match snapshot.account_model(&credential, "account-model-1-5") {
+                AccountModelLookup::Refused(refusal @ AccountModelRefusal::NotOffered { .. }) => {
+                    let text = refusal.to_string();
+                    assert!(
+                        text.contains("account-model-1.5") && text.contains("account-model.1-5"),
+                        "{text}"
+                    );
+                }
+                other => panic!("an id that matches two entries is not offered: {other:?}"),
+            }
+        }
+    }
+
     mod redirect_fixture {
         #![allow(clippy::unwrap_used)]
         /// A credential endpoint that answers every request with a `302` to a

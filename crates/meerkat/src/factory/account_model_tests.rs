@@ -137,6 +137,8 @@ struct ProviderLog {
     asked: StdMutex<Vec<(Provider, String)>>,
     /// Every provider call: the provider that served it and its model.
     served: StdMutex<Vec<(Provider, String)>>,
+    /// Every provider call's request, as the client received it.
+    requests: StdMutex<Vec<LlmRequest>>,
 }
 
 impl ProviderLog {
@@ -161,7 +163,18 @@ impl ProviderLog {
             .clone()
     }
 
+    fn requests(&self) -> Vec<LlmRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn clear(&self) {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.resolved
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -202,6 +215,11 @@ impl LlmClient for ScriptedClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((self.provider, request.model.clone()));
+        self.log
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.clone());
         Box::pin(futures::stream::iter(vec![
             Ok(LlmEvent::TextDelta {
                 delta: answer_for(self.provider),
@@ -230,12 +248,12 @@ impl LlmClient for ScriptedClient {
 }
 
 /// Credential-free provider runtime of one provider family whose accounts
-/// state their models: `offered` is the account's statement of
-/// [`ACCOUNT_MODEL`] (`None`: the account does not offer it).
+/// state their models: `offered` holds the account's statement of each model
+/// it offers, by the id the account lists it under.
 struct AccountRuntime {
     provider: Provider,
     log: Arc<ProviderLog>,
-    offered: Option<CustomModelConfig>,
+    offered: Vec<(String, CustomModelConfig)>,
 }
 
 #[async_trait]
@@ -274,11 +292,9 @@ impl ProviderRuntime for AccountRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((self.provider, model.to_string()));
-        match self.offered.as_ref() {
-            Some(definition) if model == ACCOUNT_MODEL => {
-                AccountModelLookup::Offered(definition.clone())
-            }
-            _ => AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+        match self.offered.iter().find(|(offered, _)| offered == model) {
+            Some((_, definition)) => AccountModelLookup::Offered(definition.clone()),
+            None => AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
                 credential: connection.credential_identity.clone(),
                 model: model.to_string(),
                 available: Vec::new(),
@@ -318,6 +334,18 @@ impl Harness {
     /// A factory over the account's routes, whose account offers
     /// [`ACCOUNT_MODEL`] as `offered` states it.
     fn new(routes: &str, offered: Option<CustomModelConfig>) -> Self {
+        Self::offering(
+            routes,
+            offered
+                .map(|definition| (ACCOUNT_MODEL.to_string(), definition))
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    /// A factory over the account's routes, whose account offers each model
+    /// of `offered` as stated, under the id it is listed with.
+    fn offering(routes: &str, offered: Vec<(String, CustomModelConfig)>) -> Self {
         let temp = tempfile::tempdir().expect("tempdir");
         let log = Arc::new(ProviderLog::default());
         let mut factory = AgentFactory::new(temp.path().join("sessions"))
@@ -770,4 +798,320 @@ credential_account = "team_key"
         ),
         "{error}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The account's spelling of a catalog model
+//
+// A GitHub Copilot account lists Claude models that carry a minor version
+// with a dot (`claude-opus-5.5`); the catalog writes them with a hyphen
+// (`claude-opus-5-5`). A request that names the account's spelling on a
+// Copilot route runs as the catalog row: the session's model is the catalog
+// id, so every catalog-keyed decision (profile, limits, thinking, request
+// shaping, replay) is the row's. The route writes the account's id on the
+// wire (pinned in `meerkat-copilot` and the provider crates).
+// ---------------------------------------------------------------------------
+
+/// The catalog ids with a minor version and the ids a Copilot account lists
+/// them under.
+const CATALOG_AND_ACCOUNT_IDS: [(&str, &str); 2] = [
+    ("claude-opus-5-5", "claude-opus-5.5"),
+    ("claude-fable-5-2", "claude-fable-5.2"),
+];
+
+/// An account that offers `account_id` on the protocol of `provider`.
+fn account_offering(account_id: &str, provider: Provider) -> Harness {
+    Harness::offering(
+        ACCOUNT_ROUTES,
+        vec![(account_id.to_string(), account_definition(provider))],
+    )
+}
+
+/// The one request a single turn of `agent` sends.
+async fn single_turn_request(harness: &Harness, agent: &mut DynAgent) -> LlmRequest {
+    harness.log.clear();
+    agent
+        .run(PROMPT.to_string().into())
+        .await
+        .expect("the turn runs on the account");
+    let mut requests = harness.log.requests();
+    assert_eq!(requests.len(), 1, "one turn sends one request");
+    requests.remove(0)
+}
+
+/// The account's spelling of a catalog model builds the session the catalog
+/// id builds: the request the provider client receives is equal in every
+/// field (model, output budget, provider parameters, messages), the
+/// session's durable model is the catalog id, and the catalog row's profile
+/// applies (thinking supported, its output limit, a parameter schema).
+#[tokio::test]
+async fn the_accounts_spelling_of_a_catalog_model_builds_the_catalog_row() {
+    for (catalog_id, account_id) in CATALOG_AND_ACCOUNT_IDS {
+        let harness = account_offering(account_id, Provider::Anthropic);
+        let registry = harness
+            .config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let row = registry
+            .profile_witness_for_provider(Provider::Anthropic, catalog_id)
+            .unwrap_or_else(|| panic!("{catalog_id} is a catalog row"));
+        assert!(row.profile().supports_thinking, "{catalog_id}");
+        assert_ne!(
+            row.profile().params_schema,
+            serde_json::json!({}),
+            "{catalog_id}"
+        );
+        assert!(
+            registry.entry(account_id).is_none(),
+            "the registry does not define {account_id}"
+        );
+
+        let mut by_catalog_id = harness
+            .build(catalog_id, Provider::Anthropic, ANTHROPIC_ROUTE)
+            .await
+            .unwrap_or_else(|error| panic!("{catalog_id} builds: {error}"));
+        let catalog_request = single_turn_request(&harness, &mut by_catalog_id).await;
+        assert_eq!(catalog_request.model, catalog_id);
+        assert_eq!(
+            Some(catalog_request.max_tokens),
+            row.max_output_tokens(),
+            "{catalog_id}: the catalog row's output limit is the default budget"
+        );
+        assert!(
+            harness.log.asked().is_empty(),
+            "a catalog id never asks the account"
+        );
+
+        let mut by_account_id = harness
+            .build(account_id, Provider::Anthropic, ANTHROPIC_ROUTE)
+            .await
+            .unwrap_or_else(|error| panic!("{account_id} builds: {error}"));
+        assert_eq!(
+            harness.log.asked(),
+            vec![(Provider::Anthropic, account_id.to_string())],
+            "the account is asked once about the id the registry does not define"
+        );
+        let account_request = single_turn_request(&harness, &mut by_account_id).await;
+        assert_eq!(
+            serde_json::to_value(&account_request).expect("request serializes"),
+            serde_json::to_value(&catalog_request).expect("request serializes"),
+            "{account_id} sends the request {catalog_id} sends"
+        );
+
+        let identity = durable_identity(&by_account_id);
+        assert_eq!(
+            (
+                identity.provider,
+                identity.model.as_str(),
+                &identity.auth_binding
+            ),
+            (
+                Provider::Anthropic,
+                catalog_id,
+                &Some(route(ANTHROPIC_ROUTE))
+            ),
+            "the session's durable model is the catalog id"
+        );
+    }
+}
+
+/// A user thinking budget on a catalog row that accepts adaptive thinking
+/// only is refused when the agent is built, with the row's own text, for the
+/// account's spelling as for the catalog id. Nothing is sent.
+#[tokio::test]
+async fn a_thinking_budget_on_an_adaptive_only_row_is_refused_for_the_accounts_spelling() {
+    const CATALOG_ID: &str = "claude-opus-4-8";
+    const ACCOUNT_ID: &str = "claude-opus-4.8";
+    let harness = account_offering(ACCOUNT_ID, Provider::Anthropic);
+    let refusal = |model: &'static str| {
+        let mut build = harness.build_config(model, Provider::Anthropic, ANTHROPIC_ROUTE);
+        build.provider_params = Some(
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+                thinking_budget_tokens: Some(2048),
+                ..Default::default()
+            },
+        );
+        let factory = &harness.factory;
+        let config = &harness.config;
+        async move {
+            match factory.build_agent(build, config).await {
+                Err(BuildAgentError::Config(message)) => message,
+                Err(other) => panic!("{model}: expected the row's refusal, got {other}"),
+                Ok(_) => {
+                    panic!("{model}: a thinking budget on an adaptive-only row must not build")
+                }
+            }
+        }
+    };
+    let by_catalog_id = refusal(CATALOG_ID).await;
+    assert_eq!(
+        by_catalog_id,
+        "Anthropic model 'claude-opus-4-8' does not accept a thinking budget \
+         (thinking_budget_tokens); accepted thinking types: [adaptive, disabled]"
+    );
+    assert_eq!(refusal(ACCOUNT_ID).await, by_catalog_id);
+    assert!(harness.log.served().is_empty(), "nothing is sent");
+}
+
+/// A session that stored the account's spelling as its model (it was created
+/// while that id was a model only the account defined) still resumes, and
+/// from then on runs as the catalog row under the catalog id.
+#[tokio::test]
+async fn a_resumed_session_that_stored_the_accounts_spelling_runs_the_catalog_row() {
+    let (catalog_id, account_id) = CATALOG_AND_ACCOUNT_IDS[0];
+    let harness = account_offering(account_id, Provider::Anthropic);
+    // The stored id: the build defines the model itself, so the registry
+    // owns it and the session records the id as written.
+    let mut stored = harness.build_config(account_id, Provider::Anthropic, ANTHROPIC_ROUTE);
+    stored.custom_models.insert(
+        account_id.to_string(),
+        account_definition(Provider::Anthropic),
+    );
+    let mut agent = harness
+        .factory
+        .build_agent(stored, &harness.config)
+        .await
+        .unwrap_or_else(|error| panic!("the stored spelling builds: {error}"));
+    agent
+        .run(PROMPT.to_string().into())
+        .await
+        .expect("the first turn runs");
+    assert_eq!(durable_identity(&agent).model, account_id);
+    let durable = agent.session().clone();
+    drop(agent);
+
+    let mut resume = AgentBuildConfig::new(account_id);
+    resume.override_image_generation = ToolCategoryOverride::Disable;
+    resume.resume_session = Some(durable);
+    let mut resumed = harness
+        .factory
+        .build_agent(resume, &harness.config)
+        .await
+        .unwrap_or_else(|error| panic!("the session resumes: {error}"));
+    let request = single_turn_request(&harness, &mut resumed).await;
+    assert_eq!(request.model, catalog_id);
+    let identity = durable_identity(&resumed);
+    assert_eq!(
+        (
+            identity.provider,
+            identity.model.as_str(),
+            &identity.auth_binding
+        ),
+        (
+            Provider::Anthropic,
+            catalog_id,
+            &Some(route(ANTHROPIC_ROUTE))
+        ),
+        "the resumed session runs as the catalog row"
+    );
+}
+
+/// The match stays inside the provider family the account serves the model
+/// on: an id the account serves on another protocol than the catalog row's
+/// provider keeps the account's own definition.
+#[tokio::test]
+async fn the_accounts_spelling_on_another_protocol_keeps_the_accounts_definition() {
+    let (_, account_id) = CATALOG_AND_ACCOUNT_IDS[0];
+    let harness = account_offering(account_id, Provider::OpenAI);
+    let mut agent = harness
+        .build(account_id, Provider::Anthropic, ANTHROPIC_ROUTE)
+        .await
+        .unwrap_or_else(|error| panic!("a model the account defines builds: {error}"));
+    let request = single_turn_request(&harness, &mut agent).await;
+    assert_eq!(request.model, account_id);
+    let identity = durable_identity(&agent);
+    assert_eq!(
+        (
+            identity.provider,
+            identity.model.as_str(),
+            &identity.auth_binding
+        ),
+        (Provider::OpenAI, account_id, &Some(route(OPENAI_ROUTE)))
+    );
+}
+
+/// Outside a GitHub Copilot route nothing changes: an Anthropic API key
+/// route does not accept the dotted spelling, and no account is asked.
+#[tokio::test]
+async fn a_route_outside_copilot_does_not_accept_the_accounts_spelling() {
+    let (_, account_id) = CATALOG_AND_ACCOUNT_IDS[0];
+    let harness = Harness::offering(
+        r#"
+[realm.global.backend.anthropic_key]
+provider = "anthropic"
+backend_kind = "anthropic_api"
+
+[realm.global.auth.anthropic_key]
+provider = "anthropic"
+auth_method = "api_key"
+source = { kind = "env", env = "ANTHROPIC_API_KEY" }
+
+[realm.global.binding.anthropic_key]
+backend_profile = "anthropic_key"
+auth_profile = "anthropic_key"
+"#,
+        vec![(
+            account_id.to_string(),
+            account_definition(Provider::Anthropic),
+        )],
+    );
+    match harness
+        .build(account_id, Provider::Anthropic, "anthropic_key")
+        .await
+    {
+        Err(BuildAgentError::Config(message)) => assert_eq!(
+            message,
+            format!("model 'anthropic:{account_id}' is absent from the effective model registry")
+        ),
+        Err(other) => panic!("expected the unknown-model refusal, got {other}"),
+        Ok(_) => panic!("a route outside Copilot must not accept {account_id}"),
+    }
+    assert!(harness.log.asked().is_empty(), "no account is asked");
+    assert!(harness.log.served().is_empty(), "nothing is sent");
+}
+
+/// A Copilot Anthropic route with no model named runs the catalog default,
+/// whether its binding carries the default the device sign-in writes or (the
+/// token routes) none. That default carries a minor version, so the account
+/// lists it with a dot.
+#[test]
+fn a_copilot_anthropic_route_with_no_model_named_runs_the_catalog_default() {
+    let catalog_default =
+        meerkat_models::default_model(Provider::Anthropic).expect("an Anthropic catalog model");
+    assert_eq!(catalog_default, CATALOG_AND_ACCOUNT_IDS[0].0);
+    let device_sign_in = ACCOUNT_ROUTES.replace(
+        "[realm.global.binding.copilot_anthropic]\n",
+        &format!(
+            "[realm.global.binding.copilot_anthropic]\ndefault_model = \"{catalog_default}\"\n"
+        ),
+    );
+    assert_ne!(device_sign_in, ACCOUNT_ROUTES);
+    for (label, routes) in [
+        ("device sign-in", device_sign_in.as_str()),
+        ("token routes", ACCOUNT_SECTION),
+    ] {
+        let config: Config = toml::from_str(routes).expect("the account's routes");
+        let resolution = crate::resolve_create_session_model(
+            &config,
+            crate::CreateSessionModelResolutionRequest {
+                model: None,
+                provider: None,
+                auth_binding: Some(route(ANTHROPIC_ROUTE)),
+            },
+        )
+        .unwrap_or_else(|error| panic!("{label}: the route resolves a model: {error}"));
+        assert_eq!(
+            (
+                resolution.model.as_str(),
+                resolution.provider,
+                &resolution.auth_binding
+            ),
+            (
+                catalog_default,
+                Provider::Anthropic,
+                &Some(route(ANTHROPIC_ROUTE))
+            ),
+            "{label}"
+        );
+    }
 }

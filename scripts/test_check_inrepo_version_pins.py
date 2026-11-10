@@ -153,6 +153,71 @@ class ShapeTests(GuardTest):
             "peerDependencies": {"@rkat/demo": ">=1.4.2 <2.0.0", "@rkat/demo-meta": "^1.4.2 || ^2.0.0"}}))
         self.assertClean()
 
+    def test_range_admission(self):
+        # A range admits a version when one of its alternatives has no bound that shuts it
+        # out: no ceiling at or below it, no strict floor at it, no floor above it.
+        for spec, admits in (
+                (">=1.4.2", True), ("^1.4.2 || ^2.0.0", True), ("1.4.2", True), ("=1.4.2", True), ("==1.4.2", True),
+                ("~=1.4.2", True), ("~1.4.2", True), (">=1.4.2, <2", True), (">=1.4.2,<2,!=1.4.5", True),
+                ("1.4.2 - 2.0.0", True), ("<=1.4.2", True), (">1.4.1", True), ("npm:@rkat/demo2@^1.4.2", True),
+                (">=1.4.2 <1.4.2 || >=1.4.2 <2.0.0", True), ("==1.4.*", True),
+                (">1.4.2", False), (">=1.4.3", False), ("1.4.3", False), ("=1.4.3", False), ("==1.4.3", False),
+                ("~=1.4.3", False), ("^1.4.3", False), ("~1.4.3", False), (">=1.4.3, <2", False),
+                ("1.4.3 - 2.0.0", False), ("1.4.0 - 1.4.1", False), ("<1.4.2", False), (">=1.4.2 <1.4.2", False),
+                (">=1.4.2 <1.4.2 || >=1.4.3", False), (">=1.4.2,!=1.4.2", False), (">=1.4.0,!=1.4.*", False),
+                ("npm:@rkat/demo2@^1.4.3", False)):
+            with self.subTest(spec=spec):
+                self.assertEqual(pins.range_admits(spec, "1.4.2"), admits)
+
+    def test_a_lower_bound_that_shuts_out_the_version_here_is_refused(self):
+        # Every in-repo consumer admits the version this tree builds. A strict floor at
+        # it, a floor above it and an exact pin above it shut it out, in every ecosystem.
+        self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "dependencies": {"@rkat/demo": "1.4.3"},
+            "devDependencies": {"@rkat/demo": "^1.4.3"},
+            "peerDependencies": {"@rkat/demo": ">1.4.2", "@rkat/demo-meta": ">=1.4.3 <2.0.0"},
+            "optionalDependencies": {"@rkat/demo-meta": ">=1.4.2 <1.4.2 || >=1.4.3"}}, indent=2))
+        self.repo.write("connect/py/pyproject.toml", '[project]\nname = "demo-py"\nversion = "1.4.2"\n'
+                        '[project.optional-dependencies]\nstrict = ["demo-meta>1.4.2"]\nfloor = ["demo-meta>=1.4.3,<2"]\n'
+                        'exact = ["demo-meta==1.4.3"]\ncompatible = ["demo-meta~=1.4.3"]\n'
+                        'unequal = ["demo-meta>=1.4.2,!=1.4.2"]\n')
+        self.repo.write("docs/install.md", '```toml\ndemo-core = "=1.4.3"\ndemo-core = ">1.4.2"\n'
+                        'demo-meta-rs = { version = ">=1.4.3, <2", features = ["x"] }\ndemo-core = "1.4.3"\n```\n'
+                        'npm install @rkat/demo@1.4.3 @rkat/demo-meta@^1.4.3\n')
+        self.assertFindings(
+            "dependencies @rkat/demo@1.4.3: pins @rkat/demo 1.4.3, above its version 1.4.2 in this tree",
+            "devDependencies @rkat/demo@^1.4.3: pins @rkat/demo 1.4.3, above its version 1.4.2",
+            "peerDependencies @rkat/demo@>1.4.2: admits no @rkat/demo 1.4.2, its version in this tree",
+            "peerDependencies @rkat/demo-meta@>=1.4.3 <2.0.0: pins @rkat/demo-meta 1.4.3, above its version 1.4.2",
+            "optionalDependencies @rkat/demo-meta@>=1.4.2 <1.4.2 || >=1.4.3: admits no @rkat/demo-meta 1.4.2",
+            "pyproject.toml:5: requirement demo-meta>1.4.2: admits no demo-meta 1.4.2, its version in this tree",
+            "pyproject.toml:6: requirement demo-meta>=1.4.3,<2: pins demo-meta 1.4.3, above its version 1.4.2",
+            "pyproject.toml:7: requirement demo-meta==1.4.3: pins demo-meta 1.4.3, above its version 1.4.2",
+            "pyproject.toml:8: requirement demo-meta~=1.4.3: pins demo-meta 1.4.3, above its version 1.4.2",
+            "pyproject.toml:9: requirement demo-meta>=1.4.2,!=1.4.2: admits no demo-meta 1.4.2",
+            'docs/install.md:2: cargo demo-core = "=1.4.3": pins demo-core 1.4.3, above its version 1.4.2',
+            'docs/install.md:3: cargo demo-core = ">1.4.2": admits no demo-core 1.4.2, its version in this tree',
+            'docs/install.md:4: cargo demo-meta-rs = { version = ">=1.4.3, <2", features = ["x"] }: pins '
+            "demo-meta-rs 1.4.3, above its version 1.4.2",
+            'docs/install.md:5: cargo demo-core = "1.4.3": pins demo-core 1.4.3, above its version 1.4.2',
+            "docs/install.md:7: npm-spec @rkat/demo@1.4.3: pins @rkat/demo 1.4.3, above its version 1.4.2",
+            "docs/install.md:7: npm-spec @rkat/demo-meta@^1.4.3: pins @rkat/demo-meta 1.4.3, above its version 1.4.2")
+
+    def test_bounds_that_admit_the_version_here_pass(self):
+        self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "dependencies": {"@rkat/demo": "1.4.2"},
+            "devDependencies": {"@rkat/demo": "~1.4.2"},
+            "peerDependencies": {"@rkat/demo": "1.4.2 - 2.0.0", "@rkat/demo-meta": ">=1.4.2 <2.0.0 || >=3.0.0"}}))
+        self.repo.write("connect/py/pyproject.toml", '[project]\nname = "demo-py"\nversion = "1.4.2"\n'
+                        '[project.optional-dependencies]\nexact = ["demo-meta==1.4.2"]\n'
+                        'compatible = ["demo-meta~=1.4.2"]\nrange = ["demo-meta>=1.4.2,<2,!=1.4.5"]\n')
+        self.repo.write("docs/install.md", '```toml\ndemo-core = "=1.4.2"\ndemo-core = "1.4.2"\n'
+                        'demo-meta-rs = { version = ">=1.4.2, <2" }\ndemo-core = "^1.4.2"\n```\n'
+                        'npm install @rkat/demo@1.4.2 @rkat/demo-meta@^1.4.2\n')
+        self.assertClean()
+
     def test_lock_entries(self):
         self.repo.write("connect/sdk/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
             "": {"devDependencies": {"@rkat/demo": "1.4.1"}},
@@ -417,6 +482,32 @@ class WriteTests(GuardTest):
         code, _, err = self.repo.run(write=True)
         self.assertEqual(code, 0, err)
         self.assertIn('"@rkat/demo": ">=1.4.2 <2.0.0"', manifest.read_text())
+
+    def test_write_moves_a_lower_bound_that_shuts_out_the_version_here(self):
+        # A floor or an exact pin above the version in the tree moves down to it, and a
+        # strict floor at it becomes inclusive, as a floor below it moves up.
+        manifest = self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "dependencies": {"@rkat/demo": "1.4.3"},
+            "peerDependencies": {"@rkat/demo": ">1.4.2", "@rkat/demo-meta": ">=1.4.3 <2.0.0"},
+            "optionalDependencies": {"@rkat/demo-meta": ">1.4.3"}}, indent=2) + "\n")
+        project = self.repo.write("connect/py/pyproject.toml", '[project]\nname = "demo-py"\nversion = "1.4.2"\n'
+                                  '[project.optional-dependencies]\nstrict = ["demo-meta>1.4.2"]\n'
+                                  'exact = ["demo-meta==1.4.3"]\n')
+        cargo = self.repo.write("examples/demo/Cargo.toml", '[package]\nname = "demo-example"\nversion = "0.0.0"\n'
+                                '[dependencies]\ndemo-core = "=1.4.3"\ndemo-meta-rs = { version = ">1.4.2" }\n')
+        code, out, err = self.repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        for path in ("connect/sdk/package.json", "connect/py/pyproject.toml", "examples/demo/Cargo.toml"):
+            self.assertIn(f"moved in-repo pins in {path}", out)
+        moved = manifest.read_text()
+        self.assertIn('"@rkat/demo": "1.4.2"', moved)
+        self.assertIn('"@rkat/demo": ">=1.4.2"', moved)
+        self.assertIn('"@rkat/demo-meta": ">=1.4.2 <2.0.0"', moved)
+        self.assertIn('"@rkat/demo-meta": ">=1.4.2"', moved)
+        self.assertIn('strict = ["demo-meta>=1.4.2"]\nexact = ["demo-meta==1.4.2"]\n', project.read_text())
+        self.assertIn('demo-core = "=1.4.2"\ndemo-meta-rs = { version = ">=1.4.2" }\n', cargo.read_text())
+        self.assertClean()
 
 
 class PublishedInputTests(GuardTest):

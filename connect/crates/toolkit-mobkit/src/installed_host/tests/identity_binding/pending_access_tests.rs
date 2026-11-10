@@ -13,6 +13,7 @@ use meerkat_authorization::{
     publication::LocalAuthorizationPublication,
 };
 use meerkat_authorization_contracts::evidence::EvidenceId;
+use meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy;
 
 const ACCESS_SCHEMA: &str = "toolkit.authenticated-service-access-decision";
 
@@ -264,6 +265,114 @@ async fn next_host_settles_a_natively_issued_pending_access_decision() {
     close(&next.host).await;
     assert_eq!(
         native_access_grants(&lost.grants_path),
+        vec![format!("access-{key}")],
+        "the native owner holds the lost host's one grant"
+    );
+}
+
+/// The pair opened through the prepared installation's opener, with the
+/// store wrapper that can hold its access decision.
+async fn open_prepared(
+    selection: &HostBootstrapSelection,
+    local: &CompiledLocalPolicy,
+    scope: &StoreScope,
+) -> (PreparedInstalledHost, Arc<PausedSourceStore>) {
+    let selected = local.native_host.as_ref().unwrap();
+    let policy = PreparedInstalledToolPolicy::from_canonical(
+        &read_bundle_artifact(selection, &selected.application_tool_policy).unwrap(),
+    )
+    .unwrap();
+    let captured = Arc::new(OnceLock::<Arc<PausedSourceStore>>::new());
+    let capture = captured.clone();
+    let scope = scope.clone();
+    let prepared = PreparedInstallationOwner::open(
+        selection.deployment_root.clone(),
+        PreparedLocalPolicy {
+            deployment: local.deployment.clone(),
+            components: local.components.clone(),
+            channels: local.channels.clone(),
+            native_host: selected.preparation(),
+        },
+        operator_setup::OperatorOwnerStartup::Restore,
+    )
+    .unwrap()
+    .complete_with_source_store(
+        policy,
+        Box::new(move |inner| {
+            let store = Arc::new(PausedSourceStore::new(inner, scope));
+            assert!(capture.set(store.clone()).is_ok());
+            store
+        }),
+    )
+    .await
+    .unwrap();
+    let store = captured.get().unwrap().clone();
+    (prepared, store)
+}
+
+/// The prepared installation's opener settles a decision a lost host left
+/// pending, as the installed host's opener does: the native owner recorded
+/// the lost host's grant and its row did not, so the prepared pair's cold
+/// start records the row as issued, and nothing is issued again.
+#[tokio::test]
+async fn prepared_installation_settles_a_lost_host_pending_access_decision() {
+    let (_directory, mut selection) = fixture();
+    provision_fixture(&mut selection);
+    let local: CompiledLocalPolicy =
+        serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
+    let selected = local.native_host.as_ref().unwrap();
+    let grants_path = state_directory(&selection, selected, NativeOwnerStartup::Restore)
+        .unwrap()
+        .join("grants.jsonl");
+    let scope = StoreScope {
+        realm: selected.realm.to_string(),
+        owner: local.deployment.to_string(),
+    };
+    let (key, prepared, store) = {
+        let first = open_host(&selection, &scope).await;
+        let mut decision = crate::private_originals::service_grants::tests::decision();
+        decision.route = toolkit_package::Id::new("console").unwrap();
+        first.store.arm_access_swap();
+        let pending = first.host.apply_service_access_decision(decision);
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = first.store.entered.notified() => {}
+            _ = &mut pending => panic!("the lost host's decision is held"),
+        }
+        lose(&first.host).await;
+        let journal = fs::read(&grants_path).unwrap();
+        // The prepared installation opens the pair while the lost host's
+        // decision is still held.
+        let (prepared, store) = open_prepared(&selection, &local, &scope).await;
+        let (key, settled) = row_state(&store, &scope).await;
+        assert_eq!(
+            fs::read(&grants_path).unwrap(),
+            journal,
+            "the prepared installation's cold start issues nothing"
+        );
+        first.store.release.add_permits(1);
+        let lost_answer = tokio::time::timeout(Duration::from_secs(15), &mut pending)
+            .await
+            .unwrap();
+        assert!(
+            settled == "issued"
+                && matches!(&lost_answer, Ok(observation)
+                    if observation.state == PrivateServiceGrantState::PendingReconciliation),
+            "the prepared installation left the lost host's decision {settled}, and the lost \
+             host answered {}",
+            answer(&lost_answer)
+        );
+        (key, prepared, store)
+    };
+    assert_eq!(
+        row_state(&store, &scope).await.1,
+        "issued",
+        "the lost host records nothing after the prepared installation settled its decision"
+    );
+    drop(store);
+    drop(prepared);
+    assert_eq!(
+        native_access_grants(&grants_path),
         vec![format!("access-{key}")],
         "the native owner holds the lost host's one grant"
     );

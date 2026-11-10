@@ -1636,20 +1636,22 @@ pub(crate) mod tests {
         ));
     }
 
-    /// An installed opener's cold start settles each pending decision from
-    /// the native owner's record and issues nothing: a decision whose grant
-    /// the owner recorded is issued, one it did not record ends as not
-    /// issued, and an exact retry of that one issues it once.
-    #[tokio::test]
-    async fn cold_start_settles_pending_access_from_the_native_record() {
-        let directory = directory();
-        let path = directory.path().join("grants");
-        let owner = crate::original_ingress::tests::initialized(&path);
-        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+    /// Admit each `(label, recorded)` decision's row as pending native
+    /// issuance, as a host lost during that issuance leaves it, and issue the
+    /// decision's grant natively where `recorded`.
+    async fn admit_lost_pending_access(
+        adapter: &PrivateOriginals,
+        owner: &ToolkitOriginalOwner,
+        decisions: &[(&str, bool)],
+    ) -> Vec<(
+        PrivateServiceAccessDecision,
+        PrivateServiceGrantRef,
+        StoreKey,
+    )> {
         let route = adapter.routes.get().unwrap()[0].clone();
         let now_ms = owner.clock().now().unwrap().unix_ms;
         let mut pending = Vec::new();
-        for (label, recorded) in [("recorded", true), ("unrecorded", false)] {
+        for &(label, recorded) in decisions {
             let mut request = decision();
             request.decision = Id::new(label).unwrap();
             let reference = PrivateServiceGrantRef {
@@ -1692,6 +1694,25 @@ pub(crate) mod tests {
             }
             pending.push((request, reference, key));
         }
+        pending
+    }
+
+    /// An installed opener's cold start settles each pending decision from
+    /// the native owner's record and issues nothing: a decision whose grant
+    /// the owner recorded is issued, one it did not record ends as not
+    /// issued, and an exact retry of that one issues it once.
+    #[tokio::test]
+    async fn cold_start_settles_pending_access_from_the_native_record() {
+        let directory = directory();
+        let path = directory.path().join("grants");
+        let owner = crate::original_ingress::tests::initialized(&path);
+        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+        let pending = admit_lost_pending_access(
+            &adapter,
+            &owner,
+            &[("recorded", true), ("unrecorded", false)],
+        )
+        .await;
         assert!(
             matches!(
                 adapter.reconcile_pending_access().await,
@@ -1758,6 +1779,59 @@ pub(crate) mod tests {
             issued,
             "nothing issues twice"
         );
+    }
+
+    /// A cold start that cannot read the native owner's record leaves each
+    /// pending decision as it was: a decision whose grant the owner recorded
+    /// is never ended as not issued because the lookup failed, and nothing is
+    /// written or issued.
+    #[tokio::test]
+    async fn cold_start_keeps_pending_access_when_the_native_record_is_unreadable() {
+        let directory = directory();
+        let path = directory.path().join("grants");
+        let owner = crate::original_ingress::tests::initialized(&path);
+        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+        let pending = admit_lost_pending_access(
+            &adapter,
+            &owner,
+            &[("recorded", true), ("unrecorded", false)],
+        )
+        .await;
+        let mut saved = Vec::new();
+        for (_, _, key) in &pending {
+            saved.push(adapter.store.get(key).await.unwrap().unwrap());
+        }
+        adapter.select_installed_pair_recovery().unwrap();
+        // The owner's custody ends, so its record of either grant can no
+        // longer be read.
+        owner.grants().release_custody().unwrap();
+        for (_, _, key) in &pending {
+            assert!(
+                matches!(
+                    owner
+                        .grants()
+                        .issued_reference(&EvidenceId::new(format!("access-{}", key.id)).unwrap()),
+                    Err(GrantRefusal::Unavailable)
+                ),
+                "the native owner's record is unreadable"
+            );
+        }
+        let before = std::fs::read(&path).unwrap();
+        adapter.reconcile_pending_access().await.unwrap();
+        for ((_, reference, key), saved) in pending.iter().zip(&saved) {
+            let stored = adapter.store.get(key).await.unwrap().unwrap();
+            assert_eq!(
+                stored.data.body["issuance"]["state"], "pending_native_issuance",
+                "a cold start that could not read the native record settled the row {}",
+                key.id
+            );
+            assert_eq!(&stored, saved, "the row is unchanged");
+            assert!(matches!(
+                adapter.decode_access(&stored, reference).unwrap().issuance,
+                IssuanceObservation::PendingNativeIssuance
+            ));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before, "nothing is issued");
     }
 
     #[tokio::test]

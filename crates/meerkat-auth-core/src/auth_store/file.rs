@@ -585,4 +585,132 @@ mod tests {
             assert_eq!(mode_bits(&realm_dir.join("anthropic.json")), 0o600);
         }
     }
+
+    /// A save whose write the operating system refuses (a file size limit, a
+    /// quota, a full filesystem that allocates at write time, an I/O error)
+    /// fails, and publishes nothing: the stored credential stays as it was.
+    #[cfg(unix)]
+    mod refused_writes {
+        use super::*;
+        use crate::auth_store::refused_writes_test_support::{names_in, with_writes_refused};
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+        }
+
+        fn key() -> TokenKey {
+            TokenKey::new(
+                RealmId::parse("global").unwrap(),
+                BindingId::parse("anthropic").unwrap(),
+            )
+        }
+
+        /// The names in the realm directory other than its fence file.
+        fn credential_files(root: &Path) -> Vec<String> {
+            names_in(&root.join("global"))
+                .into_iter()
+                .filter(|name| name != meerkat_core::realm_admission::ADMISSION_LOCK_FILE)
+                .collect()
+        }
+
+        /// RED before: the store wrote the temporary file through tokio's
+        /// `File` and synced it without a flush. `sync_all` waits for the
+        /// write but keeps its error for the next write or flush, so the
+        /// refused write went unseen: the save returned `Ok` and renamed the
+        /// EMPTY temporary file over the stored credential.
+        #[test]
+        fn a_refused_write_fails_the_save_and_keeps_the_stored_credential() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_save_and_keeps_the_stored_credential",
+                |root| {
+                    let store = FileTokenStore::new(root);
+                    runtime()
+                        .block_on(store.save(&covering(root, "global"), &key(), &token("old")))
+                        .expect("the first save");
+                    std::fs::read(root.join("global").join("anthropic.json"))
+                        .expect("the stored credential")
+                },
+                |root| {
+                    let store = FileTokenStore::new(root);
+                    let runtime = runtime();
+                    let saved = runtime.block_on(store.save(
+                        &covering(root, "global"),
+                        &key(),
+                        &token("new"),
+                    ));
+                    assert!(
+                        saved.is_err(),
+                        "the refused write fails the save: {saved:?}"
+                    );
+                    let loaded = runtime
+                        .block_on(store.load(&key()))
+                        .expect("the stored credential still loads")
+                        .expect("the stored credential is still there");
+                    assert_eq!(loaded.primary_secret.as_deref(), Some("old"));
+                    assert_eq!(
+                        credential_files(root),
+                        ["anthropic.json"],
+                        "the failed save leaves no temporary file"
+                    );
+                },
+                |root, before| {
+                    assert_eq!(
+                        std::fs::read(root.join("global").join("anthropic.json"))
+                            .expect("the stored credential"),
+                        before,
+                        "the stored credential is byte-identical"
+                    );
+                    assert_eq!(credential_files(root), ["anthropic.json"]);
+                    let loaded = runtime()
+                        .block_on(FileTokenStore::new(root).load(&key()))
+                        .expect("the stored credential loads")
+                        .expect("the stored credential is there");
+                    assert_eq!(loaded.primary_secret.as_deref(), Some("old"));
+                },
+            );
+        }
+
+        /// RED before: the save returned `Ok` and published an empty file as
+        /// the credential of a slot that had none.
+        #[test]
+        fn a_refused_write_publishes_no_credential_for_an_empty_slot() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_publishes_no_credential_for_an_empty_slot",
+                |_root| (),
+                |root| {
+                    let store = FileTokenStore::new(root);
+                    let runtime = runtime();
+                    let saved = runtime.block_on(store.save(
+                        &covering(root, "global"),
+                        &key(),
+                        &token("new"),
+                    ));
+                    assert!(
+                        saved.is_err(),
+                        "the refused write fails the save: {saved:?}"
+                    );
+                    assert!(
+                        runtime
+                            .block_on(store.load(&key()))
+                            .expect("an empty slot loads as empty")
+                            .is_none(),
+                        "the slot is still empty"
+                    );
+                    assert_eq!(
+                        credential_files(root),
+                        Vec::<String>::new(),
+                        "no credential file and no temporary file"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(credential_files(root), Vec::<String>::new());
+                },
+            );
+        }
+    }
 }

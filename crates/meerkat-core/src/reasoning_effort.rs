@@ -353,4 +353,335 @@ mod tests {
             );
         }
     }
+
+    /// A documented JSON example without the whitespace between its tokens:
+    /// the bytes `serde_json::to_string` produces for the same document.
+    fn compact(document: &str) -> String {
+        let mut out = String::with_capacity(document.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        for ch in document.chars() {
+            if in_string {
+                out.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+            } else if ch == '"' {
+                in_string = true;
+                out.push(ch);
+            } else if !ch.is_whitespace() {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    fn anthropic_messages() -> ReasoningRoute {
+        ReasoningRoute::new(
+            ReasoningBackend::Anthropic(AnthropicBackendKind::AnthropicApi),
+            ModelApi::Messages,
+        )
+    }
+
+    fn copilot(api: ModelApi) -> ReasoningRoute {
+        ReasoningRoute::new(ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot), api)
+    }
+
+    fn unsupported_level_refusal() -> ReasoningEffortRefusal {
+        ReasoningEffortRefusal {
+            requested: EffortLevel::Max,
+            provider: Provider::Anthropic,
+            model: "claude-opus-4-5".to_owned(),
+            route: anthropic_messages(),
+            reason: ReasoningEffortRefusalReason::UnsupportedLevel,
+            supported: Some(vec![
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+            ]),
+            facts: Some(ReasoningFactsSource::Catalog),
+            conflicting_param: None,
+            conflicting_level: None,
+        }
+    }
+
+    fn openai_refusal(
+        reason: ReasoningEffortRefusalReason,
+        route: ReasoningRoute,
+    ) -> ReasoningEffortRefusal {
+        ReasoningEffortRefusal {
+            requested: EffortLevel::High,
+            provider: Provider::OpenAI,
+            model: "gpt-5.5".to_owned(),
+            route,
+            reason,
+            supported: None,
+            facts: None,
+            conflicting_param: None,
+            conflicting_level: None,
+        }
+    }
+
+    /// The refusal serializes as the documented shape, byte for byte: the
+    /// fields in the documented order, `supported` and `facts` as explicit
+    /// `null` when absent, and the two conflict fields left out when absent.
+    #[test]
+    fn refusal_serializes_the_documented_shape() {
+        // The two documented examples, as documented (the second one's model
+        // is the document's own placeholder).
+        const UNSUPPORTED_LEVEL: &str = r#"{
+      "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+      "route": {"backend": "anthropic_api", "api": "messages"},
+      "reason": "unsupported_level", "supported": ["low", "medium", "high"], "facts": "catalog"
+    }"#;
+        const SUPPORTED_LEVELS_UNKNOWN: &str = r#"{
+  "requested": "high", "provider": "openai", "model": "<model id>",
+  "route": {"backend": "copilot", "api": "chat_completions"},
+  "reason": "supported_levels_unknown", "supported": null, "facts": null }"#;
+
+        let unsupported = unsupported_level_refusal();
+        let unknown = ReasoningEffortRefusal {
+            model: "<model id>".to_owned(),
+            ..openai_refusal(
+                ReasoningEffortRefusalReason::SupportedLevelsUnknown,
+                copilot(ModelApi::ChatCompletions),
+            )
+        };
+        for (document, refusal) in [
+            (UNSUPPORTED_LEVEL, &unsupported),
+            (SUPPORTED_LEVELS_UNKNOWN, &unknown),
+        ] {
+            assert_eq!(
+                serde_json::to_string(refusal).expect("a refusal serializes"),
+                compact(document)
+            );
+            assert_eq!(
+                &serde_json::from_str::<ReasoningEffortRefusal>(document)
+                    .expect("the documented example reads back"),
+                refusal
+            );
+        }
+
+        // A conflict names the conflicting param, and its level when the
+        // conflicting setting is itself a level, after `facts`.
+        let conflict = ReasoningEffortRefusal {
+            reason: ReasoningEffortRefusalReason::ConflictingProviderEffort,
+            supported: Some(vec![
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+            ]),
+            facts: Some(ReasoningFactsSource::Account),
+            conflicting_param: Some("provider_params.provider_tag.reasoning_effort".to_owned()),
+            conflicting_level: Some(EffortLevel::Low),
+            ..openai_refusal(
+                ReasoningEffortRefusalReason::ConflictingProviderEffort,
+                copilot(ModelApi::Responses),
+            )
+        };
+        let serialized = serde_json::to_string(&conflict).expect("a refusal serializes");
+        assert_eq!(
+            serialized,
+            compact(
+                r#"{
+  "requested": "high", "provider": "openai", "model": "gpt-5.5",
+  "route": {"backend": "copilot", "api": "responses"},
+  "reason": "conflicting_provider_effort", "supported": ["low", "medium", "high"],
+  "facts": "account",
+  "conflicting_param": "provider_params.provider_tag.reasoning_effort",
+  "conflicting_level": "low" }"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffortRefusal>(&serialized)
+                .expect("a conflict reads back"),
+            conflict
+        );
+
+        for (source, wire) in [
+            (ReasoningFactsSource::Catalog, "catalog"),
+            (ReasoningFactsSource::Account, "account"),
+            (ReasoningFactsSource::Operator, "operator"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(source).expect("a facts source serializes"),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    /// One message per reason, as documented. The messages are for people; no
+    /// surface parses them.
+    #[test]
+    fn refusal_messages_are_the_documented_texts() {
+        use ReasoningEffortRefusalReason as Reason;
+
+        assert_eq!(
+            unsupported_level_refusal().to_string(),
+            "reasoning effort 'max' is not supported by anthropic model 'claude-opus-4-5' on \
+             anthropic_api/messages; supported: low, medium, high"
+        );
+
+        let no_effort = ReasoningEffortRefusal {
+            supported: Some(Vec::new()),
+            facts: Some(ReasoningFactsSource::Catalog),
+            ..openai_refusal(
+                Reason::UnsupportedLevel,
+                ReasoningRoute::new(
+                    ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
+                    ModelApi::Realtime,
+                ),
+            )
+        };
+        assert_eq!(
+            no_effort.to_string(),
+            "reasoning effort 'high' is not supported by openai model 'gpt-5.5' on \
+             openai_api/realtime; this route accepts no reasoning effort"
+        );
+
+        assert_eq!(
+            openai_refusal(
+                Reason::SupportedLevelsUnknown,
+                copilot(ModelApi::ChatCompletions)
+            )
+            .to_string(),
+            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5' on \
+             copilot/chat_completions: no source states the levels this route accepts; \
+             provider_params can set a provider-specific effort"
+        );
+
+        assert_eq!(
+            openai_refusal(
+                Reason::SupportedLevelsUnavailable,
+                copilot(ModelApi::Responses)
+            )
+            .to_string(),
+            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5' on \
+             copilot/responses: the account's model list is not loaded; try again once it is"
+        );
+
+        let conflict =
+            |reason: Reason, param: &str, level: Option<EffortLevel>| ReasoningEffortRefusal {
+                conflicting_param: Some(param.to_owned()),
+                conflicting_level: level,
+                ..openai_refusal(reason, copilot(ModelApi::Responses))
+            };
+        assert_eq!(
+            conflict(
+                Reason::ConflictingProviderEffort,
+                "provider_params.provider_tag.reasoning_effort",
+                Some(EffortLevel::Low),
+            )
+            .to_string(),
+            "reasoning effort 'high' conflicts with \
+             provider_params.provider_tag.reasoning_effort = 'low'; set one of them"
+        );
+        assert_eq!(
+            conflict(
+                Reason::ConflictingThinkingBudget,
+                "provider_params.thinking_budget_tokens",
+                None,
+            )
+            .to_string(),
+            "reasoning effort 'high' conflicts with provider_params.thinking_budget_tokens: a \
+             thinking budget and a level are two controls; remove one"
+        );
+        let thinking_type = ReasoningEffortRefusal {
+            reason: Reason::ConflictingThinkingType,
+            conflicting_param: Some("provider_params.provider_tag.thinking".to_owned()),
+            ..unsupported_level_refusal()
+        };
+        assert_eq!(
+            thinking_type.to_string(),
+            "reasoning effort 'max' conflicts with provider_params.provider_tag.thinking: \
+             anthropic model 'claude-opus-4-5' accepts that thinking type only up to 'high'"
+        );
+        assert_eq!(
+            conflict(
+                Reason::ConflictingReasoningBody,
+                "provider_params.provider_tag.reasoning",
+                None,
+            )
+            .to_string(),
+            "reasoning effort 'high' conflicts with provider_params.provider_tag.reasoning: a \
+             raw reasoning body may carry its own effort; remove one"
+        );
+        assert_eq!(
+            conflict(
+                Reason::ConflictingReasoningMode,
+                "provider_params.reasoning",
+                None,
+            )
+            .to_string(),
+            "reasoning effort 'high' conflicts with provider_params.reasoning = 'off'"
+        );
+    }
+
+    /// The run result block serializes as the documented shape, byte for
+    /// byte, and a resolution carries the same fields plus its own
+    /// `requested`.
+    #[test]
+    fn report_serializes_the_documented_shape() {
+        const REPORT: &str = r#"{"requested": "high", "sent": [
+  {"level": "high", "provider": "openai", "model": "gpt-5.5",
+   "route": {"backend": "openai_api", "api": "responses"},
+   "fields": ["reasoning.effort"], "facts": "catalog", "decided_by": "request", "requests": 3}]}"#;
+
+        let route = ReasoningRoute::new(
+            ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
+            ModelApi::Responses,
+        );
+        let report = ReasoningEffortReport {
+            requested: EffortLevel::High,
+            sent: vec![ReasoningEffortSent {
+                level: EffortLevel::High,
+                provider: Provider::OpenAI,
+                model: "gpt-5.5".to_owned(),
+                route: route.clone(),
+                fields: vec!["reasoning.effort".to_owned()],
+                facts: ReasoningFactsSource::Catalog,
+                decided_by: ReasoningEffortDecidedBy::Request,
+                requests: 3,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&report).expect("a report serializes"),
+            compact(REPORT)
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffortReport>(REPORT)
+                .expect("the documented example reads back"),
+            report
+        );
+
+        let resolution = ReasoningEffortResolution {
+            requested: EffortLevel::High,
+            level: EffortLevel::Low,
+            provider: Provider::OpenAI,
+            model: "gpt-5.5".to_owned(),
+            route,
+            fields: vec!["reasoning_effort".to_owned(), "reasoning.effort".to_owned()],
+            facts: ReasoningFactsSource::Operator,
+            decided_by: ReasoningEffortDecidedBy::Preference,
+        };
+        let serialized = serde_json::to_string(&resolution).expect("a resolution serializes");
+        assert_eq!(
+            serialized,
+            compact(
+                r#"{"requested": "high", "level": "low", "provider": "openai", "model": "gpt-5.5",
+  "route": {"backend": "openai_api", "api": "responses"},
+  "fields": ["reasoning_effort", "reasoning.effort"], "facts": "operator",
+  "decided_by": "preference"}"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffortResolution>(&serialized)
+                .expect("a resolution reads back"),
+            resolution
+        );
+    }
 }

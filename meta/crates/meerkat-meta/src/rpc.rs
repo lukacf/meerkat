@@ -15675,6 +15675,16 @@ comms = true
             .remove_unrecorded_for_test(&identity)
             .await
             .expect("simulate a concurrent durable delete after resolution");
+        // The status read of a name this runtime does not register answers
+        // from Core's entry of it: while Core still holds the name declared,
+        // the read is retryable until a roster pass registers it again.
+        assert!(matches!(
+            identity_rt.status(&identity).await,
+            Err(crate::identity_first::IdentityRuntimeError::IdentityHistoryUnavailable { .. })
+        ));
+        // The durable delete removed the name in Core too: the read answers
+        // it unknown.
+        core_bridge.hold_removed(&identity);
         assert!(matches!(
             identity_rt.status(&identity).await,
             Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_))

@@ -64,6 +64,12 @@ backend_profile = "openai_backend"
 auth_profile = "{auth_profile_id}"
 "#
     );
+    seed_realm_config_document(root, &config);
+}
+
+/// Write `config` as the realm config of `dev` and of every workspace realm
+/// the spawned `rkat` may derive, under `root/realms`.
+fn seed_realm_config_document(root: &std::path::Path, config: &str) {
     let mut realm_ids = std::collections::BTreeSet::from(["dev".to_string()]);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     realm_ids.insert(meerkat_core::derive_workspace_realm_id(&cwd));
@@ -76,7 +82,7 @@ auth_profile = "{auth_profile_id}"
     for realm_id in realm_ids {
         let realm_dir = root.join("realms").join(realm_id);
         std::fs::create_dir_all(&realm_dir).expect("mkdir realm config dir");
-        std::fs::write(realm_dir.join("config.toml"), &config).expect("write realm config");
+        std::fs::write(realm_dir.join("config.toml"), config).expect("write realm config");
     }
 }
 
@@ -581,6 +587,78 @@ fn rkat_auth_profile_list_returns_cleanly_for_empty_realm() {
             !stderr.contains("thread 'main' panicked"),
             "CLI must not panic; stderr:\n{stderr}"
         );
+    }
+}
+
+/// `rkat auth profile` shows what a profile is without its credential
+/// material: an inline secret, and a credential command's arguments and
+/// environment values, never reach its output.
+#[test]
+fn rkat_auth_profile_prints_no_credential_values() {
+    const INLINE_SECRET: &str = "inline-secret-canary-7f3c2a";
+    const COMMAND_ARGUMENT: &str = "command-argument-canary-5b81de";
+    const COMMAND_ENV_VALUE: &str = "command-env-canary-91c4f0";
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_realm_config_document(
+        tmp.path(),
+        &format!(
+            r#"
+[realm.dev.auth.inline_profile]
+provider = "openai"
+auth_method = "api_key"
+source = {{ kind = "inline_secret", secret = "{INLINE_SECRET}" }}
+
+[realm.dev.auth.command_profile]
+provider = "openai"
+auth_method = "api_key"
+source = {{ kind = "command", program = "/usr/bin/true", args = ["--token", "{COMMAND_ARGUMENT}"], env = {{ TOKEN_SEED = "{COMMAND_ENV_VALUE}" }} }}
+"#
+        ),
+    );
+    let state_root = tmp.path().join("realms");
+
+    for (profile_id, source_kind) in [
+        ("inline_profile", "inline_secret"),
+        ("command_profile", "command"),
+    ] {
+        let out = isolated_rkat_command(&rkat, tmp.path())
+            .args([
+                "--state-root",
+                state_root.to_str().expect("utf8 path"),
+                "--realm",
+                "dev",
+                "auth",
+                "profile",
+                "--realm",
+                "dev",
+                profile_id,
+            ])
+            .output()
+            .expect("rkat auth profile must spawn");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "auth profile {profile_id} must succeed; stderr:\n{stderr}"
+        );
+        for canary in [INLINE_SECRET, COMMAND_ARGUMENT, COMMAND_ENV_VALUE] {
+            assert!(
+                !stdout.contains(canary) && !stderr.contains(canary),
+                "auth profile {profile_id} printed a credential value; \
+                 stdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+        let printed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("auth profile prints one JSON object");
+        assert_eq!(printed["id"], profile_id, "stdout:\n{stdout}");
+        assert_eq!(printed["provider"], "openai", "stdout:\n{stdout}");
+        assert_eq!(printed["auth_method"], "api_key", "stdout:\n{stdout}");
+        assert_eq!(printed["source_kind"], source_kind, "stdout:\n{stdout}");
     }
 }
 

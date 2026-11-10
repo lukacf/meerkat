@@ -397,6 +397,45 @@ async fn grant_and_revoke_need_the_manage_action_and_reads_need_agent_view() {
     let _ = runtime.shutdown().await;
 }
 
+/// The Console answers a grant's `applies` and an identity's `gate` as the
+/// stdio gateway does. Nothing has sent this Console's member a turn, so no
+/// build of it is live here: a grant applies `at_next_build`, and the list
+/// answers the gate the member's next build resolves, with no running build.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_answers_whether_a_grant_applies_and_the_members_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console(temp.path(), Some(ACCESS)).await;
+
+    let granted = rpc(&app, MANAGER, "meta/tool_grants/grant", grant_params()).await;
+    assert!(granted["error"].is_null(), "{granted:#?}");
+    assert_eq!(
+        granted["result"]["applies"],
+        json!("at_next_build"),
+        "{granted:#?}"
+    );
+
+    let listed = rpc(
+        &app,
+        VIEWER,
+        "meta/tool_grants/list",
+        json!({"identity": IDENTITY}),
+    )
+    .await;
+    assert!(listed["error"].is_null(), "{listed:#?}");
+    let gate = &listed["result"]["gate"];
+    assert!(
+        gate.is_object(),
+        "the list answers the member's gate: {listed:#?}"
+    );
+    assert_eq!(
+        gate["next_build"]["gated"]["tools"],
+        json!([GATED_TOOL]),
+        "{listed:#?}"
+    );
+    assert_eq!(gate["running"], Value::Null, "{listed:#?}");
+    let _ = runtime.shutdown().await;
+}
+
 /// A revoke is judged on its grant's identity under resource-scoped rules:
 /// a principal that may manage one identity's grants revokes them, and its
 /// revoke of another identity's grant, which it may view but not manage, is

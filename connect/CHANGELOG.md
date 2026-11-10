@@ -5,7 +5,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Downgrade: an access decision the next host ended as not issued records the
+  issuance state `not_issued`. A Connect without this change answers a
+  conflict when that decision is applied or read again; other decisions are
+  unaffected.
+
+### Changed
+
+- Connect releases are full GitHub releases, no longer prereleases. A
+  Connect release is still never the repository's latest: Core's release
+  stays latest. The `connect-v0.9.10` and `connect-v0.9.11` releases were
+  changed to match.
+
 ### Fixed
+
+- `toolkit_installed_service_candidates` no longer returns run after run of
+  pages with no candidate. A list call now reads on from its cursor until
+  its page holds a candidate or the list ends, and starts no new read after
+  20 seconds; a page that stops there without a candidate carries
+  `scan_incomplete: true` and a notice to call again with `next`, so it no
+  longer looks like the end of the list. Reading the list also no longer
+  lengthens it: the package owner's readback keeps its private files in a
+  `readback-` directory beside the setup attempts, where the list does not
+  look.
+- The shared setup owner names each peer whose close failed: one stderr
+  line per peer, `local_setup_connection_diagnostic phase=peer_close
+  peer=<n> exception=<class> errno=<code>`, in the closed categories of its
+  other peer diagnostics and never with exception text or paths. Before, a
+  failed peer close left no trace of the peer or of what failed.
+- The shared setup owner removes its private sockets and their directory in
+  `/tmp` even when a peer's close fails, still each only while it is the
+  socket the owner bound. A removal it refuses or that fails no longer
+  replaces the failure the owner reports: that failure is raised with the
+  removal's failure as its context. Before, a failed peer close left the
+  sockets behind.
+
+- Resource packaging pins the Linux library Connect 0.9.11 ships,
+  `toolkit-library-20261109-connect-ad31c1fd`, in
+  `scripts/package-connect-resources.py` and the product's
+  `release-manifest.json`, and the starter exported with it is the Linux
+  default starter. They pinned
+  `toolkit-library-20261009-installed-entry-recovery`, whose bootstrap
+  refuses `--enable-public-github-research`, an argument product
+  preparation always forwards, so every first-run setup on a Linux prefix
+  packaged from those pins ended `owner_refused` at the bootstrap.
+
+- Under sustained heavy CPU load, attaching a native service no longer
+  stalls before all of its members are attached. A readiness check's 250 ms
+  budget now bounds only its waits for the member and the optional read of
+  a failure's detail; its currentness checks run outside the budget and
+  still refuse what they refused before. A member that is ready is seen
+  ready even while one currentness check takes longer than the whole
+  budget, so the members after it are attached.
 
 - After a host loss, or a close that ran out of its 30-second join bound, an
   access decision whose native issuance was still pending no longer stays
@@ -15,18 +68,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   issued, so a fresh approval of the same proposal, or an exact retry of the
   decision, is accepted and issues its grant once.
 
-### Upgrade notes
-
-- Downgrade: an access decision the next host ended as not issued records the
-  issuance state `not_issued`. A Connect without this change answers a
-  conflict when that decision is applied or read again; other decisions are
-  unaffected.
-
 ## [0.9.11] - 2026-11-09
 
 Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11
 and Connect 0.9.11, released together): GitHub release `connect-v0.9.11`, a
-prerelease that is never the repository's latest.
+release that is never the repository's latest.
 
 ### Changed
 
@@ -171,7 +217,7 @@ prerelease that is never the repository's latest.
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10
 and Connect 0.9.10, released together) and the first Connect release from
-this repository: GitHub release `connect-v0.9.10`, a prerelease that is never
+this repository: GitHub release `connect-v0.9.10`, a release that is never
 the repository's latest. Connect 0.9.0 and 0.9.4 and the Linux component
 prereleases 0.9.5 and 0.9.6 were released from `lukacf/meerkat-connect`;
 there are no Connect releases numbered 0.9.7 to 0.9.9.

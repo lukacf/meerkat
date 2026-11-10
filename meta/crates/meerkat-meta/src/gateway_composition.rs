@@ -56,16 +56,20 @@
 //!   `parse_gateway_runtime_options` refuses them ("unsupported
 //!   runtime_options fields"). Largest single remaining piece.
 //!
-//! - **Bootstrap inputs.** The console profile keeps empty events, default
-//!   runtime options and in-memory metadata. The stdio profile keeps its
-//!   configured options and persistent metadata. Both flow through the same
-//!   exact low-level bootstrap call.
+//! - **Bootstrap inputs.** The console profile keeps empty events and
+//!   default runtime options, and in-memory metadata unless the launch gives
+//!   it a metadata store (`GatewayRuntimeBootstrapPlan::with_persistent_metadata`).
+//!   The stdio profile keeps its configured options and persistent metadata.
+//!   Both flow through the same exact low-level bootstrap call.
 //!
-//! - **Console log store.** `rpc_gateway` installs `SqliteConsoleLogStore`
-//!   for persistent launches (`set_console_log_store`). `meta_gateway`
-//!   never calls `set_console_log_store`; its console timeline is in-memory
-//!   by contract, declared through `StorageSlotSummary::declared_ephemeral`
-//!   for both the `console` and the `metadata` slot.
+//! - **Console log store.** Both gateways keep their console log and their
+//!   metadata in the same stores for a persistent launch, in its state
+//!   directory: `SqliteConsoleLogStore` (`set_console_log_store`) and
+//!   `SqliteMetadataStore`. They differ in the switch: `rpc_gateway` opens
+//!   them for a `persistent_state` directory, `meta_gateway` for
+//!   `persistent_sessions`. A launch without it keeps both in memory, declared
+//!   through `StorageSlotSummary::declared_ephemeral` for the `console` and
+//!   the `metadata` slot.
 //!
 //! - **Identity mechanism.** Two different attachment paths, not two
 //!   configurations of one. `meta_gateway` builds an
@@ -210,10 +214,11 @@ impl GatewayCompatibilityProfile {
 /// Exact low-level inputs to `UnifiedRuntime::bootstrap_with_options`.
 ///
 /// The console profile uses [`Self::console_http`], which reproduces
-/// `UnifiedRuntime::bootstrap` exactly. The stdio profile supplies its
-/// existing events, options and metadata authority. Keeping both behind this
-/// one call prevents a third bootstrap path without changing either wire
-/// schema.
+/// `UnifiedRuntime::bootstrap` exactly, its metadata in memory, unless the
+/// launch gives it a metadata store ([`Self::with_persistent_metadata`]).
+/// The stdio profile supplies its existing events, options and metadata
+/// authority. Keeping both behind this one call prevents a third bootstrap
+/// path without changing either wire schema.
 pub struct GatewayRuntimeBootstrapPlan {
     mob_spec: MobBootstrapSpec,
     module_config: MetaConfig,
@@ -237,6 +242,32 @@ impl GatewayRuntimeBootstrapPlan {
             runtime_options: RuntimeOptions::default(),
             persistent_metadata: Arc::new(InMemoryMetadataStore::new()),
         }
+    }
+
+    /// The plan with the runtime's metadata kept in `persistent_metadata`
+    /// instead of the store it holds now: the metadata store of a launch's
+    /// state directory, which `meta_gateway` with persistent sessions gives
+    /// the console profile as the stdio profile takes it at
+    /// [`Self::stdio_rpc`]. The runtime keeps its console audit log, its
+    /// attention list, the gating owner's state, its mob event cursor and
+    /// its spawned members' idle-retire opt-ins there, so a store that keeps
+    /// them across restarts keeps them across a restart of the gateway.
+    ///
+    /// A launch that keeps its state across restarts wires two more parts,
+    /// as `meta_gateway` does: the state directory's console log, installed
+    /// right after the bootstrap (`UnifiedRuntime::set_console_log_store`),
+    /// which keeps the console's requests and their threads; and, with an
+    /// identity runtime, its identity records in this store
+    /// (`gateway_wiring::keep_identity_records_in_runtime_metadata`).
+    /// Without the console log, the attention list outlives the requests its
+    /// items answer: a restart forgets their threads, and a reply to one of
+    /// them is refused as an unknown thread.
+    pub fn with_persistent_metadata(
+        mut self,
+        persistent_metadata: Arc<dyn PersistentMetadataStore>,
+    ) -> Self {
+        self.persistent_metadata = persistent_metadata;
+        self
     }
 
     pub fn stdio_rpc(
@@ -1918,8 +1949,9 @@ mod tests {
         .await
     }
 
-    /// [`console_drain_test_composition_with`], the stdio profile keeping its
-    /// metadata in `metadata` (the console profile keeps its own in memory).
+    /// [`console_drain_test_composition_with`], keeping its metadata in
+    /// `metadata` (the console profile through
+    /// [`GatewayRuntimeBootstrapPlan::with_persistent_metadata`]).
     async fn console_drain_test_composition_over(
         directory: &tempfile::TempDir,
         profile: GatewayCompatibilityProfile,
@@ -1964,6 +1996,7 @@ mod tests {
         let plan = match profile {
             GatewayCompatibilityProfile::ConsoleHttp => {
                 GatewayRuntimeBootstrapPlan::console_http(spec, config, Duration::from_secs(10))
+                    .with_persistent_metadata(metadata)
             }
             GatewayCompatibilityProfile::StdioRpc => GatewayRuntimeBootstrapPlan::stdio_rpc(
                 spec,
@@ -2019,11 +2052,95 @@ mod tests {
     }
 
     /// The stock gateways keep the gating owner's state in the realm's
-    /// metadata store: the approval a gateway left pending and the decision
-    /// it recorded are there after a restart, and after the next one, and
-    /// its gating audit reads report `durable` retention.
+    /// metadata store, in both profiles: the approval a gateway left pending
+    /// and the decision it recorded are there after a restart, and after the
+    /// next one, and its gating audit reads report `durable` retention.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn gating_state_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
+        for profile in [
+            GatewayCompatibilityProfile::StdioRpc,
+            GatewayCompatibilityProfile::ConsoleHttp,
+        ] {
+            let directory = tempfile::tempdir()?;
+            let metadata: Arc<dyn PersistentMetadataStore> =
+                Arc::new(crate::runtime::SqliteMetadataStore::open(
+                    directory.path().join("meta_metadata.sqlite3"),
+                )?);
+            let first = console_drain_test_composition_over(
+                &directory,
+                profile,
+                None,
+                Arc::clone(&metadata),
+            )
+            .await?;
+            let waiting = first
+                .runtime()
+                .evaluate_gating_action(gated("deploy"))
+                .await
+                .pending_id
+                .ok_or("an R3 action waits for approval")?;
+            let decided = first
+                .runtime()
+                .evaluate_gating_action(gated("rollback"))
+                .await
+                .pending_id
+                .ok_or("an R3 action waits for approval")?;
+            first
+                .runtime()
+                .decide_gating_action(crate::runtime::GatingDecideRequest {
+                    pending_id: decided.clone(),
+                    approver_id: "ops-approver".to_string(),
+                    decision: crate::runtime::GatingDecision::Approve,
+                    reason: None,
+                })
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            let _ = first.runtime().shutdown().await;
+            drop(first);
+
+            for restart in 1..=2 {
+                let next = console_drain_test_composition_over(
+                    &directory,
+                    profile,
+                    None,
+                    Arc::clone(&metadata),
+                )
+                .await?;
+                let pending = next.runtime().list_gating_pending().await;
+                assert_eq!(
+                    pending
+                        .iter()
+                        .map(|entry| entry.pending_id.clone())
+                        .collect::<Vec<_>>(),
+                    vec![waiting.clone()],
+                    "{profile:?} restart {restart}: the pending approval survived"
+                );
+                let audit = next.runtime().gating_audit_entries(512).await;
+                assert!(
+                    audit.iter().any(|entry| {
+                        entry.pending_id.as_deref() == Some(decided.as_str())
+                            && entry.event_type == "approval_decided"
+                    }),
+                    "{profile:?} restart {restart}: the recorded decision survived: {audit:#?}"
+                );
+                assert_eq!(
+                    gating_audit_retention(next.runtime()).await?,
+                    serde_json::json!("durable"),
+                    "{profile:?} restart {restart}"
+                );
+                let _ = next.runtime().shutdown().await;
+            }
+        }
+        Ok(())
+    }
+
+    /// A withdrawal reaches the stored gating state without a shutdown, and
+    /// after a restart, and after the next one, the withdrawn request stays
+    /// withdrawn: it is not offered, its `request_withdrawn` record is there,
+    /// and deciding it is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_state_survives_restart_after_a_withdrawal()
+    -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let metadata: Arc<dyn PersistentMetadataStore> =
             Arc::new(crate::runtime::SqliteMetadataStore::open(
@@ -2042,7 +2159,7 @@ mod tests {
             .await
             .pending_id
             .ok_or("an R3 action waits for approval")?;
-        let decided = first
+        let withdrawn = first
             .runtime()
             .evaluate_gating_action(gated("rollback"))
             .await
@@ -2050,14 +2167,39 @@ mod tests {
             .ok_or("an R3 action waits for approval")?;
         first
             .runtime()
-            .decide_gating_action(crate::runtime::GatingDecideRequest {
-                pending_id: decided.clone(),
-                approver_id: "ops-lead".to_string(),
-                decision: crate::runtime::GatingDecision::Approve,
-                reason: None,
+            .withdraw_gating_action(crate::runtime::GatingWithdrawRequest {
+                pending_id: withdrawn.clone(),
+                reason: Some("obsolete".to_string()),
             })
             .await
             .map_err(|error| format!("{error:?}"))?;
+        // The change writer stores the withdrawal before any shutdown.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut written = false;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(document) = metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+            {
+                let snapshot: crate::runtime::GatingStateSnapshot =
+                    serde_json::from_str(&document)?;
+                if snapshot
+                    .pending
+                    .iter()
+                    .all(|entry| entry.pending_id != withdrawn)
+                    && snapshot.audit.iter().any(|entry| {
+                        entry.pending_id.as_deref() == Some(withdrawn.as_str())
+                            && entry.event_type == "request_withdrawn"
+                    })
+                {
+                    written = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(written, "the withdrawal was written before any shutdown");
         let _ = first.runtime().shutdown().await;
         drop(first);
 
@@ -2076,20 +2218,31 @@ mod tests {
                     .map(|entry| entry.pending_id.clone())
                     .collect::<Vec<_>>(),
                 vec![waiting.clone()],
-                "restart {restart}: the pending approval survived"
+                "restart {restart}: only the open request is offered"
             );
             let audit = next.runtime().gating_audit_entries(512).await;
             assert!(
                 audit.iter().any(|entry| {
-                    entry.pending_id.as_deref() == Some(decided.as_str())
-                        && entry.event_type == "approval_decided"
+                    entry.pending_id.as_deref() == Some(withdrawn.as_str())
+                        && entry.event_type == "request_withdrawn"
                 }),
-                "restart {restart}: the recorded decision survived: {audit:#?}"
+                "restart {restart}: the withdrawal survived: {audit:#?}"
             );
-            assert_eq!(
-                gating_audit_retention(next.runtime()).await?,
-                serde_json::json!("durable"),
-                "restart {restart}"
+            let decided = next
+                .runtime()
+                .decide_gating_action(crate::runtime::GatingDecideRequest {
+                    pending_id: withdrawn.clone(),
+                    approver_id: "ops-lead".to_string(),
+                    decision: crate::runtime::GatingDecision::Approve,
+                    reason: None,
+                })
+                .await;
+            assert!(
+                matches!(
+                    decided,
+                    Err(crate::runtime::GatingDecideError::UnknownPendingId(_))
+                ),
+                "restart {restart}: {decided:?}"
             );
             let _ = next.runtime().shutdown().await;
         }

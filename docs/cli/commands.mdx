@@ -481,6 +481,11 @@ rkat auth connector-client list
 rkat auth connector-client remove <ID>
 ```
 
+`rkat auth profile` prints the profile's `id`, `provider`, `auth_method` and
+`source_kind` as JSON, the `auth_profile` shape JSON-RPC `auth/profile/get`
+returns. It never prints a credential value: not an `inline_secret` source's
+secret, nor a `command` source's arguments or environment values.
+
 `<PROVIDER>` is `anthropic`, `openai`, `gemini`, or `copilot` (GitHub
 Copilot: the device sign-in interactively, a GitHub token with
 `--non-interactive`; see

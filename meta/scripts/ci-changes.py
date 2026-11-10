@@ -60,7 +60,7 @@ knows: a path under meta/ loses that prefix; the root's Cargo.toml,
 Cargo.lock, rust-toolchain.toml and .cargo/, which Meta's builds now read,
 keep their names, the build configuration Meta's own copies were; Meta's
 workflows, moved to the root as meta-*.yml, take their old names; and the
-root files every job that builds Rust runs (MONOREPO_JOB_FILES) reach every
+root files the jobs that build Rust run (MONOREPO_JOB_FILES) reach every
 lane. No other path is Meta's: a pull request or push none of whose paths is
 Meta's needs no lane and prints `meta=false`, and the workflow exits early.
 Every other run prints `meta=true` and its lanes as above, a push every lane.
@@ -295,15 +295,19 @@ MONOREPO_WORKFLOWS = {
     ".github/workflows/meta-installer-release.yml": ".github/workflows/forge-release.yml",
     ".github/workflows/meta-e2e-live.yml": ".github/workflows/e2e-live.yml",
 }
-# Root files every meta-ci.yml job that builds Rust runs: the root cargo
-# wrapper it builds through and the setup actions, with the script they run.
-# Like RUST_JOB_FILES they reach every lane; MONOREPO_MARK keeps their names
-# apart from Meta's files of the same names.
+# Root files the meta-ci.yml jobs that build Rust run: the root cargo wrapper
+# they build through and the setup actions (Rust, sccache, mold, and nextest
+# for the test jobs), with the scripts they run. Like RUST_JOB_FILES they
+# reach every lane; MONOREPO_MARK keeps their names apart from Meta's files of
+# the same names.
 MONOREPO_JOB_FILES = frozenset({
     "scripts/repo-cargo",
     "scripts/ci-pin-rust-toolchain-env",
+    "scripts/ci-release-asset-download",
     ".github/actions/setup-rust-ci/action.yml",
     ".github/actions/setup-sccache-ci/action.yml",
+    ".github/actions/setup-mold-ci/action.yml",
+    ".github/actions/setup-cargo-tool-ci/action.yml",
 })
 MONOREPO_MARK = "//"
 # Root files a Meta job reads, under their own names: meerkat-meta's SQLite

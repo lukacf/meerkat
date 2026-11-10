@@ -71,10 +71,12 @@ export interface DepartedApproval {
   request: PendingApproval;
   /** When this console saw it leave the pending list. */
   departedAtMs: number;
-  /** The recorded decision: `approve`, `reject` or `escalate`, or `expired`
-   * when the deadline passed. `by` is the decider's name as the record keeps
-   * it (the signed-in person, else the approver the decision named). */
-  decided?: { action: ApprovalAction | "expired"; by?: string };
+  /** The recorded decision: `approve`, `reject` or `escalate`, `expired`
+   * when the deadline passed, or `withdrawn` when the requester withdrew it
+   * (nobody decided). `by` is the decider's name as the record keeps it (the
+   * signed-in person, else the approver the decision named); never set for
+   * `expired` or `withdrawn`. */
+  decided?: { action: ApprovalAction | "expired" | "withdrawn"; by?: string };
 }
 /** Who looks at the approvals: whether they decide in this console (a
  * signed-in person) and the approver ids they hold (`meta/console/whoami`). */
@@ -202,11 +204,12 @@ const isDenied = (error: unknown) => {
 
 /** How many requests decided elsewhere the snapshot keeps. */
 const DEPARTED_LIMIT = 20;
-const DECIDED_EVENTS: Readonly<Record<string, ApprovalAction | "expired">> = {
+const DECIDED_EVENTS: Readonly<Record<string, ApprovalAction | "expired" | "withdrawn">> = {
   approval_decided: "approve",
   rejection_decided: "reject",
   escalation_decided: "escalate",
   timeout_fallback: "expired",
+  request_withdrawn: "withdrawn",
 };
 /** The decisions a gating audit read records, by request. */
 function recordedDecisions(value: unknown): Map<string, NonNullable<DepartedApproval["decided"]>> {
@@ -219,7 +222,7 @@ function recordedDecisions(value: unknown): Map<string, NonNullable<DepartedAppr
     const action = typeof record?.event_type === "string" ? DECIDED_EVENTS[record.event_type] : undefined;
     if (!pendingId || !action || found.has(pendingId)) continue;
     const detail = record?.detail && typeof record.detail === "object" ? record.detail as Record<string, unknown> : {};
-    const by = action === "expired" ? undefined : text(detail.deciding_principal) || text(detail.approver_id);
+    const by = action === "expired" || action === "withdrawn" ? undefined : text(detail.deciding_principal) || text(detail.approver_id);
     found.set(pendingId, { action, ...(by ? { by } : {}) });
   }
   return found;

@@ -96,7 +96,9 @@ class AdapterTests(fixtures.FixtureMixin, unittest.IsolatedAsyncioTestCase):
             for name, arguments in cases.items():
                 owner.dispatch.reset_mock()
                 self.assertEqual(await self.call(client, name, arguments), {"entered": True})
-                owner.dispatch.assert_awaited_once_with("/api/" + name.removeprefix("setup_"), arguments)
+                # An owner without a shared Controller passes no shared entry.
+                owner.dispatch.assert_awaited_once_with("/api/" + name.removeprefix("setup_"), arguments,
+                    _entry=None)
             # Listing is a detached display: even changing a returned nested
             # property cannot change the strict validator captured at startup.
             tools["setup_selected_check"].input_schema["properties"]["profile"] = {}

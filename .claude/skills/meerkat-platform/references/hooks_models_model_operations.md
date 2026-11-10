@@ -447,8 +447,9 @@ A `system_prompt` after the first turn, or `session/inject_context`, adds a
 System message mid-conversation. The catalog flag
 `supports_mid_conversation_system_messages` (`rkat models`) shows which
 models accept one: the OpenAI GPT text models and, among Anthropic models,
-only claude-fable-5-1, claude-fable-5, claude-opus-5-5, claude-opus-5,
-claude-opus-4-8, claude-sonnet-5-5 and (0.9.1) claude-haiku-5-5. On Gemini and
+only claude-fable-5-2, claude-fable-5-1, claude-fable-5, claude-opus-5-5,
+claude-opus-5, claude-opus-4-8, claude-sonnet-5-5 and (0.9.1)
+claude-haiku-5-5. On Gemini and
 other Anthropic models
 (and on the ChatGPT backend, which takes one leading System message) the
 request fails with a non-retryable `invalid_request` (`InvalidInputShape`);

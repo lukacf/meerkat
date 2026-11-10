@@ -925,6 +925,37 @@ export function parseGatingDecisionResult(
   };
 }
 
+// -- GatingWithdrawResult -------------------------------------------------
+
+/** A requester's withdrawal of its own pending request: no decision, no
+ * approver, and nothing runs (`outcome` is `safe_draft`). */
+export interface GatingWithdrawResult {
+  readonly pendingId: string;
+  readonly actionId: string;
+  readonly actorId: string;
+  readonly withdrawnBy: string;
+  readonly outcome?: string | null;
+  readonly withdrawnAtMs?: number | null;
+  readonly reason?: string | null;
+}
+
+export function parseGatingWithdrawResult(
+  raw: unknown,
+): GatingWithdrawResult {
+  const d = asRecord(raw);
+  return {
+    pendingId: String(d.pending_id ?? ""),
+    actionId: String(d.action_id ?? ""),
+    actorId: String(d.actor_id ?? ""),
+    withdrawnBy: String(d.withdrawn_by ?? ""),
+    outcome: typeof d.outcome === "string" ? d.outcome : null,
+    withdrawnAtMs: typeof d.withdrawn_at_ms === "number"
+      && Number.isSafeInteger(d.withdrawn_at_ms) && d.withdrawn_at_ms >= 0
+      ? d.withdrawn_at_ms : null,
+    reason: typeof d.reason === "string" ? d.reason : null,
+  };
+}
+
 // -- GatingAuditEntry -----------------------------------------------------
 
 export interface GatingAuditEntry {
@@ -2617,6 +2648,14 @@ export function parseErrorEvent(raw: unknown): ErrorEvent {
       const runtimeId = String(context.agent_runtime_id ?? "");
       const effect = String(context.effect ?? "");
       const attempts = Number(context.attempts ?? 0);
+      if (context.cause === "budget_busy") {
+        // The realm's background budget did not admit the side effect's run
+        // within its wait: it did not run, and no attempt of it failed for
+        // that; the attempts that failed before it are named.
+        const after = attempts > 0 ? ` after ${attempts} failed attempts` : "";
+        message = `the ${effect} of ${identity} (${runtimeId}) did not run${after}: ${error}`;
+        break;
+      }
       // A compaction harvest's error says itself whether a fallback harvest
       // follows; any other side effect is not run again.
       const settled = effect === "compaction_harvest" ? "" : ", and is not run again";

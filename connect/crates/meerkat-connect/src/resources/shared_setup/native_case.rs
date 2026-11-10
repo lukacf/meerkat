@@ -1207,12 +1207,18 @@ impl Case {
             physical: None,
         });
         let owner = self.resource.as_ref().unwrap();
-        let paths = {
+        let ready = {
             let mut channel = owner.channel.lock().await;
-            tokio::time::timeout(BOUND, read_ready(&mut channel.output, 2))
-                .await
-                .unwrap()
-                .unwrap()
+            tokio::time::timeout(BOUND, read_ready(&mut channel.output, 2)).await
+        };
+        // An owner that is never ready says why on its own stderr, for one an
+        // interpreter without the pinned Python set.
+        let paths = match ready {
+            Ok(Ok(paths)) => paths,
+            other => panic!(
+                "the shared native owner was not ready ({other:?}); its stderr: {}",
+                fs::read_to_string(output.join("owner.stderr")).unwrap_or_default()
+            ),
         };
         self.script
             .selected

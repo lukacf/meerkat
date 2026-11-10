@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from Meerkat Meta main at [10d49fde733f](https://github.com/lukacf/meerkat/commit/10d49fde733fc7eb7fd1c18b73bad31e0423303c) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -1493,8 +1493,9 @@ store is slower. Nothing reads the log to decide anything, and each owner's
 own record stays the authority for what happened. A row that cannot be
 written is logged and dropped, and the change stands as its owner answered
 it. The log is kept in the realm's metadata store: durable for
-`rpc_gateway` over a state directory or a host store realm, and for the
-process on `meta_gateway`, which keeps its metadata in memory; a console
+`rpc_gateway` over a state directory or a host store realm and for
+`meta_gateway` with persistent sessions, and for the process on a launch
+that keeps its metadata in memory; a console
 without a local runtime keeps none. Each record set keeps at most 20000
 rows, none older than 365 days, each bound give or take one page of 64
 rows; an embedder sets other bounds with
@@ -2916,11 +2917,16 @@ stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
   1024 bytes, no control character. Recorded in the grant's issuer as
   attribution; nothing resolves or trusts it.
 
-Answers `{grant}`, Meerkat's `WireToolGrant`. The issuer is
-`{kind: "operator", caller?, decision_ref?}`: `caller` is the signed-in
-principal on the Console and absent for the stdio host. Meta's grant answers
-do not report `applies` or the gate yet: Meerkat's own `tool_grants/grant`
-and `tool_grants/list` report them, Meta's answers leave them out.
+Answers `{grant, applies}`. `grant` is Meerkat's `WireToolGrant`; its issuer
+is `{kind: "operator", caller?, decision_ref?}`: `caller` is the signed-in
+principal on the Console and absent for the stdio host. `applies` says
+whether the grant applies to the member's running build, as Meerkat's own
+`tool_grants/grant` answers it: `now` (that build gates the target),
+`not_mounted` (that build, or with no live build the next one, ignores the
+target as not mounted) or `at_next_build` (no build of the member is live on
+the gateway, its live build predates the gate that names the target, or the
+target is a gated MCP server the member's profile configures that its live
+build left unattached). It is advisory: the grant is issued either way.
 
 A grant wakes nothing. It opens the tool at the member's next model request,
 and a revoke or the deadline closes it there and refuses the next call at
@@ -2946,11 +2952,18 @@ Console's signed-in principal as its `actor` (none for the stdio host).
 
 ### `meta/tool_grants/list`
 
-`{identity, include_ended?}` answers `{grants, unreadable?}`: the identity's
-active grants, every one whose deadline passed settled as `expired` first, and
-the ended ones too with `include_ended`. `unreadable` names a stored grant row
-this version cannot read; it opens nothing. A retired identity's grants stay
-readable.
+`{identity, include_ended?}` answers `{grants, unreadable?, gate?}`: the
+identity's active grants, every one whose deadline passed settled as
+`expired` first, and the ended ones too with `include_ended`. `unreadable`
+names a stored grant row this version cannot read; it opens nothing. For an
+identity on the mob's roster, `gate` is the member's gate, as Meerkat's own
+`tool_grants/list` answers it: `running`, what its live build gates (its
+gated names under `tools`, with its gated servers and
+`unconfigured_mcp_servers`) and the names it ignored as not mounted, or
+`null` while no build of the member is live on the gateway; and
+`next_build`, the gate its next build resolves, split the same way.
+Advisory, like `applies`. A retired identity's grants stay readable, and its
+list answers no `gate`.
 
 ### `meta/tool_grants/audit`
 

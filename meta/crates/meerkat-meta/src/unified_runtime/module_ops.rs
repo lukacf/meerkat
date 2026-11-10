@@ -243,6 +243,17 @@ impl UnifiedRuntime {
             .decide_gating_action(request)
     }
 
+    /// See [`crate::runtime::MetaRuntimeHandle::withdraw_gating_action`].
+    pub async fn withdraw_gating_action(
+        &self,
+        request: crate::runtime::GatingWithdrawRequest,
+    ) -> Result<crate::runtime::GatingWithdrawResult, crate::runtime::GatingWithdrawError> {
+        self.module_runtime
+            .lock()
+            .await
+            .withdraw_gating_action(request)
+    }
+
     /// See [`crate::runtime::MetaRuntimeHandle::gating_audit_after`].
     pub async fn gating_audit_after(
         &self,

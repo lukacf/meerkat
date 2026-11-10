@@ -34,16 +34,19 @@ TARGETS = {
                     "49482af8016a76de90826a1362030319f27063b92f9ee0c87de970801f04cb6b", 128566016),
         "library_dir": "toolkit-library-20261009-library-support-selection-macos-arm64",
         "library_url": "https://example.invalid/connect-resources/20261010/setup-descriptor-48256eb8/toolkit-library-20261009-library-support-selection-macos-arm64.tar.gz?generation=1791603887971933",
+        "starter": "toolkit-setup-20261010-resource-selection-export",
     },
     "linux-x86_64": {
         "python": ("cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst",
                    "b48f6e7b70f366018b586a6d6234c551d05b172a3e6c79ddaf33fb90e7038acb", 74939721),
         "node": ("node-v22.23.2-linux-x64.tar.gz",
                  "b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a", 56851233),
-        "library": ("toolkit-library-20261009-installed-entry-recovery-linux-x86_64.tar.gz",
-                    "50b5ee1e384ae24f7a4a0511efaca781025eeaa8489414d71fd825557e48f146", 137446294),
-        "library_dir": "toolkit-library-20261009-installed-entry-recovery-linux-x86_64",
-        "library_url": "https://example.invalid/connect-resources/20261009-installed-entry-library-392df58801/toolkit-library-20261009-installed-entry-recovery-linux-x86_64.tar.gz?generation=1791566326372635",
+        # The library Connect 0.9.11 ships, with the starter exported for it.
+        # Its release built it from this repository, so it has no hosted URL.
+        "library": ("toolkit-library-20261109-connect-ad31c1fd-linux-x86_64.tar.gz",
+                    "de622a11f8789592fec5f5c5959be7692a57b8d7eb688a9c9e3ecc63516d3bd4", 120640110),
+        "library_dir": "toolkit-library-20261109-connect-ad31c1fd-linux-x86_64",
+        "starter": "toolkit-setup-20261109-connect-ad31c1fd-export",
     },
 }
 # This declares the consuming host, not the machine performing packaging.
@@ -54,13 +57,28 @@ SUPPORTED_HOSTS = {
     "linux-x86_64": {"platform": "linux", "machine": "x86_64", "pointer_bits": 64,
                      "glibc": "glibc 2.39"},
 }
-STARTER = {
-    "README.md": "45ad8666ef32a3db9d5186a4848332adb4726381b76353dd978d2dacadc4a5de",
-    "bootstrap_host.py": "06249f980076e1648109c7f6cf5e9ed647440a67d63ed59ea950c5874ca0cb56",
-    "current-distribution.json": "3dcc5271f0ddc16df5e96e6a32540871a953bdb842ff1dae7f1fcb1b1d7203e7",
-    "prepare_host.py": "a31de9e408930c0e05ec8ec0994a0a879d546bdbdd16703439502295377895fa",
-    "release-manifest.json": "e9950a90f0ec4fc65e707065ad6c08964851506629053c8a9be31cdfadfc5589",
-    "start.py": "4b504d98f51621d0d08bc1813a0aca4151747f22fa99bd29b4db50311310107c",
+# The six files of every starter export.
+STARTER_FILES = ("README.md", "bootstrap_host.py", "current-distribution.json",
+                 "prepare_host.py", "release-manifest.json", "start.py")
+# The exact files of each target's default starter export (its "starter",
+# under dist/). Its release manifest names that target's default library.
+STARTERS = {
+    "toolkit-setup-20261010-resource-selection-export": {
+        "README.md": "45ad8666ef32a3db9d5186a4848332adb4726381b76353dd978d2dacadc4a5de",
+        "bootstrap_host.py": "06249f980076e1648109c7f6cf5e9ed647440a67d63ed59ea950c5874ca0cb56",
+        "current-distribution.json": "3dcc5271f0ddc16df5e96e6a32540871a953bdb842ff1dae7f1fcb1b1d7203e7",
+        "prepare_host.py": "a31de9e408930c0e05ec8ec0994a0a879d546bdbdd16703439502295377895fa",
+        "release-manifest.json": "e9950a90f0ec4fc65e707065ad6c08964851506629053c8a9be31cdfadfc5589",
+        "start.py": "4b504d98f51621d0d08bc1813a0aca4151747f22fa99bd29b4db50311310107c",
+    },
+    "toolkit-setup-20261109-connect-ad31c1fd-export": {
+        "README.md": "da7c0f800676143e5de573142578f7841f79b511ab930105442a1dae04972a9f",
+        "bootstrap_host.py": "f669afb76366c09c60ae1378bb529f8c2a891174344d7cbaf71ca2cd43c1f7ee",
+        "current-distribution.json": "63f1625ee96431453cd7d2ee77488956e6e148c1927018a0a616fec5a773740f",
+        "prepare_host.py": "24e8a8e3d1537983f9cd8bcf7d26ebeb773224ffa05bacf7dcb20be5aeea178e",
+        "release-manifest.json": "b5b58a8d48509133c82be415956381162f0c440cd7783a5ad20b2d5e6b5b3498",
+        "start.py": "9aecf1729270cb4cd2d568f44c4fb4141e447e6c1f1aee713a896fff9842264a",
+    },
 }
 MAX_RUNTIME_ARCHIVE_ENTRIES = 50000
 MAX_RUNTIME_ARCHIVE_BYTES = 1024 * 1024 * 1024
@@ -181,11 +199,11 @@ def selected_resource_inputs(target, library, library_sha256, library_bytes, sta
         raise ValueError("invalid explicit resource selection")
     library, starter = library.resolve(strict=True), starter.resolve(strict=True)
     if (not re.fullmatch(r"toolkit-library-[A-Za-z0-9_.-]+-" + re.escape(target) + r"\.tar\.gz", library.name)
-            or not starter.is_dir() or {p.name for p in starter.iterdir()} != set(STARTER)):
+            or not starter.is_dir() or {p.name for p in starter.iterdir()} != set(STARTER_FILES)):
         raise ValueError("selected library target or starter closure mismatch")
     pin(library, library_sha256, library_bytes)
     files = {}
-    for name in STARTER:
+    for name in STARTER_FILES:
         path = starter / name
         if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 2 * 1024 * 1024:
             raise ValueError("invalid selected starter file")
@@ -544,12 +562,13 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     else:
         archive = ROOT / "dist" / selected["library_dir"] / library[0]
         pin(archive, library[1], library[2])
-        starter = ROOT / "dist/toolkit-setup-20261010-resource-selection-export"
-        if {p.name for p in starter.iterdir()} != set(STARTER):
+        starter = ROOT / "dist" / selected["starter"]
+        pins = STARTERS[selected["starter"]]
+        if {p.name for p in starter.iterdir()} != set(STARTER_FILES):
             raise ValueError("unexpected starter closure")
-        for name, sha in STARTER.items():
-            pin(starter / name, sha)
-        starter_files = {name: {"sha256": sha} for name, sha in STARTER.items()}
+        for name in STARTER_FILES:
+            pin(starter / name, pins[name])
+        starter_files = {name: {"sha256": pins[name]} for name in STARTER_FILES}
     pip_license = PREPARE.parent / "notices/pip-LICENSE.txt"
     pin(pip_license, PIP_LICENSE)
     source_prepare_sha = digest(PREPARE)
@@ -617,7 +636,7 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     pin(resources / "notices/pip-LICENSE.txt", PIP_LICENSE)
     (resources / "notices/runtime-compatibility.json").write_text(json.dumps(compatibility, indent=2) + "\n")
     (resources / "starter").mkdir()
-    for name in STARTER:
+    for name in STARTER_FILES:
         shutil.copyfile(starter / name, resources / "starter" / name)
         (resources / "starter" / name).chmod(0o644)
         pin(resources / "starter" / name, starter_files[name]["sha256"], starter_files[name].get("bytes"))
@@ -633,9 +652,9 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
          "url": "https://nodejs.org/download/release/" + compatibility["runtime_metadata"]["node"]["version"] + "/" + node[0]},
     ]
     # sources records actual upstream downloads, not the entire composition.
-    # A locally produced selected library has no invented hosted URL; its
-    # entries/archive and build.json selection retain its exact identity.
-    if not explicit:
+    # A locally produced library, selected or default, has no invented hosted
+    # URL; its entries/archive and build.json selection retain its exact identity.
+    if not explicit and "library_url" in selected:
         sources.append({"name": library[0], "sha256": library[1], "size": library[2],
                         "url": selected["library_url"]})
     # The accepted installer invokes isolated Python for some venv operations.

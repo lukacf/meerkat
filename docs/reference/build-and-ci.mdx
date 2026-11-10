@@ -666,8 +666,14 @@ GitHub-hosted backend by that runner); those trailing archives are added afterwa
 replacing a published asset. A pre-tag prebuild
 (`make release-prebuild`, a `release.yml` dispatch on `main` that publishes
 nothing) can build all of those artifacts for the release commit before the
-tag; the tag run of exactly that commit then publishes them after the same
-attestation checks as an asset recovery instead of rebuilding. Registry
+tag; the tag run of that commit, or of a later commit whose changes since
+touch no input of Core's release artifacts
+(`scripts/release-prebuild-equivalent`: other products' roots except their
+`Cargo.toml` files, product changelogs and a short list of CI-only files),
+then publishes them after the same attestation checks as an asset recovery
+instead of rebuilding. A run of exactly the tag commit is preferred, and a
+release built from an earlier commit's prebuild carries
+`prebuild-source-<version>.txt`, which names both commits. Registry
 publication remains GitHub-hosted.
 
 The repository pre-push dispatcher follows the same identity rule. A complete

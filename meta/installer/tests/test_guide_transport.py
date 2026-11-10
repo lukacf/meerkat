@@ -119,11 +119,11 @@ def test_route_reads_are_copies_and_declaration_is_checked(selected, monkeypatch
     route = guide_runtime.selected_model_configuration()
     route["model"] = "changed"
     assert selected.model_configuration["model"] == "gpt-6.1-sol"
+    # Meta and Core of one workspace release share its version.
     monkeypatch.setattr(receiver_sdk, "SELECTED_VERSION", "0.9.6")
-    monkeypatch.setattr(receiver_sdk, "CORE_REQUIREMENT", "=0.9.7")
-    assert replace(selected, version="0.9.6", core_version="0.9.7").core_version == "0.9.7"
+    assert replace(selected, version="0.9.6", core_version="0.9.6").core_version == "0.9.6"
     with pytest.raises(bootstrap.GatewayInstallError):
-        replace(selected, version="0.9.6", core_version="0.9.6")
+        replace(selected, version="0.9.6", core_version="0.9.7")
 
 
 def test_planner_requires_role_admission_before_consuming_startup_factory(selected, monkeypatch):

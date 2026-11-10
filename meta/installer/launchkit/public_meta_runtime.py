@@ -2,8 +2,12 @@
 
 An agent-team package pip-installs this exact PyPI wheel, checked against its
 SHA-256 in a step of its own, and downloads the release's native gateways,
-checked against the release's published checksum manifests. Applications keep
-their own runtime selection; nothing here selects a product or a candidate.
+checked against the release's published checksum manifests. The release is
+the workspace's own Meta release, the one a packaged Forge's Guide carries:
+the wheel's SHA-256 and the recorded catalog exist once that release is
+published, so they move to a new release together with Forge's release inputs.
+Applications keep their own runtime selection; nothing here selects a product
+or a candidate.
 """
 from __future__ import annotations
 
@@ -21,24 +25,23 @@ import tempfile
 
 
 def release_url(version):
-    """Where Meta's release of `version` publishes its assets.
+    """Where Meta's release of `version` publishes its assets: the monorepo,
+    under meta-v tags (its v tags are Core's).
 
-    Meta releases up to 0.9.7 stay in the standalone repository under v tags
-    (0.9.7, the last of them, was published there); later ones come from the
-    monorepo under meta-v tags (its v tags are Core's). Both publish the same
-    archive and checksum manifest names.
+    Releases up to 0.9.7 were published by the standalone repository, and no
+    agent team this Forge compiles installs one of them.
     """
     found = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", version) if isinstance(version, str) else None
     if found is None:
         raise ValueError(f"The Meta release version {version!r} is invalid.")
     if tuple(int(part) for part in found.groups()) <= (0, 9, 7):
-        return f"https://github.com/lukacf/meerkat-meta/releases/download/v{version}"
+        raise ValueError(f"Meta {version} was released before the monorepo; agent teams install a later release.")
     return f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}"
 
 
-VERSION = "0.9.6"
+VERSION = "0.9.11"
 SDK_DISTRIBUTION = "meerkat-meta"
-SDK_WHEEL_SHA256 = "40e2f2a48fa8dc656953d8a6e11fe66b5cc059df66b0162c14678d89c86349dc"
+SDK_WHEEL_SHA256 = "ee0d717ee67a36d97252c08b74e76573893fbc2549f3201a57d0bf24a4afe223"
 RELEASE_URL = release_url(VERSION)
 CATALOG_FORMAT = "forge-public-meta-model-catalog-v1"
 MODEL_CATALOG = Path(__file__).with_name(f"meta_model_catalog_{VERSION.replace('.', '_')}.json")

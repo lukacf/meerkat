@@ -117,11 +117,27 @@ export interface MobAppendSystemContextResult {
   status: 'applied' | 'duplicate';
 }
 
+/**
+ * The input a member's runtime admitted for a send, named before the send
+ * answered. Match `input_id` against `boundary_append_applied.input_id` and
+ * `boundary_appends_discarded.input_ids`.
+ */
+export interface MemberInputAdmission {
+  session_id: string;
+  input_id: string;
+}
+
 /** Delivery receipt for a direct mob member turn. */
 export interface MemberDeliveryReceipt {
   agent_identity: string;
   member_ref: MobMemberRef;
   handling_mode: HandlingMode;
+  /**
+   * Absent when the answer precedes runtime admission (an autonomous
+   * member's inbox delivery), for a member not served by this runtime, and
+   * from a runtime older than contract 0.9.12.
+   */
+  admission?: MemberInputAdmission;
 }
 
 /** Respawn receipt for a mob member. */

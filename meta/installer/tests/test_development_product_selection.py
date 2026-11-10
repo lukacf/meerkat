@@ -17,7 +17,7 @@ from test_meta_toolkit_runtime_selection import (product, no_product_execution,
     json_bytes, put, PREFIX)
 from test_sdk_wheel_integrity import InertWheel
 from test_distribution import bundle_source
-from test_guide_release_selection import neighbours
+from test_guide_release_selection import client_wheel, neighbours
 
 
 def development(product, meta_version="0.9.0"):
@@ -53,27 +53,6 @@ def development(product, meta_version="0.9.0"):
     target = replace(product.target, assembly=put(product.final / "development.json", json_bytes(descriptor)),
         source_manifest=product.source)
     return target, descriptor, staging
-
-
-def test_distribution_admits_exact_asymmetric_guide_pair_and_refuses_equal_version_assumption(
-        product, bundle_source, tmp_path, monkeypatch):
-    from launchkit import distribution, product_distribution, guide_sdk
-    monkeypatch.setattr(guide_sdk, 'SELECTED_VERSION', '0.9.6')
-    monkeypatch.setattr(guide_sdk, 'CORE_REQUIREMENT', '=0.9.7')
-    monkeypatch.setattr(guide_sdk, 'WHEEL', 'vendor/guide/meerkat_meta-0.9.6-py3-none-any.whl')
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
-    target, _, _ = development(product, '0.9.4')
-    output = tmp_path / 'asymmetric-guide.zip'
-    product_distribution.package(root, target, guide, output)
-    extracted = tmp_path / 'asymmetric-guide'
-    with zipfile.ZipFile(output) as archive:
-        archive.extractall(extracted)
-    observed = product_distribution.verify(extracted)
-    assert (observed['guide']['version'], observed['guide']['core_version']) == ('0.9.6','0.9.7')
-    observed['guide']['core_version'] = '0.9.6'
-    (extracted / distribution.MANIFEST).write_bytes(json_bytes(observed))
-    with pytest.raises(distribution.DistributionError):
-        product_distribution.verify(extracted)
 
 
 @pytest.mark.parametrize("meta_version", ["0.9.0", "0.9.1", "0.9.4"])
@@ -189,26 +168,20 @@ def test_development_catalog_uses_exact_full_meta_profiles(product, meta_version
 
 
 def guide_product_inputs(product, bundle_source, monkeypatch):
-    """Public source with an inert Guide client and gateway. The client is a
-    stand-in with its own complete pin, so packaging never reads the vendored
-    published wheel; test_guide_release_selection checks that wheel's pin."""
+    """Public source with an inert Guide client and gateway. The client is an
+    inert meerkat-meta wheel of the Guide's release, pinned like the release
+    inputs pin the published one; nothing installs or imports it."""
     from launchkit.bootstrap import SelectedGuideRuntime
     from launchkit.connect_installer_caller import ExactFile
     from launchkit import guide_sdk
 
     root, _, _ = bundle_source
-    client = b"inert guide client wheel, never install\n"
-    for name, value in (("SOURCE", "c" * 40), ("TREE", "d" * 40),
-            ("SHA256", hashlib.sha256(client).hexdigest()), ("SIZE", len(client))):
-        monkeypatch.setattr(guide_sdk, name, value)
-    sdk = root / guide_sdk.WHEEL
-    sdk.parent.mkdir(parents=True)
-    sdk.write_bytes(client)
     for name in ("LICENSE-MIT", "LICENSE-APACHE"):
         (root / name).write_text("Inert public license.\n")
+    selected = guide_sdk.SELECTED_VERSION
+    sdk = put(product.root / f"guide/meerkat_meta-{selected}-py3-none-any.whl", client_wheel(selected))
     gateway = put(product.root / "guide/rpc_gateway", b"inert guide, never execute\n")
     gateway.path.chmod(0o700)
-    selected = guide_sdk.SELECTED_VERSION
     guide = SelectedGuideRuntime(ExactFile(gateway.path, gateway.sha256), selected, guide_sdk.declared_core_version(), "a" * 40, "b" * 40)
     return root, sdk, gateway, guide
 
@@ -221,7 +194,7 @@ def test_development_distribution_keeps_guide_and_application_owners_separate(
     root, sdk, gateway, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product, meta_version)
     output = tmp_path / "selected-product.zip"
-    result = product_distribution.package(root, target, guide, output)
+    result = product_distribution.package(root, target, guide, output, guide_wheel=sdk)
     assert result["native_executed"] is False and result["installed_use_accepted"] is False
     extracted = tmp_path / "selected-product"
     with zipfile.ZipFile(output) as archive:
@@ -231,37 +204,51 @@ def test_development_distribution_keeps_guide_and_application_owners_separate(
     assert observed["guide"]["version"] == observed["guide"]["core_version"] == selected
     assert observed["product"]["selection"]["meta"]["version"] == meta_version
     assert observed["guide"]["gateway"]["sha256"] == gateway.sha256
-    assert observed["guide"]["sdk"] == guide_sdk.selection()
+    assert observed["guide"]["sdk"] == guide_sdk.selection(sdk.sha256, sdk.size)
+    assert (extracted / guide_sdk.wheel_path()).read_bytes() == sdk.path.read_bytes()
     assert (extracted / observed["product"]["paths"]["meta_wheel"]).read_bytes() == target.meta_wheel.path.read_bytes()
-    expected_clients = [guide_sdk.WHEEL, observed["product"]["paths"]["toolkit_wheel"]]
+    expected_clients = [guide_sdk.wheel_path(), observed["product"]["paths"]["toolkit_wheel"]]
     assert distribution.sdk_wheels(extracted) == expected_clients
     assert distribution.bootstrap_inputs(extracted) == ["meta-toolkit", *expected_clients]
     readme = (extracted / "README.md").read_text()
     assert f"The Forge guide uses Core {selected} and Meta {selected}" in readme
     assert f"application uses the separately selected Meta {meta_version} and Toolkit" in readme
+    assert f"- Guide client SDK wheel: `{sdk.sha256}`" in readme
     # Each independently bound guide field still refuses drift. No target or
     # guide program runs, and the selected application bytes stay unchanged.
     manifest = extracted / distribution.MANIFEST
     original = manifest.read_bytes()
-    versions = dict.fromkeys(("0.9.0", *neighbours(selected)))
+    versions = dict.fromkeys(("0.9.0", "0.9.3", *neighbours(selected)))
     for field, value in (*((field, version) for field in ("version", "core_version") for version in versions),
             ("meta_source", "not-a-source-hash"), ("gateway", {**observed["guide"]["gateway"], "sha256": "f" * 64}),
-            ("sdk", {**observed["guide"]["sdk"], "version": "0.9.0"})):
+            ("sdk", {**observed["guide"]["sdk"], "version": "0.9.0"}),
+            ("sdk", {**observed["guide"]["sdk"], "sha256": "f" * 64})):
         changed = deepcopy(observed)
         changed["guide"][field] = value
         manifest.write_bytes(json_bytes(changed))
         with pytest.raises(distribution.DistributionError):
             product_distribution.verify(extracted)
         manifest.write_bytes(original)
-    # A changed client wheel cannot be admitted by rehashing the outer manifest.
-    wheel_copy = extracted / guide_sdk.WHEEL
+    # A changed client wheel cannot be admitted by rehashing the outer manifest:
+    # the Guide's record still names the original bytes.
+    wheel_copy = extracted / guide_sdk.wheel_path()
     wheel_original = wheel_copy.read_bytes()
     changed_wheel = wheel_original[:-1] + bytes([wheel_original[-1] ^ 1])
     wheel_copy.write_bytes(changed_wheel)
     changed = deepcopy(observed)
-    changed["files"][guide_sdk.WHEEL]["sha256"] = hashlib.sha256(changed_wheel).hexdigest()
+    changed["files"][guide_sdk.wheel_path()] = {"sha256": hashlib.sha256(changed_wheel).hexdigest(),
+        "bytes": len(changed_wheel)}
     manifest.write_bytes(json_bytes(changed))
-    with pytest.raises(distribution.DistributionError, match="reviewed wheel"):
+    with pytest.raises(distribution.DistributionError, match="differs from its selected native bytes"):
+        product_distribution.verify(extracted)
+    # Rehashing the Guide's record too still refuses a wheel of another release.
+    other = client_wheel(neighbours(selected)[0])
+    wheel_copy.write_bytes(other)
+    record = {"sha256": hashlib.sha256(other).hexdigest(), "bytes": len(other)}
+    changed["files"][guide_sdk.wheel_path()] = record
+    changed["guide"]["sdk"] = guide_sdk.selection(record["sha256"], record["bytes"])
+    manifest.write_bytes(json_bytes(changed))
+    with pytest.raises(distribution.DistributionError, match="not the published Meta"):
         product_distribution.verify(extracted)
     wheel_copy.write_bytes(wheel_original)
     manifest.write_bytes(original)
@@ -269,11 +256,19 @@ def test_development_distribution_keeps_guide_and_application_owners_separate(
     gateway_copy.write_bytes(b"changed guide bytes\n")
     with pytest.raises(distribution.DistributionError, match="files changed"):
         product_distribution.verify(extracted)
-    sdk.write_bytes(changed_wheel)
+    # Packaging refuses client bytes that differ from their pin, and a pinned
+    # wheel of another release.
+    sdk.path.write_bytes(changed_wheel)
     refused_output = tmp_path / "changed-guide-sdk.zip"
-    with pytest.raises(distribution.DistributionError, match="reviewed wheel"):
-        product_distribution.package(root, target, guide, refused_output)
+    with pytest.raises(distribution.DistributionError, match="differs from its pinned release bytes"):
+        product_distribution.package(root, target, guide, refused_output, guide_wheel=sdk)
     assert not refused_output.exists()
+    other_pin = put(sdk.path, other)
+    with pytest.raises(distribution.DistributionError, match="not the published Meta"):
+        product_distribution.package(root, target, guide, refused_output, guide_wheel=other_pin)
+    assert not refused_output.exists()
+    with pytest.raises(distribution.DistributionError, match="exact product inputs"):
+        product_distribution.package(root, target, guide, refused_output, guide_wheel=str(sdk.path))
 
 
 @pytest.mark.parametrize("change", [None, "same-size", "truncated", "grown"])
@@ -281,7 +276,7 @@ def test_distribution_binds_copied_bytes_when_source_is_restored(
         product, bundle_source, tmp_path, monkeypatch, change):
     from launchkit import distribution, product_distribution
 
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product)
     watched = root / "LICENSE-MIT"
     original = watched.read_bytes()
@@ -312,7 +307,7 @@ def test_distribution_binds_copied_bytes_when_source_is_restored(
     monkeypatch.setattr(zipfile.ZipFile, "open", change_during_copy)
     output = tmp_path / "transient-product.zip"
     if change is None:
-        product_distribution.package(root, target, guide, output)
+        product_distribution.package(root, target, guide, output, guide_wheel=sdk)
         extracted = tmp_path / "transient-product"
         with zipfile.ZipFile(output) as archive:
             archive.extractall(extracted)
@@ -320,7 +315,7 @@ def test_distribution_binds_copied_bytes_when_source_is_restored(
         assert (extracted / watched.name).read_bytes() == original
     else:
         with pytest.raises(distribution.DistributionError, match="changed while writing the archive"):
-            product_distribution.package(root, target, guide, output)
+            product_distribution.package(root, target, guide, output, guide_wheel=sdk)
         with zipfile.ZipFile(output) as archive:
             assert distribution.MANIFEST not in archive.namelist()
             assert archive.getinfo(watched.name).file_size <= len(original)
@@ -371,10 +366,10 @@ def test_product_input_growth_refuses_before_restoring_its_mode(
         product, bundle_source, tmp_path, monkeypatch, when):
     from launchkit import distribution, product_distribution
 
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product)
     output = tmp_path / "mode-product.zip"
-    product_distribution.package(root, target, guide, output)
+    product_distribution.package(root, target, guide, output, guide_wheel=sdk)
     extracted = tmp_path.resolve() / "mode-product"
     with zipfile.ZipFile(output) as archive:
         archive.extractall(extracted)
@@ -420,10 +415,10 @@ def test_malformed_product_container_refuses_before_payload_reads(
         product, bundle_source, tmp_path, monkeypatch, capsys, defect):
     from launchkit import distribution, product_distribution
 
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product)
     output = tmp_path / "malformed-product.zip"
-    product_distribution.package(root, target, guide, output)
+    product_distribution.package(root, target, guide, output, guide_wheel=sdk)
     extracted = tmp_path / "malformed-product"
     with zipfile.ZipFile(output) as archive:
         archive.extractall(extracted)
@@ -471,10 +466,10 @@ def test_malformed_product_relocation_uses_normal_startup_refusal(
         product, bundle_source, tmp_path, monkeypatch, capsys, section, field, value, message):
     from launchkit import distribution, product_distribution
 
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product)
     output = tmp_path / "malformed-locator.zip"
-    product_distribution.package(root, target, guide, output)
+    product_distribution.package(root, target, guide, output, guide_wheel=sdk)
     extracted = tmp_path / "malformed-locator"
     with zipfile.ZipFile(output) as archive:
         archive.extractall(extracted)
@@ -494,28 +489,34 @@ def test_malformed_product_relocation_uses_normal_startup_refusal(
     assert "Traceback" not in output.err
 
 
-def test_a_pending_guide_client_pin_refuses_packaging_and_verification(
+def test_a_package_of_another_workspace_release_refuses_packaging_and_verification(
         product, bundle_source, tmp_path, monkeypatch):
     from launchkit import distribution, product_distribution, guide_sdk
 
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product)
     output = tmp_path / "selected-product.zip"
-    product_distribution.package(root, target, guide, output)
+    product_distribution.package(root, target, guide, output, guide_wheel=sdk)
     extracted = tmp_path / "selected-product"
     with zipfile.ZipFile(output) as archive:
         archive.extractall(extracted)
     product_distribution.verify(extracted)
-    # The pending form, kept until a selected release publishes, refuses before
-    # any product work and leaves no archive. An extracted product then neither
-    # verifies nor yields launch inputs.
-    for name in ("SOURCE", "TREE", "SHA256", "SIZE"):
-        monkeypatch.setattr(guide_sdk, name, None)
-    refused_output = tmp_path / "pending-guide-sdk.zip"
+    # Code of another workspace version refuses this release's Guide client
+    # before any product work and leaves no archive. The extracted product then
+    # neither verifies nor yields launch inputs.
+    monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", neighbours(guide_sdk.SELECTED_VERSION)[-1])
+    refused_output = tmp_path / "other-release-guide-sdk.zip"
     with pytest.raises(distribution.DistributionError,
-            match=re.escape(f"pending the published Meta {guide_sdk.SELECTED_VERSION} wheel")):
-        product_distribution.package(root, target, guide, refused_output)
+            match=re.escape(f"not the published Meta {guide_sdk.SELECTED_VERSION} wheel")):
+        product_distribution.package(root, target, guide, refused_output, guide_wheel=sdk)
     assert not refused_output.exists()
     for check in (product_distribution.verify, distribution.sdk_wheels, distribution.bootstrap_inputs):
-        with pytest.raises(distribution.DistributionError, match="pending"):
+        with pytest.raises(distribution.DistributionError):
+            check(extracted)
+    monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", None)
+    with pytest.raises(distribution.DistributionError, match="exact Meta version"):
+        product_distribution.package(root, target, guide, refused_output, guide_wheel=sdk)
+    assert not refused_output.exists()
+    for check in (product_distribution.verify, distribution.sdk_wheels, distribution.bootstrap_inputs):
+        with pytest.raises(distribution.DistributionError, match="exact Meta version"):
             check(extracted)

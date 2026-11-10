@@ -34,6 +34,7 @@ export type { DeferredTurnOptions } from "./session.js";
 export { Mob } from "./mob.js";
 export type {
   MemberDeliveryReceipt,
+  MemberInputAdmission,
   MemberSendContinuation,
   MemberSendContinuationStatus,
   MemberSendOptions,

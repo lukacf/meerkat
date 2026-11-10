@@ -3570,6 +3570,19 @@ pub struct MemberDeliveryReceipt {
     pub identity: AgentIdentity,
     /// How the message was handled.
     pub handling_mode: HandlingMode,
+    /// The member session's canonical admission of this delivery's input,
+    /// observed before the delivery answered: `input_id` is the id the
+    /// member's runtime admitted, never a requested id. A host matches it
+    /// against `boundary_append_applied.input_id` and
+    /// `boundary_appends_discarded.input_ids`, or reads the input by it.
+    /// Set by [`MemberHandle::send`] and its variants for a member served by
+    /// a local runtime; `None` when the answer precedes runtime admission (an
+    /// autonomous member's inbox delivery), for a member that is not
+    /// runtime-backed, peer-only or hosted elsewhere, for
+    /// [`MemberHandle::internal_turn`], and on the receipt of a
+    /// [`MemberTurnHandle`] (see [`MemberTurnHandle::admission`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<MemberInputAdmission>,
     /// Binding-era atom: bridge-internal, `pub(crate)` + `#[serde(skip)]`.
     #[serde(skip)]
     pub(crate) agent_runtime_id: AgentRuntimeId,
@@ -3767,18 +3780,29 @@ impl MemberTurnOptions {
     }
 }
 
-/// The member session's canonical admission of a governed input.
+/// The member session's canonical admission of an input delivered to a
+/// member: a governed input, or a send whose member's runtime admitted it
+/// before the send answered ([`MemberDeliveryReceipt::admission`]).
 ///
 /// Forwarded unchanged from the native admission outcome of `session_id`:
 /// `input_id` is the id the session admitted, or the existing id an exact
 /// replay matched, in which case `deduplicated` is true. It is observed at
 /// admission, so a later completion failure never retracts it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct MemberInputAdmission {
     pub session_id: SessionId,
     pub input_id: meerkat_core::lifecycle::InputId,
     pub deduplicated: bool,
+}
+
+impl From<&MemberInputAdmission> for meerkat_contracts::WireMemberInputAdmission {
+    fn from(admission: &MemberInputAdmission) -> Self {
+        Self {
+            session_id: admission.session_id.to_string(),
+            input_id: admission.input_id.to_string(),
+        }
+    }
 }
 
 pub(crate) type MemberInputAdmissionSender = tokio::sync::oneshot::Sender<MemberInputAdmission>;
@@ -4048,6 +4072,8 @@ fn submit_work_payload(
         completion_tx,
         bounded_result_spec,
         llm_identity_applied_tx,
+        // Set by the submitter that reads it back (`submit_work_command`).
+        admission_tx: None,
         ack_mode,
         content_attribution,
         requester: spec.requester,
@@ -9095,11 +9121,16 @@ impl MobHandle {
         // here: `spec.origin` is forwarded verbatim and the DSL accepts or
         // rejects.
         let receipt_work_ref = cmd.work_ref.clone();
-        let payload = submit_work_payload(cmd)?;
+        let mut payload = submit_work_payload(cmd)?;
+        // The member lane sends the runtime's canonical admission before it
+        // answers, so once the answer is in it is read without waiting.
+        let (admission_tx, mut admission_rx) = tokio::sync::oneshot::channel();
+        payload.admission_tx = Some(admission_tx);
         self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
             .await??;
         Ok(MobMachineCommandResult::WorkReceipt {
             work_ref: receipt_work_ref,
+            admission: admission_rx.try_recv().ok(),
         })
     }
 
@@ -13846,6 +13877,8 @@ impl MobHandle {
             completion_tx: Some(completion_tx),
             bounded_result_spec: None,
             llm_identity_applied_tx: None,
+            // The governed delivery forwards its admission itself.
+            admission_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
             // A governed input's requester is its own association's; the
@@ -13875,6 +13908,8 @@ impl MobHandle {
                 agent_runtime_id: runtime_id,
                 fence_token,
                 handling_mode,
+                // The handle answers it (`MemberTurnHandle::admission`).
+                admission: None,
             },
             session_id: Some(session_id),
             completion_rx,
@@ -16665,6 +16700,10 @@ impl MobHandle {
         }
     }
 
+    /// Submit external work to `agent_identity` and answer the incarnation
+    /// it was admitted against, the member's session binding and, when the
+    /// member's runtime admitted the input before the delivery answered, the
+    /// session's canonical admission of it.
     pub(super) async fn external_turn_for_member(
         &self,
         agent_identity: AgentIdentity,
@@ -16673,7 +16712,15 @@ impl MobHandle {
         turn_metadata: Option<RuntimeTurnMetadata>,
         external_delivery_identity: Option<crate::store::MobExternalDeliveryIdentity>,
         observers: MemberTurnObservers,
-    ) -> Result<(AgentRuntimeId, FenceToken, Option<SessionId>), MobError> {
+    ) -> Result<
+        (
+            AgentRuntimeId,
+            FenceToken,
+            Option<SessionId>,
+            Option<MemberInputAdmission>,
+        ),
+        MobError,
+    > {
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let machine_state = self.machine_state_watch_rx.borrow().clone();
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
@@ -16719,9 +16766,18 @@ impl MobHandle {
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
             expected_session_id: None,
         });
-        self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
-            .await?;
-        Ok((runtime_id, fence_token, session_id))
+        let admission = match self
+            .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
+            .await?
+        {
+            MobMachineCommandResult::WorkReceipt { admission, .. } => admission,
+            _ => {
+                return Err(MobError::Internal(
+                    "unexpected command result variant".into(),
+                ));
+            }
+        };
+        Ok((runtime_id, fence_token, session_id, admission))
     }
 
     pub(super) async fn internal_turn_for_member(
@@ -17452,6 +17508,7 @@ impl MobHandle {
         {
             MobMachineCommandResult::WorkReceipt {
                 work_ref: admitted_ref,
+                ..
             } => Ok(WorkTurnHandle {
                 receipt: WorkDeliveryReceipt {
                     work_ref: admitted_ref,
@@ -17502,7 +17559,9 @@ impl MobHandle {
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?
         {
-            MobMachineCommandResult::WorkReceipt { work_ref: ref_out } => Ok(WorkDeliveryReceipt {
+            MobMachineCommandResult::WorkReceipt {
+                work_ref: ref_out, ..
+            } => Ok(WorkDeliveryReceipt {
                 work_ref: ref_out,
                 runtime_id,
                 stage: WorkAdmissionStage::IngressAccepted,
@@ -17553,7 +17612,9 @@ impl MobHandle {
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?
         {
-            MobMachineCommandResult::WorkReceipt { work_ref: ref_out } => Ok(WorkDeliveryReceipt {
+            MobMachineCommandResult::WorkReceipt {
+                work_ref: ref_out, ..
+            } => Ok(WorkDeliveryReceipt {
                 work_ref: ref_out,
                 runtime_id,
                 stage: WorkAdmissionStage::IngressAccepted,
@@ -23006,7 +23067,7 @@ impl MemberHandle {
         let turn_metadata = options.into_runtime_metadata(handling_mode);
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let (llm_identity_applied_tx, llm_identity_applied_rx) = tokio::sync::oneshot::channel();
-        let (agent_runtime_id, fence_token, session_id) = self
+        let (agent_runtime_id, fence_token, session_id, _) = self
             .mob
             .external_turn_for_member(
                 self.agent_identity.clone(),
@@ -23034,6 +23095,7 @@ impl MemberHandle {
                 agent_runtime_id,
                 fence_token,
                 handling_mode,
+                admission: None,
             },
             session_id: Some(session_id),
             completion_rx,
@@ -23056,7 +23118,7 @@ impl MemberHandle {
         let turn_metadata = options.into_runtime_metadata(handling_mode);
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let (llm_identity_applied_tx, llm_identity_applied_rx) = tokio::sync::oneshot::channel();
-        let (agent_runtime_id, fence_token, session_id) = self
+        let (agent_runtime_id, fence_token, session_id, _) = self
             .mob
             .external_turn_for_member(
                 self.agent_identity.clone(),
@@ -23084,6 +23146,7 @@ impl MemberHandle {
                 agent_runtime_id,
                 fence_token,
                 handling_mode,
+                admission: None,
             },
             session_id: Some(session_id),
             completion_rx,
@@ -23101,7 +23164,7 @@ impl MemberHandle {
         event_tx: Option<MemberTurnEventSender>,
         completion_tx: Option<ExactTurnCompletionSender>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        let (agent_runtime_id, fence_token, _session_id) = self
+        let (agent_runtime_id, fence_token, _session_id, admission) = self
             .mob
             .external_turn_for_member(
                 self.agent_identity.clone(),
@@ -23122,6 +23185,7 @@ impl MemberHandle {
             agent_runtime_id,
             fence_token,
             handling_mode,
+            admission,
         })
     }
 
@@ -23184,15 +23248,19 @@ impl MemberHandle {
     /// Three operations that sometimes get mistaken for the same thing are
     /// actually three distinct slices of "deliver content to a member".
     /// [`MemberHandle::internal_turn`] (this) is Rust in-process direct write
-    /// into the member's pending turn slot — no peer comms, no handling-mode
+    /// into the member's pending turn slot: no peer comms, no handling-mode
     /// selection. `mob/turn_start` (RPC) resolves the identity to the bridge
     /// session and delegates to the canonical `turn/start` handler with
-    /// turn-level overrides. `mob/member_send` (RPC) is peer-delivery shape
-    /// over comms with `HandlingMode` + `RenderMetadata`; it lands in the
-    /// member's comms inbox, not as a new turn. The three surfaces share a
-    /// name fragment but diverge on who authorizes the delivery, what the
-    /// member's runtime does with it, and what the caller gets back. Keep
-    /// them separate — collapsing them would erase real policy distinctions.
+    /// turn-level overrides. `mob/member_send` (RPC) is external work with a
+    /// `HandlingMode` and `RenderMetadata`: a runtime-backed member's runtime
+    /// admits it as an input of the member's session (a steer joins a running
+    /// turn at its next boundary), and an unkeyed send answers that admission;
+    /// an autonomous member may receive it in its comms inbox instead, and
+    /// then the answer names no admission. The three surfaces share a name
+    /// fragment but diverge on who authorizes the delivery, what the member's
+    /// runtime does with it, and what the caller gets back. Keep them
+    /// separate: collapsing them would erase real policy distinctions. The
+    /// receipt carries no admission ([`MemberDeliveryReceipt::admission`]).
     pub async fn internal_turn(
         &self,
         content: impl Into<meerkat_core::types::ContentInput>,
@@ -23206,6 +23274,7 @@ impl MemberHandle {
             agent_runtime_id,
             fence_token,
             handling_mode: HandlingMode::Queue,
+            admission: None,
         })
     }
 
@@ -23821,12 +23890,47 @@ mod tests {
             agent_runtime_id: runtime_id,
             fence_token: FenceToken::new(8),
             handling_mode: HandlingMode::Queue,
+            admission: None,
         };
         let delivery_value =
             serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
         assert_eq!(delivery_value["identity"], "worker");
         assert!(delivery_value.get("agent_runtime_id").is_none());
         assert!(delivery_value.get("fence_token").is_none());
+        assert!(delivery_value.get("admission").is_none());
+    }
+
+    /// A delivery receipt serializes the admission it carries, and only then.
+    #[test]
+    fn member_delivery_receipt_serializes_its_admission_when_present() {
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let delivery = MemberDeliveryReceipt {
+            identity: AgentIdentity::from("worker"),
+            agent_runtime_id: AgentRuntimeId::new(
+                AgentIdentity::from("worker"),
+                Generation::new(1),
+            ),
+            fence_token: FenceToken::new(8),
+            handling_mode: HandlingMode::Steer,
+            admission: Some(MemberInputAdmission {
+                session_id: session_id.clone(),
+                input_id: input_id.clone(),
+                deduplicated: false,
+            }),
+        };
+        let value =
+            serde_json::to_value(&delivery).expect("delivery receipt should serialize to json");
+        assert_eq!(
+            value["admission"]["session_id"],
+            serde_json::to_value(&session_id).expect("session id serializes")
+        );
+        assert_eq!(
+            value["admission"]["input_id"],
+            serde_json::to_value(&input_id).expect("input id serializes")
+        );
+        assert_eq!(value["admission"]["deduplicated"], false);
+        assert!(value.get("agent_runtime_id").is_none());
     }
 
     #[test]
@@ -24299,6 +24403,7 @@ mod tests {
             identity,
             fence_token: FenceToken::new(generation),
             handling_mode: HandlingMode::Queue,
+            admission: None,
         }
     }
 

@@ -14,6 +14,9 @@ struct PausedSourceStore {
     armed: AtomicBool,
     // Holds the next access decision once its admission has committed.
     access_armed: AtomicBool,
+    // Holds the next access decision's swap of its native outcome into its
+    // row, before the swap reaches the store.
+    access_swap_armed: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Semaphore,
     started: AtomicUsize,
@@ -28,6 +31,7 @@ impl PausedSourceStore {
             scope,
             armed: AtomicBool::new(false),
             access_armed: AtomicBool::new(false),
+            access_swap_armed: AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
             started: AtomicUsize::new(0),
@@ -41,6 +45,9 @@ impl PausedSourceStore {
     }
     fn arm_access(&self) {
         assert!(!self.access_armed.swap(true, Ordering::SeqCst));
+    }
+    fn arm_access_swap(&self) {
+        assert!(!self.access_swap_armed.swap(true, Ordering::SeqCst));
     }
 }
 struct EnteredRead<'a> {
@@ -105,6 +112,14 @@ impl ToolkitStore for PausedSourceStore {
         }
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
+        if transition.data.schema == "toolkit.authenticated-service-access-decision"
+            && self.access_swap_armed.swap(false, Ordering::SeqCst)
+        {
+            // The decision's native outcome is known; its row has not
+            // recorded it yet.
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+        }
         self.inner.compare_and_swap(transition).await
     }
     async fn claim_record(
@@ -653,3 +668,5 @@ async fn cancelled_prepared_join_observer_preserves_exact_rejoin() {
 
 #[path = "cold_restore_tests.rs"]
 mod cold_restore_tests;
+#[path = "pending_access_tests.rs"]
+mod pending_access_tests;

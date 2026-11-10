@@ -100,12 +100,14 @@ fn backend_supports_automatic_cache_control(backend: AnthropicBackendKind) -> bo
 ///
 /// Exhaustive on purpose, like the cache capability: a new
 /// `AnthropicBackendKind` is classified here explicitly. The preserved-thinking
-/// page lists the Claude API, Claude Platform on AWS, Claude Models on Google
-/// Cloud (Anthropic managed and Google managed) and Microsoft Foundry; it does
-/// not list Amazon Bedrock, and the GitHub Copilot route is an unverified
-/// gateway, so neither sends the control. Their requests replay the thinking
-/// of the turn in progress only, and one refused with a 400 while it replays
-/// thinking is sent once more without it; nothing new reaches either.
+/// page lists Amazon Bedrock among its platforms (for Claude Fable 5.2 and
+/// Mythos 5.2), but Anthropic's beta-headers page does not say Bedrock accepts
+/// the binding beta ("not every platform accepts every beta"), so Bedrock
+/// requests send no binding control; the GitHub Copilot route is an unverified
+/// gateway and sends none either. Their requests replay the thinking of the
+/// turn in progress only, and one refused with a 400 while it replays thinking
+/// is sent once more without it; nothing new reaches either.
+/// <https://platform.claude.com/docs/en/api/beta-headers>
 /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
 fn backend_supports_thinking_binding_controls(backend: AnthropicBackendKind) -> bool {
     match backend {
@@ -1601,8 +1603,9 @@ mod tests {
     }
 
     /// Every backend is classified for the thinking-binding controls: the
-    /// backends the preserved-thinking page lists send them; Amazon Bedrock
-    /// (not listed) and the GitHub Copilot route (no live probe yet) do not.
+    /// Claude API, Vertex and Foundry send them; Amazon Bedrock (the
+    /// beta-headers page does not say it accepts the binding beta) and the
+    /// GitHub Copilot route (no live probe yet) do not.
     #[test]
     fn thinking_binding_controls_follow_the_documented_platforms() {
         let unsupported: Vec<AnthropicBackendKind> = AnthropicBackendKind::ALL
@@ -1698,12 +1701,12 @@ mod tests {
         );
     }
 
-    /// The thinking-block binding control reaches the wire only through
-    /// backends whose documentation lists Anthropic's preserved thinking: the
-    /// Claude API, Claude Models on Google Cloud and Microsoft Foundry. The
-    /// preserved-thinking page does not list Amazon Bedrock, so a Bedrock
-    /// client sends no control and leaves omitted thinking omitted.
-    /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+    /// The thinking-block binding control reaches the wire only through the
+    /// Claude API, Claude Models on Google Cloud and Microsoft Foundry.
+    /// Anthropic's beta-headers page does not say Amazon Bedrock accepts the
+    /// binding beta, so a Bedrock client sends no control and leaves omitted
+    /// thinking omitted.
+    /// <https://platform.claude.com/docs/en/api/beta-headers>
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn thinking_binding_control_follows_the_documented_backends() {

@@ -6065,6 +6065,104 @@ mod tests {
         );
     }
 
+    /// A mob member's own `current_session` schedule targets the member's
+    /// identity form, which the scheduling docs show for member `agent-a` of
+    /// mob `team`: `meerkat_schedule_list` lists the schedule by that whole
+    /// identity, and not by the member's id, its role or its mob id.
+    #[tokio::test]
+    async fn a_members_own_schedule_is_listed_by_its_identity_form() {
+        use meerkat_core::AgentToolDispatcher;
+
+        async fn call(
+            dispatcher: &dyn AgentToolDispatcher,
+            name: &'static str,
+            args: serde_json::Value,
+        ) -> serde_json::Value {
+            let raw = serde_json::value::RawValue::from_string(args.to_string())
+                .expect("encode tool arguments");
+            let outcome = dispatcher
+                .dispatch(meerkat_core::ToolCallView {
+                    id: "member-own-schedule",
+                    name,
+                    args: raw.as_ref(),
+                })
+                .await
+                .expect("the tool call is answered");
+            serde_json::from_str(&outcome.result.text_content()).expect("decode the reply")
+        }
+
+        fn listed(reply: &serde_json::Value) -> Vec<serde_json::Value> {
+            reply["schedules"]
+                .as_array()
+                .map(|rows| rows.iter().map(|row| row["schedule_id"].clone()).collect())
+                .unwrap_or_default()
+        }
+
+        let store =
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+        let binding = meerkat_core::MobMemberBinding {
+            mob_id: "team".to_string(),
+            role: "worker".to_string(),
+            member: "agent-a".to_string(),
+        };
+        let identity = mob_member_schedule_identity(&binding);
+        assert_eq!(
+            identity,
+            r#"mob_member:{"schema":"meerkat.schedule.mob_member_identity.v2","mob_id":"team","member":"agent-a"}"#,
+            "the identity form the docs show"
+        );
+        let dispatcher = meerkat_schedule::CurrentSessionScheduleToolDispatcher::new_with_resolver(
+            Arc::new(meerkat_schedule::ScheduleToolDispatcher::new(
+                service.clone(),
+            )),
+            SessionId::new(),
+            Arc::new(MobMemberCurrentSessionScheduleResolver::new(binding)),
+        );
+
+        let created = call(
+            &dispatcher,
+            "meerkat_schedule_create",
+            serde_json::json!({
+                "name": "self-followup",
+                "trigger": {
+                    "type": "once",
+                    "due_at_utc": (chrono::Utc::now() + ChronoDuration::days(1)).to_rfc3339(),
+                },
+                "target": {
+                    "target_kind": "session",
+                    "type": "current_session",
+                    "action": { "type": "prompt", "prompt": "check in" }
+                },
+                "misfire_policy": { "type": "skip" },
+                "overlap_policy": "skip_if_running",
+                "missing_target_policy": "mark_misfired",
+                "planning_horizon_occurrences": 1
+            }),
+        )
+        .await;
+        let by_identity = call(
+            &dispatcher,
+            "meerkat_schedule_list",
+            serde_json::json!({ "target_id": identity }),
+        )
+        .await;
+        assert_eq!(
+            listed(&by_identity),
+            vec![created["schedule_id"].clone()],
+            "{by_identity}"
+        );
+        for part in ["agent-a", "worker", "team"] {
+            let reply = call(
+                &dispatcher,
+                "meerkat_schedule_list",
+                serde_json::json!({ "target_id": part }),
+            )
+            .await;
+            assert!(listed(&reply).is_empty(), "{part}: {reply}");
+        }
+    }
+
     /// The recognized-but-currently-absent member class stays creatable:
     /// absence at fire time is governed by `missing_target_policy`, and the
     /// member may exist by the first occurrence.

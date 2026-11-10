@@ -31,8 +31,14 @@ DISPATCH_PASS="PASS Publishing dispatches are bound to their version's tag"
 DISPATCH_FAIL="FAIL A publishing dispatch without release_tag could publish a branch tip as the tagged version"
 TAG_VALIDATION_PASS="PASS Tag releases skip Cargo validation only on an exact-tree CI attestation that proves its lanes ran"
 TAG_VALIDATION_FAIL="FAIL Tag releases may skip Cargo validation only on an exact-tree CI attestation that proves its lanes ran"
-PREBUILD_PASS="PASS Pre-tag prebuilds publish nothing, and a tag publishes its own commit's prebuild only through the attested-archive verification"
-PREBUILD_FAIL="FAIL A pre-tag prebuild must publish nothing, and a tag may publish its commit's prebuild only through the attested-archive verification"
+PREBUILD_PASS="PASS Pre-tag prebuilds publish nothing, and a tag publishes the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification"
+PREBUILD_FAIL="FAIL A pre-tag prebuild must publish nothing, and a tag may publish the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification"
+NON_INPUTS_PASS="PASS No release build job, local action or script names a path a reused prebuild may differ in (another product's root, a product changelog, a CI-only file)"
+NON_INPUTS_FAIL="FAIL A release build job, local action or script names a path a reused prebuild may differ in"
+MACOS_X86_PASS="PASS Intel macOS release binaries build on the BuildBuddy lane when it is selected, for a macOS version every supported Intel Mac runs, are run and inspected on Apple silicon, and trail the critical assets; the hosted cross-build builds them only on the GitHub-hosted backend"
+MACOS_X86_FAIL="FAIL Intel macOS release binaries must build on the BuildBuddy lane when it is selected"
+CLOSURES_PASS="PASS The release binaries and the Web SDK runtime compile no package under another product's root"
+CLOSURES_FAIL="FAIL A release binary or the Web SDK runtime compiles a package under another product's root"
 BASELINE_PASS="PASS Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 BASELINE_FAIL="FAIL The semver baseline rustdoc must stay off every path a user waits on"
 TRAILING_PASS="PASS Linux and macOS arm64 assets publish without waiting for the trailing Intel macOS and Windows lanes; no upload replaces a published asset"
@@ -476,8 +482,8 @@ elif name == "prebuild-moving-checkout":
 elif name == "prebuild-builds-anyway":
     # A tag whose commit was prebuilt rebuilds every binary anyway.
     needle = "      needs.release_prebuild.outputs.run_id == '' &&\n"
-    if text.count(needle) != 4:
-        raise SystemExit(f"fixture `{name}` expects four binary build guards, found {text.count(needle)}")
+    if text.count(needle) != 5:
+        raise SystemExit(f"fixture `{name}` expects five binary build guards, found {text.count(needle)}")
     text = text.replace(needle, "")
 elif name == "prebuild-reuse-unverified":
     # The publisher takes the prebuild's archives through the exact-tag
@@ -485,7 +491,7 @@ elif name == "prebuild-reuse-unverified":
     # drops the --source-run binding.
     pattern = re.compile(
         r'          if \[\[ -n "\$\{PREBUILD_RUN_ID\}" \]\]; then\n'
-        r"            # The tag commit's pre-tag prebuild(?:.*\n)*?          elif "
+        r"            # The tag's pre-tag prebuild(?:.*\n)*?          elif "
     )
     text, count = pattern.subn("          if ", text)
     if count != 1:
@@ -497,6 +503,60 @@ elif name == "prebuild-web-unverified":
     if match is None:
         raise SystemExit(f"fixture `{name}` expects the Web SDK verification step")
     text = text[: match.start()] + text[match.end() :]
+elif name == "prebuild-web-unbound":
+    # The prebuilt package is no longer bound to the prebuild's commit.
+    match = re.search(
+        r"      - name: Bind the prebuilt Web SDK package to its commit\n"
+        r"(?:        .*\n|\n)*?(?=      #|      - name: )",
+        text,
+    )
+    if match is None:
+        raise SystemExit(f"fixture `{name}` expects the Web SDK binding step")
+    text = text[: match.start()] + text[match.end() :]
+elif name == "prebuild-lookup-shallow":
+    # The lookup checks out the tag commit alone: no ancestor can be compared.
+    replace_once(
+        "          fetch-depth: 0\n          sparse-checkout: |\n            scripts/release-find-prebuild\n",
+        "          sparse-checkout: |\n            scripts/release-find-prebuild\n",
+    )
+elif name == "prebuild-build-names-ci-file":
+    # A build job names a CI-only file a reused prebuild may differ in.
+    replace_once(
+        "  build_web_sdk_package:\n    name: Build Web SDK package\n",
+        "  build_web_sdk_package:\n    name: Build Web SDK package (lanes from scripts/ci-cargo-lanes.mjs)\n",
+    )
+elif name == "prebuild-build-names-product-root":
+    # A build job names another product's root.
+    replace_once(
+        "  build_binaries_macos_x86_cross:\n    name: Cross-compile and package Intel macOS surface binaries on Apple silicon",
+        "  build_binaries_macos_x86_cross:\n    name: Cross-compile and package Intel macOS surface binaries with connect/ resources on Apple silicon",
+    )
+elif name == "macos-x86-hosted-on-buildbuddy":
+    # The hosted Intel macOS cross-build runs on the BuildBuddy backend too.
+    exclusion = (
+        "      !(github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && "
+        "github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && "
+        "(vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))) &&\n"
+    )
+    header = (
+        "    name: Cross-compile and package Intel macOS surface binaries on Apple silicon (${{ matrix.surface.bin }})\n"
+        "    needs: [require_ci_green, release_validate_gate, release_prebuild]\n"
+        "    if: >-\n"
+        "      always() &&\n"
+    )
+    replace_once(header + exclusion, header)
+elif name == "macos-x86-gates-critical":
+    # The critical gate waits for the BuildBuddy Intel macOS lane.
+    replace_once(
+        "    needs: [build_binaries, build_binaries_buildbuddy, release_prebuild]\n",
+        "    needs: [build_binaries, build_binaries_buildbuddy, build_binaries_buildbuddy_macos_x86, release_prebuild]\n",
+    )
+elif name == "macos-x86-unverified":
+    # Nothing runs or inspects the BuildBuddy Intel macOS binaries.
+    replace_once(
+        '.release-tooling/scripts/check-macos-x86-release-binary "${binary}" "${VERSION}"',
+        "true",
+    )
 elif name == "prebuild-any-backend":
     # The request no longer checks the backend, so a GitHub-hosted prebuild
     # can race a BuildBuddy tag run (v0.9.3).
@@ -738,14 +798,16 @@ pathlib.Path(destination).write_text(text)
 PYEOF
 }
 
-# mutate_tree <name> <root>: copy the committed .github tree under <root>
-# and mutate one of its workflows or local actions; the checker reads local
-# actions and the other workflows from there (--repo-root).
+# mutate_tree <name> <root>: copy the committed .github tree and the Intel
+# macOS lane's scripts under <root> and mutate one of those files; the
+# checker reads local actions, the other workflows and those scripts from
+# there (--repo-root).
 mutate_tree() {
   local name="$1"
   local root="$2"
-  mkdir -p "$root"
+  mkdir -p "${root}/scripts"
   cp -R "${REPO_ROOT}/.github" "${root}/.github"
+  cp "${REPO_ROOT}/scripts/buildbuddy-bazel-poc" "${REPO_ROOT}/scripts/check-macos-x86-release-binary" "${root}/scripts/"
   "$PYTHON" - "$root" "$name" <<'PYEOF'
 import pathlib
 import sys
@@ -986,6 +1048,21 @@ elif name == "cache-token-job-action":
         "\n"
         "    - name: Checkout tap\n",
     )
+elif name == "macos-x86-minimum-unset":
+    # The BuildBuddy Intel macOS build keeps the launcher's shared macOS
+    # minimum, newer than some supported Intel Macs run.
+    replace_once(
+        "scripts/buildbuddy-bazel-poc",
+        " --macos_minimum_os=11.0)\n",
+        ")\n",
+    )
+elif name == "macos-x86-minimum-too-new":
+    # The BuildBuddy Intel macOS build targets a macOS the inspection refuses.
+    replace_once(
+        "scripts/buildbuddy-bazel-poc",
+        " --macos_minimum_os=11.0)\n",
+        " --macos_minimum_os=13.0)\n",
+    )
 else:
     raise SystemExit(f"unknown tree fixture `{name}`")
 PYEOF
@@ -1198,12 +1275,24 @@ expect_fail_named prebuild-reuse-unverified "${TEST_ROOT}/prebuild-reuse-unverif
 mutate prebuild-web-unverified "${TEST_ROOT}/prebuild-web-unverified.yml"
 expect_fail_named prebuild-web-unverified "${TEST_ROOT}/prebuild-web-unverified.yml" \
   "must verify the prebuilt package's attestation" prebuild
+mutate prebuild-web-unbound "${TEST_ROOT}/prebuild-web-unbound.yml"
+expect_fail_named prebuild-web-unbound "${TEST_ROOT}/prebuild-web-unbound.yml" \
+  "must bind the prebuilt package to the prebuild's commit" prebuild
+mutate prebuild-lookup-shallow "${TEST_ROOT}/prebuild-lookup-shallow.yml"
+expect_fail_named prebuild-lookup-shallow "${TEST_ROOT}/prebuild-lookup-shallow.yml" \
+  "must check out the whole history (fetch-depth: 0)" prebuild
+mutate prebuild-build-names-ci-file "${TEST_ROOT}/prebuild-build-names-ci-file.yml"
+expect_fail_named prebuild-build-names-ci-file "${TEST_ROOT}/prebuild-build-names-ci-file.yml" \
+  "build_web_sdk_package job names scripts/ci-cargo-lanes.mjs" prebuild-non-inputs
+mutate prebuild-build-names-product-root "${TEST_ROOT}/prebuild-build-names-product-root.yml"
+expect_fail_named prebuild-build-names-product-root "${TEST_ROOT}/prebuild-build-names-product-root.yml" \
+  "build_binaries_macos_x86_cross job names connect/ (connect's root)" prebuild-non-inputs
 mutate prebuild-reuse-no-wait "${TEST_ROOT}/prebuild-reuse-no-wait.yml"
 expect_fail_named prebuild-reuse-no-wait "${TEST_ROOT}/prebuild-reuse-no-wait.yml" \
   "must wait for the prebuild run's \`Release binary build gate\`" prebuild
 mutate prebuild-gate-waits-trailing "${TEST_ROOT}/prebuild-gate-waits-trailing.yml"
 expect_fail_named prebuild-gate-waits-trailing "${TEST_ROOT}/prebuild-gate-waits-trailing.yml" \
-  "job \`release_prebuild_gate\` waits for \`build_binaries_gate\`" trailing-platforms
+  "job \`release_prebuild_gate\` waits for \`build_binaries_buildbuddy_macos_x86\`, \`build_binaries_gate\`" trailing-platforms
 mutate prebuild-critical-full-gate "${TEST_ROOT}/prebuild-critical-full-gate.yml"
 expect_fail_named prebuild-critical-full-gate "${TEST_ROOT}/prebuild-critical-full-gate.yml" \
   "expected \`Release critical binary build gate\`" prebuild
@@ -1234,7 +1323,7 @@ expect_fail_named semver-baseline-after-release "${TEST_ROOT}/semver-baseline-af
 
 mutate trailing-gates-critical "${TEST_ROOT}/trailing-gates-critical.yml"
 expect_fail_named trailing-gates-critical "${TEST_ROOT}/trailing-gates-critical.yml" \
-  "waits for \`build_binaries_gate\`, \`build_binaries_macos_x86_cross\`" trailing-platforms
+  "waits for \`build_binaries_buildbuddy_macos_x86\`, \`build_binaries_gate\`, \`build_binaries_macos_x86_cross\`" trailing-platforms
 mutate trailing-overwrites "${TEST_ROOT}/trailing-overwrites.yml"
 expect_fail_named trailing-overwrites "${TEST_ROOT}/trailing-overwrites.yml" \
   "release uploads are add-only" trailing-platforms
@@ -1371,7 +1460,7 @@ run_doctor() {
 }
 
 run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-committed.log"
-for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
+for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$MACOS_X86_PASS" "$CLOSURES_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
   if ! grep -Fxq "$line" "${TEST_ROOT}/doctor-committed.log"; then
     fail "doctor does not report \`${line}\` for the committed workflow" \
       "$(cat "${TEST_ROOT}/doctor-committed.log")"
@@ -1406,6 +1495,104 @@ run_doctor "${TEST_ROOT}/doctor-prebuild.yml" "${TEST_ROOT}/doctor-prebuild.log"
 if ! grep -Fq "$PREBUILD_FAIL" "${TEST_ROOT}/doctor-prebuild.log"; then
   fail "doctor does not report \`${PREBUILD_FAIL}\` for a workflow whose prebuild publishes" \
     "$(cat "${TEST_ROOT}/doctor-prebuild.log")"
+fi
+
+mutate prebuild-build-names-ci-file "${TEST_ROOT}/doctor-non-inputs.yml"
+run_doctor "${TEST_ROOT}/doctor-non-inputs.yml" "${TEST_ROOT}/doctor-non-inputs.log"
+if ! grep -Fq "$NON_INPUTS_FAIL" "${TEST_ROOT}/doctor-non-inputs.log"; then
+  fail "doctor does not report \`${NON_INPUTS_FAIL}\` for a workflow whose build job names a CI-only file" \
+    "$(cat "${TEST_ROOT}/doctor-non-inputs.log")"
+fi
+
+# Intel macOS on the BuildBuddy lane: the hosted cross-build must not run
+# there, the critical assets must not wait for the lane, and its binaries
+# must be run and inspected on Apple silicon before the binary build gate.
+for fixture in macos-x86-hosted-on-buildbuddy macos-x86-gates-critical macos-x86-unverified; do
+  mutate "${fixture}" "${TEST_ROOT}/doctor-${fixture}.yml"
+  run_doctor "${TEST_ROOT}/doctor-${fixture}.yml" "${TEST_ROOT}/doctor-${fixture}.log"
+  if ! grep -Fq "$MACOS_X86_FAIL" "${TEST_ROOT}/doctor-${fixture}.log"; then
+    fail "doctor does not report \`${MACOS_X86_FAIL}\` for the \`${fixture}\` workflow" \
+      "$(cat "${TEST_ROOT}/doctor-${fixture}.log")"
+  fi
+done
+expect_fail_named macos-x86-hosted-on-buildbuddy "${TEST_ROOT}/doctor-macos-x86-hosted-on-buildbuddy.yml" \
+  "job \`build_binaries_macos_x86_cross\` runs on the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY true" buildbuddy-macos-x86
+expect_fail_named macos-x86-gates-critical "${TEST_ROOT}/doctor-macos-x86-gates-critical.yml" \
+  "job \`build_binaries_critical_gate\` waits for \`build_binaries_buildbuddy_macos_x86\`" buildbuddy-macos-x86
+expect_fail_named macos-x86-unverified "${TEST_ROOT}/doctor-macos-x86-unverified.yml" \
+  "0 macOS runner jobs run \`scripts/check-macos-x86-release-binary\`" buildbuddy-macos-x86
+# The lane targets a macOS version the inspection accepts.
+mutate_tree macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-unset"
+expect_tree_fail_named macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-unset" \
+  "release-build-macos-x86 must set \`--macos_minimum_os\`" buildbuddy-macos-x86
+mutate_tree macos-x86-minimum-too-new "${TEST_ROOT}/macos-x86-minimum-too-new"
+expect_tree_fail_named macos-x86-minimum-too-new "${TEST_ROOT}/macos-x86-minimum-too-new" \
+  "release-build-macos-x86 targets macOS 13.0, newer than the 11.0" buildbuddy-macos-x86
+
+# The prebuild closure follows a module's relative imports and the files the
+# npm scripts a build script runs execute with node: a product's root named
+# only there is found (here two steps from the Web SDK build script).
+closure_tree="${TEST_ROOT}/closure-tree"
+mkdir -p "${closure_tree}/scripts" "${closure_tree}/ci" "${closure_tree}/sdks/web/scripts"
+cp -R "${REPO_ROOT}/.github" "${closure_tree}/.github"
+cp "${REPO_ROOT}/scripts/release-prebuild-equivalent" "${REPO_ROOT}/scripts/release-build-web-sdk-package.sh" \
+  "${closure_tree}/scripts/"
+cp "${REPO_ROOT}/ci/products.json" "${closure_tree}/ci/"
+cp "${REPO_ROOT}/sdks/web/package.json" "${closure_tree}/sdks/web/"
+printf 'import "./reads-a-product.mjs";\n' >"${closure_tree}/sdks/web/scripts/build-wasm.mjs"
+printf 'export const notes = "connect/README.md";\n' >"${closure_tree}/sdks/web/scripts/reads-a-product.mjs"
+expect_tree_fail_named prebuild-closure-npm-import "${closure_tree}" \
+  "sdks/web/scripts/reads-a-product.mjs names connect/ (connect's root)" prebuild-non-inputs
+
+# A release binary or the Web SDK runtime whose normal or build dependencies
+# (path dependencies, transitively) reach a package under a product's root
+# fails the closures check and the doctor; a dev-dependency does not count.
+closures_metadata() {
+  "$PYTHON" - "$1" "$2" "$REPO_ROOT" <<'PYEOF'
+import json
+import sys
+
+destination, kind, root = sys.argv[1:4]
+
+
+def package(name, directory, dependencies=()):
+    return {"name": name, "manifest_path": f"{root}/{directory}/Cargo.toml",
+            "dependencies": [{"name": dep, "kind": dep_kind, "path": f"{root}/{dep_dir}"}
+                             for dep, dep_kind, dep_dir in dependencies]}
+
+
+edge = ("meerkat-meta", None if kind == "normal" else kind, "meta/crates/meerkat-meta")
+packages = [
+    package("rkat", "crates/meerkat-cli", [("meerkat", None, "crates/meerkat")]),
+    package("meerkat", "crates/meerkat", [edge]),
+    package("meerkat-meta", "meta/crates/meerkat-meta"),
+    *(package(name, f"crates/{name}") for name in ("meerkat-rpc", "meerkat-rest", "meerkat-mcp-server", "meerkat-web-runtime")),
+]
+with open(destination, "w", encoding="utf-8") as handle:
+    json.dump({"packages": packages}, handle)
+PYEOF
+}
+for kind in normal build dev; do
+  closures_metadata "${TEST_ROOT}/metadata-${kind}.json" "${kind}"
+  set +e
+  RELEASE_CONTRACT_CARGO_METADATA="${TEST_ROOT}/metadata-${kind}.json" \
+    "$PYTHON" "$CHECKER" --workflow "$WORKFLOW" release-closures >"${TEST_ROOT}/closures-${kind}.log" 2>&1
+  status=$?
+  set -e
+  if [[ "${kind}" == dev ]]; then
+    [[ "${status}" -eq 0 ]] || fail "closures-dev: a dev-dependency on a product's package was refused" \
+      "$(cat "${TEST_ROOT}/closures-${kind}.log")"
+    continue
+  fi
+  [[ "${status}" -ne 0 ]] || fail "closures-${kind}: a release binary that compiles a product's package was accepted"
+  grep -Fq "rkat's normal or build dependencies reach meerkat-meta (meta/crates/meerkat-meta/, under meta's root meta/) through meerkat" \
+    "${TEST_ROOT}/closures-${kind}.log" ||
+    fail "closures-${kind}: failure does not name the defect" "$(cat "${TEST_ROOT}/closures-${kind}.log")"
+done
+RELEASE_CONTRACT_CARGO_METADATA="${TEST_ROOT}/metadata-build.json" run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-closures.log"
+if ! grep -Fq "$CLOSURES_FAIL" "${TEST_ROOT}/doctor-closures.log"; then
+  fail "doctor does not report \`${CLOSURES_FAIL}\` for a release binary that compiles a product's package" \
+    "$(cat "${TEST_ROOT}/doctor-closures.log")"
 fi
 
 mutate semver-baseline-gates-homebrew "${TEST_ROOT}/doctor-baseline.yml"
@@ -1534,6 +1721,18 @@ if ! grep -Fq "$LEVELS_LIST_FAIL" "${TEST_ROOT}/doctor-levels-meta.log" ||
   ! grep -Fq "no workspace package for meerkat-meta" "${TEST_ROOT}/doctor-levels-meta.log"; then
   fail "doctor does not report \`${LEVELS_LIST_FAIL}\` naming the crate when Meta's list has no level plan" \
     "$(cat "${TEST_ROOT}/doctor-levels-meta.log")"
+fi
+
+# 6. Connect's tag gates wait, bounded, instead of refusing, so a Connect tag
+#    can be pushed together with Core's and Meta's: the CI gate polls
+#    exact-main CI for up to 120 minutes, and the published-floor check first
+#    waits up to 120 minutes until every Core and Meta crate is on crates.io
+#    at the versions Connect declares. The test runs the gate's script under
+#    a fake clock, the wait with stub curl, date and sleep, the
+#    declared-versions step with a stub cargo, and the job graph; no network.
+if ! connect_log="$("$PYTHON" "${REPO_ROOT}/scripts/test_connect_release_workflow.py" 2>&1)"; then
+  fail "connect-release.yml's tag gates do not wait as scripts/test_connect_release_workflow.py requires" \
+    "${connect_log}"
 fi
 
 echo "release doctor workflow contract holds"

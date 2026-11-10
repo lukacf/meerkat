@@ -423,6 +423,10 @@ pub(super) struct SubmitWorkPayload {
     pub bounded_result_spec: Option<super::handle::BoundedResultSpec>,
     /// Executor-bound acknowledgement for a host-requested LLM identity.
     pub llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    /// Carries the member session's canonical admission of this work's
+    /// input back to the caller, sent before the delivery answers when the
+    /// member's runtime admitted the input. Shell dispatch carrier only.
+    pub admission_tx: Option<super::handle::MemberInputAdmissionSender>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,
     pub content_attribution: crate::mob_machine::WorkContentAttribution,
     /// The original requester the host authenticated for this work

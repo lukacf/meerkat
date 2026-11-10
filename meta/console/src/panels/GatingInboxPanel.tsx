@@ -181,6 +181,8 @@ function recordVerdict(record: GatingAuditEntryView): { label: string; tone: Ton
     // No one decided in time and the safe fallback applied: a quiet mark,
     // as on the decisions strip.
     case "timeout_fallback": return { label: "Timed out", tone: "neutral" };
+    // The requester withdrew it before anyone decided; nothing ran.
+    case "request_withdrawn": return { label: "Withdrawn", tone: "neutral" };
     case "pending_created": return { label: "Requested", tone: "neutral" };
     case "approval_notification": return { label: "Approver notified", tone: "neutral" };
     case "conflict_blocked": return { label: "Blocked", tone: "warn" };

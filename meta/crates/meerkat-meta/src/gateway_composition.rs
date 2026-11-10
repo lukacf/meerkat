@@ -2134,6 +2134,121 @@ mod tests {
         Ok(())
     }
 
+    /// A withdrawal reaches the stored gating state without a shutdown, and
+    /// after a restart, and after the next one, the withdrawn request stays
+    /// withdrawn: it is not offered, its `request_withdrawn` record is there,
+    /// and deciding it is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_state_survives_restart_after_a_withdrawal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        let first = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let waiting = first
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        let withdrawn = first
+            .runtime()
+            .evaluate_gating_action(gated("rollback"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        first
+            .runtime()
+            .withdraw_gating_action(crate::runtime::GatingWithdrawRequest {
+                pending_id: withdrawn.clone(),
+                reason: Some("obsolete".to_string()),
+            })
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        // The change writer stores the withdrawal before any shutdown.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut written = false;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(document) = metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+            {
+                let snapshot: crate::runtime::GatingStateSnapshot =
+                    serde_json::from_str(&document)?;
+                if snapshot
+                    .pending
+                    .iter()
+                    .all(|entry| entry.pending_id != withdrawn)
+                    && snapshot.audit.iter().any(|entry| {
+                        entry.pending_id.as_deref() == Some(withdrawn.as_str())
+                            && entry.event_type == "request_withdrawn"
+                    })
+                {
+                    written = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(written, "the withdrawal was written before any shutdown");
+        let _ = first.runtime().shutdown().await;
+        drop(first);
+
+        for restart in 1..=2 {
+            let next = console_drain_test_composition_over(
+                &directory,
+                GatewayCompatibilityProfile::StdioRpc,
+                None,
+                Arc::clone(&metadata),
+            )
+            .await?;
+            let pending = next.runtime().list_gating_pending().await;
+            assert_eq!(
+                pending
+                    .iter()
+                    .map(|entry| entry.pending_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![waiting.clone()],
+                "restart {restart}: only the open request is offered"
+            );
+            let audit = next.runtime().gating_audit_entries(512).await;
+            assert!(
+                audit.iter().any(|entry| {
+                    entry.pending_id.as_deref() == Some(withdrawn.as_str())
+                        && entry.event_type == "request_withdrawn"
+                }),
+                "restart {restart}: the withdrawal survived: {audit:#?}"
+            );
+            let decided = next
+                .runtime()
+                .decide_gating_action(crate::runtime::GatingDecideRequest {
+                    pending_id: withdrawn.clone(),
+                    approver_id: "ops-lead".to_string(),
+                    decision: crate::runtime::GatingDecision::Approve,
+                    reason: None,
+                })
+                .await;
+            assert!(
+                matches!(
+                    decided,
+                    Err(crate::runtime::GatingDecideError::UnknownPendingId(_))
+                ),
+                "restart {restart}: {decided:?}"
+            );
+            let _ = next.runtime().shutdown().await;
+        }
+        Ok(())
+    }
+
     /// A stock gateway whose metadata store keeps nothing across restarts
     /// keeps gating in memory, and its gating audit reads say so.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

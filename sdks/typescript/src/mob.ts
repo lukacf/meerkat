@@ -115,12 +115,30 @@ export interface MemberSendContinuation {
   status: MemberSendContinuationStatus;
 }
 
+/**
+ * The input a member's runtime admitted for an unkeyed send, named before
+ * the send answered. Match `inputId` against `boundary_append_applied.input_id`
+ * and `boundary_appends_discarded.input_ids`, or follow it with
+ * `session/input_status`.
+ */
+export interface MemberInputAdmission {
+  sessionId: string;
+  inputId: string;
+}
+
 export interface MemberDeliveryReceipt {
   mobId: string;
   agentIdentity: string;
   memberRef: MobMemberRef;
   handlingMode: MobHandlingMode;
   continuation?: MemberSendContinuation;
+  /**
+   * Absent for a keyed send (its `continuation` status names its input),
+   * when the answer precedes runtime admission (an autonomous member's inbox
+   * delivery), for a member not served by a local runtime, and from a server
+   * older than contract 0.9.12.
+   */
+  admission?: MemberInputAdmission;
 }
 
 export interface MemberRespawnReceipt {

@@ -3204,6 +3204,9 @@ enum SubmitWorkDispatchCompletion {
         req: Box<meerkat_core::service::StartTurnRequest>,
         completion_tx: Option<super::handle::ExactTurnCompletionSender>,
         llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+        /// Receives the runtime's canonical admission of the turn's input,
+        /// sent before the lane answers (see `SubmitWorkPayload::admission_tx`).
+        admission_tx: Option<super::handle::MemberInputAdmissionSender>,
         /// `Some(identity)` iff the target is machine-placed on a member
         /// host: a typed delivery failure then fires the W-D.2 revival
         /// trigger back onto the actor.
@@ -3361,6 +3364,9 @@ struct AutonomousDispatchMaterial {
         Option<tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>>,
     completion_tx: Option<super::handle::ExactTurnCompletionSender>,
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    /// Receives the runtime's canonical admission of an admitted runtime
+    /// turn, sent before the lane answers; an inbox event has none.
+    admission_tx: Option<super::handle::MemberInputAdmissionSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     content_attribution: crate::mob_machine::WorkContentAttribution,
     /// The original requester of host human input: stamped onto the admitted
@@ -3382,6 +3388,7 @@ enum PendingTurnDispatch {
         req: Box<meerkat_core::service::StartTurnRequest>,
         completion_tx: Option<super::handle::ExactTurnCompletionSender>,
         llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+        admission_tx: Option<super::handle::MemberInputAdmissionSender>,
         placed_identity: Option<AgentIdentity>,
         placed_incarnation: Option<super::bridge_protocol::BridgeMemberIncarnation>,
         placed_input_id: Option<String>,
@@ -4080,11 +4087,14 @@ impl DetachedMemberReadinessContext {
 
     /// Off-loop half of local autonomous dispatch: admit a runtime turn when
     /// the steer barrier demands it, otherwise inject the inbox event.
+    /// Answers the runtime's canonical admission of an admitted untracked
+    /// runtime turn; `None` for an inbox event, whose answer precedes runtime
+    /// admission. The material's `admission_tx` is the caller's to use.
     async fn dispatch_autonomous(
         &self,
         agent_identity: &AgentIdentity,
         material: AutonomousDispatchMaterial,
-    ) -> Result<(), MobError> {
+    ) -> Result<Option<super::handle::MemberInputAdmission>, MobError> {
         let AutonomousDispatchMaterial {
             member_ref,
             bridge_session_id,
@@ -4099,6 +4109,7 @@ impl DetachedMemberReadinessContext {
             event_tx,
             completion_tx,
             llm_identity_applied_tx,
+            admission_tx: _,
             ack_mode,
             content_attribution,
             requester,
@@ -4133,14 +4144,18 @@ impl DetachedMemberReadinessContext {
                 return self
                     .provisioner
                     .admit_host_human_turn(&member_ref, req, completion_tx)
-                    .await;
+                    .await
+                    .map(|()| None);
             }
             return if let Some(completion_tx) = completion_tx {
                 self.provisioner
                     .admit_tracked_turn(&member_ref, req, completion_tx, llm_identity_applied_tx)
                     .await
+                    .map(|()| None)
             } else {
-                self.provisioner.admit_turn(&member_ref, req).await
+                self.provisioner
+                    .admit_turn_with_admission(&member_ref, req)
+                    .await
             };
         }
         // The inbox event carries no requester: only host human input, which
@@ -4184,7 +4199,8 @@ impl DetachedMemberReadinessContext {
                 render_metadata,
             ),
         };
-        inject_result.map_err(|error| {
+        // The inbox event's answer precedes runtime admission: no admission.
+        inject_result.map(|()| None).map_err(|error| {
             MobError::Internal(format!(
                 "autonomous dispatch inject failed for '{agent_identity}': {error}"
             ))
@@ -4473,6 +4489,8 @@ struct SubmitWorkDispatchRequest {
     completion_tx: Option<super::handle::ExactTurnCompletionSender>,
     bounded_result_spec: Option<super::handle::BoundedResultSpec>,
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
+    /// See `SubmitWorkPayload::admission_tx`.
+    admission_tx: Option<super::handle::MemberInputAdmissionSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     content_attribution: crate::mob_machine::WorkContentAttribution,
     /// The original requester of host human input (validated before
@@ -20112,6 +20130,20 @@ impl MobActor {
         }
     }
 
+    /// Send a member delivery's canonical runtime admission to its caller
+    /// ahead of the lane's answer, and reduce the result to that answer. The
+    /// caller reads the admission once the answer is in, without waiting.
+    fn forward_member_input_admission(
+        result: Result<Option<super::handle::MemberInputAdmission>, MobError>,
+        admission_tx: Option<super::handle::MemberInputAdmissionSender>,
+    ) -> Result<(), MobError> {
+        result.map(|admission| {
+            if let (Some(admission), Some(admission_tx)) = (admission, admission_tx) {
+                let _ = admission_tx.send(admission);
+            }
+        })
+    }
+
     /// Body of one detached member turn admission: caller liveness, then the
     /// member-local readiness steps that used to run inline, then the
     /// runtime admission, autonomous dispatch, or completion-bearing
@@ -20179,6 +20211,7 @@ impl MobActor {
                 req,
                 completion_tx,
                 llm_identity_applied_tx,
+                admission_tx,
                 placed_identity,
                 placed_incarnation,
                 placed_input_id,
@@ -20200,13 +20233,14 @@ impl MobActor {
                     super::handle::MemberTurnAdmissionTestStage::AfterRuntimeAdmission,
                 )
                 .await;
-                let _ = reply_tx.send(result);
+                let _ = reply_tx.send(Self::forward_member_input_admission(result, admission_tx));
             }
-            PendingTurnDispatch::Autonomous(material) => {
+            PendingTurnDispatch::Autonomous(mut material) => {
+                let admission_tx = material.admission_tx.take();
                 let result = context
                     .dispatch_autonomous(&agent_identity, *material)
                     .await;
-                let _ = reply_tx.send(result);
+                let _ = reply_tx.send(Self::forward_member_input_admission(result, admission_tx));
             }
             PendingTurnDispatch::Governed {
                 member_ref,
@@ -30819,6 +30853,7 @@ impl MobActor {
                             req,
                             completion_tx,
                             llm_identity_applied_tx,
+                            admission_tx,
                             placed_identity,
                             placed_incarnation,
                             placed_input_id,
@@ -30833,6 +30868,7 @@ impl MobActor {
                                             req,
                                             completion_tx,
                                             llm_identity_applied_tx,
+                                            admission_tx,
                                             placed_identity,
                                             placed_incarnation,
                                             placed_input_id,
@@ -62364,6 +62400,7 @@ impl MobActor {
             completion_tx,
             bounded_result_spec,
             llm_identity_applied_tx,
+            admission_tx,
             mut ack_mode,
             content_attribution,
             requester,
@@ -62509,6 +62546,7 @@ impl MobActor {
                             completion_tx,
                             bounded_result_spec,
                             llm_identity_applied_tx,
+                            admission_tx,
                             ack_mode,
                             content_attribution,
                             requester,
@@ -62996,6 +63034,7 @@ impl MobActor {
                     completion_tx,
                     bounded_result_spec,
                     llm_identity_applied_tx,
+                    admission_tx,
                     ack_mode,
                     content_attribution,
                     requester,
@@ -63596,6 +63635,7 @@ impl MobActor {
             completion_tx,
             bounded_result_spec,
             llm_identity_applied_tx,
+            admission_tx,
             ack_mode,
             content_attribution,
             requester,
@@ -63806,6 +63846,9 @@ impl MobActor {
                         req: Box::new(req),
                         completion_tx,
                         llm_identity_applied_tx,
+                        // The member's host admits the input; this process
+                        // observes no runtime admission to forward.
+                        admission_tx: None,
                         placed_identity,
                         placed_incarnation,
                         placed_input_id,
@@ -63865,6 +63908,7 @@ impl MobActor {
                     event_tx,
                     completion_tx,
                     llm_identity_applied_tx,
+                    admission_tx,
                     ack_mode,
                     content_attribution,
                     requester,
@@ -63950,6 +63994,7 @@ impl MobActor {
                         req,
                         completion_tx,
                         llm_identity_applied_tx,
+                        admission_tx,
                         placed_identity,
                         placed_incarnation,
                         placed_input_id,
@@ -64031,7 +64076,10 @@ impl MobActor {
 
     /// Detached admission-task version of the former inline
     /// `spawn_turn_admission_reply` body: the runtime (or placed transport)
-    /// admission for one already machine-admitted turn.
+    /// admission for one already machine-admitted turn. Answers the member
+    /// session's canonical admission of an untracked local runtime turn;
+    /// `None` for a tracked turn, a placed member and a member whose runtime
+    /// this process does not observe.
     #[allow(clippy::too_many_arguments)]
     async fn execute_turn_admission(
         provisioner: &Arc<dyn MobProvisioner>,
@@ -64042,20 +64090,19 @@ impl MobActor {
         revival: Option<(mpsc::Sender<RoutedMobCommand>, AgentIdentity)>,
         placed_incarnation: Option<super::bridge_protocol::BridgeMemberIncarnation>,
         placed_input_id: Option<String>,
-    ) -> Result<(), MobError> {
+    ) -> Result<Option<super::handle::MemberInputAdmission>, MobError> {
         debug_assert_eq!(revival.is_some(), placed_incarnation.is_some());
         let result = match (placed_incarnation, placed_input_id) {
-            (Some(expected_member), Some(input_id)) => {
-                Self::admit_placed_ingress_turn(
-                    provisioner,
-                    member_ref,
-                    req,
-                    completion_tx.is_some() || llm_identity_applied_tx.is_some(),
-                    expected_member,
-                    input_id,
-                )
-                .await
-            }
+            (Some(expected_member), Some(input_id)) => Self::admit_placed_ingress_turn(
+                provisioner,
+                member_ref,
+                req,
+                completion_tx.is_some() || llm_identity_applied_tx.is_some(),
+                expected_member,
+                input_id,
+            )
+            .await
+            .map(|()| None),
             (None, None) => {
                 if let Some(completion_tx) = completion_tx {
                     provisioner
@@ -64066,8 +64113,11 @@ impl MobActor {
                             llm_identity_applied_tx,
                         )
                         .await
+                        .map(|()| None)
                 } else {
-                    provisioner.admit_turn(&member_ref, *req).await
+                    provisioner
+                        .admit_turn_with_admission(&member_ref, *req)
+                        .await
                 }
             }
             _ => Err(MobError::Internal(
@@ -69639,6 +69689,7 @@ mod routed_effect_containment_tests {
                 completion_tx: None,
                 bounded_result_spec: None,
                 llm_identity_applied_tx: None,
+                admission_tx: None,
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                 requester: None,

@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [c655094aaabf](https://github.com/lukacf/meerkat/commit/c655094aaabf0430af174de2986036a0a568b95e) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -1511,6 +1511,7 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 | `gating_evaluate(...)` | `GatingEvaluateResult` | Evaluate a gating rule |
 | `gating_pending()` | `list[GatingPendingEntry]` | List pending gating decisions |
 | `gating_decide(...)` | `GatingDecisionResult` | Submit a gating decision |
+| `gating_withdraw(pending_id, reason=None)` | `GatingWithdrawResult` | Withdraw a pending request this host minted, with no decision |
 | `gating_audit(limit)` | `list[GatingAuditEntry]` | Retrieve gating audit log |
 | `memory_query(filters)` | `MemoryQueryResult` | Query the assertion ledger by `entity`, `topic`, and `store` filters |
 | `remember_agent_memory(identity, ...)` | `AgentMemoryRecord` | Persist durable memory for an identity |

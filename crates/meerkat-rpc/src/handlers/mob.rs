@@ -1328,6 +1328,8 @@ pub async fn handle_member_send(
                         ),
                         handling_mode: params.handling_mode,
                         continuation: Some(continuation),
+                        // The continuation status names a keyed send's input.
+                        admission: None,
                     },
                 )
             }
@@ -1357,6 +1359,10 @@ pub async fn handle_member_send(
                     ),
                     handling_mode: receipt.handling_mode.into(),
                     continuation: None,
+                    admission: receipt
+                        .admission
+                        .as_ref()
+                        .map(meerkat_contracts::WireMemberInputAdmission::from),
                 },
             )
         }
@@ -1426,6 +1432,10 @@ pub async fn handle_ingress_interaction(
         member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         handling_mode: receipt.handling_mode.into(),
         continuation: None,
+        admission: receipt
+            .admission
+            .as_ref()
+            .map(meerkat_contracts::WireMemberInputAdmission::from),
     };
     RpcResponse::success(
         id,

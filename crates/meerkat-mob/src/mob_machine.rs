@@ -261,6 +261,10 @@ pub(crate) enum MobMachineCommandResult {
     RunId(RunId),
     WorkReceipt {
         work_ref: WorkRef,
+        /// The member session's canonical admission of the work's input,
+        /// when the member's runtime admitted it before the delivery
+        /// answered.
+        admission: Option<crate::runtime::MemberInputAdmission>,
     },
     FlowStatus(Option<MobRun>),
     SpawnReceipt(crate::runtime::MemberSpawnReceipt),

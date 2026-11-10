@@ -92,7 +92,7 @@ retry.
 | `mob_force_cancel` | mob_id, agent_identity | `()` | async, force-cancel an in-flight turn |
 | `mob_stop_member_run` | mob_id, agent_identity, run_id, reason | `WireRunStopReceipt` JSON | async, run-fenced Stop of one exact member run; a stale run id is `not_current` |
 | `mob_member_status` | mob_id, agent_identity | MobMemberStatusResult JSON | async, execution status snapshot with `member_ref` and tri-state `peer_connectivity` |
-| `mob_member_send` | mob_id, agent_identity, request JSON (`content`, optional `handling_mode`, `render_metadata`) | delivery receipt JSON | async; receipt keys: `mob_id`, `agent_identity`, `member_ref`, `handling_mode` (`queue` or `steer`) |
+| `mob_member_send` | mob_id, agent_identity, request JSON (`content`, optional `handling_mode`, `render_metadata`) | delivery receipt JSON | async; receipt keys: `mob_id`, `agent_identity`, `member_ref`, `handling_mode` (`queue` or `steer`), and `admission` (`session_id`, `input_id`) when the member's runtime admitted the send before it answered |
 | `mob_member_peer_target` | mob_id, member | peer target JSON | async, resolve a member to an external in-process `PeerTarget` (comms public key and address) for `mob_wire_peer` on another mob; wrapped by `Mob.crossMobPeerTarget(member)` and consumed by `Mob.wireToPeer(member, targetJson)` in `@rkat/web` |
 | `mob_list_members` | mob_id | RosterEntry[] JSON | async |
 | `mob_append_system_context` | mob_id, agent_identity, request JSON (`text`, optional `source`, `idempotency_key`) | `{mob_id, agent_identity, status}` JSON | async, append one ordinary durable System message to the member's session |

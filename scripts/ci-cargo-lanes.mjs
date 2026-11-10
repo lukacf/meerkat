@@ -3097,12 +3097,31 @@ function plan(args) {
   // 41594713659 (cancelled at its 40-minute timeout five seconds after the
   // last part finished) and 7m24s, 18m51s and 24m46s on 41608949055 (51m49s
   // in all, 86 percent of its 60-minute timeout, and the end of that run).
-  result.closure_check_rows = byProduct(result.closure).map(([product, names]) => ({
-    name: `${product}, ${names.length} crates`,
-    product,
-    packages: names,
-    package_flags: names.map((name) => `-p ${name}`).join(" "),
-  }));
+  // When the plan reaches Core, a product's part checks every target
+  // (`targets: "all"`): a Core change can break a product's test code alone,
+  // and when it invalidates meerkat-mob's build no pull-request row checks
+  // that (the `downstream <product>` Clippy row goes to the push, which runs
+  // none). Each part is checked with every feature (`features: "all"`), and
+  // a product's part after a Core change a second time, in a row of its own,
+  // with the product's default features (`features: "default"`, what its own
+  // unit and test rows build): --all-features never compiles the code a
+  // product builds only without one of its features (meerkat-meta calls
+  // Core's precheck_identity only without openai-live). These are the
+  // downstream rows Core's product-scoped evidence depends on. Core's own
+  // part, and a product's part without a Core change, check lib and bin
+  // targets with every feature.
+  result.closure_check_rows = byProduct(result.closure).flatMap(([product, names]) => {
+    const downstream = result.core_changed && product !== CORE;
+    const row = {
+      name: `${product}, ${names.length} crates`,
+      product,
+      packages: names,
+      package_flags: names.map((name) => `-p ${name}`).join(" "),
+      targets: downstream ? "all" : "lib",
+      features: "all",
+    };
+    return downstream ? [row, { ...row, name: `${row.name}, default features`, features: "default" }] : [row];
+  });
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   // The compile-only checks of the closure, and the two exact-profile lanes
   // (governed JSONL compiles meerkat-rpc's lib test, the confinement lane
@@ -3350,6 +3369,44 @@ function plan(args) {
     main_unit: waveOf("main-unit", [...result.main_unit_shards, ...result.main_feature_unit_shards], durations),
     closure_tests: waveOf("closure-tests", result.closure_test_rows, durations),
     feature_check: waveOf("feature-check", result.feature_check_jobs, durations),
+  };
+  // Each planned row's product, per lane, for the CI gate's product
+  // evidence (scripts/ci-product-evidence.mjs): a row's own product, else
+  // the one product of its packages; null when its packages span products or
+  // name none, which the evidence treats as unknown. The archived lanes take
+  // their package's product. The downstream type-check rows say so: a pull
+  // request's `downstream <product>` Clippy rows and, when the plan reaches
+  // Core, the products' closure-check rows, which type-check every target of
+  // them against the changed Core, with every feature and with the
+  // product's default features (a push runs no downstream Clippy row), and
+  // the products' rustdoc rows, which document their links into Core items.
+  const rowProduct = (row) => {
+    if (row.product) return row.product;
+    const names = row.packages ?? [...String(row.package_flags ?? "").matchAll(/(?:^|\s)-p\s+(\S+)/g)].map((match) => match[1]);
+    const found = new Set(names.map((name) => productOf.get(name) ?? null));
+    return found.size === 1 ? [...found][0] : null;
+  };
+  const rowsOf = (rows, downstream = (row) => row.downstream === true) =>
+    rows.map((row) => ({ name: row.name, product: rowProduct(row), ...(downstream(row) ? { downstream: true } : {}) }));
+  const archiveProducts = new Map(result.main_archive_builds.map((row) => [row.archive, rowProduct(row)]));
+  const downstreamOfCore = (row) => result.core_changed && rowProduct(row) !== CORE;
+  result.row_products = {
+    clippy: rowsOf(result.shards),
+    unit: rowsOf([...result.unit_shards, ...result.unit_feature_shards]),
+    main_unit: rowsOf([...result.main_unit_shards, ...result.main_feature_unit_shards]),
+    main_archive_build: rowsOf(result.main_archive_builds),
+    main_archive_run: result.main_archive_runs.map((row) => ({ name: row.name, product: archiveProducts.get(row.archive) ?? null })),
+    integration: rowsOf([...result.integration_suites, ...result.reader_rows]),
+    closure_tests: rowsOf(result.closure_test_rows),
+    feature_check: rowsOf(result.feature_check_jobs),
+    closure_check: rowsOf(result.closure_check_rows ?? [], downstreamOfCore),
+    rustdoc: (result.rustdoc_rows ?? []).flatMap((row) =>
+      row.features.map((features) => ({
+        name: row.name,
+        features,
+        product: rowProduct(row),
+        ...(downstreamOfCore(row) ? { downstream: true } : {}),
+      }))),
   };
   return result;
 }
@@ -3629,7 +3686,13 @@ function githubOutput(result) {
     "closure_check_matrix",
     JSON.stringify({
       include: closureCheckRows.length > 0
-        ? closureCheckRows.map((row) => ({ name: row.name, product: row.product, packages: row.package_flags }))
+        ? closureCheckRows.map((row) => ({
+            name: row.name,
+            product: row.product,
+            packages: row.package_flags,
+            targets: row.targets,
+            features: row.features,
+          }))
         : [{ name: "none", product: "none", packages: "" }],
     }),
   );
@@ -3731,6 +3794,8 @@ function githubOutput(result) {
   );
   scalar("downstream_products", productSection.downstream.map((row) => row.product).join(" "));
   scalar("connect_checks", String(productSection.lanes.includes("connect_checks")));
+  // Every planned row's product per lane, for the gate's product evidence.
+  scalar("row_products", JSON.stringify(result.row_products ?? {}));
   return `${lines.join("\n")}\n`;
 }
 

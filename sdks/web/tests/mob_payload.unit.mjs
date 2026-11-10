@@ -1042,6 +1042,30 @@ test('Mob result decoders reject missing generated truth instead of fabricating 
   );
 });
 
+test('Mob member send keeps the admission it is answered with and refuses a malformed one', async () => {
+  const admissions = [
+    { session_id: 'session-1', input_id: 'input-1' },
+    { session_id: 'session-1' },
+  ];
+  const mob = new Mob('mob-web-unit', {
+    async mob_member_send() {
+      return JSON.stringify({
+        mob_id: 'mob-web-unit',
+        agent_identity: 'worker-1',
+        member_ref: 'ref-worker-1',
+        handling_mode: 'steer',
+        admission: admissions.shift(),
+      });
+    },
+  });
+  const receipt = await mob.member('worker-1').send('same words', 'steer');
+  assert.deepEqual(receipt.admission, { session_id: 'session-1', input_id: 'input-1' });
+  await assert.rejects(
+    () => mob.member('worker-1').send('same words', 'steer'),
+    /Invalid mob member delivery response: invalid admission/,
+  );
+});
+
 test('Mob result decoders preserve generated result truth after validation', async () => {
   const deliveryMob = new Mob('mob-web-unit', {
     async mob_member_send() {

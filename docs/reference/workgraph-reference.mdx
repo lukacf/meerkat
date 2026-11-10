@@ -50,7 +50,7 @@ supplying filter fields.
 |--------|---------|
 | `open` | Created and not currently claimed |
 | `in_progress` | Claimed or actively being worked |
-| `blocked` | Set by `workgraph_block`. Not ready and not claimable. There is currently no transition back to `open`: an update keeps the item `blocked`, and it leaves `blocked` only through `workgraph_close`. A dependency (a `blocks` edge) does not set this status; see below |
+| `blocked` | Set by `workgraph_block`. Not ready and not claimable. There is currently no transition back to `open`: an update keeps the item `blocked`. It leaves `blocked` only by closing: through `workgraph_close`, or automatically when it is a parent whose `failed_child_join_policy` or `cancelled_child_join_policy` is `propagate` and a child has failed or been cancelled. Then the next claim attempt or trusted readiness observation on the parent closes it as `failed` or `cancelled` (child-join propagation). A dependency (a `blocks` edge) does not set this status; see below |
 | `completed` | Terminal success |
 | `cancelled` | Terminal cancellation |
 | `failed` | Terminal failure |

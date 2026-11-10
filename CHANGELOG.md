@@ -106,21 +106,22 @@ them.
   rewrite with its replacement; any other difference from the stored row
   still refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
-- `meerkat-runtime`: an authorization audit observation recorded on a
-  terminal input row after the row was last written is no longer lost. It
-  waits on the live row for the row's next write, and two terminal paths
-  left it none. A row archived once its completion or publication receipt
-  was durable dropped an observation recorded after the receipt's rewrite
-  was built; the archive now writes such observations to the stored row
-  first. A terminal rewrite whose caller was dropped after the store had
-  committed it left the stored rows rewritten and the live rows as they
-  were, and once an observation was recorded in between, every retry in the
-  process failed with "terminal completion finalization lost the exact
-  durable CAS" (or the same error of another terminal rewrite) until a
-  restart; a retry now accepts a stored row equal to its rewrite except for
-  audit records the rewrite adds at the end, and writes them. Any other
-  difference from the stored row still refuses the rewrite. Affects 0.8.52
-  through 0.9.11.
+- `meerkat-runtime`: two terminal paths no longer lose an authorization
+  audit observation recorded on a terminal input row after the row was last
+  written. Such an observation waits on the live row for the row's next
+  write, and these paths left it none. A row archived once its completion or
+  publication receipt was durable dropped an observation recorded after the
+  receipt's rewrite was built; the archive now writes such observations to
+  the stored row first, and if that write is refused, the session is marked
+  for a cold reload and the row is not archived. A terminal rewrite whose
+  caller was dropped after the store had committed it left the stored rows
+  rewritten and the live rows as they were, and once an observation was
+  recorded in between, every retry in the process failed with "terminal
+  completion finalization lost the exact durable CAS" (or the same error of
+  another terminal rewrite) until a restart; a retry now accepts a stored
+  row equal to its rewrite except for audit records the rewrite adds at the
+  end, and writes them. Any other difference from the stored row still
+  refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
 - `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
   runtime store and drops it no longer breaks that realm's credential

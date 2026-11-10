@@ -4143,8 +4143,8 @@ impl DriverEntry {
                 self.realize_terminal_receipt_resolution(&authorized)?;
                 if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
                     driver
-                        .archive_terminal_inputs_after_durable_obligations(&input_ids)
-                        .await?;
+                        .archive_terminal_inputs_after_durable_receipt(&input_ids)
+                        .await;
                 }
                 return Ok(());
             }
@@ -4200,8 +4200,8 @@ impl DriverEntry {
         self.realize_terminal_receipt_resolution(&authorized)?;
         if !has_interaction_terminal_outbox && let DriverEntry::Persistent(driver) = self {
             driver
-                .archive_terminal_inputs_after_durable_obligations(&input_ids)
-                .await?;
+                .archive_terminal_inputs_after_durable_receipt(&input_ids)
+                .await;
         }
         Ok(())
     }
@@ -4627,8 +4627,8 @@ impl DriverEntry {
         .await?;
         if let DriverEntry::Persistent(driver) = self {
             driver
-                .archive_terminal_inputs_after_durable_obligations(&completion_input_ids)
-                .await?;
+                .archive_terminal_inputs_after_durable_receipt(&completion_input_ids)
+                .await;
         }
         Ok(())
     }

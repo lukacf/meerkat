@@ -1123,6 +1123,29 @@ impl PersistentRuntimeDriver {
         Ok(())
     }
 
+    /// [`Self::archive_terminal_inputs_after_durable_obligations`] for rows
+    /// whose terminal receipt is durable and realized. The receipt is final,
+    /// so the archive cannot fail its caller: a failure, a refused or failed
+    /// commit of the rows' staged audit records included, marks this session
+    /// for a cold reload with its reason and leaves the rows live and
+    /// unarchived until that reload. Nothing more is written, and no row is
+    /// archived over a refusal.
+    pub(crate) async fn archive_terminal_inputs_after_durable_receipt(
+        &mut self,
+        input_ids: &[InputId],
+    ) {
+        if let Err(error) = self
+            .archive_terminal_inputs_after_durable_obligations(input_ids)
+            .await
+        {
+            tracing::error!(
+                %error,
+                "terminal inputs stay live after their durable receipt: their archive failed"
+            );
+            self.mark_durability_reload_required("terminal_receipt_archive", error.to_string());
+        }
+    }
+
     /// Commit every authorization audit record an operation staged on one of
     /// `input_ids` since the row's last durable write. Such a record waits on
     /// the live row for the row's next write, and an archived row has none.

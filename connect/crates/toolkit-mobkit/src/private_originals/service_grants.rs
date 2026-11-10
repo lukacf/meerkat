@@ -99,8 +99,10 @@ enum IssuanceObservation {
     /// Settled at an installed host's cold start: the host that admitted this
     /// decision was lost while its native issuance was pending, and the
     /// native owner recorded no grant for it. Nothing was issued, and the lost
-    /// host can no longer issue it; an approval of the same decision replaces
-    /// this row and issues once.
+    /// host can no longer issue it; a fresh approval of the same request
+    /// replaces this row and issues once, whatever evidence, parent or
+    /// computed deadline it brings, while a request with different content is
+    /// a conflict.
     NotIssued,
 }
 
@@ -179,6 +181,36 @@ pub(super) struct AccessRecord {
     /// exact native issuance attempt. It is evidence, never reusable authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     application_policy: Option<ApplicationServiceEvidence>,
+}
+impl AccessRecord {
+    /// Whether `decision`, with its MCP `selection`, asks for what this row's
+    /// decision asked for: every field of the decision and of its stored MCP
+    /// selection except its approval's own evidence and computed lifetime
+    /// deadline, which a fresh approval of the same request carries anew, as
+    /// it does the parent grant it presents.
+    fn same_request(
+        &self,
+        decision: &AccessDecision,
+        selection: Option<&StoredServiceMcpSelection>,
+    ) -> bool {
+        let mut request = decision.clone();
+        match (&mut request, &self.decision) {
+            (AccessDecision::Legacy(fresh), AccessDecision::Legacy(saved)) => {
+                fresh.evidence = saved.evidence.clone();
+                fresh.permission.lifetime.expires_at_ms = saved.permission.lifetime.expires_at_ms;
+            }
+            (AccessDecision::Mcp(fresh), AccessDecision::Mcp(saved)) => {
+                fresh.evidence = saved.evidence.clone();
+                fresh.permission.lifetime.expires_at_ms = saved.permission.lifetime.expires_at_ms;
+            }
+            (AccessDecision::Catalog(fresh), AccessDecision::Catalog(saved)) => {
+                fresh.evidence = saved.evidence.clone();
+                fresh.lifetime.expires_at_ms = saved.lifetime.expires_at_ms;
+            }
+            _ => return false,
+        }
+        request == self.decision && selection == self.mcp.as_ref()
+    }
 }
 
 /// Legacy version 2 access vocabulary. Its retained account/resource and
@@ -591,18 +623,27 @@ impl PrivateOriginals {
         let saved = self.store.get(&key).await.map_err(store_error)?;
         // A decision whose host was lost while its issuance was pending, and
         // which the next host's cold start ended because the native owner
-        // recorded no grant for it, issued nothing under this key's grant id:
-        // this approval of the same decision replaces it.
+        // recorded no grant for it, issued nothing under this key's grant id.
+        // A fresh approval of the same request replaces it, whatever evidence,
+        // parent grant or computed deadline that approval brings, and is
+        // checked as a first approval is; a request with different content
+        // under this route and decision id is a conflict, and the row stays.
         let not_issued = match &saved {
-            Some(stored) => matches!(
-                self.decode_access_row(stored)?.issuance,
-                IssuanceObservation::NotIssued
-            ),
-            None => false,
+            Some(stored) => {
+                let ended = self.decode_access_row(stored)?;
+                matches!(ended.issuance, IssuanceObservation::NotIssued).then_some(ended)
+            }
+            None => None,
         };
+        if not_issued
+            .as_ref()
+            .is_some_and(|ended| !ended.same_request(&decision, mcp.as_ref()))
+        {
+            return Err(PrivateOriginalError::Conflict.into());
+        }
         // Exact saved decisions remain observable after their proposed access
         // expires. Observation re-resolves issued grants but never reissues.
-        if let Some(stored) = saved.as_ref().filter(|_| !not_issued) {
+        if let Some(stored) = saved.as_ref().filter(|_| not_issued.is_none()) {
             let record = self.decode_access(stored, &reference)?;
             if reviewed_parent
                 .as_ref()
@@ -1957,6 +1998,159 @@ pub(crate) mod tests {
             adapter.apply_service_access_decision(denied),
         )
         .await;
+    }
+
+    /// The answer an apply gave, for an assertion's message.
+    pub(super) fn answer(
+        applied: &Result<PrivateServiceGrantObservation, PrivateOriginalError>,
+    ) -> String {
+        match applied {
+            Ok(observation) => format!("{:?}", observation.state),
+            Err(error) => format!("{error:?}"),
+        }
+    }
+
+    /// A public service catalog decision for `session`'s task, expiring at
+    /// `expires_at_ms`, the minimum of its services' deadlines.
+    fn catalog_decision(
+        session: &meerkat_core::SessionId,
+        expires_at_ms: u64,
+    ) -> catalog::ServiceCatalogDecision {
+        catalog::ServiceCatalogDecision {
+            kind: catalog::CatalogDecisionKind::PublicServiceCatalogV1,
+            route: Id::new("route").unwrap(),
+            decision: Id::new("catalog-decision").unwrap(),
+            evidence: PrivateSourceEvidence {
+                resource_id: EvidenceId::new("catalog-approval").unwrap(),
+                revision: EvidenceId::new("1").unwrap(),
+                sha256: "a".repeat(64),
+            },
+            session: session.clone(),
+            original: EvidenceId::new("catalog-task").unwrap(),
+            lifetime: RoleLifetime {
+                scope: LifetimeScope::Task {
+                    task: Id::new("catalog-task").unwrap(),
+                },
+                expires_at_ms: Some(expires_at_ms),
+            },
+        }
+    }
+
+    /// A fresh approval of a not-issued catalog decision's same request
+    /// settles it although its services' recomputed minimum gives it a new
+    /// deadline and the approval presents a new operator parent: the catalog
+    /// grant issues once, under the new parent and with the new deadline.
+    #[tokio::test]
+    async fn not_issued_catalog_access_settles_for_a_new_deadline_and_parent() {
+        let directory = directory();
+        let path = directory.path().join("grants");
+        let owner = crate::original_ingress::tests::initialized(&path);
+        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+        let route = adapter.routes.get().unwrap()[0].clone();
+        let session = meerkat_core::SessionId::new();
+        let ended_decision = catalog_decision(&session, u64::MAX - 1);
+        let key = adapter
+            .access_key(&PrivateOriginals::service_catalog_reference(&ended_decision).unwrap())
+            .unwrap();
+        let pending = AccessRecord {
+            decision: AccessDecision::Catalog(ended_decision.clone()),
+            caller: route.grant_caller.clone(),
+            parent: route.application_parent.clone().unwrap(),
+            issuance: IssuanceObservation::PendingNativeIssuance,
+            mcp: None,
+            application_policy: None,
+        };
+        adapter
+            .store
+            .admit(AdmissionRequest {
+                key: key.clone(),
+                admission_key: key.id.clone(),
+                data: encode_access(&pending).unwrap(),
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap();
+        adapter.select_installed_pair_recovery().unwrap();
+        adapter.reconcile_pending_access().await.unwrap();
+        let ended = adapter.store.get(&key).await.unwrap().unwrap();
+        assert_eq!(ended.data.body["issuance"]["state"], "not_issued");
+        let mut fresh = ended_decision;
+        fresh.evidence.revision = EvidenceId::new("2").unwrap();
+        fresh.evidence.sha256 = "b".repeat(64);
+        fresh.lifetime.expires_at_ms = Some(u64::MAX - 2);
+        let parent = vec![
+            owner
+                .grants()
+                .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &crate::original_ingress::tests::principal("admin"),
+                    EvidenceId::new("catalog-parent").unwrap(),
+                    app(),
+                    None,
+                    ExecutionRestrictions {
+                        delegation_depth: DelegationDepth::remaining(1),
+                        ..ExecutionRestrictions::unrestricted()
+                    },
+                )
+                .unwrap(),
+        ];
+        assert!(Some(&parent) != route.application_parent.as_ref());
+        let (_host_directory, host) =
+            crate::installed_host::operator_setup::test_service_lifetime();
+        let apply = || {
+            adapter.apply_service_access(
+                AccessDecision::Catalog(fresh.clone()),
+                None,
+                Some(parent.clone()),
+                Some(Arc::downgrade(&host)),
+                None,
+                Arc::new(|| Ok(())),
+            )
+        };
+        let before = std::fs::read(&path).unwrap();
+        let applied = apply().await;
+        assert!(
+            matches!(&applied, Ok(observation)
+                if observation.state == PrivateServiceGrantState::GrantIssued),
+            "a fresh approval of the ended catalog decision's same request with a new deadline \
+             and parent was answered {}",
+            answer(&applied)
+        );
+        let issued = std::fs::read(&path).unwrap();
+        assert_ne!(issued, before, "the fresh approval issued the grant");
+        let stored = adapter.store.get(&key).await.unwrap().unwrap();
+        let record = adapter
+            .decode_access(
+                &stored,
+                &PrivateOriginals::service_catalog_reference(&fresh).unwrap(),
+            )
+            .unwrap();
+        let IssuanceObservation::Issued { lineage } = &record.issuance else {
+            panic!("the fresh approval's row records its grant");
+        };
+        assert!(
+            lineage[..1] == parent[..],
+            "the grant issued under the new parent"
+        );
+        let resolved = owner
+            .grants()
+            .resolve_lineage(lineage, &route.logical_executor, None)
+            .unwrap();
+        assert!(
+            resolved.restrictions().lifetime == LifetimeRestriction::window(0, u64::MAX - 2),
+            "the grant carries the new deadline"
+        );
+        drop(resolved);
+        assert_eq!(
+            apply().await.unwrap().state,
+            PrivateServiceGrantState::GrantIssued
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            issued,
+            "nothing issues twice"
+        );
     }
 
     #[tokio::test]

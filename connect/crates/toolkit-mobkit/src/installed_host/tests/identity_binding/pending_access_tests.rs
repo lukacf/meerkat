@@ -231,6 +231,59 @@ async fn next_host_ends_an_unissued_pending_access_decision_for_a_fresh_approval
     );
 }
 
+/// Two fresh approvals of the same request race to replace a decision the
+/// next host ended as not issued: one replacement wins and issues the grant
+/// once, and the other loses the compare-and-swap of the ended row and is
+/// answered as a conflict.
+#[tokio::test]
+async fn concurrent_approvals_of_a_not_issued_decision_issue_once() {
+    let (lost, next, lost_answer) = lose_host_with_pending_access(Lost::BeforeIssuance).await;
+    assert!(
+        matches!(&lost_answer, Ok(observation)
+            if observation.state == PrivateServiceGrantState::PendingReconciliation),
+        "the lost host's decision stays pending: {}",
+        answer(&lost_answer)
+    );
+    let (key, settled) = row_state(&next.store, &lost.scope).await;
+    assert_eq!(settled, "not_issued");
+    let mut fresh = lost.decision.clone();
+    fresh.evidence.revision = EvidenceId::new("2").unwrap();
+    fresh.evidence.sha256 = "b".repeat(64);
+    // The first approval's replacement is held before it reaches the store.
+    next.store.arm_access_swap();
+    let first = next.host.apply_service_access_decision(fresh.clone());
+    tokio::pin!(first);
+    tokio::select! {
+        _ = next.store.entered.notified() => {}
+        _ = &mut first => panic!("the first approval's replacement is held"),
+    }
+    let second = tokio::time::timeout(
+        Duration::from_secs(15),
+        next.host.apply_service_access_decision(fresh),
+    )
+    .await
+    .unwrap();
+    next.store.release.add_permits(1);
+    let first = tokio::time::timeout(Duration::from_secs(15), &mut first)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&second, Ok(observation)
+            if observation.state == PrivateServiceGrantState::GrantIssued)
+            && matches!(&first, Err(PrivateOriginalError::Conflict)),
+        "the second approval was answered {} and the held first one {}",
+        answer(&second),
+        answer(&first)
+    );
+    assert_eq!(row_state(&next.store, &lost.scope).await.1, "issued");
+    close(&next.host).await;
+    assert_eq!(
+        native_access_grants(&lost.grants_path),
+        vec![format!("access-{key}")],
+        "the native owner issued the decision's grant once"
+    );
+}
+
 /// A host lost after the native owner recorded its decision's grant, before
 /// the decision's row recorded it: the next host's cold start settles the
 /// row as issued from the native record, and the decision observes its grant

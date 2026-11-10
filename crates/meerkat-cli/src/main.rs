@@ -19405,7 +19405,9 @@ async fn export_session_atif(
 }
 
 /// Write an exported trajectory to `destination`: a temporary file beside it,
-/// synced, then renamed onto it.
+/// synced, then renamed onto it. A write, sync or rename that fails publishes
+/// nothing and removes the temporary file: an earlier export at `destination`
+/// stays as it was.
 #[cfg(feature = "session-store")]
 async fn write_trajectory_file(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temporary = destination.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
@@ -19414,11 +19416,23 @@ async fn write_trajectory_file(destination: &Path, bytes: &[u8]) -> std::io::Res
         .create_new(true)
         .open(&temporary)
         .await?;
-    file.write_all(bytes).await?;
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(&temporary, destination).await?;
-    Ok(())
+    let published = async {
+        file.write_all(bytes).await?;
+        // tokio's `sync_all` waits for the write but keeps its error for the
+        // next write or flush: the flush is what reports a write the
+        // operating system refused (a file size limit, a quota, a full
+        // filesystem, an I/O error). Without it the sync of the empty file
+        // succeeds and the rename publishes it.
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, destination).await
+    }
+    .await;
+    if published.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    published
 }
 
 /// A trajectory write the operating system refuses (a file size limit, a

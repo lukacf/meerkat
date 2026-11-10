@@ -905,6 +905,10 @@ impl FileConfigStore {
             .open(&tmp_path)
             .await?;
         tmp.write_all(content.as_bytes()).await?;
+        // The write's own result. The sync below waits for the write but
+        // does not report its failure, so without this a write the
+        // filesystem refused would publish an empty document as saved.
+        tmp.flush().await?;
         tmp.sync_all().await?;
         drop(tmp);
         tokio::fs::rename(&tmp_path, &self.path).await?;

@@ -187,6 +187,18 @@ them.
   `delivery_id` or `input_id`), not by its caller key. Affects 0.9.5 through
   0.9.11.
 
+- `meerkat-core`: a configuration write that failed at the write itself was
+  reported as saved and replaced the document with an empty file. When the
+  filesystem refused the bytes of a config document or of its
+  `config_state.json` (a full disk on a filesystem that allocates at write
+  time, a quota, a file size limit, an I/O error), the store synced and
+  renamed its temporary file without the write's result, so the empty file
+  took the document's place and the caller (`rkat config set` and `patch`,
+  JSON-RPC `config/set` and `config/patch`, the REST and MCP config writes)
+  saw success. The write now fails with the filesystem's error, and the
+  file it could not write stays as it was; the temporary file is left
+  beside it. Affects 0.3.3 through 0.9.12.
+
 ### Security
 
 - `rkat`: `rkat auth profile <PROFILE_ID>` printed the whole auth profile, so

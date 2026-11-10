@@ -625,6 +625,9 @@ pub(crate) async fn write_generation_at(
         .open(&tmp)
         .await?;
     file.write_all(body.as_bytes()).await?;
+    // The write's own result: the sync below waits for the write but does
+    // not report its failure.
+    file.flush().await?;
     file.sync_all().await?;
     tokio::fs::rename(&tmp, state_path).await?;
     Ok(())

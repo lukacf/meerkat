@@ -1291,6 +1291,48 @@ mod tests {
         assert!(params.injected_context.is_none());
     }
 
+    /// `session/create` and `turn/start` read the Claude effort in either
+    /// spelling: `xhigh`, as the model catalog advertises it, and `x_high`.
+    #[test]
+    fn session_create_and_turn_start_params_read_claude_xhigh_in_either_spelling() {
+        use super::CreateSessionParams;
+        use crate::handlers::turn::StartTurnParams;
+        use meerkat_core::lifecycle::run_primitive::{
+            AnthropicEffort, AnthropicProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        let is_claude_xhigh = |params: Option<ProviderParamsOverride>| {
+            matches!(
+                params.and_then(|params| params.provider_tag),
+                Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                    effort: Some(AnthropicEffort::XHigh),
+                    ..
+                }))
+            )
+        };
+        for spelling in ["xhigh", "x_high"] {
+            let provider_params = serde_json::json!({
+                "provider_tag": {"provider": "anthropic", "effort": spelling}
+            });
+            let create: CreateSessionParams = serde_json::from_value(serde_json::json!({
+                "prompt": "hello",
+                "provider_params": provider_params,
+            }))
+            .expect("session/create reads the Claude effort in either spelling");
+            assert!(is_claude_xhigh(create.provider_params), "{spelling}");
+            let turn: StartTurnParams = serde_json::from_value(serde_json::json!({
+                "session_id": "test-id",
+                "prompt": "hello",
+                "provider_params": provider_params,
+            }))
+            .expect("turn/start reads the Claude effort in either spelling");
+            assert!(
+                is_claude_xhigh(turn.provider_params.and_then(|params| params.into_set())),
+                "{spelling}"
+            );
+        }
+    }
+
     #[test]
     fn create_session_provider_param_fails_closed_for_unknown_provider() {
         let err = super::parse_provider_param("provider-shaped-cache-key").unwrap_err();

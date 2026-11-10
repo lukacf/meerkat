@@ -2101,6 +2101,225 @@ mod grant_target_tests {
     }
 }
 
+/// Whether a grant of `target` to a mob member identity applies to the
+/// member's running build now, as a grant answers it (`applies`): `now` when
+/// `running`, the gate the member's live build runs, covers the target,
+/// unless the target is a gated MCP server the member's build configures
+/// (`configured_servers`) and the running build's surface does not hold (the
+/// build left it unattached, so the next build connects it); `not_mounted`
+/// when that build ignored the target, or, with no live build (`running` is
+/// `None`), when the next build leaves its family off
+/// (`next_build_not_mounted`); `at_next_build` otherwise. Advisory: the grant
+/// is issued either way. Every grant surface answers `applies` here, so no
+/// surface owns the rule.
+#[must_use]
+pub fn member_tool_grant_applies(
+    running: Option<&meerkat_core::tool_grant::RunningToolGrantGate>,
+    next_build_not_mounted: &meerkat_core::tool_grant::GrantGatedTools,
+    configured_servers: &BTreeSet<String>,
+    target: &meerkat_core::tool_grant::ToolGrantTarget,
+) -> meerkat_contracts::WireToolGrantApplies {
+    use meerkat_contracts::WireToolGrantApplies;
+    use meerkat_core::tool_grant::ToolGrantTarget;
+    match running {
+        Some(running) if running.gate.gates_target(target) => match target {
+            ToolGrantTarget::McpServer { server, .. }
+                if !running.attached_servers.contains(server)
+                    && configured_servers.contains(server) =>
+            {
+                WireToolGrantApplies::AtNextBuild
+            }
+            _ => WireToolGrantApplies::Now,
+        },
+        Some(running) if running.gate.ignores_target(target) => WireToolGrantApplies::NotMounted,
+        Some(_) => WireToolGrantApplies::AtNextBuild,
+        None => match target {
+            ToolGrantTarget::Family { family, .. }
+                if next_build_not_mounted.families.contains(family) =>
+            {
+                WireToolGrantApplies::NotMounted
+            }
+            _ => WireToolGrantApplies::AtNextBuild,
+        },
+    }
+}
+
+/// A mob member identity's tool grant gate as a grant list answers it
+/// (`gate`): `running`, what the member's live build gates (its gated names
+/// under `tools`, with its gated servers and its unconfigured-servers mode)
+/// and the names that build ignored as not mounted, `None` when no build of
+/// the member is live; and `next_build`, the gate the member's next build
+/// resolves (`next_build_gated`, and the entries it ignores as not mounted,
+/// `next_build_not_mounted`). Advisory, like `applies`. Every grant surface
+/// answers the gate here, so no surface owns its shape.
+#[must_use]
+pub fn wire_member_tool_grant_gate(
+    running: Option<&meerkat_core::tool_grant::RunningToolGrantGate>,
+    next_build_gated: &meerkat_core::tool_grant::GrantGatedTools,
+    next_build_not_mounted: &meerkat_core::tool_grant::GrantGatedTools,
+) -> meerkat_contracts::WireMemberToolGrantGate {
+    use meerkat_contracts::{
+        WireMemberToolGrantGate, WireToolGrantGateEntries, WireToolGrantGateView,
+    };
+    WireMemberToolGrantGate {
+        running: running.map(|running| WireToolGrantGateView {
+            gated: WireToolGrantGateEntries {
+                families: Vec::new(),
+                tools: running.gate.gated.iter().map(ToString::to_string).collect(),
+                mcp_servers: running.gate.gated_servers.iter().cloned().collect(),
+                unconfigured_mcp_servers: running.gate.gates_unconfigured_servers,
+            },
+            not_mounted: WireToolGrantGateEntries {
+                tools: running
+                    .gate
+                    .not_mounted_names
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                ..WireToolGrantGateEntries::default()
+            },
+        }),
+        next_build: WireToolGrantGateView {
+            gated: WireToolGrantGateEntries::from(next_build_gated),
+            not_mounted: WireToolGrantGateEntries::from(next_build_not_mounted),
+        },
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod member_grant_answer_tests {
+    use super::*;
+    use meerkat_contracts::WireToolGrantApplies;
+    use meerkat_core::tool_grant::{
+        GrantGatedTools, InstalledToolGrantGate, RunningToolGrantGate, ToolGrantTarget,
+    };
+    use meerkat_core::types::ToolName;
+
+    /// An identity grant applies now when the member's running build gates
+    /// its target, except a gated MCP server the member's build configures
+    /// and the running build's surface does not hold, which applies at the
+    /// next build; it is not mounted when that build ignored every name it
+    /// names, or, with no live build, when the next build leaves its family
+    /// off; otherwise it applies at the next build. The running gate lists
+    /// its gated names under `tools`, with its servers and its mode.
+    #[test]
+    fn an_identity_grant_answers_whether_it_applies_to_the_running_build() {
+        let running = RunningToolGrantGate {
+            gate: InstalledToolGrantGate {
+                gated: BTreeSet::from([ToolName::from("deploy")]),
+                gated_servers: BTreeSet::from([
+                    "drive".to_string(),
+                    "mail".to_string(),
+                    "tickets".to_string(),
+                ]),
+                gates_unconfigured_servers: false,
+                ungated_servers: BTreeSet::new(),
+                not_mounted_names: BTreeSet::from([ToolName::from("shell")]),
+            },
+            open: BTreeSet::new(),
+            attached_servers: BTreeSet::from(["tickets".to_string()]),
+        };
+        let next_build_gated = GrantGatedTools::default()
+            .with_tool("deploy")
+            .with_tool("web_search")
+            .with_mcp_server("drive")
+            .with_mcp_server("mail")
+            .with_mcp_server("tickets");
+        let next_build_not_mounted = GrantGatedTools::default().with_family("shell");
+        let configured_servers = BTreeSet::from(["mail".to_string(), "tickets".to_string()]);
+        let tool = |name: &str| ToolGrantTarget::Tool {
+            name: ToolName::from(name),
+        };
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: BTreeSet::from([ToolName::from("shell")]),
+        };
+        let server = |server: &str| ToolGrantTarget::McpServer {
+            server: server.to_string(),
+            tools: None,
+        };
+        for (target, live, idle) in [
+            (
+                tool("deploy"),
+                WireToolGrantApplies::Now,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            // Configured and attached.
+            (
+                server("tickets"),
+                WireToolGrantApplies::Now,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            // Configured, left unattached by the running build.
+            (
+                server("mail"),
+                WireToolGrantApplies::AtNextBuild,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            // Gated, configured by no build: gated wherever it is attached.
+            (
+                server("drive"),
+                WireToolGrantApplies::Now,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            (
+                shell,
+                WireToolGrantApplies::NotMounted,
+                WireToolGrantApplies::NotMounted,
+            ),
+            (
+                tool("web_search"),
+                WireToolGrantApplies::AtNextBuild,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+        ] {
+            assert_eq!(
+                member_tool_grant_applies(
+                    Some(&running),
+                    &next_build_not_mounted,
+                    &configured_servers,
+                    &target
+                ),
+                live,
+                "{target:?}"
+            );
+            assert_eq!(
+                member_tool_grant_applies(
+                    None,
+                    &next_build_not_mounted,
+                    &configured_servers,
+                    &target
+                ),
+                idle,
+                "{target:?}"
+            );
+        }
+
+        let gate =
+            wire_member_tool_grant_gate(Some(&running), &next_build_gated, &next_build_not_mounted);
+        let Some(listed) = gate.running else {
+            panic!("a live build's gate is listed");
+        };
+        assert_eq!(listed.gated.tools, ["deploy"]);
+        assert_eq!(listed.gated.mcp_servers, ["drive", "mail", "tickets"]);
+        assert!(!listed.gated.unconfigured_mcp_servers);
+        assert_eq!(listed.not_mounted.tools, ["shell"]);
+        assert_eq!(gate.next_build.gated.tools, ["deploy", "web_search"]);
+        assert_eq!(
+            gate.next_build.gated.mcp_servers,
+            ["drive", "mail", "tickets"]
+        );
+        assert_eq!(gate.next_build.not_mounted.families, ["shell"]);
+        assert!(
+            wire_member_tool_grant_gate(None, &next_build_gated, &next_build_not_mounted)
+                .running
+                .is_none(),
+            "no live build lists no running gate"
+        );
+    }
+}
+
 /// Whether a build's gate covers web search, by name or through its family.
 /// Such a build disables every provider-native tool, so the gated `web_search`
 /// tool is its only search path and the gate adjudicates every search.

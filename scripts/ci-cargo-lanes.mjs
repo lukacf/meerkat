@@ -705,6 +705,20 @@ export const INTEGRATION_SUITES = [
       "meerkat", "meerkat-tools", "meerkat-llm-core", "meerkat-anthropic", "meerkat-auth-core", "meerkat-models",
     ],
   },
+  // meerkat-connect's stock Console composition (tests/mobkit_setup_member.rs:
+  // Meta's Console routes with the setup customizer, the research hook,
+  // recipe discovery and a paired host) requires `console`. The closure-tests
+  // rows build the package's tests/*.rs targets with its default features,
+  // so Cargo drops this one there and no other row ran it. Triggered by the
+  // packages whose items it uses and the Connect crates it composes; it
+  // compiles meerkat-mob, so it runs on the push.
+  {
+    package: "meerkat-connect",
+    name: "connect-console-composition",
+    features: ["console"],
+    tests: ["mobkit_setup_member"],
+    triggers: ["meerkat-connect", "toolkit-mobkit", "meerkat-toolkit", "toolkit-package", "meerkat-meta", "meerkat", "meerkat-core"],
+  },
 ];
 
 // Packages whose own lib-test binary dominates their push-to-main lane. On

@@ -1314,7 +1314,7 @@ for (const path of [
   assert.equal(shardOf("meerkat").targets, "--all-targets", "the facade is not in the chain");
   assert.equal(shardOf("surface-build-fixtures").targets, "--all-targets", "a mixed head group splits");
   assert.ok(!shardOf("surface-build-fixtures").packages.includes("meerkat-integration-tests"));
-  assert.deepEqual(pr.deferred_to_push.integration_suites.sort(), ["gpt-live-replay", "machine-codegen", "rpc-configured-turn-limit"]);
+  assert.deepEqual(pr.deferred_to_push.integration_suites.sort(), ["connect-console-composition", "gpt-live-replay", "machine-codegen", "rpc-configured-turn-limit"]);
   assert.deepEqual(pr.deferred_to_push.unit_feature_suites.sort(), ["meerkat[experimental-gpt-live]", "meerkat[openai-live]"]);
   assert.equal(pr.wasm, true, "a workspace pull request runs wasm-check: the web runtime is one of its packages");
   assert.equal(pr.example_web, false, "and the example web suites only for their own inputs");
@@ -2607,9 +2607,27 @@ for (const path of [
   assert.match(store.integration_suites[0].test_flags, /--test compaction_context_window\b/);
   assert.deepEqual(names(planFor(["crates/meerkat-tools/src/lib.rs"])), ["meerkat-authorization"]);
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
+  // meerkat-connect's console composition target needs `console`, which the
+  // closure-tests rows never enable: its own suite runs it on the push, for
+  // a change to Connect or to the Console it drives, and a pull request
+  // leaves it to the push (it compiles meerkat-mob).
+  for (const path of [
+    "connect/crates/meerkat-connect/tests/mobkit_setup_member.rs",
+    "meta/crates/meerkat-meta/src/lib.rs",
+  ]) {
+    const console = planFor([path], ["--event", "push"]).integration_suites.find(
+      (suite) => suite.name === "connect-console-composition",
+    );
+    assert.ok(console, `${path} runs the Connect console composition suite`);
+    assert.equal(console.package_flags, "-p meerkat-connect --features console");
+    assert.equal(console.test_flags, "--test mobkit_setup_member");
+  }
+  const consolePr = planFor(["connect/crates/meerkat-connect/tests/mobkit_setup_member.rs"], ["--event", "pull_request"]);
+  assert.ok(!names(consolePr).includes("meerkat-connect"), "a pull request runs no suite that compiles meerkat-mob");
+  assert.ok(consolePr.deferred_to_push.integration_suites.includes("connect-console-composition"));
   assert.deepEqual(
     names(planFor(["Cargo.toml"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat", "meerkat", "meerkat-rpc", "meerkat-integration-tests", "meerkat-authorization"],
+    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat", "meerkat", "meerkat-rpc", "meerkat-integration-tests", "meerkat-authorization", "meerkat-connect"],
     "workspace mode runs every suite",
   );
   // Config layering, core construction and facade changes must execute both

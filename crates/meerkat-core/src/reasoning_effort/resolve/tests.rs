@@ -1258,33 +1258,51 @@ fn a_refusal_without_an_observation_names_the_direct_route() {
         }
     }
 
-    // The two families with no direct route have no direct observation;
-    // their levels are unknown all the same.
-    for provider in [Provider::SelfHosted, Provider::Other] {
+    // The self-hosted family and a provider outside the families have no
+    // direct observation; their levels are unknown all the same. The
+    // self-hosted refusal names that family's own route. A provider outside
+    // the families has no route to name, and none is guessed: `route: null`.
+    let self_hosted = ReasoningRoute::new(
+        ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+        ModelApi::ChatCompletions,
+    );
+    for (provider, route) in [
+        (Provider::SelfHosted, Some(self_hosted)),
+        (Provider::Other, None),
+    ] {
         assert_eq!(direct_route_observation(provider), None);
         assert_eq!(
             supported_reasoning_levels(provider, None, None),
             ReasoningLevelFacts::Unknown
         );
-        let mut params = None;
-        let refusal = resolve(
+        for mode in [
             ReasoningResolveMode::Strict,
-            High,
-            None,
-            provider,
-            None,
-            &mut params,
-        )
-        .expect_err("no observation, no source");
-        assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
-        assert_eq!((refusal.supported, refusal.facts), (None, None));
-        assert_eq!(
-            refusal.route,
-            Some(ReasoningRoute::new(
-                ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
-                ModelApi::ChatCompletions
-            ))
-        );
+            ReasoningResolveMode::Preference,
+        ] {
+            let mut params = None;
+            let refusal = resolve(mode, High, None, provider, None, &mut params)
+                .expect_err("no observation, no source");
+            assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
+            assert_eq!((refusal.supported.clone(), refusal.facts), (None, None));
+            assert_eq!(refusal.route, route, "{provider:?}");
+            assert_eq!(params, None);
+
+            let value = serde_json::to_value(&refusal).expect("a refusal serializes");
+            let text = refusal.to_string();
+            match &route {
+                Some(route) => {
+                    assert_eq!(
+                        value["route"],
+                        serde_json::json!({"backend": "self_hosted", "api": "chat_completions"})
+                    );
+                    assert!(text.contains(&format!(" on {route}:")), "{text}");
+                }
+                None => {
+                    assert!(value["route"].is_null(), "{value}");
+                    assert!(!text.contains(" on "), "{text}");
+                }
+            }
+        }
     }
 }
 
@@ -2066,6 +2084,190 @@ fn a_tag_of_another_family_is_refused() {
     }
 }
 
+/// The OpenAI tag's opaque `thinking` and `chat_template_kwargs` bodies are
+/// forwarded beside a level in both modes and kept as they are: only the
+/// opaque `reasoning` body conflicts.
+#[test]
+fn opaque_thinking_and_chat_template_bodies_are_accepted_beside_a_level() {
+    let body = || {
+        Some(OpaqueProviderBody::from_value(
+            &serde_json::json!({"type": "enabled"}),
+        ))
+    };
+    let catalog_row = row(Provider::OpenAI, &[Low, Medium, High]);
+    let routes = [
+        (
+            observation(OPENAI_API, ModelApi::Responses),
+            Some(&catalog_row),
+        ),
+        (
+            observation(OPENAI_API, ModelApi::ChatCompletions),
+            Some(&catalog_row),
+        ),
+        (
+            operator(
+                ReasoningBackend::SelfHosted(SelfHostedBackendKind::OpenAiCompatible),
+                ModelApi::ChatCompletions,
+                &[Low, Medium, High],
+            ),
+            None,
+        ),
+    ];
+    for (observation, catalog_row) in &routes {
+        for mode in [
+            ReasoningResolveMode::Strict,
+            ReasoningResolveMode::Preference,
+        ] {
+            for tag in [
+                OpenAiProviderTag {
+                    thinking: body(),
+                    ..Default::default()
+                },
+                OpenAiProviderTag {
+                    chat_template_kwargs: body(),
+                    ..Default::default()
+                },
+                OpenAiProviderTag {
+                    thinking: body(),
+                    chat_template_kwargs: body(),
+                    ..Default::default()
+                },
+            ] {
+                let mut params = openai(tag.clone());
+                resolve(
+                    mode,
+                    High,
+                    Some(observation),
+                    family(observation.backend),
+                    *catalog_row,
+                    &mut params,
+                )
+                .expect("accepted beside the level");
+                assert_eq!(
+                    openai_tag_of(&params),
+                    &OpenAiProviderTag {
+                        reasoning_effort: Some(ReasoningEffort::High),
+                        reasoning_effort_resolved: true,
+                        ..tag
+                    },
+                    "the bodies are kept as they are"
+                );
+            }
+
+            // The opaque `reasoning` body is the one that conflicts, with or
+            // without the other two beside it.
+            let baseline = openai(OpenAiProviderTag {
+                reasoning: body(),
+                thinking: body(),
+                chat_template_kwargs: body(),
+                ..Default::default()
+            });
+            let mut params = baseline.clone();
+            let refusal = resolve(
+                mode,
+                High,
+                Some(observation),
+                family(observation.backend),
+                *catalog_row,
+                &mut params,
+            )
+            .expect_err("a raw reasoning body may carry its own effort");
+            assert_eq!(
+                conflict_of(&refusal),
+                conflict(
+                    Reason::ConflictingReasoningBody,
+                    "provider_params.provider_tag.reasoning",
+                    None
+                )
+            );
+            assert_eq!(params, baseline);
+        }
+    }
+}
+
+/// The APIs a backend's family does not speak, written out by hand.
+fn unspoken_apis(backend: ReasoningBackend) -> &'static [ModelApi] {
+    match backend {
+        ReasoningBackend::OpenAi(_) | ReasoningBackend::SelfHosted(_) => {
+            &[ModelApi::Messages, ModelApi::GenerateContent]
+        }
+        ReasoningBackend::Anthropic(_) => &[
+            ModelApi::Responses,
+            ModelApi::ChatCompletions,
+            ModelApi::GenerateContent,
+        ],
+        ReasoningBackend::Google(_) => &[ModelApi::Responses, ModelApi::Messages],
+    }
+}
+
+/// An API the backend's family does not speak takes no effort, like the
+/// realtime API: `supported: []` from the kind's own source, whatever the
+/// sources state, and every level is refused as unsupported in both modes.
+#[test]
+fn an_api_the_family_does_not_speak_takes_no_effort() {
+    let mut routes = 0;
+    for backend in backends() {
+        // The kind's source, written out by hand.
+        let source = match backend {
+            ReasoningBackend::SelfHosted(_) => ReasoningFactsSource::Operator,
+            _ if backend.is_copilot() => ReasoningFactsSource::Account,
+            _ => ReasoningFactsSource::Catalog,
+        };
+        for api in unspoken_apis(backend).iter().copied() {
+            routes += 1;
+            let context = format!("{}/{api}", backend.as_str());
+            let (observation, catalog_row) = stating_everywhere(backend, api, &LADDER);
+            assert_eq!(
+                supported_reasoning_levels(
+                    family(backend),
+                    Some(&observation),
+                    catalog_row.as_ref()
+                ),
+                ReasoningLevelFacts::Stated {
+                    levels: Vec::new(),
+                    source,
+                },
+                "{context}"
+            );
+            for level in LADDER {
+                for mode in [
+                    ReasoningResolveMode::Strict,
+                    ReasoningResolveMode::Preference,
+                ] {
+                    let mut params = None;
+                    let refusal = resolve(
+                        mode,
+                        level,
+                        Some(&observation),
+                        family(backend),
+                        catalog_row.as_ref(),
+                        &mut params,
+                    )
+                    .expect_err("the route takes no effort");
+                    assert_eq!(refusal.reason, Reason::UnsupportedLevel, "{context}");
+                    assert_eq!(refusal.supported, Some(Vec::new()), "{context}");
+                    assert_eq!(refusal.facts, Some(source), "{context}");
+                    assert_eq!(
+                        refusal.route,
+                        Some(ReasoningRoute::new(backend, api)),
+                        "{context}"
+                    );
+                    assert!(
+                        refusal
+                            .to_string()
+                            .ends_with("; this route accepts no reasoning effort"),
+                        "{context}: {refusal}"
+                    );
+                    assert_eq!(params, None, "{context}");
+                }
+            }
+        }
+    }
+    // OpenAI and self-hosted kinds: 6 kinds, 2 APIs. Anthropic: 5 kinds, 3
+    // APIs. Gemini: 4 kinds, 2 APIs.
+    assert_eq!(routes, 6 * 2 + 5 * 3 + 4 * 2);
+}
+
 // ---------------------------------------------------------------------
 // The whole decision table
 // ---------------------------------------------------------------------
@@ -2320,8 +2522,17 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
             assert_eq!(refusal.requested, requested, "{context}");
             assert_eq!(refusal.provider, provider, "{context}");
             assert_eq!(refusal.model, MODEL, "{context}");
-            if let Some(observation) = observation {
-                assert_eq!(refusal.route, Some(observation.route()), "{context}");
+            match observation {
+                Some(observation) => {
+                    assert_eq!(refusal.route, Some(observation.route()), "{context}");
+                }
+                // Without an observation the refusal names the family's own
+                // route; a provider outside the families has none to name.
+                None => assert_eq!(
+                    refusal.route.is_none(),
+                    provider == Provider::Other,
+                    "{context}"
+                ),
             }
             // `facts` is absent exactly when `supported` is.
             assert_eq!(

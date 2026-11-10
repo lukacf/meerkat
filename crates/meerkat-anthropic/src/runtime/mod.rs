@@ -2436,7 +2436,14 @@ mod copilot_wire_model_tests {
         let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
         let listed: meerkat_copilot::CopilotModelsEnvelope =
             serde_json::from_value(serde_json::json!({
-                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/v1/messages"]}]
+                "data": [{
+                    "id": ACCOUNT_ID,
+                    "supported_endpoints": ["/v1/messages"],
+                    "capabilities": {"supports": {
+                        "adaptive_thinking": true,
+                        "reasoning_effort": ["low", "medium", "high"]
+                    }}
+                }]
             }))
             .expect("the account's list");
         let _seated = copilot
@@ -2489,6 +2496,27 @@ mod copilot_wire_model_tests {
                     .expect("the target names one provider"),
             )
             .expect("the session's text client builds on the Copilot route");
+        // The session's client reports the route the account's list gives
+        // the model, with the levels the entry it resolved states: the
+        // entry the account writes with a dot, read for the catalog id.
+        {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            assert_eq!(
+                client.reasoning_route(),
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Anthropic(
+                        super::AnthropicBackendKind::Copilot
+                    ),
+                    api: meerkat_core::ModelApi::Messages,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            );
+        }
 
         let messages = vec![Message::User(UserMessage::text("hello"))];
         let projection = client

@@ -1805,7 +1805,11 @@ mod copilot_wire_model_tests {
         let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
         let listed: meerkat_copilot::CopilotModelsEnvelope =
             serde_json::from_value(serde_json::json!({
-                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/chat/completions"]}]
+                "data": [{
+                    "id": ACCOUNT_ID,
+                    "supported_endpoints": ["/chat/completions"],
+                    "capabilities": {"supports": {"reasoning_effort": ["low", "medium", "high"]}}
+                }]
             }))
             .expect("the account's list");
         let _seated = copilot
@@ -1863,6 +1867,26 @@ mod copilot_wire_model_tests {
             [ACCOUNT_ID.to_string()],
             "the route asks for the Chat Completions client of the account's id"
         );
+        // The session's client reports the route the account's list gives
+        // the model, with the levels the entry it resolved states.
+        {
+            use meerkat_core::model_profile::capabilities::EffortLevel;
+            assert_eq!(
+                client.reasoning_route(),
+                Some(meerkat_core::ReasoningRouteObservation {
+                    backend: meerkat_core::ReasoningBackend::Google(
+                        super::GoogleBackendKind::Copilot
+                    ),
+                    api: meerkat_core::ModelApi::ChatCompletions,
+                    account: meerkat_core::AccountLevelStatement::Stated(vec![
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                    ]),
+                    operator_levels: None,
+                })
+            );
+        }
 
         let messages = vec![Message::User(UserMessage::text("hello"))];
         let projection = client

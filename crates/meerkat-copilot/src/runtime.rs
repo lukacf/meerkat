@@ -14425,6 +14425,569 @@ mod tests {
             );
         }
     }
+
+    /// What a session's routed client observes about its route for the
+    /// provider-neutral `reasoning_effort` option: the Copilot backend of
+    /// the session's family, the endpoint the account's list gives the
+    /// model, and the effort levels the list states for it. The lists here
+    /// are hand-written and generic: they name no real model and no account.
+    mod reasoning_route_observations {
+        use super::*;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::{AnthropicBackendKind, GoogleBackendKind};
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        const FIXTURE_LIST: &str = include_str!("fixtures/copilot_models_generic.json");
+
+        const LOW_TO_HIGH: [EffortLevel; 3] =
+            [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High];
+        const LOW_TO_MAX: [EffortLevel; 5] = [
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ];
+
+        /// A model listing with `entries` as its `data`.
+        fn listing(entries: serde_json::Value) -> CopilotHttpResponse {
+            json_response(200, serde_json::json!({ "data": entries }))
+        }
+
+        /// The fixture list as the listing's answer.
+        fn fixture_listing() -> CopilotHttpResponse {
+            CopilotHttpResponse {
+                status: 200,
+                body: FIXTURE_LIST.as_bytes().to_vec(),
+                retry_after: None,
+                rate_limited: false,
+                rate_limit_reset: None,
+            }
+        }
+
+        /// One entry served on `endpoint` whose `supports` block is
+        /// `supports`.
+        fn entry(id: &str, endpoint: &str, supports: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "id": id,
+                "supported_endpoints": [endpoint],
+                "capabilities": {"supports": supports}
+            })
+        }
+
+        /// One Copilot account over a transport that answers `script`: its
+        /// token exchange, then its model listings.
+        struct ObservedAccount {
+            runtime: Arc<CopilotRuntime>,
+            binding: ValidatedBinding,
+            env: ResolverEnvironment,
+            transport: Arc<ScriptedTransport>,
+        }
+
+        impl ObservedAccount {
+            async fn new(script: impl IntoIterator<Item = CopilotHttpResponse>) -> Self {
+                let (auth_binding, binding) = validated_binding();
+                let (env, _) = resolver_environment(&auth_binding).await;
+                let transport = Arc::new(ScriptedTransport::new(script));
+                Self {
+                    runtime: Arc::new(CopilotRuntime {
+                        accounts: Mutex::new(BTreeMap::new()),
+                        pacing: Mutex::new(BTreeMap::new()),
+                        transport: transport.clone(),
+                    }),
+                    binding,
+                    env,
+                    transport,
+                }
+            }
+
+            /// A session's routed client for `model` of `provider`'s family,
+            /// built as an agent build does: the session's auth resolves on
+            /// the account, then [`routed_client`] builds over a stand-in
+            /// adapter.
+            async fn session(
+                &self,
+                provider: Provider,
+                model: &str,
+            ) -> Arc<dyn meerkat_llm_core::LlmClient> {
+                let resolved = self
+                    .runtime
+                    .resolve(&self.binding, &self.env)
+                    .await
+                    .expect("the session's auth resolves");
+                let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                    provider,
+                    backend: self.binding.backend(),
+                    backend_profile: self.binding.backend_profile().clone(),
+                    credential_identity: self.binding.credential_identity().clone(),
+                    auth_lease: Arc::new(
+                        meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                            resolved.authorizer(),
+                            resolved.metadata().clone(),
+                            crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                        ),
+                    ),
+                };
+                let factory: CopilotRouteClientFactory =
+                    Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+                routed_client(
+                    Arc::clone(&self.runtime),
+                    connection,
+                    provider,
+                    model.to_string(),
+                    factory,
+                )
+                .expect("the routed client builds once its auth resolved")
+            }
+
+            /// What the session's routed client for `model` observes.
+            async fn observed(
+                &self,
+                provider: Provider,
+                model: &str,
+            ) -> Option<ReasoningRouteObservation> {
+                self.session(provider, model).await.reasoning_route()
+            }
+        }
+
+        fn copilot_backend(provider: Provider) -> ReasoningBackend {
+            match provider {
+                Provider::OpenAI => ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+                Provider::Anthropic => ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot),
+                Provider::Gemini => ReasoningBackend::Google(GoogleBackendKind::Copilot),
+                other => panic!("{other:?} has no Copilot backend"),
+            }
+        }
+
+        fn observation(
+            provider: Provider,
+            api: ModelApi,
+            account: AccountLevelStatement,
+        ) -> Option<ReasoningRouteObservation> {
+            Some(ReasoningRouteObservation {
+                backend: copilot_backend(provider),
+                api,
+                account,
+                operator_levels: None,
+            })
+        }
+
+        fn stated(levels: &[EffortLevel]) -> AccountLevelStatement {
+            AccountLevelStatement::Stated(levels.to_vec())
+        }
+
+        /// R2.5: the levels are those of the entry the route resolved for
+        /// the session's model. A session on the catalog spelling of a
+        /// model the account writes with a dot observes that entry's levels
+        /// on its endpoint; a model the account lists under its own id
+        /// observes its own entry; an id that two entries match and none
+        /// exactly, and a model the list does not name, have no route.
+        #[tokio::test]
+        async fn copilot_observation_reads_the_resolved_entry() {
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::json!([
+                    entry(
+                        "claude-fixture-5.5",
+                        "/v1/messages",
+                        serde_json::json!({
+                            "adaptive_thinking": true,
+                            "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+                        }),
+                    ),
+                    entry(
+                        "claude-fixture-6",
+                        "/v1/messages",
+                        serde_json::json!({
+                            "adaptive_thinking": true,
+                            "reasoning_effort": ["low", "medium", "high"]
+                        }),
+                    ),
+                    entry(
+                        "claude-twin-7.1",
+                        "/v1/messages",
+                        serde_json::json!({"reasoning_effort": ["low"]}),
+                    ),
+                    entry(
+                        "claude.twin-7-1",
+                        "/v1/messages",
+                        serde_json::json!({"reasoning_effort": ["high"]}),
+                    ),
+                ])),
+            ])
+            .await;
+
+            for spelling in ["claude-fixture-5-5", "claude-fixture-5.5"] {
+                assert_eq!(
+                    account.observed(Provider::Anthropic, spelling).await,
+                    observation(Provider::Anthropic, ModelApi::Messages, stated(&LOW_TO_MAX)),
+                    "{spelling} reads the entry the account writes with a dot"
+                );
+            }
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-fixture-6")
+                    .await,
+                observation(
+                    Provider::Anthropic,
+                    ModelApi::Messages,
+                    stated(&LOW_TO_HIGH)
+                ),
+            );
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-twin-7-1")
+                    .await,
+                None,
+                "an id that two entries match and none exactly has no route"
+            );
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-twin-7.1")
+                    .await,
+                observation(
+                    Provider::Anthropic,
+                    ModelApi::Messages,
+                    stated(&[EffortLevel::Low])
+                ),
+                "the exact id reads its own entry"
+            );
+            assert_eq!(
+                account
+                    .observed(Provider::Anthropic, "claude-absent-1")
+                    .await,
+                None,
+                "a model the list does not name has no route"
+            );
+            assert_eq!(
+                account.observed(Provider::OpenAI, "claude-fixture-6").await,
+                None,
+                "a model served on no endpoint of the family has no route"
+            );
+        }
+
+        /// R2.5, over the fixture list: every family's routed client reports
+        /// its Copilot backend, the endpoint the list gives the model, and
+        /// the statement of that model's entry.
+        #[tokio::test]
+        async fn every_adapter_reports_its_route() {
+            let account =
+                ObservedAccount::new([token_response("derived"), fixture_listing()]).await;
+            for (provider, model, api, account_statement) in [
+                (
+                    Provider::OpenAI,
+                    "fixture-responses-a",
+                    ModelApi::Responses,
+                    stated(&[
+                        EffortLevel::None,
+                        EffortLevel::Low,
+                        EffortLevel::Medium,
+                        EffortLevel::High,
+                        EffortLevel::Xhigh,
+                        EffortLevel::Max,
+                    ]),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-responses-b",
+                    ModelApi::Responses,
+                    stated(&LOW_TO_MAX),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-responses-c",
+                    ModelApi::Responses,
+                    stated(&LOW_TO_HIGH),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-chat-a",
+                    ModelApi::ChatCompletions,
+                    stated(&LOW_TO_HIGH),
+                ),
+                (
+                    Provider::OpenAI,
+                    "fixture-legacy-a",
+                    ModelApi::ChatCompletions,
+                    AccountLevelStatement::NotStated,
+                ),
+                (
+                    Provider::Anthropic,
+                    "fixture-messages-a",
+                    ModelApi::Messages,
+                    stated(&LOW_TO_MAX),
+                ),
+                (
+                    Provider::Anthropic,
+                    "fixture-messages-b",
+                    ModelApi::Messages,
+                    AccountLevelStatement::NotStated,
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-chat-a",
+                    ModelApi::ChatCompletions,
+                    stated(&LOW_TO_HIGH),
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-chat-b",
+                    ModelApi::ChatCompletions,
+                    stated(&[]),
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-messages-a",
+                    ModelApi::ChatCompletions,
+                    stated(&LOW_TO_MAX),
+                ),
+            ] {
+                assert_eq!(
+                    account.observed(provider, model).await,
+                    observation(provider, api, account_statement),
+                    "{model} on the {provider:?} family"
+                );
+            }
+        }
+
+        /// R2.6: the account's token is minted and its model discovery
+        /// failed, so the account holds no list. Each family's route is on
+        /// its optimistic endpoint and the account's statement is
+        /// unavailable: nothing stands in for the list.
+        #[tokio::test]
+        async fn copilot_observation_without_a_list_is_unavailable() {
+            // The listing's 503 is tried once more at once, and fails again.
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                json_response(503, serde_json::json!({"message": "temporary"})),
+                json_response(503, serde_json::json!({"message": "temporary"})),
+            ])
+            .await;
+            for (provider, model, api) in [
+                (Provider::OpenAI, "fixture-responses-a", ModelApi::Responses),
+                (
+                    Provider::Anthropic,
+                    "fixture-messages-a",
+                    ModelApi::Messages,
+                ),
+                (
+                    Provider::Gemini,
+                    "fixture-chat-a",
+                    ModelApi::ChatCompletions,
+                ),
+            ] {
+                assert_eq!(
+                    account.observed(provider, model).await,
+                    observation(provider, api, AccountLevelStatement::ListUnavailable),
+                    "{provider:?}"
+                );
+            }
+            assert_eq!(
+                account.transport.request_count(),
+                3,
+                "one mint and the failed listing with its one retry"
+            );
+        }
+
+        /// R2.7: an observation reads the route the client already prepared.
+        /// It sends nothing, with a loaded list and without one, however
+        /// often it is asked.
+        #[tokio::test]
+        async fn observation_does_no_io() {
+            for (script, requests) in [
+                (vec![token_response("derived"), fixture_listing()], 2),
+                (
+                    vec![
+                        token_response("derived"),
+                        json_response(503, serde_json::json!({"message": "temporary"})),
+                        json_response(503, serde_json::json!({"message": "temporary"})),
+                    ],
+                    3,
+                ),
+            ] {
+                let account = ObservedAccount::new(script).await;
+                let clients = [
+                    account
+                        .session(Provider::OpenAI, "fixture-responses-a")
+                        .await,
+                    account
+                        .session(Provider::Anthropic, "fixture-messages-a")
+                        .await,
+                    account.session(Provider::Gemini, "fixture-chat-a").await,
+                ];
+                assert_eq!(account.transport.request_count(), requests);
+                let first: Vec<_> = clients
+                    .iter()
+                    .map(|client| client.reasoning_route())
+                    .collect();
+                assert!(first.iter().all(Option::is_some));
+                for _ in 0..16 {
+                    let again: Vec<_> = clients
+                        .iter()
+                        .map(|client| client.reasoning_route())
+                        .collect();
+                    assert_eq!(again, first);
+                }
+                assert_eq!(
+                    account.transport.request_count(),
+                    requests,
+                    "observing the route sends nothing"
+                );
+            }
+        }
+
+        /// R2.11: an entry without the field states no levels; an empty
+        /// array states that the model takes none. The two are different
+        /// statements.
+        #[tokio::test]
+        async fn an_entry_that_states_no_levels_is_not_stated() {
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::json!([
+                    entry(
+                        "fixture-silent",
+                        "/responses",
+                        serde_json::json!({"streaming": true}),
+                    ),
+                    entry(
+                        "fixture-empty",
+                        "/responses",
+                        serde_json::json!({"streaming": true, "reasoning_effort": []}),
+                    ),
+                    entry(
+                        "fixture-null",
+                        "/responses",
+                        serde_json::json!({"reasoning_effort": null}),
+                    ),
+                    {"id": "fixture-bare", "supported_endpoints": ["/responses"]},
+                ])),
+            ])
+            .await;
+            for (model, account_statement) in [
+                ("fixture-silent", AccountLevelStatement::NotStated),
+                ("fixture-empty", stated(&[])),
+                ("fixture-null", AccountLevelStatement::NotStated),
+                ("fixture-bare", AccountLevelStatement::NotStated),
+            ] {
+                assert_eq!(
+                    account.observed(Provider::OpenAI, model).await,
+                    observation(Provider::OpenAI, ModelApi::Responses, account_statement),
+                    "{model}"
+                );
+            }
+        }
+
+        /// R2.13: Copilot Messages takes a level only as the pair adaptive
+        /// thinking with effort. An entry there that states levels and
+        /// states `adaptive_thinking: false` cannot take the pair, so it
+        /// states no usable levels; with `adaptive_thinking: true`, or with
+        /// the key absent, its levels stand. The same entry shape on
+        /// Responses or Chat Completions is unaffected.
+        #[tokio::test]
+        async fn a_messages_entry_that_refuses_adaptive_thinking_states_no_usable_levels() {
+            let levels = serde_json::json!(["low", "medium", "high"]);
+            let shapes = |endpoint: &str, prefix: &str| {
+                [
+                    entry(
+                        &format!("{prefix}-adaptive"),
+                        endpoint,
+                        serde_json::json!({"adaptive_thinking": true, "reasoning_effort": levels}),
+                    ),
+                    entry(
+                        &format!("{prefix}-unstated"),
+                        endpoint,
+                        serde_json::json!({"reasoning_effort": levels}),
+                    ),
+                    entry(
+                        &format!("{prefix}-refusing"),
+                        endpoint,
+                        serde_json::json!({"adaptive_thinking": false, "reasoning_effort": levels}),
+                    ),
+                ]
+            };
+            let mut entries = Vec::new();
+            entries.extend(shapes("/v1/messages", "messages"));
+            entries.extend(shapes("/responses", "responses"));
+            entries.extend(shapes("/chat/completions", "chat"));
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::Value::Array(entries)),
+            ])
+            .await;
+
+            for (provider, prefix, api) in [
+                (Provider::Anthropic, "messages", ModelApi::Messages),
+                (Provider::OpenAI, "responses", ModelApi::Responses),
+                (Provider::OpenAI, "chat", ModelApi::ChatCompletions),
+                (Provider::Gemini, "chat", ModelApi::ChatCompletions),
+            ] {
+                for (shape, on_messages, elsewhere) in [
+                    ("adaptive", stated(&LOW_TO_HIGH), stated(&LOW_TO_HIGH)),
+                    ("unstated", stated(&LOW_TO_HIGH), stated(&LOW_TO_HIGH)),
+                    (
+                        "refusing",
+                        AccountLevelStatement::NotStated,
+                        stated(&LOW_TO_HIGH),
+                    ),
+                ] {
+                    let model = format!("{prefix}-{shape}");
+                    let expected = if api == ModelApi::Messages {
+                        on_messages
+                    } else {
+                        elsewhere
+                    };
+                    assert_eq!(
+                        account.observed(provider, &model).await,
+                        observation(provider, api, expected),
+                        "{model} on the {provider:?} family"
+                    );
+                }
+            }
+        }
+
+        /// The account capability gate stands in front of a route's adapter
+        /// and does not hide what the adapter reports.
+        #[test]
+        fn the_capability_gate_forwards_its_clients_route() {
+            struct ReportingClient(ReasoningRouteObservation);
+
+            #[async_trait]
+            impl meerkat_llm_core::LlmClient for ReportingClient {
+                fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                    Some(self.0.clone())
+                }
+
+                fn stream<'a>(
+                    &'a self,
+                    _request: &'a meerkat_llm_core::LlmRequest,
+                ) -> meerkat_llm_core::LlmStream<'a> {
+                    Box::pin(futures::stream::empty())
+                }
+
+                fn provider(&self) -> Provider {
+                    Provider::OpenAI
+                }
+
+                async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                    Ok(())
+                }
+            }
+
+            let reported = ReasoningRouteObservation {
+                backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+                api: ModelApi::Responses,
+                account: AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            };
+            let gated = capability_gated_client(
+                Arc::new(ReportingClient(reported.clone())),
+                Some(crate::CopilotModelCapabilities::default()),
+            );
+            assert_eq!(gated.reasoning_route(), Some(reported));
+        }
+    }
 }
 
 #[cfg(test)]

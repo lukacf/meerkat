@@ -623,13 +623,17 @@ mod tests {
         let (_dir, root) = project();
         std::fs::create_dir_all(root.join("packages/app/.rkat/skills")).unwrap();
         symlink("packages/app/.rkat", root.join("alias")).unwrap();
-        symlink(root.join("packages/app/.rkat/skills"), root.join("tools")).unwrap();
+        symlink(
+            root.join("packages/app/.rkat/skills"),
+            root.join("linked-skills"),
+        )
+        .unwrap();
         let rule = ProtectedPaths::default();
         for refused in [
             "alias",
             "alias/mcp.toml",
             "alias/realms/r/config.toml",
-            "tools/planted/SKILL.md",
+            "linked-skills/planted/SKILL.md",
         ] {
             assert_eq!(
                 rule.admit_write(&root, &root.join(refused)),

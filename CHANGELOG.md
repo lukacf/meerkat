@@ -35,6 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-sqlite`, `meerkat-store`, `meerkat-runtime`, `meerkat-workgraph`:
+  every public signature that names a rusqlite type names rusqlite 0.41's
+  (`Connection`, `Transaction`, `Error`, `FromSql`, `ValueRef`), no longer
+  0.37's. They include `meerkat_sqlite::Connection` (a re-export of
+  `rusqlite::Connection`), `meerkat_sqlite::open`, `open_with` and
+  `begin_immediate`, `meerkat_sqlite::SqliteStoreError` and
+  `meerkat_store::StoreError` (`From<rusqlite::Error>` and their
+  `rusqlite::Error` sources), `meerkat_sqlite::classify_sqlite_error` and
+  `is_busy_or_locked`, the ledger's `Migration::apply`,
+  `SchemaDomain::initialize_current` and `MaintenancePrepareFn`, and the
+  connection and `*_in_txn` functions of `meerkat_store::sqlite_store`.
+  Code that passes these types to or from its own rusqlite moves to
+  rusqlite 0.41 with Meerkat (see Upgrade notes). The semver gate does not
+  measure which version of a dependency's type a signature names.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2

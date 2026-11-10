@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   builds the variant literally adds `cause:
   LifecycleEffectFailureCause::Failed`, and one that destructures it without
   `..` names the field.
+- Rust: `meta_extension_state::SqliteExtensionDocumentStore::from_connection`
+  and `meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
+  take a rusqlite 0.41 `Connection`, no longer a rusqlite 0.37 one. A host
+  that opens that connection with its own rusqlite moves to rusqlite 0.41
+  with Meta (see Upgrade). The semver gate does not measure which version of
+  a dependency's type a signature names.
 
 ### Added
 

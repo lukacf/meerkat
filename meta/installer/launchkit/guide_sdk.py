@@ -20,10 +20,14 @@ from email.parser import BytesParser
 import io
 import re
 import zipfile
+import zlib
 
 SELECTED_VERSION = "0.9.11"
 DISTRIBUTION = "meerkat-meta"
 MAX_WHEEL_BYTES = 32 * 1024 * 1024
+# The largest dist-info entry verify() reads, METADATA or WHEEL. The client
+# wheel's METADATA is about a kilobyte; a long description would fit too.
+MAX_DIST_INFO_BYTES = 1024 * 1024
 
 
 def declared_core_version():
@@ -45,11 +49,34 @@ def selection(sha256, size):
     return {"path": wheel_path(), "version": declared_core_version(), "sha256": sha256, "bytes": size}
 
 
+def _dist_info_entry(archive, name, refusal):
+    """One dist-info entry's bytes, refused past MAX_DIST_INFO_BYTES.
+
+    MAX_WHEEL_BYTES bounds only the compressed wheel, and a small entry can
+    expand to gigabytes. The entry's declared size is checked first, and the
+    read stops past the bound whatever the entry declares. Only stored and
+    deflated entries are read: zipfile expands those no further than a read
+    asks, but expands each compressed chunk of its other methods in full.
+    """
+    entry = archive.getinfo(name)
+    if (entry.file_size > MAX_DIST_INFO_BYTES
+            or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
+        raise ValueError(refusal)
+    with archive.open(entry) as stream:
+        content = stream.read(MAX_DIST_INFO_BYTES + 1)
+    if len(content) > MAX_DIST_INFO_BYTES:
+        raise ValueError(refusal)
+    return content
+
+
 def verify(content):
     """Refuse bytes that are not the meerkat-meta wheel of the Guide's release.
 
     Byte identity is the release inputs' pin and the package manifest's record.
-    This reads only the wheel's own metadata; nothing is imported or installed.
+    This reads only the wheel's own metadata, each entry within
+    MAX_DIST_INFO_BYTES; nothing is imported or installed. An entry zipfile
+    cannot read (corrupt, truncated, encrypted, or of an unsupported method)
+    is the same refusal.
     """
     version = declared_core_version()
     refusal = f"The Guide client is not the published Meta {version} wheel."
@@ -58,9 +85,9 @@ def verify(content):
         if type(content) is not bytes or not 0 < len(content) <= MAX_WHEEL_BYTES:
             raise ValueError(refusal)
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            metadata = BytesParser().parsebytes(archive.read(info + "METADATA"))
-            wheel = BytesParser().parsebytes(archive.read(info + "WHEEL"))
-    except (ValueError, KeyError, zipfile.BadZipFile):
+            metadata = BytesParser().parsebytes(_dist_info_entry(archive, info + "METADATA", refusal))
+            wheel = BytesParser().parsebytes(_dist_info_entry(archive, info + "WHEEL", refusal))
+    except (ValueError, KeyError, EOFError, NotImplementedError, RuntimeError, zipfile.BadZipFile, zlib.error):
         raise ValueError(refusal) from None
     if (metadata.get_all("Name") != [DISTRIBUTION] or metadata.get_all("Version") != [version]
             or wheel.get_all("Root-Is-Purelib") != ["true"] or wheel.get_all("Tag") != ["py3-none-any"]):

@@ -1779,12 +1779,34 @@ async def stage_deployment_update(identity: str, value: DeploymentUpdateRequest)
 async def build_implementation(identity: str, value: ImplementationRequest):
     async def submit_selected():
         options = {}
+        refresh_framework = value.refresh_framework
         if (type(application_host) is LocalApplicationRegistry
                 and not value.refresh_framework and not value.preserve_design):
             options = application_host.initial_build_options(identity, value.version)
         elif (application_host is not None and value.previous_build_id is None
                 and not value.refresh_framework and not value.preserve_design):
             options = application_host.initial_build_options(identity)
+        elif value.refresh_framework and not value.preserve_design:
+            # Rebuild with updated runtime. A host-selected product refreshes
+            # through preserve_design, and the build owner refuses this request
+            # for one. Any other build's new framework is compiled for the
+            # runtime the launcher selected, never for the compiler's MobKit
+            # default: the build owner admits it as a new product build that
+            # keeps the application source.
+            from .implementation import ApplicationRuntimeUnselected
+            unselected = ("This application has no selected Meta runtime to rebuild with. Start Forge from "
+                "its packaged release, which selects its Meta runtime, then rebuild the application.")
+            if application_host is None:
+                raise ApplicationRuntimeUnselected(unselected)
+            checked = await implementation.status(identity)
+            if (checked.get("build_id") == value.previous_build_id
+                    and (checked.get("framework") or {}).get("runtime_candidate") is None):
+                options = (application_host.initial_build_options(identity, value.version)
+                    if type(application_host) is LocalApplicationRegistry
+                    else application_host.initial_build_options(identity))
+                if options.get("runtime_target") is None:
+                    raise ApplicationRuntimeUnselected(unselected)
+                refresh_framework = False
         if value.preserve_design:
             checked = await implementation.status(identity)
             if (checked.get("build_id") != value.previous_build_id or checked.get("status") != "completed"
@@ -1811,7 +1833,7 @@ async def build_implementation(identity: str, value: ImplementationRequest):
         if value.start_fresh:
             options.update(start_fresh=True, expected_fresh_source_digest=value.previous_source_digest)
         return await implementation.submit(identity, value.version, value.request,
-            expected_selected_build_id=value.previous_build_id, refresh_framework=value.refresh_framework, **options)
+            expected_selected_build_id=value.previous_build_id, refresh_framework=refresh_framework, **options)
     return await guide_result(submit_selected())
 
 

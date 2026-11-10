@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from .planning_limits import PLANNING_LIMITS
 
-REFERENCE_VERSION = "2026-10-24.1"
+REFERENCE_VERSION = "2026-11-09.1"
 
 COMMS_PROTOCOL = """Working with your mob:
 - Each durable agent owns a continuing responsibility and its conversation history.
@@ -268,7 +268,7 @@ CAPABILITIES = {
         "Inbound Slack/Telegram/email/webhook adapters, event ingestion and external notification delivery.",
         "Application-owned registry discovery, entity membership/subscriptions and automatic population-change policies using the supported desired-roster hooks. The compiler supplies the validated native reconciliation seam, not these business rules or access/privacy policy.",
         "Ephemeral worker profiles, elastic worker fleets and runtime spawn policy in generated deployments.",
-        "Preconfigured recurring triggers: the compiler supports per-class native scheduling access, not installed recurrence. On pinned MobKit 0.8.42, a granted agent can author current_session prompt recurrence; MobKit persists the stable mob-member target and each firing is an agent turn. Registered host-runnable callbacks do not create a schedule, and the advertised native authoring schema omits host_runnable targets. Preserve unresolved installation and destination delivery checks.",
+        "Preconfigured recurring triggers: the compiler supports per-class native scheduling access, not installed recurrence. A granted agent authors recurrence with the selected runtime's native scheduling tools, using only the targets and arguments those tools advertise. A registered callback or named host runnable does not create a schedule or grant its authoring. Preserve unresolved installation and destination delivery checks.",
         "Automatic knowledge-service ingestion/write pipeline, arbitrary PDF/Office extraction and document synchronization. Operator-led ingestion of individual files is supported separately.",
         "A generic external-action approval gate. Exact tool scopes or an actual connector's review mechanism are required.",
     ],

@@ -162,6 +162,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobMemberSendResult": schema_for!(crate::wire::MobMemberSendResult),
         "WireContinuationReceipt": schema_for!(crate::wire::WireContinuationReceipt),
         "WireContinuationStatus": schema_for!(crate::wire::WireContinuationStatus),
+        "WireMemberInputAdmission": schema_for!(crate::wire::WireMemberInputAdmission),
         "MobIngressInteractionParams": schema_for!(crate::wire::MobIngressInteractionParams),
         "MobIngressInteractionResult": schema_for!(crate::wire::MobIngressInteractionResult),
         "MobAppendSystemContextResult": schema_for!(crate::wire::MobAppendSystemContextResult),

@@ -317,7 +317,12 @@ settings before the turn, so REST can change build settings that RPC refuses.
   System message at the admitted boundary; plain text content is accepted.
 - `session/input_status {session_id, selector: {"by": "input_id" |
   "idempotency_key", "value": "..."}}` returns the stored runtime state of one
-  input (`state` is absent when nothing matches).
+  input (`state` is absent when nothing matches). By `idempotency_key` it
+  finds an input by the key its sender supplied: the key a caller gave
+  `session/external_event` (since 0.9.12) or a key a host gave the Rust API.
+  A keyed `mob/member_send` is read through its receipt
+  (`continuation.status`, or by its `delivery_id` or `input_id`), not by its
+  caller key.
 
 ## Events, streaming and replay
 

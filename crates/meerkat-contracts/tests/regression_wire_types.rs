@@ -1376,6 +1376,51 @@ fn external_event_and_member_send_schemas_name_the_optional_key() {
         result["properties"].get("continuation").is_some(),
         "mob/member_send result names its continuation receipt: {result}"
     );
+    assert!(
+        result["properties"].get("admission").is_some(),
+        "mob/member_send result names its admission: {result}"
+    );
+}
+
+/// An unkeyed member send's result names the admission its member's
+/// runtime made: present, it serializes as `{session_id, input_id}` and
+/// parses back; absent, it is left out, and an answer without it still
+/// parses.
+#[test]
+fn member_send_result_carries_an_optional_admission() {
+    let admitted = meerkat_contracts::MobMemberSendResult {
+        mob_id: "mob-1".to_string(),
+        agent_identity: "worker-1".to_string(),
+        member_ref: meerkat_contracts::WireMemberRef::encode("mob-1", "worker-1"),
+        handling_mode: meerkat_contracts::WireHandlingMode::Steer,
+        continuation: None,
+        admission: Some(meerkat_contracts::WireMemberInputAdmission {
+            session_id: "session-1".to_string(),
+            input_id: "input-1".to_string(),
+        }),
+    };
+    let value = serde_json::to_value(&admitted).expect("serialize");
+    assert_eq!(
+        value["admission"],
+        serde_json::json!({ "session_id": "session-1", "input_id": "input-1" }),
+        "{value}"
+    );
+    let back: meerkat_contracts::MobMemberSendResult =
+        serde_json::from_value(value).expect("parse");
+    assert_eq!(back, admitted);
+
+    let unadmitted = meerkat_contracts::MobMemberSendResult {
+        admission: None,
+        ..admitted
+    };
+    let value = serde_json::to_value(&unadmitted).expect("serialize");
+    assert!(
+        value.get("admission").is_none(),
+        "absent stays absent: {value}"
+    );
+    let back: meerkat_contracts::MobMemberSendResult =
+        serde_json::from_value(value).expect("an answer without admission parses");
+    assert_eq!(back.admission, None);
 }
 
 /// Scoped tool grant results pin their field names: a family target carries

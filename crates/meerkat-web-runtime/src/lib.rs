@@ -2793,7 +2793,7 @@ pub async fn mob_member_send(
         .await
         .map_err(err_mob)?;
     let identity_str = receipt.identity.to_string();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "mob_id": id.as_str(),
         "agent_identity": receipt.identity,
         "member_ref": meerkat_contracts::WireMemberRef::encode(id.as_str(), &identity_str),
@@ -2802,6 +2802,12 @@ pub async fn mob_member_send(
             meerkat_core::HandlingMode::Steer => "steer",
         },
     });
+    // The input the member's runtime admitted, when it did before the send
+    // answered.
+    if let Some(admission) = receipt.admission.as_ref() {
+        payload["admission"] =
+            serde_json::json!(meerkat_contracts::WireMemberInputAdmission::from(admission));
+    }
     serde_json::to_string(&payload).map_err(|e| err_str("serialize", e))
 }
 

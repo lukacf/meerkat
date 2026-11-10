@@ -179,8 +179,20 @@ nothing; `--execute --no-tag --no-push` makes the release commit). Candidate
 production must run from that final merged commit, not a PR head or an earlier
 build. Candidate runs may start as soon as the commit is on main: their build
 legs run beside the commit's `ci.yml` **push-to-main** run, and collection
-refuses (it never waits) unless that run is already green by then. A refused
-candidate binds nothing; dispatch a new one once CI is green.
+waits (up to 240 minutes, since that run may start cold) until that run, and a
+Meta CI run at the commit that
+ran Meta's lanes, are green; a green re-run attempt counts. A red `ci.yml` run
+counts too when its attestation shows every failure in rows Meta does not
+depend on (Meta depends on Core's and Meta's rows; a Connect-only red row does
+not hold Meta back; the root's `scripts/ci-product-evidence.mjs`, as the
+release commit's first parent has it, judges it, and refuses a commit that
+changes what decides that evidence). Collection, promotion, recovery and the
+published-release check re-check the bound CI run the same way, on the attempt
+the candidate bound: re-running that run (as Connect's release needs a green
+run at the same commit) changes nothing they read. A candidate that should use
+a newer attempt is a new candidate, dispatched once that attempt counts.
+A candidate whose wait runs out binds nothing; dispatch a new one once CI is
+green.
 
 The five targets form two tiers, each built and bound by its own candidate run
 from the same commit. The core tier (Linux x86_64 and aarch64, macOS arm64) is
@@ -204,9 +216,11 @@ Save it unchanged outside the repository, for example as
 `accepted-core.json` and `accepted-trailing.json`. It binds the repository, run
 and attempt, tier, immutable manifest artifact ID and ZIP digest, and manifest
 file hash. The attested manifest binds the exact source, version, CI evidence,
-the tier's target artifact identities, and its archive and inner-executable
-hashes. The manifest's own artifact identity is outside the manifest to avoid a
-self-referential hash.
+the tier's target artifact identities, its archive and inner-executable
+hashes, the tree of `crates/` at the source commit (the in-tree Core the
+gateways embed), and for the core tier the published-floor record when its
+floor check ran. The manifest's own artifact identity is outside the manifest
+to avoid a self-referential hash.
 
 Inner members follow the producer: Unix archives contain the executable
 basename, and Windows ZIPs contain exactly
@@ -220,9 +234,9 @@ not placeholders). IDs are integers; digests are 64 lowercase hex characters:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "kind": "accepted-candidate",
-  "repository": "lukacf/meerkat-meta",
+  "repository": "lukacf/meerkat",
   "run_id": 123,
   "run_attempt": 1,
   "tier": "core",
@@ -282,8 +296,20 @@ the candidate step: make reads `TIER` from the environment too.
 
 Promotion verifies the original signed provenance, including the certificate's
 source digest and workflow identity, run/attempt, artifact ZIP digests, archive
-hashes, and every inner executable hash. It copies the original archives, index,
-and checksums without rebuilding, signing, stripping, or recompressing anything.
+hashes, and every inner executable hash. It also fetches Core's tag of the
+version the workspace pins (`v<Core>`) and refuses a candidate whose bound
+`crates/` tree differs from that tag's, so a candidate may build before Core's
+tag exists but never publishes unreleased Core; promotion then publishes
+nothing until Meta's published-floor check against crates.io Core succeeded.
+A core candidate dispatched once Core's crates are already on crates.io (a
+Meta-only release, or a candidate after Core's publication) runs that floor
+check itself and binds its record in the manifest; the promotion reuses the
+record instead of building again only while everything it binds still holds
+(the declared Core version, each Core crate's index checksum with none
+yanked, the re-resolved lock, the Meta crates' packaged bytes and the
+toolchain), and builds otherwise.
+It copies the original archives, index, and checksums without rebuilding,
+signing, stripping, or recompressing anything.
 A tag mismatch, missing/expired artifact, changed attempt, or failed verification
 refuses publication; there is no fallback build. Do not rerun an accepted
 candidate's jobs and assume the old selection still applies.
@@ -303,8 +329,9 @@ tier, which may arrive later, adds `index-trailing.json` and
 up to v0.9.1 keep one `index.json` and `checksums.sha256` for all five targets.
 
 Only the candidate manifest's attestation implies green exact-main CI: the
-build legs start beside CI and attest their archives before the gate runs, and
-collection, which attests the manifest, refuses unless CI is green.
+build legs run beside CI and attest their archives whatever CI concludes, and
+collection, which attests the manifest, waits for green CI and binds nothing
+without it.
 
 ### Recovery without replacing published bytes
 

@@ -654,8 +654,11 @@ After merging the final release-version/dependency commit, use
 `make release-candidate SOURCE_SHA=<full-sha> TIER=trailing`. The dispatch must
 snapshot that same main SHA. Each run builds/signs/packages one tier (core:
 Linux x86_64 and aarch64, macOS arm64; trailing: macOS x86_64, Windows) beside
-the push-to-main CI run of that SHA, refuses at collection unless that CI run is
-already green, and emits an immutable run/attempt/tier/artifact/digest selection
+the push-to-main CI run of that SHA, waits at collection (up to 240 minutes)
+until that CI run and a Meta CI run that ran Meta's lanes are green (a red CI
+run counts when its attestation shows every failure in rows Meta does not
+depend on, such as a Connect-only row), and emits
+an immutable run/attempt/tier/artifact/digest selection
 backed by signed provenance and outer/inner executable hashes. Save the
 selections outside the repo and obtain consumer acceptance against those bytes.
 
@@ -666,7 +669,13 @@ tag line, independent of Core's `vX.Y.Z`) and invokes
 `release-assets-recover` and `release-registry-retry` refuse it (unset it if
 the shell still exports it from the candidate step).
 Promotion accepts only the core selection and verifies and publishes the
-original bytes without rebuilding or signing again. The trailing tier is added
+original bytes without rebuilding or signing again. It refuses a candidate
+whose bound `crates/` tree differs from Core's tag of the version the
+workspace pins (candidates may build before that tag exists), and publishes
+nothing until Meta's published-floor check against crates.io Core succeeded;
+it reuses the floor record of a core candidate built after Core's crates
+were published only while everything that record binds still holds.
+The trailing tier is added
 afterwards, add-only, with
 `make release-assets-recover RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=<trailing json-file>`. Assets precede the Python and TypeScript SDKs, then the crates
 (`meta-extension-state`, then `meerkat-meta`) and an exact registry readback.

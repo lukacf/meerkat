@@ -496,7 +496,13 @@ case "${command}" in
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//crates/meerkat-cli:rkat //crates/meerkat-rpc:rkat_rpc_bin //crates/meerkat-rest:rkat_rest_bin //crates/meerkat-mcp-server:rkat_mcp_bin"
-    extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel --platforms=//tools/bazel/platforms:macos_x86_64)
+    # Cross-compiled on the Apple-silicon executors. This flag comes after
+    # the launcher's shared macOS minimum (BUILDBUDDY_MACOS_MINIMUM_OS,
+    # default 13.0, which v0.9.1's Intel binaries targeted) on the command
+    # line, so it wins for the target while host tools keep the shared value.
+    # 11.0 is the newest scripts/check-macos-x86-release-binary accepts, so
+    # every supported Intel Mac can start these binaries.
+    extra_args+=(--compilation_mode=opt --define=meerkat_release_build=1 --remote_download_outputs=toplevel --platforms=//tools/bazel/platforms:macos_x86_64 --macos_minimum_os=11.0)
     ;;
   release-build-linux-x86)
     command="build"

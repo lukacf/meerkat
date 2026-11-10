@@ -1,13 +1,17 @@
 name: Release binaries check
 
 # Builds the four release binaries on the dispatched ref exactly as the
-# release workflow does: the Linux and macOS arm64 targets through its
-# BuildBuddy lane (scripts/buildbuddy-bazel-poc release-build-*, which pass
-# --define=meerkat_release_build=1), Intel macOS through its cross-build on
-# Apple silicon, and runs the release packaging guards on every one of them:
+# release workflow does: the Linux and macOS targets through its BuildBuddy
+# lane (scripts/buildbuddy-bazel-poc release-build-*, which set
+# --define=meerkat_release_build=1; Intel macOS is then run and inspected on
+# Apple silicon, as the release's BuildBuddy backend does), Intel macOS also
+# through the cross-build on Apple silicon its GitHub-hosted backend uses,
+# and runs the release packaging guards on every one of them:
 # the Linux portability check, scripts/check-release-binary-markers and, for
-# Intel macOS, scripts/check-macos-x86-release-binary. It publishes nothing: a read-only
-# token, no archive, no attestation, no upload, no release, no registry.
+# Intel macOS, scripts/check-macos-x86-release-binary. It publishes nothing: a
+# read-only token, no release archive, no attestation, no release, no
+# registry; the only upload is a one-day workflow artifact that hands the
+# BuildBuddy Intel macOS binaries to the Apple silicon runner.
 # Dispatch it on a release candidate commit before tagging, so that the tag
 # cannot fail at packaging:
 #   gh workflow run release-binaries-check.yml --ref <branch>
@@ -37,6 +41,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - bb_command: release-build-macos-arm64
             target: aarch64-apple-darwin
+          - bb_command: release-build-macos-x86
+            target: x86_64-apple-darwin
 
     steps:
       - name: Checkout
@@ -92,12 +98,67 @@ jobs:
               ./scripts/check-linux-release-binary-portability.sh "${src}"
             fi
             scripts/check-release-binary-markers "${src}"
+            # Intel macOS runs only on a Mac: macos-x86-buildbuddy below.
+            if [[ "${TARGET}" == x86_64-apple-darwin ]]; then
+              mkdir -p "${RUNNER_TEMP}/macos-x86"
+              cp "${src}" "${RUNNER_TEMP}/macos-x86/${bin}"
+            fi
           done
           echo "All four ${TARGET} release binaries pass the release packaging guards"
 
-  # Intel macOS is cross-compiled on Apple silicon in the release
-  # (build_binaries_macos_x86_cross), not on BuildBuddy: check it the same
-  # way, one job per surface package.
+      - name: Hand the Intel macOS binaries to the Apple silicon runner
+        if: matrix.target == 'x86_64-apple-darwin'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-check-x86_64-apple-darwin
+          path: ${{ runner.temp }}/macos-x86/*
+          retention-days: 1
+          if-no-files-found: error
+
+  # The release's BuildBuddy backend runs and inspects its Intel macOS
+  # binaries on Apple silicon, under Rosetta (verify_macos_x86_binaries):
+  # the same checks here, on the binaries the build job above made.
+  macos-x86-buildbuddy:
+    name: Run and inspect the BuildBuddy Intel macOS release binaries on Apple silicon
+    needs: build
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download the Intel macOS binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-check-x86_64-apple-darwin
+          path: ${{ runner.temp }}/macos-x86
+
+      - name: Run and inspect each binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk '
+            /^\[workspace.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { in_workspace_package = 0 }
+            in_workspace_package && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
+          ' Cargo.toml)"
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+            src="${RUNNER_TEMP}/macos-x86/${bin}"
+            chmod +x "${src}"
+            scripts/check-macos-x86-release-binary "${src}" "${version}"
+            scripts/check-release-binary-markers "${src}"
+            if [[ "${bin}" == rkat ]]; then
+              scripts/check-release-binary-sqlite-profile "${src}"
+            fi
+          done
+          echo "Ran and inspected the four BuildBuddy Intel macOS release binaries"
+
+  # The release's GitHub-hosted backend cross-compiles Intel macOS on Apple
+  # silicon (build_binaries_macos_x86_cross): check it the same way, one job
+  # per surface package.
   macos-x86-cross:
     name: Cross-compile and check Intel macOS release binaries (${{ matrix.surface.bin }})
     runs-on: macos-15

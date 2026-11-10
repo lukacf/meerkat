@@ -77,6 +77,12 @@ them.
   `target_id` that is empty or only whitespace are refused as invalid
   arguments.
 
+### Changed
+
+- Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
+  (previously 10.12). They are built on the BuildBuddy release lane for macOS
+  11.0, and the release refuses one that needs a newer macOS.
+
 ### Fixed
 
 - `meerkat-core`, `meerkat-contracts`: the Claude effort `xhigh` is now

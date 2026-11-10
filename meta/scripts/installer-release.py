@@ -778,13 +778,19 @@ def forge_ci_evidence(sha, work, objects=None):
 
 
 def recheck_forge_ci(manifest):
-    """Publication rechecks the reused run against the candidate's commit."""
+    """Publication rechecks the reused run against the candidate's commit, on
+    the attempt the candidate bound: the record of exactly that attempt
+    (actions/runs/<id>/attempts/<attempt>) and its jobs, never the run's own
+    record, which answers its latest attempt. Re-running the run (failed jobs
+    routinely are) changes nothing this reads; a candidate that should use
+    the newer attempt binds it."""
     record, objects = manifest["forge_ci"], GitObjects()
     wanted = evidence_tuple(objects, manifest["source_sha"])
     require(record["tuple"] == wanted and evidence_tuple(objects, record["head_sha"]) == wanted,
             "the bound Forge run no longer tested this candidate's Forge inputs")
     require_guide_release_sdk(objects, manifest["source_sha"], wanted["trees"][GUIDE_SDK_TREE])
-    run = rc.api(rc.repo_endpoint(f"actions/runs/{record['run_id']}"))
+    run = rc.api(rc.repo_endpoint(f"actions/runs/{rc.integer(record['run_id'], 'Forge run ID')}"
+                                  f"/attempts/{rc.integer(record['run_attempt'], 'Forge run attempt')}"))
     require(run["id"] == record["run_id"] and run["run_attempt"] == record["run_attempt"]
             and run["head_sha"] == record["head_sha"] and run["path"] == INSTALLER_CI
             and run["event"] == "workflow_dispatch"

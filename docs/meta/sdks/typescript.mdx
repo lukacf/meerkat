@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [c655094aaabf](https://github.com/lukacf/meerkat/commit/c655094aaabf0430af174de2986036a0a568b95e) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -446,6 +446,11 @@ compatibility with existing TypeScript objects; parsed responses use `null` when
 a field is absent or malformed. Unknown outcome strings are preserved.
 `nextPendingId` identifies an escalation successor; the SDK does not automatically
 retry or execute the action. See [Gating](/meta/concepts/gating) for decision semantics.
+
+`handle.gatingWithdraw(pendingId, reason?)` withdraws a pending request this host
+minted, with no decision: it returns `pendingId`, `actionId`, `actorId`,
+`outcome` (`safe_draft`), `withdrawnAtMs`, `withdrawnBy` and `reason`. A request
+that was already decided, timed out or withdrawn is refused as an unknown id.
 
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.

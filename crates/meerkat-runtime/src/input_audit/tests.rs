@@ -230,6 +230,28 @@ fn committed_image_is_only_the_stored_prefix_of_the_live_records() {
 }
 
 #[test]
+fn same_records_compares_every_record_in_order() {
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let stored = live.freeze_for_persistence().unwrap();
+    // A live buffer and a frozen copy of it hold the same records.
+    assert!(live.has_same_records(&stored).unwrap());
+    assert!(stored.has_same_records(&live).unwrap());
+    // A record one side lacks is a difference, in either direction,
+    sink.append(event(&sink)).unwrap();
+    assert!(!live.has_same_records(&stored).unwrap());
+    assert!(!stored.has_same_records(&live).unwrap());
+    // and so are different records of the same count.
+    let (other, other_sink) = fixture();
+    other_sink.append(event(&other_sink)).unwrap();
+    assert!(!other.has_same_records(&stored).unwrap());
+    // Neither side changes.
+    assert_eq!(count(&live), 2);
+    assert_eq!(count(&stored), 1);
+    assert_eq!(count(&other), 1);
+}
+
+#[test]
 fn restored_payload_is_data_and_frozen_store_candidates_cannot_gain_live_sink() {
     let (audit, sink) = fixture();
     sink.append(event(&sink)).unwrap();

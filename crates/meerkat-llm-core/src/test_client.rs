@@ -99,3 +99,45 @@ impl LlmClient for TestClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::sync::Arc;
+
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    use meerkat_core::provider_matrix::SelfHostedBackendKind;
+    use meerkat_core::{
+        AccountLevelStatement, AgentLlmClient, ModelApi, Provider, ReasoningBackend,
+        ReasoningRouteObservation,
+    };
+
+    use super::TestClient;
+    use crate::adapter::LlmClientAdapter;
+    use crate::types::LlmClient;
+
+    /// A test client reports no route until a test sets one, then reports
+    /// exactly that one, also through the adapter the agent loop holds.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        assert_eq!(TestClient::default().reasoning_route(), None);
+        assert_eq!(TestClient::new(Vec::new()).reasoning_route(), None);
+        assert_eq!(
+            TestClient::for_provider(Provider::OpenAI).reasoning_route(),
+            None
+        );
+
+        let route = ReasoningRouteObservation {
+            backend: ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+            api: ModelApi::ChatCompletions,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
+        };
+        let client =
+            TestClient::for_provider(Provider::SelfHosted).with_reasoning_route(route.clone());
+        assert_eq!(client.reasoning_route(), Some(route.clone()));
+
+        let adapter = LlmClientAdapter::new(Arc::new(client), "test-model".to_string());
+        assert_eq!(AgentLlmClient::reasoning_route(&adapter), Some(route));
+    }
+}

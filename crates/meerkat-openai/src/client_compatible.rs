@@ -1439,6 +1439,23 @@ impl LlmClient for OpenAiCompatibleClient {
         }
     }
 
+    /// The API of this client's mode on the backend it was declared for
+    /// ([`Self::with_openai_backend`]). A client that was not told which
+    /// backend it speaks to reports no route: nothing infers one from a
+    /// base URL.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        let backend = meerkat_core::ReasoningBackend::OpenAi(self.openai_backend?);
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend,
+            api: match self.mode {
+                OpenAiCompatibleMode::Responses => meerkat_core::ModelApi::Responses,
+                OpenAiCompatibleMode::ChatCompletions => meerkat_core::ModelApi::ChatCompletions,
+            },
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         let mode = match self.mode {
             OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,

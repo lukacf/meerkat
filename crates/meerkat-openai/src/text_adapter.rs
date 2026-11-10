@@ -129,6 +129,20 @@ impl OpenAiRealtimeTextAdapter {
 
 #[async_trait]
 impl LlmClient for OpenAiRealtimeTextAdapter {
+    /// The realtime API of the OpenAI API backend: the adapter connects
+    /// with an API key to the public realtime endpoint and is built for no
+    /// other backend.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        Some(meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+            ),
+            api: meerkat_core::ModelApi::Realtime,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        })
+    }
+
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         project_realtime_replay_messages(messages)
     }

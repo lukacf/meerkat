@@ -1446,24 +1446,36 @@ struct MemoryFixture {
 }
 
 impl MemoryFixture {
-    async fn cancelled_run_recording(recorded: usize) -> (Self, Vec<meerkat_core::OperationId>) {
+    /// A persistent driver of `runtime_id` on a fresh in-memory store, with a
+    /// ready durability health handle.
+    fn new_driver(
+        runtime_id: &crate::identifiers::LogicalRuntimeId,
+    ) -> (
+        Arc<crate::store::InMemoryRuntimeStore>,
+        crate::meerkat_machine::DurabilityHealthHandle,
+        PersistentRuntimeDriver,
+    ) {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let health = owner::ready_durability_health_for_test();
+        let driver = PersistentRuntimeDriver::new_with_control_and_durability_health(
+            runtime_id.clone(),
+            store.clone(),
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+            Arc::new(std::sync::RwLock::new(
+                crate::driver::ephemeral::RuntimeControlProjection::default(),
+            )),
+            crate::driver::ephemeral::new_ingress_dsl_authority(),
+            health.clone(),
+        );
+        (store, health, driver)
+    }
+
+    async fn cancelled_run_recording(recorded: usize) -> (Self, Vec<meerkat_core::OperationId>) {
         let session_id = SessionId::new();
         let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
-        let health = owner::ready_durability_health_for_test();
+        let (store, health, driver) = Self::new_driver(&runtime_id);
         let driver = Arc::new(crate::tokio::sync::Mutex::new(
-            owner::DriverEntry::Persistent(
-                PersistentRuntimeDriver::new_with_control_and_durability_health(
-                    runtime_id.clone(),
-                    store.clone(),
-                    Arc::new(meerkat_store::MemoryBlobStore::new()),
-                    Arc::new(std::sync::RwLock::new(
-                        crate::driver::ephemeral::RuntimeControlProjection::default(),
-                    )),
-                    crate::driver::ephemeral::new_ingress_dsl_authority(),
-                    health.clone(),
-                ),
-            ),
+            owner::DriverEntry::Persistent(driver),
         ));
         let run = Fixture::cancel_run_recording(&driver, &session_id, recorded).await;
         let fixture = Self {
@@ -1488,6 +1500,126 @@ impl MemoryFixture {
             "the terminal write stores the records staged before it"
         );
         (fixture, run.recorded)
+    }
+
+    /// Two independent inputs accepted and left queued, with no run of
+    /// their own: `run_id` names the earlier run whose operation stages the
+    /// rows' records, as requeued work's sink does.
+    async fn queued_inputs() -> Self {
+        let session_id = SessionId::new();
+        let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+        let (store, health, driver) = Self::new_driver(&runtime_id);
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(
+            owner::DriverEntry::Persistent(driver),
+        ));
+        let inputs = Fixture::accept_independent_inputs(&driver).await;
+        Self {
+            store,
+            driver,
+            health,
+            runtime_id,
+            session_id,
+            inputs,
+            run_id: RunId::new(),
+            carrier: RuntimeLoopTeardownSlot::pending(),
+        }
+    }
+
+    /// A governed original staged for a run, then ended by a receipt-less
+    /// sweep while that run still runs: the sweep's archive defers it until
+    /// the run's terminal, and its audit buffer stays open. The fixture's
+    /// only input is that original, and `run_id` is its run.
+    async fn governed_original_deferred_while_its_run_runs() -> Self {
+        let machine = crate::meerkat_machine::MeerkatMachine::ephemeral();
+        let host = Arc::new(crate::input_authority::tests::TestIngress::isolated(
+            machine.generated_auth_lease_handle(),
+        ));
+        let slot = Arc::new(std::sync::OnceLock::new());
+        assert!(
+            slot.set(
+                crate::meerkat_machine::credential_custody::NativeWorkAuthorizationAttachment::new(
+                    host.clone(),
+                    &machine,
+                )
+            )
+            .is_ok()
+        );
+        let session_id = SessionId::new();
+        // The runtime the fixture host's originals name.
+        let runtime_id = crate::identifiers::LogicalRuntimeId::new("native-test");
+        let (store, health, mut persistent) = Self::new_driver(&runtime_id);
+        persistent.inner_mut().set_work_authorization_host(slot);
+        persistent
+            .inner_mut()
+            .set_executor_work_authorization_support(true);
+        persistent
+            .inner_mut()
+            .install_registered_authority_for_test(
+                mm::SessionId::from_domain(&session_id),
+                Some(&runtime_id),
+                Some(1),
+                Some(mm::Generation::from(1)),
+                Some(mm::RuntimeEpochId::from(
+                    "deferred-original-epoch".to_owned(),
+                )),
+                crate::store::SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            )
+            .expect("registered placement");
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(
+            owner::DriverEntry::Persistent(persistent),
+        ));
+        let original = host.input("deferred-original");
+        let input_id = original.id().clone();
+        let run_id = RunId::new();
+        {
+            let mut entry = driver.lock().await;
+            assert!(
+                entry
+                    .as_driver_mut()
+                    .accept_input(original)
+                    .await
+                    .expect("governed admission")
+                    .is_accepted()
+            );
+            let owner::DriverEntry::Persistent(persistent) = &mut *entry else {
+                panic!("persistent fixture");
+            };
+            persistent
+                .inner_mut()
+                .contract_begin_run_authority(run_id.clone())
+                .expect("generated Prepare");
+            persistent
+                .inner_mut()
+                .machine_realize_authorized_stage_batch(owner::test_authorized_stage_for_run(
+                    vec![input_id.clone()],
+                    run_id.clone(),
+                ))
+                .expect("generated StageForRun");
+            assert_eq!(
+                persistent
+                    .abandon_inputs(
+                        std::slice::from_ref(&input_id),
+                        crate::input_state::InputAbandonReason::Stopped,
+                    )
+                    .await
+                    .expect("the receipt-less sweep commits"),
+                1
+            );
+            assert!(
+                persistent.inner_ref().ledger().get(&input_id).is_some(),
+                "the governed original's archive defers while its run runs"
+            );
+        }
+        Self {
+            store,
+            driver,
+            health,
+            runtime_id,
+            session_id,
+            inputs: vec![input_id],
+            run_id,
+            carrier: RuntimeLoopTeardownSlot::pending(),
+        }
     }
 
     /// The first input's live audit, which an operation of the run stages on.
@@ -1545,6 +1677,82 @@ impl MemoryFixture {
         self.store
             .block_next_input_state_batch_cas_after_commit(entered.clone(), release.clone());
         (entered, release)
+    }
+
+    /// Hold the next machine lifecycle commit right after the store commits
+    /// it, until `release` is notified. Returns `(entered, release)`.
+    fn hold_next_lifecycle_commit_after_commit(
+        &self,
+    ) -> (
+        Arc<crate::tokio::sync::Notify>,
+        Arc<crate::tokio::sync::Notify>,
+    ) {
+        let entered = Arc::new(crate::tokio::sync::Notify::new());
+        let release = Arc::new(crate::tokio::sync::Notify::new());
+        self.store
+            .block_next_machine_lifecycle_commit_after_commit(entered.clone(), release.clone());
+        (entered, release)
+    }
+
+    /// While a held commit waits right after it committed (`entered`,
+    /// `release`), an operation stages a refusal on `live`; then the hold
+    /// releases. Returns the refusal's operation id.
+    async fn stage_during_held_commit(
+        &self,
+        live: &crate::input_audit::InputAuthorizationAudit,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) -> meerkat_core::OperationId {
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the held commit commits");
+        let staged = self.stage_refusal(live);
+        release.notify_one();
+        staged
+    }
+
+    /// `input_ids` are archived from the live shell, the first input's
+    /// stored row holds exactly `first_audit`, in order, and its audit buffer
+    /// `live` is closed: a later record is refused, and the stored row stays
+    /// as it was.
+    async fn assert_archived_with_closed_audit(
+        &self,
+        input_ids: &[InputId],
+        first_audit: &[meerkat_core::OperationId],
+        live: &crate::input_audit::InputAuthorizationAudit,
+    ) {
+        {
+            let entry = self.driver.lock().await;
+            for input_id in input_ids {
+                assert!(
+                    entry.shell_driver().ledger().get(input_id).is_none(),
+                    "the terminal rows are archived"
+                );
+            }
+        }
+        let first = self.stored_bytes(&input_ids[0]).await;
+        assert_eq!(
+            crate::input_audit::tests::audit_operation_ids(
+                &self
+                    .stored_row(&input_ids[0])
+                    .await
+                    .state
+                    .authorization_audit
+            ),
+            first_audit,
+            "every record staged before the archive is durable"
+        );
+        assert!(
+            crate::input_audit::tests::try_stage_refusal_after_row_write(
+                live,
+                &input_ids[0],
+                &self.session_id,
+                &self.run_id,
+            )
+            .is_err(),
+            "the archived row's audit buffer refuses a later record"
+        );
+        assert_eq!(first, self.stored_bytes(&input_ids[0]).await);
     }
 
     /// Finalize the cancelled run's terminal as teardown does, and drop the
@@ -2015,6 +2223,117 @@ async fn retry_after_a_dropped_finalization_does_not_excuse_a_changed_stored_row
     changed.state.updated_at += chrono::Duration::seconds(1);
     fixture.replace_first_stored_row(changed).await;
     fixture.assert_teardown_refuses_stored_rows().await;
+}
+
+/// Once teardown archived the cancelled run's rows, an operation of the run
+/// that records again finds the row's audit buffer closed: the sink refuses
+/// the record, so the operation is refused as observation unavailable,
+/// instead of accepting a record no row will ever write.
+#[tokio::test]
+async fn an_audit_observation_after_the_terminal_archive_is_refused() {
+    let (fixture, recorded) = MemoryFixture::cancelled_run_recording(1).await;
+    let live = fixture.first_live_audit().await;
+    fixture
+        .teardown()
+        .await
+        .expect("teardown settles and archives the cancelled run");
+    fixture
+        .assert_archived_with_closed_audit(&fixture.inputs, &recorded, &live)
+        .await;
+}
+
+/// A receipt-less sweep archives the rows it ends right after its own
+/// lifecycle commit. An operation stages a record on one of them while that
+/// commit is held right after it committed: the sweep writes the record to
+/// the stored row before the archive, and closes the archived row's buffer.
+#[tokio::test]
+async fn abandon_sweep_commits_an_audit_observation_staged_during_its_commit() {
+    let fixture = MemoryFixture::queued_inputs().await;
+    let live = fixture.first_live_audit().await;
+    let before = fixture.stage_refusal(&live);
+    let (entered, release) = fixture.hold_next_lifecycle_commit_after_commit();
+    let sweep = async {
+        fixture
+            .driver
+            .lock()
+            .await
+            .abandon_inputs(
+                &fixture.inputs,
+                crate::input_state::InputAbandonReason::Retired,
+            )
+            .await
+    };
+    let stage = fixture.stage_during_held_commit(&live, entered, release);
+    let (swept, during) = crate::tokio::join!(sweep, stage);
+    assert_eq!(swept.expect("the sweep commits"), 2);
+    fixture
+        .assert_archived_with_closed_audit(&fixture.inputs, &[before, during], &live)
+        .await;
+}
+
+/// The same for one queued input's cancel, which archives its row right
+/// after its own lifecycle commit.
+#[tokio::test]
+async fn queued_input_cancel_commits_an_audit_observation_staged_during_its_commit() {
+    let fixture = MemoryFixture::queued_inputs().await;
+    let live = fixture.first_live_audit().await;
+    let (entered, release) = fixture.hold_next_lifecycle_commit_after_commit();
+    let cancel = async {
+        fixture
+            .driver
+            .lock()
+            .await
+            .abandon_queued_input(
+                &fixture.inputs[0],
+                crate::input_state::InputAbandonReason::Cancelled,
+            )
+            .await
+    };
+    let stage = fixture.stage_during_held_commit(&live, entered, release);
+    let (cancelled, during) = crate::tokio::join!(cancel, stage);
+    assert!(cancelled.expect("the cancel commits"));
+    fixture
+        .assert_archived_with_closed_audit(&fixture.inputs[..1], &[during], &live)
+        .await;
+}
+
+/// A run's terminal archives the governed original a receipt-less sweep
+/// ended while the run still ran (that archive deferred, leaving the row's
+/// audit buffer open), right after the terminal's own lifecycle commit: the
+/// run-terminal cleanup the deferral names. An operation of the run stages
+/// a record while that commit is held right after it committed: the terminal
+/// writes it to the stored row before the archive and closes the buffer.
+#[tokio::test]
+async fn run_terminal_commits_an_audit_observation_staged_during_its_commit() {
+    let fixture = MemoryFixture::governed_original_deferred_while_its_run_runs().await;
+    let live = fixture.first_live_audit().await;
+    {
+        let entry = fixture.driver.lock().await;
+        let shared = entry.shared_dsl_authority();
+        mm::MeerkatMachineMutator::apply(
+            &mut *shared.lock().unwrap(),
+            mm::MeerkatMachineInput::RunCancelled {
+                run_id: mm::RunId::from_domain(&fixture.run_id),
+            },
+        )
+        .expect("the run's generated terminal");
+    }
+    let (entered, release) = fixture.hold_next_lifecycle_commit_after_commit();
+    let terminal = async {
+        let mut entry = fixture.driver.lock().await;
+        let owner::DriverEntry::Persistent(driver) = &mut *entry else {
+            panic!("persistent fixture");
+        };
+        driver
+            .machine_realize_run_cancelled(&fixture.run_id, &fixture.inputs)
+            .await
+    };
+    let stage = fixture.stage_during_held_commit(&live, entered, release);
+    let (settled, during) = crate::tokio::join!(terminal, stage);
+    settled.expect("the run's terminal commits");
+    fixture
+        .assert_archived_with_closed_audit(&fixture.inputs, &[during], &live)
+        .await;
 }
 
 #[tokio::test]

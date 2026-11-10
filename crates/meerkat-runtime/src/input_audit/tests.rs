@@ -74,6 +74,18 @@ pub(crate) fn stage_refusal_after_row_write(
     owner_session_id: &SessionId,
     run_id: &RunId,
 ) -> OperationId {
+    try_stage_refusal_after_row_write(audit, row_input_id, owner_session_id, run_id)
+        .expect("the bound sink stages the refusal on the live row")
+}
+
+/// [`stage_refusal_after_row_write`] returning the sink's answer to the
+/// append instead of expecting it accepted.
+pub(crate) fn try_stage_refusal_after_row_write(
+    audit: &InputAuthorizationAudit,
+    row_input_id: &InputId,
+    owner_session_id: &SessionId,
+    run_id: &RunId,
+) -> Result<OperationId, OperationObservationError> {
     let mut governed = crate::input_authority::tests::input("late-observation-requester");
     governed.header_mut().id = row_input_id.clone();
     let original = RetainedInputAuthority::from_input(&governed)
@@ -113,9 +125,8 @@ pub(crate) fn stage_refusal_after_row_write(
             reason: OperationRefusalKind::MalformedFacts,
             read: None,
         },
-    })
-    .expect("the bound sink stages the refusal on the live row");
-    operation_id
+    })?;
+    Ok(operation_id)
 }
 
 /// The operation ids of a stored row's audit, in order.

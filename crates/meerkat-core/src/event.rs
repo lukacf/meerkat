@@ -5900,6 +5900,60 @@ mod tests {
         }
     }
 
+    /// A stored retry-exhausted turn error reads in both forms: the record
+    /// an earlier release wrote, which carries no provider facts, and the
+    /// record that carries them. Both use only the fields a stored
+    /// `llm_failure` turn error already fills, so a release that wrote the
+    /// first form reads the second, and each form is written back unchanged.
+    #[test]
+    fn stored_retry_exhausted_turn_error_reads_with_and_without_provider_facts() {
+        let without_facts = serde_json::json!({
+            "kind": "retry_exhausted",
+            "terminal": true,
+            "outcome": "failed",
+            "detail": "Terminal failure: Failed (RetryExhausted): retry exhausted: \
+                       LLM error (self_hosted): Server overloaded (503)",
+        });
+        let decoded: TurnErrorMetadata = serde_json::from_value(without_facts.clone()).unwrap();
+        assert_eq!(decoded.kind, TurnTerminalCauseKind::RetryExhausted);
+        assert_eq!(decoded.outcome, Some(TurnTerminalOutcome::Failed));
+        assert!(decoded.terminal);
+        assert_eq!(decoded.provider, None);
+        assert_eq!(decoded.model, None);
+        assert_eq!(decoded.retryable, None);
+        assert_eq!(decoded.reason, None);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), without_facts);
+
+        let with_facts = serde_json::json!({
+            "kind": "retry_exhausted",
+            "terminal": true,
+            "outcome": "failed",
+            "detail": "Terminal failure: Failed (RetryExhausted): retry exhausted: \
+                       LLM error (self_hosted): Server overloaded (503)",
+            "provider": "self_hosted",
+            "retryable": true,
+            "reason": {
+                "reason_type": "llm_provider_error",
+                "provider_error_kind": "server_overloaded",
+                "provider_error_retryability": "retryable",
+                "provider_error": { "message": "Server overloaded (503)" },
+            },
+        });
+        let decoded: TurnErrorMetadata = serde_json::from_value(with_facts.clone()).unwrap();
+        assert_eq!(decoded.kind, TurnTerminalCauseKind::RetryExhausted);
+        assert_eq!(decoded.provider.as_deref(), Some("self_hosted"));
+        assert_eq!(decoded.retryable, Some(true));
+        assert_eq!(
+            decoded.reason,
+            Some(AgentErrorReason::LlmProviderError {
+                provider_error_kind: LlmProviderErrorKind::ServerOverloaded,
+                provider_error_retryability: LlmProviderErrorRetryability::Retryable,
+                provider_error: serde_json::json!({ "message": "Server overloaded (503)" }),
+            })
+        );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), with_facts);
+    }
+
     #[test]
     fn agent_error_report_fails_closed_for_unknown_terminal_cause() {
         let error = crate::error::AgentError::TerminalFailure {

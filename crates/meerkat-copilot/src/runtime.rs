@@ -672,6 +672,52 @@ impl CopilotRuntime {
         resolve_route_for_state(&state, provider, model)
     }
 
+    /// Test support for the route rows of the provider crates; not part of
+    /// the supported API. Seats an account on this runtime that holds
+    /// `models` as its model list and serves on `api_base`, for the
+    /// connections of `credential_identity` whose authorizer reports
+    /// `persistence_id`. Nothing is requested and no token is minted: such
+    /// a connection signs with its own authorizer, and the routes resolve
+    /// against the seated list exactly as against a discovered one. The
+    /// runtime keeps the account only while the returned handle lives.
+    #[doc(hidden)]
+    pub fn seat_account_for_tests(
+        &self,
+        persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
+        credential_identity: &AuthCredentialIdentity,
+        api_base: &str,
+        models: Vec<crate::CopilotModel>,
+    ) -> Result<CopilotSeatedAccount, crate::protocol::CopilotProtocolError> {
+        let models = CopilotModelSnapshot::from_models(models)?;
+        let state = Arc::new(CopilotAccountState::with_pacing(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::OperatorToken,
+            Arc::default(),
+        ));
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: state.next_generation.fetch_add(1, Ordering::Relaxed),
+            token: String::new(),
+            source_generation: 0,
+            source_published_at_millis: None,
+            source_expires_at: None,
+            refresh_at: DateTime::<Utc>::MAX_UTC,
+            expires_at: DateTime::<Utc>::MAX_UTC,
+            api_base: api_base.to_string(),
+            models: Some(Arc::new(models)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        self.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: credential_identity.clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        Ok(CopilotSeatedAccount { _state: state })
+    }
+
     /// The account state `connection`'s Copilot authorizer shares.
     fn connection_state(
         &self,
@@ -789,6 +835,14 @@ impl Default for CopilotRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// An account seated by [`CopilotRuntime::seat_account_for_tests`]: the
+/// runtime serves it while this handle lives.
+#[doc(hidden)]
+#[must_use = "the runtime serves the seated account only while this handle lives"]
+pub struct CopilotSeatedAccount {
+    _state: Arc<CopilotAccountState>,
 }
 
 #[derive(Clone)]
@@ -4756,6 +4810,37 @@ mod tests {
                 )
                 .wire_model(),
                 "claude-opus-5-5"
+            );
+        }
+
+        /// The route a resolved auth reports for a model reads the same
+        /// lookup: either spelling of a model the account lists, and no
+        /// route for a model it does not list.
+        #[tokio::test]
+        async fn a_resolved_auth_reports_the_route_of_either_spelling() {
+            let (auth_binding, binding) = validated_binding();
+            let (env, _) = resolver_environment(&auth_binding).await;
+            let resolved = CopilotResolvedAuth {
+                authorizer: Arc::new(CopilotAuthorizer {
+                    state: account_with(account_list()),
+                    binding,
+                    env,
+                    transport: Arc::new(ScriptedTransport::new([])),
+                }),
+                metadata: AuthMetadata::default(),
+            };
+            for spelling in ["claude-opus-5-5", "claude-opus-5.5"] {
+                assert_eq!(
+                    resolved.route_for(Provider::Anthropic, spelling),
+                    CopilotModelAccess::Available {
+                        endpoint: CopilotEndpoint::Messages
+                    },
+                    "{spelling}"
+                );
+            }
+            assert_eq!(
+                resolved.route_for(Provider::Anthropic, "claude-opus-4-5"),
+                CopilotModelAccess::Unavailable
             );
         }
 

@@ -1729,6 +1729,150 @@ mod copilot_wire_model_tests {
             );
         }
     }
+
+    /// Signs nothing and names the persistence the runtime keys the account
+    /// by.
+    struct SeatedAuthorizer {
+        persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
+    }
+
+    #[async_trait]
+    impl meerkat_core::HttpAuthorizer for SeatedAuthorizer {
+        async fn authorize(
+            &self,
+            _request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            Ok(())
+        }
+
+        fn label(&self) -> &str {
+            meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+        }
+
+        fn persistence_authority_id(
+            &self,
+        ) -> Option<meerkat_core::auth::ProviderAuthPersistenceId> {
+            Some(self.persistence_id)
+        }
+    }
+
+    /// The whole route, as an agent build composes it: the provider runtime
+    /// builds the session's text client on a Copilot runtime whose account
+    /// lists the model under another spelling, and the Chat Completions
+    /// client the route asks its factory for is the one for the account's
+    /// id (that client names its spec's model in the request body, pinned in
+    /// `meerkat-openai`). Only the account's model list and the Chat
+    /// Completions client are stand-ins; the route closure, the routed
+    /// client and the Gemini adapter are the real ones.
+    #[tokio::test]
+    async fn a_session_on_the_gemini_copilot_route_asks_for_the_accounts_id() {
+        use meerkat_core::{
+            AuthBindingRef, AuthCredentialIdentity, AuthMetadata, BackendProfile, BindingId,
+            BindingOrigin, Config, CredentialAccountId, CredentialAccountRef, ModelRegistry,
+            RealmId, SessionLlmIdentity,
+        };
+        use meerkat_llm_core::PreparedLlmRequest;
+        use meerkat_llm_core::provider_runtime::binding::{
+            DynamicLease, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
+        };
+        use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
+
+        const MODEL: &str = "gemini-3.8-flash";
+        const ACCOUNT_ID: &str = "gemini-3-8-flash";
+
+        let persistence_id = meerkat_core::auth::ProviderAuthPersistence::new(
+            Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
+        )
+        .authority_id();
+        let account = AuthCredentialIdentity::Account(CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").expect("valid account"),
+        });
+        let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
+        let listed: meerkat_copilot::CopilotModelsEnvelope =
+            serde_json::from_value(serde_json::json!({
+                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/chat/completions"]}]
+            }))
+            .expect("the account's list");
+        let _seated = copilot
+            .seat_account_for_tests(
+                persistence_id,
+                &account,
+                "https://copilot.example.test",
+                listed.data,
+            )
+            .expect("the account is seated");
+
+        let identity = SessionLlmIdentity {
+            model: MODEL.to_string(),
+            provider: Provider::Gemini,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(AuthBindingRef {
+                realm: RealmId::global(),
+                binding: BindingId::parse("copilot_gemini").expect("valid binding"),
+                profile: None,
+                origin: BindingOrigin::Configured,
+            }),
+        };
+        let profile = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("registry")
+            .profile_witness_for_provider(Provider::Gemini, MODEL)
+            .expect("a catalog row");
+        let connection = ResolvedConnection {
+            provider: Provider::Gemini,
+            backend: NormalizedBackendKind::Google(super::GoogleBackendKind::Copilot),
+            backend_profile: Arc::new(BackendProfile {
+                id: "copilot_gemini".to_string(),
+                provider: Provider::Gemini,
+                backend_kind: "copilot".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            }),
+            credential_identity: account,
+            auth_lease: Arc::new(DynamicLease::from_authorizer(
+                Arc::new(SeatedAuthorizer { persistence_id }),
+                AuthMetadata::default(),
+                meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL,
+            )),
+        };
+        let factory = Arc::new(RecordingFactory::default());
+        let client = super::GoogleProviderRuntime::with_copilot(copilot, factory.clone())
+            .build_text_client(
+                ResolvedTextTarget::new(identity, profile, connection)
+                    .expect("the target names one provider"),
+            )
+            .expect("the session's text client builds on the Copilot route");
+        assert_eq!(
+            *factory.spec_models.lock().expect("spec lock"),
+            [ACCOUNT_ID.to_string()],
+            "the route asks for the Chat Completions client of the account's id"
+        );
+
+        let messages = vec![Message::User(UserMessage::text("hello"))];
+        let projection = client
+            .project_replay_request(&messages)
+            .expect("the route projects the request");
+        let prepared =
+            PreparedLlmRequest::from_projection(LlmRequest::new(MODEL, messages), projection);
+        let mut stream = client.stream_prepared(&prepared);
+        while let Some(event) = futures::StreamExt::next(&mut stream).await {
+            event.expect("the turn streams");
+        }
+        drop(stream);
+        assert_eq!(
+            *factory.requested.lock().expect("requested lock"),
+            [MODEL.to_string()],
+            "the request keeps the session's model"
+        );
+        assert_eq!(
+            factory.spec_models.lock().expect("spec lock").len(),
+            1,
+            "the route's client was not built again"
+        );
+    }
 }
 
 #[cfg(test)]

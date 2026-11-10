@@ -2105,6 +2105,156 @@ mod copilot_wire_model_tests {
         let recorded = sent("claude-sonnet-5-5", "claude-sonnet-5.5", &request).await;
         assert_eq!(recorded.body["model"], "claude-opus-5");
     }
+
+    /// Signs like the Copilot authorizer and names the persistence the
+    /// runtime keys the account by.
+    struct SeatedAuthorizer {
+        persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for SeatedAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer test-token".to_string()));
+            Ok(())
+        }
+
+        fn label(&self) -> &str {
+            meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+        }
+
+        fn persistence_authority_id(
+            &self,
+        ) -> Option<meerkat_core::auth::ProviderAuthPersistenceId> {
+            Some(self.persistence_id)
+        }
+    }
+
+    /// The whole route, as an agent build composes it: the provider runtime
+    /// builds the session's text client on a Copilot runtime whose account
+    /// lists the model with a dot, and the request that client sends names
+    /// the account's id. Only the account's model list and the Messages
+    /// endpoint are stand-ins; the route closure, the routed client and the
+    /// Messages client are the real ones.
+    #[tokio::test]
+    async fn a_session_on_the_copilot_route_sends_the_accounts_id() {
+        use meerkat_core::{
+            AuthBindingRef, AuthCredentialIdentity, AuthMetadata, BackendProfile, BindingId,
+            BindingOrigin, Config, CredentialAccountId, CredentialAccountRef, ModelRegistry,
+            Provider, RealmId, SessionLlmIdentity,
+        };
+        use meerkat_llm_core::PreparedLlmRequest;
+        use meerkat_llm_core::provider_runtime::binding::{
+            DynamicLease, NormalizedBackendKind, ResolvedConnection, ResolvedTextTarget,
+        };
+        use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
+
+        const CATALOG_ID: &str = "claude-sonnet-5-5";
+        const ACCOUNT_ID: &str = "claude-sonnet-5.5";
+
+        let captures: Captures = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(capture))
+            .with_state(Arc::clone(&captures));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let persistence_id = meerkat_core::auth::ProviderAuthPersistence::new(
+            Arc::new(meerkat_auth_core::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
+        )
+        .authority_id();
+        let account = AuthCredentialIdentity::Account(CredentialAccountRef {
+            realm: RealmId::global(),
+            account: CredentialAccountId::parse("github_copilot").expect("valid account"),
+        });
+        let copilot = Arc::new(meerkat_copilot::CopilotRuntime::new());
+        let listed: meerkat_copilot::CopilotModelsEnvelope =
+            serde_json::from_value(serde_json::json!({
+                "data": [{"id": ACCOUNT_ID, "supported_endpoints": ["/v1/messages"]}]
+            }))
+            .expect("the account's list");
+        let _seated = copilot
+            .seat_account_for_tests(
+                persistence_id,
+                &account,
+                &format!("http://{addr}"),
+                listed.data,
+            )
+            .expect("the account is seated");
+
+        let auth_binding = AuthBindingRef {
+            realm: RealmId::global(),
+            binding: BindingId::parse("copilot_anthropic").expect("valid binding"),
+            profile: None,
+            origin: BindingOrigin::Configured,
+        };
+        let identity = SessionLlmIdentity {
+            model: CATALOG_ID.to_string(),
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(auth_binding),
+        };
+        let profile = ModelRegistry::from_config(&Config::default(), meerkat_models::canonical())
+            .expect("registry")
+            .profile_witness_for_provider(Provider::Anthropic, CATALOG_ID)
+            .expect("a catalog row");
+        let connection = ResolvedConnection {
+            provider: Provider::Anthropic,
+            backend: NormalizedBackendKind::Anthropic(super::AnthropicBackendKind::Copilot),
+            backend_profile: Arc::new(BackendProfile {
+                id: "copilot_anthropic".to_string(),
+                provider: Provider::Anthropic,
+                backend_kind: "copilot".to_string(),
+                base_url: None,
+                options: Value::Null,
+                server: None,
+            }),
+            credential_identity: account,
+            auth_lease: Arc::new(DynamicLease::from_authorizer(
+                Arc::new(SeatedAuthorizer { persistence_id }),
+                AuthMetadata::default(),
+                meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL,
+            )),
+        };
+        let client = super::AnthropicProviderRuntime::with_copilot(copilot)
+            .build_text_client(
+                ResolvedTextTarget::new(identity, profile, connection)
+                    .expect("the target names one provider"),
+            )
+            .expect("the session's text client builds on the Copilot route");
+
+        let messages = vec![Message::User(UserMessage::text("hello"))];
+        let projection = client
+            .project_replay_request(&messages)
+            .expect("the route projects the request");
+        let prepared = PreparedLlmRequest::from_projection(
+            LlmRequest::new(CATALOG_ID, messages).with_max_tokens(4096),
+            projection,
+        );
+        let mut stream = client.stream_prepared(&prepared);
+        while let Some(event) = stream.next().await {
+            event.unwrap_or_else(|error| panic!("the turn streams: {error}"));
+        }
+        drop(stream);
+        server.abort();
+
+        let recorded = captures.lock().expect("capture lock");
+        assert_eq!(recorded.len(), 1, "one request sent");
+        assert_eq!(
+            recorded[0].body["model"], ACCOUNT_ID,
+            "the request names the account's id"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "oauth", not(target_arch = "wasm32")))]

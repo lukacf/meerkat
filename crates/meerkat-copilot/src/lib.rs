@@ -24,5 +24,6 @@ pub use protocol::{
 pub use runtime::{
     CopilotAuthorizer, CopilotChatCompletionsClientFactory, CopilotChatCompletionsClientSpec,
     CopilotModelAccess, CopilotResolvedAuth, CopilotRouteClientFactory, CopilotRouteResolution,
-    CopilotRuntime, capability_gated_client, routed_client, verify_operator_token,
+    CopilotRuntime, CopilotSeatedAccount, capability_gated_client, routed_client,
+    verify_operator_token,
 };

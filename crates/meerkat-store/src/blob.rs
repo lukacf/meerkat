@@ -208,6 +208,13 @@ impl FsBlobStore {
             file.write_all(bytes)
                 .await
                 .map_err(|err| BlobStoreError::WriteFailed(err.to_string()))?;
+            // tokio's `sync_all` waits for the write but keeps its error for
+            // the next write or flush: the flush is what reports a write the
+            // operating system refused, before the object is renamed to its
+            // content address.
+            file.flush()
+                .await
+                .map_err(|err| BlobStoreError::WriteFailed(err.to_string()))?;
             file.sync_all()
                 .await
                 .map_err(|err| BlobStoreError::WriteFailed(err.to_string()))?;

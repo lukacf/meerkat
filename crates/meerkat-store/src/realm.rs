@@ -285,11 +285,13 @@ impl ManifestLockGuard {
                 .open(path)
                 .await
             {
-                Ok(mut file) => {
-                    file.write_all(b"realm-manifest-lock")
+                Ok(file) => {
+                    // A lock file whose write failed is removed again: left
+                    // behind, it would hold the lock for nobody until it
+                    // went stale.
+                    write_created_file(file, path, b"realm-manifest-lock")
                         .await
                         .map_err(StoreError::Io)?;
-                    file.sync_all().await.map_err(StoreError::Io)?;
                     return Ok(Self {
                         path: path.to_path_buf(),
                     });
@@ -373,6 +375,35 @@ fn remove_file_nonblocking_on_drop(path: PathBuf) {
     }
 }
 
+/// Write `payload` to `file`, which this caller just created at `path`, and
+/// sync it. On a failure the file is removed again, so a failed write leaves
+/// neither an empty file under a name that means something (a lock, a
+/// marker) nor a temporary file.
+///
+/// tokio's `File` hands a write to the blocking pool and returns before it
+/// ran, and `sync_all` waits for that write but keeps its error for the next
+/// write or flush instead of returning it. The flush is what reports a write
+/// refused by a file size limit, a quota, a full filesystem or an I/O error:
+/// without it the sync of the empty file succeeds, and a caller that renames
+/// the file replaces its target with an empty one.
+async fn write_created_file(
+    mut file: tokio::fs::File,
+    path: &Path,
+    payload: &[u8],
+) -> Result<(), std::io::Error> {
+    let written = async {
+        file.write_all(payload).await?;
+        file.flush().await?;
+        file.sync_all().await
+    }
+    .await;
+    drop(file);
+    if written.is_err() {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    written
+}
+
 fn default_realms_root() -> PathBuf {
     meerkat_core::default_state_root()
 }
@@ -447,18 +478,19 @@ async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<()
         .await
         .map_err(StoreError::Io)?;
     let tmp_path = parent.join(format!(".lease.tmp.{}", Uuid::now_v7()));
-    let mut file = tokio::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp_path)
         .await
         .map_err(StoreError::Io)?;
-    file.write_all(&payload).await.map_err(StoreError::Io)?;
-    file.sync_all().await.map_err(StoreError::Io)?;
-    drop(file);
-    tokio::fs::rename(&tmp_path, path)
+    write_created_file(file, &tmp_path, &payload)
         .await
         .map_err(StoreError::Io)?;
+    if let Err(err) = tokio::fs::rename(&tmp_path, path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(StoreError::Io(err));
+    }
     Ok(())
 }
 
@@ -843,14 +875,14 @@ async fn create_first_start_marker(path: &Path, realm_id: &str) -> Result<(), st
         created_at_unix: now_unix_secs(),
     })
     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    let mut file = tokio::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .await?;
-    file.write_all(&payload).await?;
-    file.sync_all().await?;
-    Ok(())
+    // A marker whose write failed is removed again: left behind, it would
+    // reserve the first start for nobody until it went stale.
+    write_created_file(file, path, &payload).await
 }
 
 /// Age-based takeover check so a crashed first start cannot brick the
@@ -1207,19 +1239,20 @@ async fn write_manifest_payload_atomically(
     let tmp_name = format!(".realm_manifest.tmp.{}", Uuid::now_v7());
     let tmp_path = paths.root.join(tmp_name);
 
-    let mut tmp = tokio::fs::OpenOptions::new()
+    let tmp = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp_path)
         .await
         .map_err(StoreError::Io)?;
-    tmp.write_all(&payload).await.map_err(StoreError::Io)?;
-    tmp.sync_all().await.map_err(StoreError::Io)?;
-    drop(tmp);
-
-    tokio::fs::rename(&tmp_path, &paths.manifest_path)
+    write_created_file(tmp, &tmp_path, &payload)
         .await
         .map_err(StoreError::Io)?;
+
+    if let Err(err) = tokio::fs::rename(&tmp_path, &paths.manifest_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(StoreError::Io(err));
+    }
     sync_dir(&paths.root).await?;
     Ok(())
 }

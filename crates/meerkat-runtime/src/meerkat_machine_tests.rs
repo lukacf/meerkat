@@ -4106,6 +4106,144 @@ fn persistent_oauth_authority_cache_rebinds_overlapping_reopened_sqlite_store() 
     assert_eq!(err, meerkat_auth_core::oauth_flow::OAuthFlowError::Missing);
 }
 
+/// A new handle of the SQLite database at `path` and a persistent machine
+/// over it.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+fn sqlite_store_handle_and_machine(
+    path: &std::path::Path,
+) -> (Arc<dyn crate::store::RuntimeStore>, MeerkatMachine) {
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.to_path_buf())
+            .expect("sqlite runtime store handle"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let machine = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+        .expect("persistent machine");
+    (store, machine)
+}
+
+/// Releases `binding`'s auth lease through `machine`, then starts a browser
+/// OAuth flow for it there with `verifier`; both reach the machine's runtime
+/// store. Returns the flow's state.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+fn release_lease_and_start_oauth_flow(
+    machine: &MeerkatMachine,
+    binding: &str,
+    verifier: &str,
+) -> String {
+    let target = oauth_target_with_binding(binding);
+    let released = machine.auth_lease_handle().release_lease(
+        &meerkat_core::handles::LeaseKey::from_credential_identity(&target),
+    );
+    let started = machine.oauth_flow_authority().start(
+        target,
+        meerkat_auth_core::oauth_flow::OAuthBrowserFlowIdentity::from(
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+        ),
+        "http://127.0.0.1/callback".to_string(),
+        verifier.to_string(),
+    );
+    match (released, started) {
+        (Ok(()), Ok(state)) => state,
+        (released, started) => panic!(
+            "a machine over an open handle of the store releases the lease and starts the \
+             OAuth flow: release {released:?}, start {started:?}"
+        ),
+    }
+}
+
+/// The verifiers of the browser OAuth flows `(binding, state)` that a
+/// process restart over the SQLite database at `path` consumes.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+fn durable_oauth_flow_verifiers(path: &std::path::Path, flows: &[(&str, &str)]) -> Vec<String> {
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.to_path_buf())
+            .expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    crate::meerkat_machine::forget_persistent_auth_authorities_for_test(&restarted_store);
+    let restarted = MeerkatMachine::persistent(restarted_store, memory_blob_store())
+        .expect("persistent machine");
+    flows
+        .iter()
+        .map(|(binding, state)| {
+            restarted
+                .oauth_flow_authority()
+                .consume(
+                    state,
+                    &oauth_target_with_binding(binding),
+                    meerkat_auth_core::oauth_flow::OAuthBrowserFlowCompletion::from(
+                        meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                    ),
+                    "http://127.0.0.1/callback",
+                )
+                .expect("the OAuth flow is durable")
+                .pkce_verifier
+        })
+        .collect()
+}
+
+/// Two handles of one SQLite database share one auth authority. Once the
+/// later handle and its machine are dropped, the machine over the first still
+/// releases auth leases and starts OAuth flows, and those flows are durable.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_auth_authority_survives_drop_of_a_later_handle_of_the_same_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let (first_store, first) = sqlite_store_handle_and_machine(&path);
+    let (later_store, later) = sqlite_store_handle_and_machine(&path);
+    drop(later);
+    drop(later_store);
+
+    let state = release_lease_and_start_oauth_flow(&first, "later_handle_dropped", "verifier");
+    drop(first);
+    drop(first_store);
+
+    assert_eq!(
+        durable_oauth_flow_verifiers(&path, &[("later_handle_dropped", state.as_str())]),
+        ["verifier"]
+    );
+}
+
+/// Three handles of one SQLite database share one auth authority. The middle
+/// handle drops, then the newest: each time the machines over the handles
+/// still open release auth leases and start durable OAuth flows.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_auth_authority_survives_drop_of_a_middle_handle_of_the_same_sqlite_store() {
+    let _guard = persistent_auth_authority_test_guard();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let (first_store, first) = sqlite_store_handle_and_machine(&path);
+    let (middle_store, middle) = sqlite_store_handle_and_machine(&path);
+    let (newest_store, newest) = sqlite_store_handle_and_machine(&path);
+    drop(middle);
+    drop(middle_store);
+
+    let first_state =
+        release_lease_and_start_oauth_flow(&first, "middle_handle_dropped_first", "first");
+    let newest_state =
+        release_lease_and_start_oauth_flow(&newest, "middle_handle_dropped_newest", "newest");
+    drop(newest);
+    drop(newest_store);
+    let last_state =
+        release_lease_and_start_oauth_flow(&first, "middle_handle_dropped_last", "last");
+    drop(first);
+    drop(first_store);
+
+    assert_eq!(
+        durable_oauth_flow_verifiers(
+            &path,
+            &[
+                ("middle_handle_dropped_first", first_state.as_str()),
+                ("middle_handle_dropped_newest", newest_state.as_str()),
+                ("middle_handle_dropped_last", last_state.as_str()),
+            ],
+        ),
+        ["first", "newest", "last"]
+    );
+}
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
 #[test]
 fn persistent_oauth_release_prunes_durable_payload_snapshot_for_sqlite_store() {

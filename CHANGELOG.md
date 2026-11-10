@@ -90,6 +90,16 @@ them.
   rewrite with its replacement; any other difference from the stored row
   still refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
+- `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
+  runtime store and drops it no longer breaks that realm's credential
+  rotation and OAuth sign-ins. Every handle of one database shares the
+  realm's auth authority, and that authority followed only the handle opened
+  last: from the moment that handle was dropped, every auth lease release (a
+  credential rotation's included) failed with "runtime store is no longer
+  available", every OAuth sign-in failed to start, and sign-ins that another
+  process had persisted were not found. The authority now uses the newest
+  handle of the store that is still open. Affects 0.6.0 through 0.9.11.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

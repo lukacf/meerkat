@@ -179,7 +179,8 @@ class ShapeTests(GuardTest):
             "peerDependencies": {"@rkat/demo": ">1.4.2", "@rkat/demo-meta": ">=1.4.3 <2.0.0"},
             "optionalDependencies": {"@rkat/demo-meta": ">=1.4.2 <1.4.2 || >=1.4.3"}}, indent=2))
         self.repo.write("connect/py/pyproject.toml", '[project]\nname = "demo-py"\nversion = "1.4.2"\n'
-                        '[project.optional-dependencies]\nstrict = ["demo-meta>1.4.2"]\nfloor = ["demo-meta>=1.4.3,<2"]\n'
+                        '[project.optional-dependencies]\nstrict = ["demo-meta>1.4.2"]\n'
+                        'floor = ["demo-meta>=1.4.3,<2"]\n'
                         'exact = ["demo-meta==1.4.3"]\ncompatible = ["demo-meta~=1.4.3"]\n'
                         'unequal = ["demo-meta>=1.4.2,!=1.4.2"]\n')
         self.repo.write("docs/install.md", '```toml\ndemo-core = "=1.4.3"\ndemo-core = ">1.4.2"\n'

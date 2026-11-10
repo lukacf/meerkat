@@ -7,7 +7,9 @@ the build of the same commit, in a release the same release's artifacts. A
 pin of an in-repo package is therefore either a same-commit reference (a
 path, `file:`, `link:` or workspace dependency) or names exactly the
 package's version in this tree; a range may admit later versions but no
-earlier one, and its ceiling must admit the version here.
+earlier one, and it must admit the version here: no ceiling at or below it,
+no strict floor at it, no floor above it. A requirement that names one
+version above the version here is refused the same way.
 
 The in-repo packages and their versions come from the tree itself: the Cargo
 workspace members (and the root table's renamed entries), every package.json
@@ -60,7 +62,9 @@ longer holds is stale.
 Cargo.toml) that no allow entry covers to the version of the package it pins,
 and a range's ceiling that version reaches to the next release that may break
 it (the next minor on the 0.x line, else the next major: `>=0.9.11 <0.10.0`
-becomes `>=0.10.0 <0.11.0`); the version bumps run it so that a bump moves
+becomes `>=0.10.0 <0.11.0`); a floor or an exact requirement above that
+version moves down to it, and a strict floor at it becomes inclusive (`>0.9.11`
+becomes `>=0.9.11`). The version bumps run it so that a bump moves
 those pins in the same commit. A
 registry lock entry and a requirement with a hash cannot move this way and stay
 findings, as do pins in prose and code, which the docs stamper or a person
@@ -142,24 +146,59 @@ def next_breaking(version: str) -> str:
 
 
 CEILING_RE = re.compile(r"(<=|<)[ \t]*v?(\d+(?:\.\d+){0,2})(?![0-9.])")
+# One comparator of an npm range, a PEP 440 specifier or a Cargo requirement: an
+# operator and a version, or a bare version that starts a word.
+COMPARATOR_RE = re.compile(r"(?:(===|==|~=|!=|>=|<=|>|<|=|\^|~)[ \t]*|(?<![0-9A-Za-z.+_-]))v?(\d+(?:\.\d+){0,2})"
+                           r"(-[0-9A-Za-z.-]+)?(\.\*)?")
+
+
+def comparator_admits(match: re.Match, target: tuple) -> bool:
+    """Whether one comparator of a range lets `target` through."""
+    operator, base, pre, wildcard = match.groups()
+    bound = version_key(full_version(base) + (pre or ""))
+    if bound is None:
+        return True
+    if operator == "<":
+        return bound > target
+    if operator == "<=":
+        return bound >= target
+    if operator == ">":
+        return bound < target
+    if operator == "!=":
+        parts = len(base.split(".")) if wildcard else len(bound)
+        return bound[:parts] != target[:parts]
+    # `>=`, `^`, `~`, `~=`, an exact pin and a bare version are floors here: a floor
+    # below the version is a pin below it, which the caller reports from the floor.
+    return bound <= target
 
 
 def range_admits(spec: str, version: str) -> bool:
-    """Whether some alternative of an npm range or PEP 440 specifier has no ceiling at or below `version`."""
+    """Whether some alternative of an npm range, a PEP 440 specifier or a Cargo requirement admits `version`.
+
+    An alternative admits it when no bound shuts it out: no ceiling at or below it, no
+    strict floor at it, and no floor or exact pin above it.
+    """
     target = version_key(version)
     if target is None:
         return True
+    if spec.startswith("npm:"):
+        spec = spec.rpartition("@")[2]
     for alternative in spec.split("||"):
-        if all((bound := version_key(full_version(match.group(2)))) is None
-               or (bound > target if match.group(1) == "<" else bound >= target)
-               for match in CEILING_RE.finditer(alternative)):
+        # An npm hyphen range `A - B` is `>=A <=B`.
+        alternative = re.sub(r"(?<=[0-9A-Za-z])\s+-\s+(?=v?\d)", " <=", alternative)
+        if all(comparator_admits(match, target) for match in COMPARATOR_RE.finditer(alternative)):
             return True
     return False
 
 
 def move_range(spec: str, pinned: str, expected: str) -> str:
-    """Move a range's floor to `expected`, and a ceiling it reaches to the next release that may break."""
+    """Move a range's floor to `expected`, and a ceiling it reaches to the next release that may break.
+
+    A floor above `expected` moves down to it as one below it moves up, and a strict
+    floor at it becomes inclusive.
+    """
     moved = move_version(spec, pinned, expected) if pinned and pinned != expected else spec
+    moved = re.sub(rf"(?<![<>=!~^])>(?!=)([ \t]*v?{re.escape(expected)}(?![0-9]|\.[0-9]|-))", r">=\1", moved)
     target = version_key(expected)
 
     def lift(match):
@@ -200,7 +239,8 @@ class Finding:
     # A pin of a published release input, and the release before `expected` it may also name.
     published: bool = False
     previous: str = ""
-    # A range whose ceiling shuts out `expected`.
+    # A range or an exact pin that shuts out `expected`: a ceiling at or below it, a strict
+    # floor at it, or a floor above it.
     excludes: bool = False
     # In a JSON file a `key` entry scopes: the key path of the value that starts on the line.
     key: str | None = None
@@ -211,8 +251,11 @@ class Finding:
             return (f"{where}: {self.pin}: a release of the retired standalone repository; "
                     f"use {self.package} {self.expected} of this repository")
         if self.excludes and not below(self.pinned, self.expected):
+            if below(self.expected, self.pinned):
+                return (f"{where}: {self.shape} {self.pin}: pins {self.package} {self.pinned}, "
+                        f"above its version {self.expected} in this tree")
             return (f"{where}: {self.shape} {self.pin}: admits no {self.package} {self.expected}, its version in this "
-                    f"tree (a ceiling at or below it)")
+                    f"tree (a bound shuts it out)")
         if self.published:
             allowed = (f"a published release input names {self.expected} or the release before it, {self.previous}"
                        if self.previous else
@@ -510,7 +553,8 @@ class Scanner:
             self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, False,
                                          published=True, previous=previous or ""))
             return
-        # A range must also admit the version here: a ceiling at or below it shuts it out.
+        # A requirement must also admit the version here: a ceiling at or below it, a strict
+        # floor at it, or a floor or an exact pin above it shuts it out.
         excludes = spec is not None and not range_admits(spec, expected)
         if pinned is None or below(pinned, expected) or excludes:
             self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, movable,
@@ -643,7 +687,7 @@ class Scanner:
         for match in self.npm_spec_re.finditer(line):
             if self.inventory.get("npm", match.group(1)) is not None:
                 self.check(path, number, "npm-spec", match.group(0), key_of("npm", match.group(1)),
-                           match.group(3), True)
+                           match.group(3), True, (match.group(2) or "") + match.group(3))
         if code:
             for match in self.constant_re.finditer(line):
                 product = self.constant_product(match.group(1))
@@ -671,7 +715,7 @@ class Scanner:
                 plain = version.group(1)
             if plain is not None and re.match(r"^\s*[=^~<>]*\s*v?\d", plain):
                 self.check(path, number, "cargo", match.group(0).strip(), key_of("cargo", crate),
-                           cargo_floor(plain), True)
+                           cargo_floor(plain), True, plain)
 
     def constant_product(self, name: str):
         words = name.split("_")
@@ -1008,7 +1052,8 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         print(f"{CONFIG}: version constant {name} of {path} is not in that file; delete it", file=err)
     if reported or stale or stale_paths or stale_matches or stale_constants:
         count = len(stale) + len(stale_paths) + len(stale_matches) + len(stale_constants)
-        print(f"check_inrepo_version_pins: {len(reported)} pin(s) below the version of the in-repo package they pin, "
+        print(f"check_inrepo_version_pins: {len(reported)} pin(s) below, or shutting out, the version of the in-repo "
+              f"package they pin, "
               f"{count} stale allow entr{'y' if count == 1 else 'ies'}. Pin the version in this tree, use a "
               f"same-commit reference, or allow the pin in {CONFIG} with its reason.", file=err)
         return 1

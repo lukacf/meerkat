@@ -187,6 +187,11 @@
       "reason": "The release asset provenance test uses synthetic release versions."
     },
     {
+      "path": "scripts/test-release-projection-only.sh",
+      "match": "1\\.2\\.3",
+      "reason": "The release projection classifier's test builds a synthetic repository at version 1.2.3."
+    },
+    {
       "path": "sdks/python/tests/**",
       "reason": "The SDK's binary resolution and integrity tests use synthetic release versions and archive names."
     },

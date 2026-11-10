@@ -658,12 +658,16 @@ pub(crate) struct CopilotOpenAiRouteTarget {
 /// The client that serves an OpenAI model's GitHub Copilot route on the
 /// endpoint Copilot advertised for it. Both clients speak to the Copilot
 /// backend ([`OpenAiBackendKind::Copilot`]), whose admissions they apply.
+/// `wire_model` is the id the account lists the model under, which the
+/// requests name; the session's model (`target.model`) keeps selecting the
+/// catalog row.
 #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
 pub(crate) fn copilot_openai_route_client(
     endpoint: meerkat_copilot::CopilotEndpoint,
     api_base: String,
     authorizer: Arc<dyn meerkat_core::HttpAuthorizer>,
     target: &CopilotOpenAiRouteTarget,
+    wire_model: &str,
 ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
     match endpoint {
         meerkat_copilot::CopilotEndpoint::Responses => Ok(Arc::new(
@@ -672,12 +676,13 @@ pub(crate) fn copilot_openai_route_client(
                 .with_authorizer(authorizer)
                 .with_responses_path("responses")
                 .with_copilot_responses_item_identity()
-                .with_copilot_backend_wire(),
+                .with_copilot_backend_wire()
+                .with_wire_model(&target.model, wire_model),
         )),
         meerkat_copilot::CopilotEndpoint::ChatCompletions => Ok(Arc::new(
             crate::OpenAiCompatibleClient::new_with_options(
                 crate::client_compatible::OpenAiCompatibleMode::ChatCompletions,
-                target.model.clone(),
+                wire_model.to_string(),
                 api_base,
                 None,
                 crate::OpenAiCompatibleClientOptions {
@@ -1119,6 +1124,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         route.api_base.clone(),
                         route.bind_authorizer(authorizer),
                         &route_target,
+                        route.wire_model(),
                     )
                 });
             meerkat_copilot::routed_client(
@@ -2277,6 +2283,7 @@ mod tests {
                 supports_image_input: true,
                 supports_image_tool_results: true,
             },
+            "gpt-test",
         )
         .expect("the OpenAI model's chat route builds");
         let gemini = OpenAiCopilotChatCompletionsClientFactory
@@ -2482,6 +2489,189 @@ fn ce_stale_refresh_remains_stale_credential() {
         result,
         ProviderAuthError::Auth(AuthError::StaleCredential)
     ));
+}
+
+/// The GitHub Copilot routes name the account's id for their model on the
+/// wire, on Responses and on Chat Completions alike, and nothing else about
+/// the request changes. An id the account lists as the session writes it is
+/// sent as it always was.
+#[cfg(all(test, feature = "copilot", not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod copilot_wire_model_tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use futures::StreamExt;
+    use meerkat_copilot::{CopilotChatCompletionsClientFactory, CopilotEndpoint};
+    use meerkat_core::{Message, Provider, UserMessage};
+    use meerkat_llm_core::{LlmClient, LlmRequest};
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+
+    use super::{
+        CopilotOpenAiRouteTarget, OpenAiCopilotChatCompletionsClientFactory,
+        copilot_openai_route_client,
+    };
+
+    const RESPONSES_SSE: &str = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",",
+        "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    const CHAT_SSE: &str = concat!(
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},",
+        "\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+        "\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    #[derive(Clone)]
+    struct CaptureState {
+        bodies: Arc<Mutex<Vec<Value>>>,
+        payload: &'static str,
+    }
+
+    async fn capture(
+        State(state): State<CaptureState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.bodies.lock().expect("capture lock").push(body);
+        ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    struct CopilotLabelledAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for CopilotLabelledAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                "Bearer copilot-token".to_string(),
+            ));
+            Ok(())
+        }
+
+        fn label(&self) -> &str {
+            meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+        }
+    }
+
+    /// The body the client `build` makes for a local Copilot API base sends
+    /// for one request on `model`.
+    async fn sent(
+        endpoint: CopilotEndpoint,
+        model: &str,
+        build: impl FnOnce(String) -> Arc<dyn LlmClient>,
+    ) -> Value {
+        let (path, payload) = match endpoint {
+            CopilotEndpoint::Responses => ("/responses", RESPONSES_SSE),
+            _ => ("/chat/completions", CHAT_SSE),
+        };
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route(path, post(capture))
+            .with_state(CaptureState {
+                bodies: Arc::clone(&bodies),
+                payload,
+            });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = build(format!("http://{addr}"));
+        let request = LlmRequest::new(model, vec![Message::User(UserMessage::text("hello"))]);
+        let mut stream = client.stream(&request);
+        while let Some(event) = stream.next().await {
+            event.unwrap_or_else(|error| panic!("{model}: stream failed: {error}"));
+        }
+        drop(stream);
+        server.abort();
+        let mut bodies = std::mem::take(&mut *bodies.lock().expect("capture lock"));
+        assert_eq!(bodies.len(), 1, "one request sent");
+        bodies.remove(0)
+    }
+
+    /// The OpenAI route's client for a session on `model` whose account
+    /// lists it as `wire_model`.
+    fn openai_route(
+        endpoint: CopilotEndpoint,
+        model: &str,
+        wire_model: &str,
+    ) -> impl FnOnce(String) -> Arc<dyn LlmClient> {
+        let target = CopilotOpenAiRouteTarget {
+            model: model.to_string(),
+            supports_temperature: true,
+            supports_image_input: true,
+            supports_image_tool_results: true,
+        };
+        let wire_model = wire_model.to_string();
+        move |api_base| {
+            copilot_openai_route_client(
+                endpoint,
+                api_base,
+                Arc::new(CopilotLabelledAuthorizer),
+                &target,
+                &wire_model,
+            )
+            .expect("the OpenAI Copilot route client builds")
+        }
+    }
+
+    /// On both endpoints the request names the id the account lists the
+    /// model under, and apart from that field the body is the one the route
+    /// sends when the account lists the session's id itself.
+    #[tokio::test]
+    async fn the_openai_copilot_routes_name_the_accounts_id() {
+        const MODEL: &str = "gpt-5.5";
+        const ACCOUNT_ID: &str = "gpt-5-5";
+        for endpoint in [CopilotEndpoint::Responses, CopilotEndpoint::ChatCompletions] {
+            let as_listed = sent(endpoint, MODEL, openai_route(endpoint, MODEL, MODEL)).await;
+            assert_eq!(as_listed["model"], MODEL, "{endpoint:?}");
+
+            let mut by_account_id =
+                sent(endpoint, MODEL, openai_route(endpoint, MODEL, ACCOUNT_ID)).await;
+            assert_eq!(by_account_id["model"], ACCOUNT_ID, "{endpoint:?}");
+            by_account_id["model"] = Value::String(MODEL.to_string());
+            assert_eq!(
+                by_account_id, as_listed,
+                "{endpoint:?}: only the model field differs"
+            );
+        }
+    }
+
+    /// The Chat Completions client the Gemini route gets from the shared
+    /// factory names its spec's model, the id the route hands it.
+    #[tokio::test]
+    async fn the_gemini_copilot_route_client_names_its_specs_model() {
+        for account_id in ["gemini-3.8-flash", "gemini-3-8-flash"] {
+            let body = sent(
+                CopilotEndpoint::ChatCompletions,
+                "gemini-3.8-flash",
+                |api_base| {
+                    OpenAiCopilotChatCompletionsClientFactory
+                        .build(meerkat_copilot::CopilotChatCompletionsClientSpec::new(
+                            Provider::Gemini,
+                            account_id.to_string(),
+                            api_base,
+                            Arc::new(CopilotLabelledAuthorizer),
+                            true,
+                            true,
+                            true,
+                            true,
+                        ))
+                        .expect("the Gemini model's chat route builds")
+                },
+            )
+            .await;
+            assert_eq!(body["model"], account_id);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "oauth", not(target_arch = "wasm32")))]

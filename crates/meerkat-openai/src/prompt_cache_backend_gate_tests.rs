@@ -401,6 +401,7 @@ mod copilot_routes {
                 supports_image_input: true,
                 supports_image_tool_results: true,
             },
+            MODEL,
         )
         .expect("Copilot route client")
     }

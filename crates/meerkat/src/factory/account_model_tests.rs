@@ -839,6 +839,23 @@ async fn single_turn_request(harness: &Harness, agent: &mut DynAgent) -> LlmRequ
     requests.remove(0)
 }
 
+/// `request` as a value two runs can be compared by: everything it carries
+/// except each message's creation time, which is the run's own clock.
+fn without_message_times(request: &LlmRequest) -> serde_json::Value {
+    let mut value = serde_json::to_value(request).expect("request serializes");
+    let messages = value["messages"]
+        .as_array_mut()
+        .expect("a request carries its messages");
+    assert!(!messages.is_empty());
+    for message in messages {
+        message
+            .as_object_mut()
+            .expect("a message is an object")
+            .remove("created_at");
+    }
+    value
+}
+
 /// The account's spelling of a catalog model builds the session the catalog
 /// id builds: the request the provider client receives is equal in every
 /// field (model, output budget, provider parameters, messages), the
@@ -893,8 +910,8 @@ async fn the_accounts_spelling_of_a_catalog_model_builds_the_catalog_row() {
         );
         let account_request = single_turn_request(&harness, &mut by_account_id).await;
         assert_eq!(
-            serde_json::to_value(&account_request).expect("request serializes"),
-            serde_json::to_value(&catalog_request).expect("request serializes"),
+            without_message_times(&account_request),
+            without_message_times(&catalog_request),
             "{account_id} sends the request {catalog_id} sends"
         );
 

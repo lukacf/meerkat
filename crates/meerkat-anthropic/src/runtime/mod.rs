@@ -959,23 +959,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     let authorizer = connection
                         .resolved_authorizer()
                         .ok_or(ProviderClientError::NoCredentialMaterial)?;
-                    let authorizer = route.bind_authorizer(authorizer);
-                    let client = crate::AnthropicClient::builder(String::new())
-                        .authorizer(authorizer)
-                        .base_url(route.api_base.clone())
-                        .default_cache_control(default_cache_control_for_backend(
-                            AnthropicBackendKind::Copilot,
-                        ))
-                        .automatic_cache_control_supported(
-                            backend_supports_automatic_cache_control(AnthropicBackendKind::Copilot),
-                        )
-                        .thinking_binding_controls_supported(
-                            backend_supports_thinking_binding_controls(
-                                AnthropicBackendKind::Copilot,
-                            ),
-                        )
-                        .build()
-                        .map_err(ProviderClientError::from)?;
+                    let client = copilot_messages_route_client(
+                        route.api_base.clone(),
+                        route.bind_authorizer(authorizer),
+                        &model,
+                        route.wire_model(),
+                    )?;
                     Ok(Arc::new(client) as Arc<dyn LlmClient>)
                 });
             meerkat_copilot::routed_client(
@@ -1002,6 +991,34 @@ impl ProviderRuntime for AnthropicProviderRuntime {
 /// single runtime authority for the Anthropic cache default. `build_client`
 /// erases the type at the `ProviderRuntime` seam; the runtime tests drive this
 /// function directly to read the request body a backend's default produces.
+/// The client that serves an Anthropic model's GitHub Copilot route on the
+/// account's Messages endpoint. `model` is the session's model, which keeps
+/// selecting the catalog row; `wire_model` is the id the account lists it
+/// under, which the requests name.
+#[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+fn copilot_messages_route_client(
+    api_base: String,
+    authorizer: Arc<dyn meerkat_core::HttpAuthorizer>,
+    model: &str,
+    wire_model: &str,
+) -> Result<crate::AnthropicClient, ProviderClientError> {
+    crate::AnthropicClient::builder(String::new())
+        .authorizer(authorizer)
+        .base_url(api_base)
+        .default_cache_control(default_cache_control_for_backend(
+            AnthropicBackendKind::Copilot,
+        ))
+        .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+            AnthropicBackendKind::Copilot,
+        ))
+        .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
+            AnthropicBackendKind::Copilot,
+        ))
+        .wire_model(model, wire_model)
+        .build()
+        .map_err(ProviderClientError::from)
+}
+
 fn build_anthropic_client(
     connection: ResolvedConnection,
 ) -> Result<crate::AnthropicClient, ProviderClientError> {
@@ -1898,6 +1915,196 @@ fn ce_stale_refresh_remains_stale_credential() {
         result,
         ProviderAuthError::Auth(AuthError::StaleCredential)
     ));
+}
+
+/// The GitHub Copilot route names the account's id for its model on the
+/// wire, and nothing else about the request changes: the session's model
+/// keeps selecting the catalog row (its thinking shape, its beta headers).
+#[cfg(all(test, feature = "copilot", not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod copilot_wire_model_tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{
+        Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
+    };
+    use futures::StreamExt;
+    use meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig;
+    use meerkat_core::{Message, UserMessage};
+    use meerkat_llm_core::{LlmClient, LlmRequest};
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+
+    use super::copilot_messages_route_client;
+
+    const SSE_OK: &str = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n",
+        "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n",
+        "data: {\"type\":\"content_block_stop\"}\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1},\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
+        "data: {\"type\":\"message_stop\"}\n",
+    );
+
+    struct Recorded {
+        headers: BTreeMap<String, String>,
+        body: Value,
+    }
+
+    type Captures = Arc<Mutex<Vec<Recorded>>>;
+
+    async fn capture(
+        State(captures): State<Captures>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        let headers = headers
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "content-length" | "host"))
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        captures
+            .lock()
+            .expect("capture lock")
+            .push(Recorded { headers, body });
+        ([("content-type", "text/event-stream")], SSE_OK)
+    }
+
+    struct CopilotLabelledAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for CopilotLabelledAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer test-token".to_string()));
+            Ok(())
+        }
+
+        fn label(&self) -> &str {
+            meerkat_copilot::GITHUB_COPILOT_AUTHORIZER_LABEL
+        }
+    }
+
+    /// What the route's client, built for a session on `model` whose account
+    /// lists it as `wire_model`, sends for `request`.
+    async fn sent(model: &str, wire_model: &str, request: &LlmRequest) -> Recorded {
+        let captures: Captures = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(capture))
+            .with_state(Arc::clone(&captures));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = copilot_messages_route_client(
+            format!("http://{addr}"),
+            Arc::new(CopilotLabelledAuthorizer),
+            model,
+            wire_model,
+        )
+        .expect("the Copilot Messages route client builds");
+        assert_eq!(
+            client
+                .plain_model_route(model)
+                .expect("plain route")
+                .wire_model(),
+            wire_model,
+            "the plain route names the id the requests name"
+        );
+        let mut stream = client.stream(request);
+        while let Some(event) = stream.next().await {
+            event.unwrap_or_else(|error| panic!("{model}: stream failed: {error}"));
+        }
+        drop(stream);
+        server.abort();
+        let mut recorded = std::mem::take(&mut *captures.lock().expect("capture lock"));
+        assert_eq!(recorded.len(), 1, "one request sent");
+        recorded.remove(0)
+    }
+
+    fn request(model: &str, thinking: AnthropicThinkingConfig) -> LlmRequest {
+        LlmRequest::new(model, vec![Message::User(UserMessage::text("hello"))])
+            .with_max_tokens(4096)
+            .with_anthropic_tag_merge(|tag| tag.thinking = Some(thinking))
+    }
+
+    /// For a catalog model the account lists with a dot, the request names
+    /// the account's id; every other byte of the body and every header is
+    /// what the route sends when the account lists the catalog id itself.
+    /// The catalog row's own shaping is in both: the adaptive thinking field
+    /// of Claude Sonnet 5.5, and for Claude Haiku 4.5 its thinking budget
+    /// with the interleaved-thinking beta header.
+    #[tokio::test]
+    async fn the_copilot_route_names_the_accounts_id_and_keeps_the_catalog_rows_request() {
+        for (catalog_id, account_id, thinking, thinking_on_the_wire, beta) in [
+            (
+                "claude-sonnet-5-5",
+                "claude-sonnet-5.5",
+                AnthropicThinkingConfig::Adaptive,
+                serde_json::json!({"type": "adaptive"}),
+                None,
+            ),
+            (
+                "claude-haiku-4-5",
+                "claude-haiku-4.5",
+                AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 2048,
+                },
+                serde_json::json!({"type": "enabled", "budget_tokens": 2048}),
+                Some("interleaved-thinking-2025-05-14"),
+            ),
+        ] {
+            let request = request(catalog_id, thinking);
+            let by_account_id = sent(catalog_id, account_id, &request).await;
+            let by_catalog_id = sent(catalog_id, catalog_id, &request).await;
+
+            assert_eq!(by_account_id.body["model"], account_id);
+            assert_eq!(by_catalog_id.body["model"], catalog_id);
+            assert_eq!(
+                by_account_id.body["thinking"], thinking_on_the_wire,
+                "{catalog_id}"
+            );
+            let betas = by_account_id
+                .headers
+                .get("anthropic-beta")
+                .cloned()
+                .unwrap_or_default();
+            if let Some(beta) = beta {
+                assert!(betas.split(',').any(|sent| sent.trim() == beta), "{betas}");
+            }
+
+            let mut body = by_account_id.body.clone();
+            body["model"] = Value::String(catalog_id.to_string());
+            assert_eq!(
+                body, by_catalog_id.body,
+                "{catalog_id}: only the model field differs"
+            );
+            assert_eq!(
+                by_account_id.headers, by_catalog_id.headers,
+                "{catalog_id}: the headers are the catalog row's"
+            );
+        }
+    }
+
+    /// The client names the account's id only for the model it was built
+    /// for: a request for another model keeps its own id.
+    #[tokio::test]
+    async fn another_models_request_keeps_its_own_id() {
+        let request = request("claude-opus-5", AnthropicThinkingConfig::Adaptive);
+        let recorded = sent("claude-sonnet-5-5", "claude-sonnet-5.5", &request).await;
+        assert_eq!(recorded.body["model"], "claude-opus-5");
+    }
 }
 
 #[cfg(all(test, feature = "oauth", not(target_arch = "wasm32")))]

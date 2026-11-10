@@ -34,9 +34,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::protocol::{
     CopilotAccountIdentity, CopilotBackendConfig, CopilotCredentialMode, CopilotEndpoint,
-    CopilotModelSnapshot, CopilotModelsEnvelope, CopilotTokenEnvelope, CopilotTokenErrorEnvelope,
-    CopilotUserEnvelope, DEFAULT_COPILOT_API_BASE, GitHubErrorEnvelope, GitHubTokenKind,
-    copilot_user_url,
+    CopilotModelMatch, CopilotModelOffering, CopilotModelSnapshot, CopilotModelsEnvelope,
+    CopilotTokenEnvelope, CopilotTokenErrorEnvelope, CopilotUserEnvelope, DEFAULT_COPILOT_API_BASE,
+    GitHubErrorEnvelope, GitHubTokenKind, copilot_user_url,
 };
 
 const CAPI_EXPIRY_SKEW_SECONDS: i64 = 300;
@@ -743,23 +743,26 @@ fn resolve_route_for_state(
 ) -> Option<CopilotRouteResolution> {
     let cache = state.cache.read();
     let cached = cache.as_ref()?;
-    let (access, capabilities, available_models) = match cached.models.as_ref() {
+    // The entry `model` names in the account's list, and the account's own
+    // id for it: the id the route's requests name. A model the list does not
+    // resolve, and an account whose list is not loaded, keep the requested
+    // id.
+    let (access, capabilities, available_models, wire_model) = match cached.models.as_ref() {
         Some(snapshot) => {
-            let model = snapshot.model(model);
-            let access = model.map_or(CopilotModelAccess::Unavailable, |model| {
-                model
-                    .route_for(provider)
-                    .map_or(CopilotModelAccess::Unavailable, |endpoint| {
-                        CopilotModelAccess::Available { endpoint }
-                    })
-            });
+            let (wire_model, offering) = match snapshot.resolve(model) {
+                CopilotModelMatch::Listed { id, offering } => (id, Some(offering)),
+                CopilotModelMatch::Ambiguous(_) | CopilotModelMatch::Absent => (model, None),
+            };
             (
-                access,
-                model.map(|model| model.capabilities.clone()),
+                offering.map_or(CopilotModelAccess::Unavailable, |offering| {
+                    model_access(offering, provider)
+                }),
+                offering.map(|offering| offering.capabilities.clone()),
                 Some(Arc::clone(snapshot)),
+                wire_model.to_string(),
             )
         }
-        None => (CopilotModelAccess::Unknown, None, None),
+        None => (CopilotModelAccess::Unknown, None, None, model.to_string()),
     };
     Some(CopilotRouteResolution {
         access,
@@ -769,7 +772,17 @@ fn resolve_route_for_state(
         state: Arc::downgrade(state),
         provider,
         model: model.to_string(),
+        wire_model,
     })
+}
+
+/// How `provider`'s family reaches a model the account lists.
+fn model_access(offering: &CopilotModelOffering, provider: Provider) -> CopilotModelAccess {
+    offering
+        .route_for(provider)
+        .map_or(CopilotModelAccess::Unavailable, |endpoint| {
+            CopilotModelAccess::Available { endpoint }
+        })
 }
 
 impl Default for CopilotRuntime {
@@ -805,14 +818,12 @@ impl CopilotResolvedAuth {
         let Some(snapshot) = self.model_snapshot() else {
             return CopilotModelAccess::Unknown;
         };
-        let Some(model_access) = snapshot.model(model) else {
-            return CopilotModelAccess::Unavailable;
-        };
-        model_access
-            .route_for(provider)
-            .map_or(CopilotModelAccess::Unavailable, |endpoint| {
-                CopilotModelAccess::Available { endpoint }
-            })
+        match snapshot.resolve(model) {
+            CopilotModelMatch::Listed { offering, .. } => model_access(offering, provider),
+            CopilotModelMatch::Ambiguous(_) | CopilotModelMatch::Absent => {
+                CopilotModelAccess::Unavailable
+            }
+        }
     }
 }
 
@@ -831,9 +842,22 @@ pub struct CopilotRouteResolution {
     state: Weak<CopilotAccountState>,
     provider: Provider,
     model: String,
+    wire_model: String,
 }
 
 impl CopilotRouteResolution {
+    /// The id the account lists the route's model under: the id a request
+    /// on this route names. It is the requested id unless the account lists
+    /// the model under another spelling of it
+    /// ([`crate::same_account_model_id`]), and while the account's model
+    /// list is not loaded or does not resolve the model. The session keeps
+    /// the requested id as its model; only the request to Copilot names
+    /// this one.
+    #[must_use]
+    pub fn wire_model(&self) -> &str {
+        &self.wire_model
+    }
+
     pub fn bind_authorizer(&self, inner: Arc<dyn HttpAuthorizer>) -> Arc<dyn HttpAuthorizer> {
         Arc::new(CopilotRouteBoundAuthorizer {
             inner,
@@ -850,13 +874,26 @@ impl CopilotRouteResolution {
         model: &str,
         endpoint: CopilotEndpoint,
     ) -> String {
+        // A model that more than one entry of the account's list names, and
+        // none exactly, is refused by naming those entries.
         // A model the account lists under a policy that is not `enabled` is
         // refused by naming the state the account states.
         // So is a model it lists with an empty endpoint list.
-        let listed = self
+        let listed = match self
             .available_models
             .as_ref()
-            .and_then(|snapshot| snapshot.model(model));
+            .map(|snapshot| snapshot.resolve(model))
+        {
+            Some(CopilotModelMatch::Listed { offering, .. }) => Some(offering),
+            Some(CopilotModelMatch::Ambiguous(candidates)) => {
+                return format!(
+                    "Copilot account lists more than one model matching {} model '{model}': {}",
+                    provider.as_str(),
+                    candidates.join(", "),
+                );
+            }
+            Some(CopilotModelMatch::Absent) | None => None,
+        };
         let refusing_state = listed.and_then(|offering| offering.refusing_policy_state());
         let mut message = match refusing_state {
             Some(state) => format!(
@@ -1006,6 +1043,14 @@ pub fn routed_client(
                 "Copilot route was not initialized during auth resolution".to_string(),
             )
         })?;
+    if route.wire_model != model {
+        tracing::debug!(
+            provider = provider.as_str(),
+            model = %model,
+            account_model = %route.wire_model,
+            "Copilot route requests name the account's id for the model"
+        );
+    }
     let fingerprint = CopilotRouteFingerprint::from(&route);
     let capabilities = route.capabilities.clone();
     let schema_compiler = factory(&route, &connection)?;
@@ -1030,6 +1075,9 @@ struct CopilotRouteFingerprint {
     access: CopilotModelAccess,
     api_base: String,
     capabilities: Option<crate::protocol::CopilotModelCapabilities>,
+    /// The account's id for the model: a client is built to name it, so a
+    /// list that moves the model to another id needs a new client.
+    wire_model: String,
 }
 
 impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
@@ -1038,6 +1086,7 @@ impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
             access: route.access,
             api_base: route.api_base.clone(),
             capabilities: route.capabilities.clone(),
+            wire_model: route.wire_model.clone(),
         }
     }
 }
@@ -4665,6 +4714,132 @@ mod tests {
                 "Copilot account does not expose /responses for openai model 'gpt-5.6'; \
                  available account models: gemini-3.8-flash, gpt-5.4-mini, gpt-5.5"
             );
+        }
+
+        /// The id a route's requests name is the account's own id for the
+        /// model, whichever spelling the request used: the dotted entry for
+        /// a catalog id, the same id for the account's own spelling and for
+        /// OpenAI and Gemini ids the account lists as the catalog does. A
+        /// model the list does not resolve keeps the requested id, and so
+        /// does an account whose list is not loaded.
+        #[test]
+        fn a_route_names_the_accounts_id_for_its_model() {
+            let state = account_with(account_list());
+            for (provider, requested, account_id) in [
+                (Provider::Anthropic, "claude-opus-5-5", "claude-opus-5.5"),
+                (Provider::Anthropic, "claude-fable-5-2", "claude-fable-5.2"),
+                (Provider::Anthropic, "claude-opus-5.5", "claude-opus-5.5"),
+                (Provider::Anthropic, "claude-opus-5", "claude-opus-5"),
+                (Provider::OpenAI, "gpt-5.5", "gpt-5.5"),
+                (Provider::OpenAI, "gpt-5.4-mini", "gpt-5.4-mini"),
+                (Provider::OpenAI, "gpt-5-5", "gpt-5.5"),
+                (Provider::Gemini, "gemini-3.8-flash", "gemini-3.8-flash"),
+                (Provider::Anthropic, "claude-opus-4-5", "claude-opus-4-5"),
+            ] {
+                assert_eq!(
+                    route(&state, provider, requested).wire_model(),
+                    account_id,
+                    "{requested}"
+                );
+            }
+
+            let mut ambiguous = account_list();
+            ambiguous.push(listed(
+                "claude-opus.5.5",
+                &[CopilotEndpoint::Messages],
+                12_000,
+            ));
+            assert_eq!(
+                route(
+                    &account_with(ambiguous),
+                    Provider::Anthropic,
+                    "claude-opus-5-5"
+                )
+                .wire_model(),
+                "claude-opus-5-5"
+            );
+
+            let unlisted = account_with(Vec::new());
+            unlisted.cache.write().as_mut().expect("cache").models = None;
+            let unknown = route(&unlisted, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(unknown.access, CopilotModelAccess::Unknown);
+            assert_eq!(unknown.wire_model(), "claude-opus-5-5");
+        }
+
+        /// An account that lists both spellings of one id serves each
+        /// request on the entry it names exactly. A build that names the
+        /// dotted entry runs as the catalog row (the session's model is the
+        /// catalog id), so its requests name the hyphen entry: by the rule
+        /// the two entries are one model.
+        #[test]
+        fn an_account_listing_both_spellings_serves_the_exact_entry() {
+            let mut models = account_list();
+            models.push(listed(
+                "claude-opus-5-5",
+                &[CopilotEndpoint::Messages],
+                11_000,
+            ));
+            let state = account_with(models);
+            assert_eq!(
+                route(&state, Provider::Anthropic, "claude-opus-5-5").wire_model(),
+                "claude-opus-5-5"
+            );
+            assert_eq!(
+                route(&state, Provider::Anthropic, "claude-opus-5.5").wire_model(),
+                "claude-opus-5.5"
+            );
+        }
+
+        /// A route's client is built to name the account's id, so a model
+        /// list that moves the model to another id is a route change: the
+        /// route's fingerprint differs, which rebuilds the client.
+        #[test]
+        fn a_list_that_moves_the_accounts_id_changes_the_route() {
+            let state = account_with(account_list());
+            let before = route(&state, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(before.wire_model(), "claude-opus-5.5");
+
+            let mut models = account_list();
+            for model in &mut models {
+                if model.id == "claude-opus-5.5" {
+                    model.id = "claude-opus-5-5".to_string();
+                }
+            }
+            state.cache.write().as_mut().expect("cache").models = Some(Arc::new(
+                CopilotModelSnapshot::from_models(models).expect("unique model ids"),
+            ));
+            let after = route(&state, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(after.wire_model(), "claude-opus-5-5");
+            assert_eq!(after.access, before.access);
+            assert_eq!(after.capabilities, before.capabilities);
+            assert!(
+                CopilotRouteFingerprint::from(&after) != CopilotRouteFingerprint::from(&before),
+                "the account's id is part of the route"
+            );
+        }
+
+        /// The rule itself: two ids are the same model on an account when
+        /// they are equal once every `.` is read as `-`, and only then.
+        #[test]
+        fn two_ids_name_one_model_when_only_their_separators_differ() {
+            for (left, right, same) in [
+                ("claude-opus-5-5", "claude-opus-5.5", true),
+                ("claude-opus-5.5", "claude-opus-5-5", true),
+                ("claude.opus.5.5", "claude-opus-5-5", true),
+                ("gpt-5.5", "gpt-5.5", true),
+                ("gpt-5.5", "gpt-5.6", false),
+                ("claude-opus-55", "claude-opus-5.5", false),
+                ("claude-opus-5-5", "claude-opus-5-5-fast", false),
+                ("claude-opus-5-5", "claude_opus_5_5", false),
+                ("Claude-Opus-5-5", "claude-opus-5.5", false),
+                ("", "", true),
+            ] {
+                assert_eq!(
+                    crate::same_account_model_id(left, right),
+                    same,
+                    "{left} / {right}"
+                );
+            }
         }
 
         /// The model list answers a build about a model the registry does

@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from Meerkat Meta main at [01453e56759b](https://github.com/lukacf/meerkat/commit/01453e56759be007de027cab94c6e37053481da3) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 Both bundled gateways, the console/admin `meta_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -295,13 +295,16 @@ that store:
   metadata store durable: a gateway killed between a step and its side
   effects runs them at its next start, and a graceful shutdown that ran out
   of its share of the drain window leaves the rest for the next start.
-- `meta_gateway` keeps its metadata in memory (its storage census reports
-  the `metadata` slot `declared_ephemeral`), so its side effects are run at
-  least once within the process only: a kill loses those still owed, and the
-  next start projects from the journal's head.
+- `rpc_gateway` without a state directory keeps its metadata in memory (its
+  storage census reports the `metadata` slot `declared_ephemeral`), so its
+  side effects are run at least once within the process only: a kill loses
+  those still owed, and the next start projects from the journal's head.
 - The first start of a release that projects the journal begins at the
   journal's head: side effects an earlier release still owed when it stopped
   (it kept them in memory) are not run.
+
+`meta_gateway` runs none of these side effects: it composes no customizer, no
+retirement hook and no agent memory.
 
 A retirement that distills the session it ends, or drops its memory scope,
 first harvests the compactions that session holds: a delete, a reset, a

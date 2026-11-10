@@ -23,6 +23,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   lengthens it: the package owner's readback keeps its private files in a
   `readback-` directory beside the setup attempts, where the list does not
   look.
+- The shared setup owner names each peer whose close failed: one stderr
+  line per peer, `local_setup_connection_diagnostic phase=peer_close
+  peer=<n> exception=<class> errno=<code>`, in the closed categories of its
+  other peer diagnostics and never with exception text or paths. Before, a
+  failed peer close left no trace of the peer or of what failed.
+- The shared setup owner removes its private sockets and their directory in
+  `/tmp` even when a peer's close fails, still each only while it is the
+  socket the owner bound. A removal it refuses or that fails no longer
+  replaces the failure the owner reports: that failure is raised with the
+  removal's failure as its context. Before, a failed peer close left the
+  sockets behind.
 
 - Resource packaging pins the Linux library Connect 0.9.11 ships,
   `toolkit-library-20261109-connect-ad31c1fd`, in

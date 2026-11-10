@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `meta/gating/withdraw {pending_id, reason?}`: the embedding host
+  withdraws a pending gating request it minted, with no decision. Host-only
+  (the stdio gateway, or `withdraw_gating_action` in the library); the
+  console has no withdraw route (`-32601`) and a candidate launch refuses it
+  (`-32047` `candidate_launch`). It is a transition of the gating owner, so a
+  request ends exactly once: after a withdrawal a decision gets an unknown
+  id, and after a decision or timeout a withdrawal does. An escalated request
+  is followed hop by hop along the `next_pending_id` its escalations recorded
+  to the live successor, which is withdrawn; the result names the id
+  withdrawn. The audit records `request_withdrawn` (outcome `safe_draft`,
+  detail `reason`, `withdrawn_by`, route and delivery ids, origin; no
+  approver, no payload). The console shows a withdrawn request as a departed
+  "Withdrawn by the requester" card without decision buttons, and its inbox
+  row reads "Withdrawn". Python `gating_withdraw`, TypeScript
+  `gatingWithdraw`.
+
 - `LifecycleEffectFailureCause` (`failed`, `budget_busy`), carried by
   `LifecycleEffectFailure::cause` and by `cause` on
   `lifecycle_effect_failed`: `budget_busy` says the side effect did not run
@@ -47,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A `GatingResolutionObserver` now also receives cause `withdrawn` with
+  `approved: false`; it is not a rejection. The agent memory steward settles
+  a withdrawn promotion gate as expired: the stage is discarded and a
+  proposal-sourced gate's proposal stays held (re-dreamable), as after a
+  timeout.
+
 - Forge runs the Meerkat release it is built from instead of older pinned
   releases. Its Guide runs that release's Meta and Core (0.9.11; until now
   Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
@@ -57,17 +79,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carries the release's published `meerkat-meta` wheel and `rpc_gateway`, which
   the release inputs pin. No older Meta wheel is vendored, and nothing
   downloads a Meta runtime from the standalone repository.
+
 - Forge: the Guide accepts a profile auth binding (`auth_binding` with `realm`,
   `binding` and an optional `profile`) in its launcher-selected model route and
   names it in each of its profiles, which Core's mob profiles apply.
 
 ### Fixed
 
-- Forge: **Rebuild with updated runtime** on an application built without a
-  selected product runtime (an ordinary application an earlier Forge built)
-  compiled a new package for MobKit 0.8.47. It now rebuilds the application on
-  the Meta runtime Forge started with, keeping its application source, and a
-  Forge without a selected Meta runtime refuses the rebuild and says so.
+- Meta's grant answers report `applies` and the member's gate, as Meerkat's
+  own `tool_grants/grant` and `tool_grants/list` report them:
+  `meta/tool_grants/grant` answers `{grant, applies}`, whether the grant
+  applies to the member's running build (`now`, `not_mounted` or
+  `at_next_build`), and `meta/tool_grants/list` answers the member's `gate`
+  (`running`, what its live build gates, `null` while no build of it is
+  live on the gateway, and `next_build`, the gate its next build resolves).
+  A retired identity's list answers its grants without a gate. Both are
+  advisory, on the stdio gateway and on `POST /console/rpc`. The 0.9.11
+  known limitation "Meta's grant answers do not report `applies` or the
+  gate yet" no longer applies.
 
 - A retirement's harvest of the compactions its session holds no longer
   ends failed because the realm's agent memory background budget was busy.
@@ -122,6 +151,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
   keeps both in memory, as before.
+
+- Forge: **Rebuild with updated runtime** on an application built without a
+  selected product runtime (an ordinary application an earlier Forge built)
+  compiled a new package for MobKit 0.8.47. It now rebuilds the application on
+  the Meta runtime Forge started with, keeping its application source, and a
+  Forge without a selected Meta runtime refuses the rebuild and says so.
 
 ## [0.9.11] - 2026-11-09
 

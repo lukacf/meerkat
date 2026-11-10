@@ -379,6 +379,7 @@ const DECIDED_WORDS: Record<NonNullable<DepartedApproval["decided"]>["action"], 
   reject: { text: "Rejected", tone: "warn" },
   escalate: { text: "Escalated", tone: "info" },
   expired: { text: "Expired before anyone decided", tone: "neutral" },
+  withdrawn: { text: "Withdrawn by the requester", tone: "neutral" },
 };
 
 /** A request decided elsewhere: its card stays where it was, saying who
@@ -388,7 +389,7 @@ export function DepartedApprovalCard({ departed }: { departed: DepartedApproval 
   const titleIsId = request.action === request.actionId;
   const title = titleIsId ? humanizeEnum(request.actionId) || request.action : request.action;
   const words = decided ? DECIDED_WORDS[decided.action] : { text: "Decided elsewhere", tone: "neutral" as Tone };
-  const text = decided && decided.action !== "expired" ? `${words.text} ${decided.by ? `by ${decided.by}` : "elsewhere"}` : words.text;
+  const text = decided && decided.action !== "expired" && decided.action !== "withdrawn" ? `${words.text} ${decided.by ? `by ${decided.by}` : "elsewhere"}` : words.text;
   return (
     <article className="cc-approval cc-approval--departed" data-state="departed" data-testid={`gating-departed:${request.pendingId}`}>
       <header className="cc-approval__header">

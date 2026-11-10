@@ -139,6 +139,7 @@ from .types import (
     GatingDecisionResult,
     GatingEvaluateResult,
     GatingPendingEntry,
+    GatingWithdrawResult,
     MemberHealth,
     MemberReloadResult,
     MemberSnapshot,
@@ -2068,7 +2069,10 @@ class MetaRuntime:
         reference to the decision you made before issuing, as attribution.
         The grant applies across the member's respawns and the gateway's
         restarts, opens the tool at the member's next model request and wakes
-        nothing. Returns ``{"grant": {...}}``.
+        nothing. Returns ``{"grant": {...}, "applies": ...}``: ``applies``
+        says whether the grant applies to the member's running build
+        (``"now"``, ``"not_mounted"`` or ``"at_next_build"``). It is
+        advisory, and an older gateway leaves it out.
 
         Raises :class:`ToolGrantRequestRefusedError` for a refused request.
         """
@@ -2115,6 +2119,11 @@ class MetaRuntime:
         Ended (expired or revoked) grants are listed only with
         ``include_ended``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the gateway cannot read.
+        For an identity on the mob's roster the result also carries
+        ``"gate"``: ``"running"``, what the member's live build gates and the
+        names it ignored as not mounted (``None`` while no build of it is
+        live on the gateway), and ``"next_build"``, the gate its next build
+        resolves. The gate is advisory, and an older gateway leaves it out.
         """
         raw = await self._rpc(
             "meta/tool_grants/list",
@@ -4432,6 +4441,30 @@ class MobHandle:
         }
         raw = await self._runtime._rpc("meta/gating/decide", params)
         return GatingDecisionResult.from_dict(raw)
+
+    async def gating_withdraw(
+        self,
+        pending_id: str,
+        reason: str | None = None,
+    ) -> GatingWithdrawResult:
+        """Withdraw a pending request this host minted (``meta/gating/withdraw``).
+
+        Not a decision: the request leaves the queue with no approver, its
+        audit records ``request_withdrawn`` and nothing runs. An escalated
+        request is followed along its escalations to the live successor,
+        which is withdrawn; the result's ``pending_id`` names the id actually
+        withdrawn. A request that was already decided, timed out or withdrawn
+        (or whose escalation chain ended so) answers an unknown id. The chain
+        is read from the gating audit, which keeps only the last 512 records:
+        if the escalation record has aged out, withdrawing the original id
+        answers an unknown id although the successor is still pending, so
+        withdraw the successor by its own id.
+        """
+        params: dict[str, Any] = {"pending_id": pending_id}
+        if reason is not None:
+            params["reason"] = reason
+        raw = await self._runtime._rpc("meta/gating/withdraw", params)
+        return GatingWithdrawResult.from_dict(raw)
 
     async def gating_audit(self, limit: int = 100) -> list[GatingAuditEntry]:
         """Query the gating audit log."""

@@ -2,12 +2,23 @@
 
 ## Unreleased
 
+- `MetaRuntime.grantTool` resolves the gateway's `applies` beside the
+  grant (whether it applies to the member's running build: `now`,
+  `not_mounted` or `at_next_build`), and `listToolGrants` the member's
+  `gate` (`running` and `next_build`), now that the gateway answers them;
+  both are advisory, and the method docs name them. An older gateway leaves
+  them out.
 - `parseErrorEvent` words a `lifecycle_effect_failed` event whose `cause`
   is `budget_busy` as a side effect that did not run ("the
   compaction_harvest of ... did not run: ...", or "... did not run after N
   failed attempts: ..." when attempts failed before it): the realm's agent
   memory background budget did not admit its run within its wait.
   `context.cause` carries the cause; an event without one reads as before.
+- `MobHandle.gatingWithdraw(pendingId, reason?)` calls
+  `meta/gating/withdraw` and returns `GatingWithdrawResult`: the host
+  withdraws a pending request it minted, with no decision. An escalated
+  request is followed to its live successor; `pendingId` names the id
+  withdrawn.
 
 ## 0.9.11
 

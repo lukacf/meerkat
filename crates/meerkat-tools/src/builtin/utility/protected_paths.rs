@@ -162,31 +162,26 @@ fn strictly_inside(path: &Path, base: &Path) -> bool {
 
 /// Whether `name`, a path component, opens an engine directory. Letter
 /// case is ignored on every platform: a case-insensitive filesystem (the
-/// default on macOS and Windows) opens `.rkat` for `.RKAT`. Two more
-/// spellings such a filesystem opens `.rkat` for are folded first: the
-/// KELVIN SIGN (U+212A), which case folding maps to `k`, and the code
-/// points HFS+ ignores in a name. No other Unicode equivalence is applied.
+/// default on macOS and Windows) opens `.rkat` for `.RKAT`.
 fn is_engine_directory_name(name: &OsStr, windows_names: bool) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    let folded: String = name
-        .chars()
+    same_name(name, OsStr::new(ENGINE_DIRECTORY), true, windows_names)
+}
+
+/// `name` as a comparison that ignores letter case reads it: ASCII letters
+/// in lower case, and the other spellings a case-insensitive filesystem
+/// opens the same entry for folded as well. Those are the two characters
+/// whose case folding is an ASCII letter (the KELVIN SIGN, U+212A, for `k`
+/// and LATIN SMALL LETTER LONG S, U+017F, for `s`) and the code points HFS+
+/// ignores in a name. No other Unicode equivalence is applied.
+fn fold_name(name: &str) -> String {
+    name.chars()
         .filter(|character| !is_hfs_ignorable(*character))
-        .map(|character| {
-            if character == '\u{212A}' {
-                'k'
-            } else {
-                character
-            }
+        .map(|character| match character {
+            '\u{212A}' => 'k',
+            '\u{017F}' => 's',
+            other => other.to_ascii_lowercase(),
         })
-        .collect();
-    same_name(
-        OsStr::new(&folded),
-        OsStr::new(ENGINE_DIRECTORY),
-        true,
-        windows_names,
-    )
+        .collect()
 }
 
 /// The code points HFS+ ignores when it compares names.
@@ -198,26 +193,28 @@ const fn is_hfs_ignorable(character: char) -> bool {
 }
 
 /// Whether two path component names open the same directory entry. With
-/// `windows_names`, each name is first reduced the way Windows reduces it
+/// `ignore_case`, both names are folded first ([`fold_name`]). With
+/// `windows_names`, each name is then reduced the way Windows reduces it
 /// before it opens a file: an alternate data stream suffix (`:name`) and
 /// trailing dots and spaces are dropped.
 fn same_name(left: &OsStr, right: &OsStr, ignore_case: bool, windows_names: bool) -> bool {
     let (Some(left), Some(right)) = (left.to_str(), right.to_str()) else {
         return left == right;
     };
-    let reduce = |name: &'_ str| -> String {
-        let name = if windows_names {
-            name.split(':')
-                .next()
-                .unwrap_or(name)
-                .trim_end_matches(['.', ' '])
-        } else {
-            name
-        };
-        if ignore_case {
-            name.to_ascii_lowercase()
+    let reduce = |name: &str| -> String {
+        let name = if ignore_case {
+            fold_name(name)
         } else {
             name.to_owned()
+        };
+        if windows_names {
+            name.split(':')
+                .next()
+                .unwrap_or(&name)
+                .trim_end_matches(['.', ' '])
+                .to_owned()
+        } else {
+            name
         }
     };
     reduce(left) == reduce(right)

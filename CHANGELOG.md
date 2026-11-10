@@ -257,11 +257,13 @@ them.
   at the root, because a host started from that directory reads it as its
   own. The call fails with an invalid-arguments tool error, nothing is
   written, and a patch that names one such path applies none of its
-  operations. Two limits remain. A hard link that already exists in the
-  project to such a file is written through. And where a protected
-  directory holds a symbolic link to another place, that place is not
-  refused: the rule follows a link at `<project root>/.rkat` and at each
-  declared path, not links deeper inside them. To change engine
+  operations. Three limits remain. A hard link that already exists in the
+  project to such a file is written through. Where a protected directory
+  holds a symbolic link to another place, that place is not refused: the
+  rule follows a link at `<project root>/.rkat` and at each declared path,
+  not links deeper inside them. And a `.rkat` below the project root that
+  is itself a symbolic link is refused by its name, not where it leads. To
+  change engine
   configuration, use the CLI (`rkat mcp add`, `rkat config`, `rkat auth`,
   `rkat skill add`) or edit the files yourself. `apply_patch` is affected
   from 0.4.6 and `blob_save_file` from 0.6.2, both through 0.9.11.

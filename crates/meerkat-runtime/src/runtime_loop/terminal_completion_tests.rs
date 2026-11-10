@@ -1432,10 +1432,12 @@ async fn teardown_recovery_finalizes_over_a_stored_audit_prefix() {
 }
 
 /// [`Fixture::cancelled_run_recording`] on the in-memory store, whose test
-/// hooks hold a terminal input CAS right after its commit.
+/// hooks hold a terminal input CAS right after its commit. The driver carries
+/// the session's durability gate, as production persistent drivers do.
 struct MemoryFixture {
     store: Arc<crate::store::InMemoryRuntimeStore>,
     driver: owner::SharedDriver,
+    health: crate::meerkat_machine::DurabilityHealthHandle,
     runtime_id: crate::identifiers::LogicalRuntimeId,
     session_id: SessionId,
     inputs: Vec<InputId>,
@@ -1448,17 +1450,26 @@ impl MemoryFixture {
         let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
         let session_id = SessionId::new();
         let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+        let health = owner::ready_durability_health_for_test();
         let driver = Arc::new(crate::tokio::sync::Mutex::new(
-            owner::DriverEntry::Persistent(PersistentRuntimeDriver::new(
-                runtime_id.clone(),
-                store.clone(),
-                Arc::new(meerkat_store::MemoryBlobStore::new()),
-            )),
+            owner::DriverEntry::Persistent(
+                PersistentRuntimeDriver::new_with_control_and_durability_health(
+                    runtime_id.clone(),
+                    store.clone(),
+                    Arc::new(meerkat_store::MemoryBlobStore::new()),
+                    Arc::new(std::sync::RwLock::new(
+                        crate::driver::ephemeral::RuntimeControlProjection::default(),
+                    )),
+                    crate::driver::ephemeral::new_ingress_dsl_authority(),
+                    health.clone(),
+                ),
+            ),
         ));
         let run = Fixture::cancel_run_recording(&driver, &session_id, recorded).await;
         let fixture = Self {
             store,
             driver,
+            health,
             runtime_id,
             session_id,
             inputs: run.inputs,
@@ -1642,6 +1653,74 @@ impl MemoryFixture {
         assert!(self.carrier.pending_nondirected_run_terminal().is_some());
     }
 
+    /// While the finalization's CAS is held right after its commit (`entered`,
+    /// `release` from [`Self::hold_next_cas_after_commit`]), an operation of
+    /// the run stages a refusal on `live` and another writer changes the first
+    /// stored row; then the hook releases. Returns the refusal's operation id
+    /// and both stored rows' bytes as the writers left them.
+    async fn stage_and_change_first_row_after_the_finalization_cas(
+        &self,
+        live: &crate::input_audit::InputAuthorizationAudit,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) -> (meerkat_core::OperationId, [Vec<u8>; 2]) {
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the finalization CAS commits");
+        let late = self.stage_refusal(live);
+        let mut changed = self.stored_row(&self.inputs[0]).await;
+        changed.state.updated_at += chrono::Duration::seconds(1);
+        self.replace_first_stored_row(changed).await;
+        let written = [
+            self.stored_bytes(&self.inputs[0]).await,
+            self.stored_bytes(&self.inputs[1]).await,
+        ];
+        release.notify_one();
+        (late, written)
+    }
+
+    /// The archive refused the stored rows the writers left as `written`: the
+    /// session is marked for a cold reload with the archive's reason, neither
+    /// stored row was written again (so `late` is not stored), and both rows
+    /// stay live, never archived over the refusal.
+    async fn assert_archive_refused_for_a_cold_reload(
+        &self,
+        written: &[Vec<u8>; 2],
+        late: &meerkat_core::OperationId,
+    ) {
+        let required = self
+            .health
+            .require_ready()
+            .expect_err("a refused archive marks the session for a cold reload");
+        assert_eq!(required.operation(), "terminal_receipt_archive");
+        assert!(
+            required
+                .reason()
+                .contains("terminal input archive lost the exact durable CAS"),
+            "{required}"
+        );
+        assert_eq!(written[0], self.stored_bytes(&self.inputs[0]).await);
+        assert_eq!(written[1], self.stored_bytes(&self.inputs[1]).await);
+        assert!(
+            !crate::input_audit::tests::audit_operation_ids(
+                &self
+                    .stored_row(&self.inputs[0])
+                    .await
+                    .state
+                    .authorization_audit
+            )
+            .contains(late),
+            "the refused archive stores nothing"
+        );
+        let entry = self.driver.lock().await;
+        for input_id in &self.inputs {
+            assert!(
+                entry.shell_driver().ledger().get(input_id).is_some(),
+                "the refused rows are not archived"
+            );
+        }
+    }
+
     /// Both rows finalized as the cancelled run and archived from the live
     /// shell, no pending terminal owner left, and the first row's durable
     /// audit holding exactly `first_audit`, in order.
@@ -1789,47 +1868,81 @@ async fn teardown_archive_commits_audit_observations_staged_during_its_own_audit
 
 /// The archive's audit commit expects every other byte of the row as it was
 /// written: a stored row another writer changed after the finalization stays
-/// a difference, the archive refuses, and the rows stay live and as the
-/// writers left them.
+/// a difference, and the archive refuses. The finalization's receipt is
+/// durable by then, so teardown still settles the run's terminal and releases
+/// its carrier; the archive stays fail closed: the session is marked for a
+/// cold reload, neither stored row is written, and the rows stay live.
 #[tokio::test]
 async fn teardown_archive_does_not_excuse_a_changed_stored_row() {
     let (fixture, _) = MemoryFixture::cancelled_run_recording(1).await;
     let live = fixture.first_live_audit().await;
     let (entered, release) = fixture.hold_next_cas_after_commit();
-    let stage = async {
-        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
-            .await
-            .expect("the finalization CAS commits");
-        fixture.stage_refusal(&live);
-        let mut changed = fixture.stored_row(&fixture.inputs[0]).await;
-        changed.state.updated_at += chrono::Duration::seconds(1);
-        fixture.replace_first_stored_row(changed).await;
-        let written = [
-            fixture.stored_bytes(&fixture.inputs[0]).await,
-            fixture.stored_bytes(&fixture.inputs[1]).await,
-        ];
-        release.notify_one();
-        written
-    };
-    let (settled, written) = crate::tokio::join!(fixture.teardown(), stage);
-    let error = settled.expect_err("a changed stored row is no committed audit prefix");
-    assert!(
-        error
-            .to_string()
-            .contains("terminal input archive lost the exact durable CAS"),
-        "{error}"
-    );
-    assert_eq!(written[0], fixture.stored_bytes(&fixture.inputs[0]).await);
-    assert_eq!(written[1], fixture.stored_bytes(&fixture.inputs[1]).await);
-    let entry = fixture.driver.lock().await;
+    let stage =
+        fixture.stage_and_change_first_row_after_the_finalization_cas(&live, entered, release);
+    let (settled, (late, written)) = crate::tokio::join!(fixture.teardown(), stage);
+    settled.expect("teardown settles the run's terminal once its receipt is durable");
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    fixture
+        .assert_archive_refused_for_a_cold_reload(&written, &late)
+        .await;
+}
+
+/// The live path the same way, with completion waiters: the archive's audit
+/// commit runs after the finalization's receipt is durable and realized, so
+/// its refusal cannot fail the finalization. The finalization returns, the
+/// run's waiters receive the cancelled run, and its carrier is released; the
+/// archive stays fail closed and marks the session for a cold reload.
+#[tokio::test]
+async fn live_finalization_delivers_its_waiters_when_the_archive_audit_commit_is_refused() {
+    let (fixture, _) = MemoryFixture::cancelled_run_recording(1).await;
+    let live = fixture.first_live_audit().await;
+    let completions = Arc::new(crate::tokio::sync::Mutex::new(
+        crate::completion::CompletionRegistry::new(),
+    ));
+    let mut handles = Vec::new();
     for input_id in &fixture.inputs {
+        handles.push(completions.lock().await.register(input_id.clone()));
+    }
+    let hooks = Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+        fixture.session_id.clone(),
+    ));
+    let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+    let authority = gate.lock_owned().await;
+    let mut executor = NoExecution;
+    let (entered, release) = fixture.hold_next_cas_after_commit();
+    let finalize = finalize_publish_and_resolve_runtime_terminals(
+        &fixture.driver,
+        &hooks,
+        Some(&completions),
+        authority,
+        &fixture.carrier,
+        &mut executor,
+        &fixture.inputs,
+        &[],
+        &fixture.run_id,
+        mm::RuntimeCompletionTerminalObservation::MachineTerminal,
+        None,
+        mm::RuntimeCompletionFinalizationObservation::Succeeded,
+        None,
+    );
+    let stage =
+        fixture.stage_and_change_first_row_after_the_finalization_cas(&live, entered, release);
+    let (finalized, (late, written)) = crate::tokio::join!(finalize, stage);
+    finalized.expect("the finalization returns once its receipt is durable");
+    for handle in handles {
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_authorized())
+                .await
+                .expect("the finalization delivers every waiter of the cancelled run");
         assert!(
-            entry.shell_driver().ledger().get(input_id).is_some(),
-            "the refused rows are not archived"
+            matches!(outcome, crate::completion::CompletionOutcome::Cancelled),
+            "expected the cancelled run, got {outcome:?}"
         );
     }
-    drop(entry);
-    assert!(fixture.carrier.pending_nondirected_run_terminal().is_some());
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    fixture
+        .assert_archive_refused_for_a_cold_reload(&written, &late)
+        .await;
 }
 
 /// A finalization dropped right after the store committed its CAS leaves the

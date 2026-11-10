@@ -863,6 +863,11 @@ Storing api keys inline in config files works but shouldn't be
 checked into git. Prefer `managed_store` or `env`. The stock CLI uses its
 file-backed TokenStore profile (mode 0600 on Unix). Native hosts can enable
 `native-keyring` and deliberately select the keyring-aware profile.
+A config document the engine writes is readable by its owner only on Unix
+(mode 0600; 0640 in a directory whose setgid bit shares it with its group),
+but a document you create or edit by hand has the mode your editor gave it:
+`chmod 600` a document that holds a secret (see
+[File permissions](/concepts/configuration#file-permissions)).
 </Warning>
 
 <Note>

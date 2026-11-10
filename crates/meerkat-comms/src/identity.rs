@@ -215,22 +215,36 @@ impl Keypair {
 
     /// Save the keypair to a directory.
     /// Writes `identity.key` (secret, mode 0600) and `identity.pub` (public).
+    /// On Unix the key file is 0600 from its creation, whatever the process
+    /// umask, and one that already exists is made 0600 before the key is
+    /// written to it: the key is never in a file others can read.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&self, dir: &Path) -> Result<(), IdentityError> {
+        use tokio::io::AsyncWriteExt as _;
+
         tokio::fs::create_dir_all(dir).await?;
 
         let key_path = dir.join("identity.key");
-        let mut secret_bytes = self.signing_key.to_bytes();
-        tokio::fs::write(&key_path, &secret_bytes).await?;
-        secret_bytes.zeroize();
-
-        // Set restrictive permissions on private key (Unix only)
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut key_file = options.open(&key_path).await?;
+        // A key file that was already there keeps the mode it had.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            tokio::fs::set_permissions(&key_path, perms).await?;
+            key_file.set_permissions(perms).await?;
         }
+        let mut secret_bytes = self.signing_key.to_bytes();
+        let written = match key_file.write_all(&secret_bytes).await {
+            Ok(()) => key_file.flush().await,
+            Err(error) => Err(error),
+        };
+        secret_bytes.zeroize();
+        written?;
+        drop(key_file);
 
         tokio::fs::write(
             dir.join("identity.pub"),

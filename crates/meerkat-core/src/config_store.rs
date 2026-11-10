@@ -711,6 +711,15 @@ impl ConfigStore for TaggedConfigStore {
 /// ([`ConfigError::AdmissionInProgress`]) with nothing written. Its raw
 /// writes ([`ConfigStore::set_held`] and the patch forms) take the guard of
 /// a caller that holds the fence and the custody.
+///
+/// A document can hold credential material (an inline secret, a command
+/// source's environment, a realm MCP server's literal arguments, environment
+/// and headers), so on Unix every write gives the document, and the
+/// generation sidecar beside it, an owner's mode whatever the process umask:
+/// 0600, or 0640 (readable by the directory's group) when the document's
+/// directory has the setgid bit. The file has the mode from its creation. A
+/// write never adds a permission an existing document lacked, and never
+/// changes a directory's mode.
 pub struct FileConfigStore {
     path: PathBuf,
     create_if_missing: bool,
@@ -889,7 +898,9 @@ impl FileConfigStore {
     /// Replace the document atomically under `guard`, which must hold the
     /// document's admission fence (a guard that does not is refused with
     /// nothing written): write a sibling temp file, sync it, rename it over
-    /// the document.
+    /// the document. The temp file is created with a config document's
+    /// mode (`document_file`: owner-only on Unix, whatever the umask), which
+    /// the rename gives the document; the directory keeps its own.
     async fn write_content(
         &self,
         guard: &AdmissionGuard,
@@ -899,11 +910,7 @@ impl FileConfigStore {
         let parent = parent_directory(&self.path);
         tokio::fs::create_dir_all(&parent).await?;
         let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
-        let mut tmp = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await?;
+        let mut tmp = crate::document_file::create_replacement(&tmp_path, &self.path).await?;
         tmp.write_all(content.as_bytes()).await?;
         // The write's own result. The sync below waits for the write but
         // does not report its failure, so without this a write the

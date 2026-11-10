@@ -597,9 +597,10 @@ pub(crate) async fn read_generation_at(state_path: &Path) -> Result<u64, ConfigR
 }
 
 /// Publish `generation` to the sidecar at `state_path` (a temporary file
-/// renamed over it), under `guard`, which must hold the admission fence of
-/// the sidecar's directory: a guard that does not is refused with nothing
-/// written.
+/// renamed over it, created with a config document's mode: owner-only on
+/// Unix, whatever the umask), under `guard`, which must hold the admission
+/// fence of the sidecar's directory: a guard that does not is refused with
+/// nothing written.
 pub(crate) async fn write_generation_at(
     guard: &AdmissionGuard,
     state_path: &Path,
@@ -619,11 +620,7 @@ pub(crate) async fn write_generation_at(
         ".config_state.tmp.{}",
         crate::time_compat::new_uuid_v7()
     ));
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .await?;
+    let mut file = crate::document_file::create_replacement(&tmp, state_path).await?;
     file.write_all(body.as_bytes()).await?;
     // The write's own result: the sync below waits for the write but does
     // not report its failure.

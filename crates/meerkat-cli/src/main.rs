@@ -1398,7 +1398,7 @@ async fn init_project_config() -> anyhow::Result<()> {
         )
     })?;
 
-    tokio::fs::write(&project_config, content)
+    write_new_config_document(&project_config, content.as_bytes())
         .await
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1410,6 +1410,43 @@ async fn init_project_config() -> anyhow::Result<()> {
 
     println!("Initialized {}", project_config.display());
     Ok(())
+}
+
+/// Create or truncate the configuration document at `path` and write
+/// `bytes`, by the rule `meerkat-core` applies to the documents it writes.
+/// The document can hold credential material, so on Unix a file this creates
+/// is readable by its owner only (0600), from its creation and whatever the
+/// process umask. In a directory whose setgid bit says it is shared through
+/// its group on purpose it is also readable by that group (0640), which the
+/// directory gives it.
+async fn write_new_config_document(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    let shared = {
+        use std::os::unix::fs::PermissionsExt as _;
+        const SETGID: u32 = 0o2000;
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        tokio::fs::metadata(directory)
+            .await
+            .is_ok_and(|directory| directory.permissions().mode() & SETGID != 0)
+    };
+    #[cfg(unix)]
+    options.mode(if shared { 0o640 } else { 0o600 });
+    let mut file = options.open(path).await?;
+    // The umask may have taken the group's read bit: the mode of a shared
+    // directory's document is exact whatever the umask.
+    #[cfg(unix)]
+    if shared {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o640))
+            .await?;
+    }
+    file.write_all(bytes).await?;
+    file.flush().await
 }
 
 #[derive(Parser)]
@@ -5601,9 +5638,29 @@ async fn write_comms_binding_out(
         tokio::fs::create_dir_all(parent).await?;
     }
     let bytes = serde_json::to_vec_pretty(&binding)?;
-    tokio::fs::write(path, bytes).await?;
+    write_private_file(path, &bytes).await?;
     eprintln!("Wrote comms external binding to {}", path.display());
     Ok(())
+}
+
+/// Write `bytes` to a new file at `path` that only its owner can read on
+/// Unix (0600, given when the file is created, which the umask can only
+/// narrow). A file already at `path` is removed first, so the bytes are
+/// never written into an older file with a wider mode.
+#[cfg(feature = "comms")]
+async fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    file.write_all(bytes).await?;
+    file.flush().await
 }
 
 #[derive(Clone)]

@@ -209,6 +209,70 @@ them.
   JSON-RPC `auth/profile/get` returns, and never a credential value.
   Affects 0.6.0 through 0.9.11.
 
+- `meerkat-core`, `rkat`: the configuration documents the engine writes are
+  owner-only on Unix, whatever the process umask. They are a config document
+  (`~/.rkat/config.toml`, a project's `.rkat/config.toml`, a realm's own
+  `config.toml`), the `config_state.json` beside it, and `mcp.toml`
+  (`~/.rkat/mcp.toml`, a project's `.rkat/mcp.toml`). Every write gave them
+  the umask's mode (0644 under the common 022, 0664 under 002), and so did
+  the temporary file of the write before it was renamed into place, so every
+  local user could read them. A document can hold credential material by
+  documented configuration: an auth profile's
+  `source = { kind = "inline_secret", ... }`, the `env` values of a
+  `command` source, and the literal `args`, `env` and `headers` of an MCP
+  server (a realm's `[[tools.mcp_servers]]`, or `mcp.toml`). One rule now
+  decides the mode, and the file has it from its creation, before any byte
+  is written: 0640, readable by the directory's group, when the document's
+  directory has the setgid bit (a directory shared through its group on
+  purpose), and 0600 in every other directory. A document is never
+  group-writable and never readable by others, and a rewrite never adds a
+  permission the file lacked: a document its owner made 0400 stays 0400.
+  `rkat init` writes the project document it copies from the user document
+  by the same rule. The engine changes the mode of no directory. The
+  documents have had the umask's mode since 0.3.0, and the inline secret
+  source since 0.6.0. Affects 0.3.0 through 0.9.12.
+
+- `rkat`: `--comms-binding-out` wrote its binding file, which carries the
+  comms runtime's bootstrap token, with the umask's mode (0644 under the
+  common 022). The file is now 0600 on Unix from its creation: a binding
+  file already at the path is removed, and a new one is written in its
+  place. Affects 0.6.33 through 0.9.12.
+
+- `meerkat-comms`: `Keypair::save` created `identity.key` with the umask's
+  mode and made it 0600 only after it had written the key, so the secret
+  key was readable by every local user for a moment, and stayed so when the
+  save failed in between. The file is now 0600 on Unix from its creation,
+  and a key file that already exists is made 0600 before the key is written
+  to it. `Keypair::load_or_generate`, which the stock hosts use, already
+  created the file 0600. Affects 0.3.0 through 0.9.12.
+
+### Upgrade notes
+
+- A configuration document an earlier release wrote keeps its mode until
+  the engine next rewrites it. To make the existing ones owner-only now, run
+  `chmod 600` on each that exists: `~/.rkat/config.toml`,
+  `~/.rkat/config_state.json` and `~/.rkat/mcp.toml`; a project's
+  `.rkat/config.toml` and `.rkat/mcp.toml`; and each realm's `config.toml`
+  and `config_state.json` in its realm directory
+  (`<project-root>/.rkat/realms/<realm>/` for the CLI, or
+  `<state-root>/<realm>/`). A binding file `--comms-binding-out` wrote
+  earlier keeps its mode until it is written again: `chmod 600` it, or
+  delete it once the supervisor has read it.
+
+- A configuration document that several local accounts read through group
+  permissions (a project checkout or a realm directory shared by a group,
+  or an install that runs a helper or a verifier under another account) is
+  no longer readable by the group after a rewrite, unless its directory has
+  the setgid bit. Set it once on each shared directory, `chmod g+s <dir>`
+  (the `.rkat` directory of a shared project, a shared realm directory),
+  and the documents written there are 0640 with the directory's group. A
+  document the engine already rewrote as 0600 stays 0600: `chmod g+r` it
+  once. An install that cannot set the bit grants read another way (an
+  ACL, or its own `chmod g+r` after a write). Other accounts never get
+  write access through the document's mode, and nothing is readable by
+  others. The admission fence file keeps its own rule: `admission.lock` is
+  0640 with its directory's group in every directory.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

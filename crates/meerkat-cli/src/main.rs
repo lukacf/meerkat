@@ -19400,17 +19400,201 @@ async fn export_session_atif(
     if let Some(parent) = destination.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    write_trajectory_file(&destination, trajectory.to_json()?.as_bytes()).await?;
+    Ok(destination)
+}
+
+/// Write an exported trajectory to `destination`: a temporary file beside it,
+/// synced, then renamed onto it.
+#[cfg(feature = "session-store")]
+async fn write_trajectory_file(destination: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let temporary = destination.with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4()));
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .await?;
-    file.write_all(trajectory.to_json()?.as_bytes()).await?;
+    file.write_all(bytes).await?;
     file.sync_all().await?;
     drop(file);
-    tokio::fs::rename(&temporary, &destination).await?;
-    Ok(destination)
+    tokio::fs::rename(&temporary, destination).await?;
+    Ok(())
+}
+
+/// A trajectory write the operating system refuses (a file size limit, a
+/// quota, a full filesystem that allocates at write time, an I/O error) fails
+/// the export and publishes nothing: an earlier export at the destination
+/// stays as it was.
+///
+/// RED before, for both rows: the export wrote the temporary file through
+/// tokio's `File` and synced it without a flush. `sync_all` waits for the
+/// write but keeps its error for the next write or flush, so the refused
+/// write went unseen: the export returned `Ok` and renamed the EMPTY
+/// temporary file onto the destination.
+#[cfg(all(test, unix, feature = "session-store"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod trajectory_export_refused_write_tests {
+    use super::*;
+
+    /// Set, to the directory the scenario works in, in the child process a
+    /// scenario runs in.
+    const REFUSED_CHILD: &str = "RKAT_TEST_WRITES_REFUSED_CHILD";
+    /// Printed by that child once the scenario ran to its end.
+    const REFUSED_CHILD_DONE: &str = "export scenario ran with every file write refused";
+    /// Printed by that child instead, when a probe write succeeded.
+    const REFUSED_CHILD_NOT_REFUSED: &str =
+        "NOT exercised: this platform did not refuse a write past a zero file size limit";
+
+    /// Run `scenario`, part of this module's test `test`, in a process that
+    /// can create, rename and read files but whose every write of at least
+    /// one byte to a regular file fails (EFBIG): a zero file size limit with
+    /// `SIGXFSZ` ignored. Both are process-wide, so the shared test process
+    /// never sets them: the scenario runs in a child process of this test
+    /// binary, started by a shell that sets them before exec, that runs
+    /// `test` alone.
+    ///
+    /// `prepare` runs first, in this process, where writes work: it stores
+    /// whatever content the scenario must not destroy and returns what
+    /// `verify` compares against. `verify` runs last, in this process again.
+    /// All three get the same fresh directory.
+    ///
+    /// On a platform where the limit does not refuse the write the row is
+    /// skipped, with a line on stderr that says so.
+    fn with_writes_refused<T>(
+        test: &str,
+        prepare: impl FnOnce(&Path) -> T,
+        scenario: impl FnOnce(&Path),
+        verify: impl FnOnce(&Path, T),
+    ) {
+        if let Some(root) = std::env::var_os(REFUSED_CHILD) {
+            let root = PathBuf::from(root);
+            if std::fs::write(root.join("probe").join("byte"), b"x").is_ok() {
+                println!("\n{REFUSED_CHILD_NOT_REFUSED}");
+                return;
+            }
+            scenario(&root.join("scenario"));
+            println!("\n{REFUSED_CHILD_DONE}");
+            return;
+        }
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let work = root.path().join("scenario");
+        std::fs::create_dir(&work).expect("the scenario directory");
+        std::fs::create_dir(root.path().join("probe")).expect("the probe directory");
+        let before = prepare(&work);
+        let binary = std::env::current_exe().expect("the test binary");
+        let test_path = format!("trajectory_export_refused_write_tests::{test}");
+        #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap '' XFSZ && ulimit -f 0 && exec \"$@\"",
+                "export-writes-refused",
+            ])
+            .arg(binary.as_os_str())
+            .args([
+                "--exact",
+                test_path.as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(REFUSED_CHILD, root.path())
+            .output()
+            .expect("start the test with writes refused");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() && stdout.contains(REFUSED_CHILD_NOT_REFUSED) {
+            eprintln!("SKIPPED {test}: {REFUSED_CHILD_NOT_REFUSED}");
+            return;
+        }
+        assert!(
+            output.status.success() && stdout.contains(REFUSED_CHILD_DONE),
+            "{test} failed with writes refused ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        verify(&work, before);
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime")
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the directory")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_refused_write_fails_the_export_and_keeps_the_earlier_export() {
+        with_writes_refused(
+            "a_refused_write_fails_the_export_and_keeps_the_earlier_export",
+            |root| {
+                runtime()
+                    .block_on(write_trajectory_file(
+                        &root.join("session.json"),
+                        b"{\"earlier\":true}",
+                    ))
+                    .expect("the earlier export");
+                std::fs::read(root.join("session.json")).expect("the earlier export")
+            },
+            |root| {
+                let written = runtime().block_on(write_trajectory_file(
+                    &root.join("session.json"),
+                    b"{\"later\":true}",
+                ));
+                assert!(
+                    written.is_err(),
+                    "the refused write fails the export: {written:?}"
+                );
+                assert_eq!(
+                    names_in(root),
+                    ["session.json"],
+                    "the failed export leaves no temporary file"
+                );
+            },
+            |root, before| {
+                assert_eq!(
+                    std::fs::read(root.join("session.json")).expect("the earlier export"),
+                    before,
+                    "the earlier export is byte-identical"
+                );
+                assert_eq!(names_in(root), ["session.json"]);
+            },
+        );
+    }
+
+    #[test]
+    fn a_refused_write_publishes_no_export() {
+        with_writes_refused(
+            "a_refused_write_publishes_no_export",
+            |_root| (),
+            |root| {
+                let written = runtime().block_on(write_trajectory_file(
+                    &root.join("session.json"),
+                    b"{\"later\":true}",
+                ));
+                assert!(
+                    written.is_err(),
+                    "the refused write fails the export: {written:?}"
+                );
+                assert_eq!(
+                    names_in(root),
+                    Vec::<String>::new(),
+                    "no export and no temporary file"
+                );
+            },
+            |root, ()| {
+                assert_eq!(names_in(root), Vec::<String>::new());
+            },
+        );
+    }
 }
 
 #[cfg(not(feature = "session-store"))]

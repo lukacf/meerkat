@@ -140,6 +140,17 @@ pub(crate) fn audit_operation_ids(audit: &InputAuthorizationAudit) -> Vec<Operat
     .collect()
 }
 
+/// Whether another holder has `audit`'s live buffer locked right now: an
+/// archive hold, or an append in progress. A frozen payload has no buffer.
+pub(crate) fn audit_buffer_is_held(audit: &InputAuthorizationAudit) -> bool {
+    match &audit.0 {
+        AuditPayload::Pending(records) => {
+            matches!(records.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+        }
+        AuditPayload::Frozen(_) => false,
+    }
+}
+
 #[test]
 fn frozen_prefix_rollback_clone_and_concurrent_suffix_do_not_drain_or_alias() {
     let (audit, sink) = fixture();
@@ -297,6 +308,52 @@ fn an_archive_hold_checks_the_committed_records_and_closes_the_buffer() {
     let mut frozen = committed.hold_for_archive().unwrap();
     assert!(frozen.holds_only(&committed).unwrap());
     frozen.close();
+}
+
+/// An append from another thread while an archive hold is live waits for the
+/// hold, so the held check cannot miss it. Once the hold is dropped the
+/// append is accepted if the hold left the buffer open, and refused if the
+/// hold closed it.
+#[test]
+fn an_append_during_an_archive_hold_waits_and_is_refused_once_the_hold_closed_the_buffer() {
+    for closes in [false, true] {
+        let (live, sink) = fixture();
+        sink.append(event(&sink)).unwrap();
+        let committed = live.freeze_for_persistence().unwrap();
+        let late = event(&sink);
+        let (started, on_start) = std::sync::mpsc::channel();
+        let (answered, answer) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            let mut held = live.hold_for_archive().unwrap();
+            assert!(audit_buffer_is_held(&live));
+            threads.spawn(|| {
+                started.send(()).unwrap();
+                answered.send(sink.append(late)).unwrap();
+            });
+            on_start.recv().unwrap();
+            assert_eq!(
+                answer.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "the append waits while the hold is live"
+            );
+            // The held records are still exactly the committed ones.
+            assert!(held.holds_only(&committed).unwrap());
+            if closes {
+                held.close();
+            }
+            drop(held);
+            let appended = answer
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the append returns once the hold is dropped");
+            if closes {
+                assert_eq!(appended, Err(OperationObservationError));
+            } else {
+                assert_eq!(appended, Ok(()));
+            }
+        });
+        assert!(!audit_buffer_is_held(&live));
+        assert_eq!(count(&live), if closes { 1 } else { 2 });
+    }
 }
 
 #[test]

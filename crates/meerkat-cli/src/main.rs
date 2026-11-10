@@ -387,10 +387,12 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
+        // A typed owner, so the JSON failure document carries the typed turn
+        // error; the stderr text and the exit status are what they were.
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
-            Err(anyhow::anyhow!(
-                "turn abandoned: {reason}; error={}",
-                serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string())
+            Err(exit_status::typed_failure(
+                exit_status::FailedTurn::new(reason, error),
+                ToString::to_string,
             ))
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
@@ -4416,6 +4418,18 @@ fn default_trace_filter(cli: &Cli) -> &'static str {
     }
 }
 
+/// Whether a failure of this invocation also writes the JSON failure
+/// document: `rkat run` asked for JSON output (`--output json` or `--json`).
+/// No other command writes one.
+fn cli_failure_document(cli: &Cli) -> exit_status::FailureDocument {
+    match &cli.command {
+        Some(Commands::Run { output, json, .. }) if *json || *output == CliOutputFormat::Json => {
+            exit_status::FailureDocument::JsonStdout
+        }
+        _ => exit_status::FailureDocument::None,
+    }
+}
+
 fn init_tracing(cli: &Cli) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_trace_filter(cli)));
@@ -4474,6 +4488,9 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
         None
     };
     init_tracing(&cli);
+    // A failed `rkat run` with JSON output also writes its failure document
+    // to stdout, wherever in this function the failure is reported.
+    let failure_document = cli_failure_document(&cli);
 
     // `rkat storage …` dispatches before runtime-scope resolution on
     // purpose: the dual-root resolver refuses a realm materialized under
@@ -4488,20 +4505,24 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
         }
         return Ok(match handle_storage_command(command, &cli).await {
             Ok(()) => ExitCode::from(EXIT_SUCCESS),
-            Err(e) => exit_status::report_failure(&e),
+            Err(e) => exit_status::report_failure(&e, failure_document),
         });
     }
 
     let cli_scope = if auth_config_realm.is_some() {
-        resolve_runtime_scope_with_realm(&cli, None)?
+        resolve_runtime_scope_with_realm(&cli, None)
     } else {
-        resolve_runtime_scope(&cli)?
+        resolve_runtime_scope(&cli)
     };
+    // The process exit reports this failure on stderr; a JSON run gets its
+    // failure document here.
+    let cli_scope = cli_scope
+        .inspect_err(|error| exit_status::write_failure_document(error, failure_document))?;
 
     if let Some(model) = cli.default_model.as_deref()
         && let Err(e) = handle_set_default_model(model, &cli_scope).await
     {
-        return Ok(exit_status::report_failure(&e));
+        return Ok(exit_status::report_failure(&e, failure_document));
     }
     let Some(command) = cli.command else {
         if cli.default_model.is_some() {
@@ -4579,12 +4600,17 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
             // Wave-c C-12: parse user-supplied `realm:binding[:profile]`
             // at the CLI argument boundary. Downstream receives the
             // typed `Option<AuthBindingRef>`; the opaque-string form
-            // never crosses into session-build options.
+            // never crosses into session-build options. A refused value is
+            // reported by the process exit; a JSON run gets its failure
+            // document here.
             let auth_binding = match auth_binding.as_deref() {
                 None => None,
                 Some(raw) => Some(
                     cli_parse::parse_auth_binding_user_input(raw)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                        .inspect_err(|error| {
+                            exit_status::write_failure_document(error, failure_document);
+                        })?,
                 ),
             };
             Box::pin(handle_run_command(
@@ -4757,10 +4783,11 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
     };
 
     // Map result to exit code: a typed failure exits with its public code's
-    // `cli_exit_code()` (§17.4 mob codes included), anything else with 1.
+    // `cli_exit_code()` (§17.4 mob codes included), anything else with 1. A
+    // failed JSON run also ends stdout with its failure document.
     Ok(match result {
         Ok(()) => ExitCode::from(EXIT_SUCCESS),
-        Err(e) => exit_status::report_failure(&e),
+        Err(e) => exit_status::report_failure(&e, failure_document),
     })
 }
 
@@ -30596,6 +30623,47 @@ default_model = "gemma"
         )
         .expect_err("html and json output must conflict");
         assert!(conflict.to_string().contains("--html"));
+    }
+
+    /// Only `rkat run` asked for JSON output (`--output json` or `--json`)
+    /// writes the failure document; other output modes and other commands,
+    /// `rkat help` included, do not.
+    #[test]
+    fn only_a_json_run_asks_for_the_failure_document() {
+        use exit_status::FailureDocument;
+        let cases: [(&[&str], FailureDocument); 9] = [
+            (
+                &["rkat", "run", "--output", "json", "hi"],
+                FailureDocument::JsonStdout,
+            ),
+            (
+                &["rkat", "run", "--json", "hi"],
+                FailureDocument::JsonStdout,
+            ),
+            (
+                &["rkat", "run", "--resume", "last", "--json", "hi"],
+                FailureDocument::JsonStdout,
+            ),
+            (&["rkat", "run", "hi"], FailureDocument::None),
+            (
+                &["rkat", "run", "--output", "text", "hi"],
+                FailureDocument::None,
+            ),
+            (
+                &["rkat", "run", "--output", "html", "hi"],
+                FailureDocument::None,
+            ),
+            (&["rkat", "run", "--html", "hi"], FailureDocument::None),
+            (
+                &["rkat", "help", "--output", "json", "how?"],
+                FailureDocument::None,
+            ),
+            (&["rkat", "models"], FailureDocument::None),
+        ];
+        for (args, expected) in cases {
+            let cli = Cli::try_parse_from(args.iter().copied()).expect("arguments parse");
+            assert_eq!(cli_failure_document(&cli), expected, "{args:?}");
+        }
     }
 
     #[test]

@@ -35,6 +35,35 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-contracts`: `WireRunFailure`, the failure document
+  `rkat run --output json` writes (`{"error": WireError}`, emitted in
+  `artifacts/schemas/errors.json`), and `error::turn_failure_error_code`,
+  the `ErrorCode` of a failed turn's typed terminal cause. JSON-RPC and the
+  `rkat run` failure document read a failed turn's code from that one
+  mapping; the JSON-RPC codes are unchanged.
+
+### Changed
+
+- `rkat run --output json` (and `--json`, with or without `--resume`): a
+  failed run now writes a JSON failure document to stdout (stdout was empty
+  before). The document is `{"error": {code, category, message, details}}`,
+  the error envelope the other surfaces use, and it is the last document on
+  stdout, after any `--stream` text. `code` is the failure's public error
+  code and `message` the text of stderr's `Error:` line. For a turn that
+  ended in failure, `details.error` is the typed turn error (`kind`,
+  `retryable`, `provider`, `model`, `reason`), and `code` follows its
+  `kind` as on JSON-RPC (`PROVIDER_ERROR`, `BUDGET_EXHAUSTED`, `HOOK_DENIED`
+  or `INTERNAL_ERROR`), so a caller can tell a transient provider failure
+  (`kind` `retry_exhausted`, or `retryable` `true`) from a permanent one
+  without reading text. A typed error before the turn prints its own code
+  and data; a check made by the CLI itself prints `INTERNAL_ERROR`. Exit
+  statuses and the stderr text are unchanged (a failed turn still exits 1),
+  text and HTML output print no document, an argument the parser refuses
+  prints none, and no other command prints one. See "JSON failure
+  document" in `docs/cli/configuration.mdx`.
+
 ### Fixed
 
 - `meerkat-core`: a turn that fails because a provider failure outlasted the
@@ -62,6 +91,16 @@ them.
   event are unchanged, and no field is new: a stored turn error without the
   three fields still reads, and an earlier release reads one that has them.
   Affects 0.8.0 through 0.9.14.
+
+### Upgrade notes
+
+- A script that runs `rkat run --output json` (or `--json`) must not read
+  non-empty stdout as success, nor parse the last stdout document as a run
+  result without looking at it: a failed run now ends stdout with
+  `{"error": {...}}`. Decide by the exit status, which is unchanged, or by
+  the document's top-level key: `error` is a failure, `status`
+  (`"pending_tool_call"`) a run waiting for an external tool result, and
+  anything else the run result. Text and HTML output are unchanged.
 
 ## [0.9.14] - 2026-11-11
 

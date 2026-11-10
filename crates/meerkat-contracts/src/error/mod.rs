@@ -372,6 +372,44 @@ impl WireError {
     }
 }
 
+/// The failure document of `rkat run --output json`: the last document on
+/// stdout when the run fails, in place of the run result.
+///
+/// `error` is the same envelope the other surfaces report. For a turn that
+/// ended in failure its `code` is [`turn_failure_error_code`] and its
+/// `details` are `{"error": TurnErrorMetadata}`; for any other typed failure
+/// they are that error's own code and wire data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireRunFailure {
+    pub error: WireError,
+}
+
+/// The [`ErrorCode`] of a failed turn's typed terminal cause.
+///
+/// One mapping for every surface that reports a failed turn by code: the
+/// JSON-RPC error of a turn that fails through the runtime
+/// ([`ErrorCode::jsonrpc_code`]) and the `rkat run` failure document
+/// ([`WireRunFailure`]). It gives a cause the code
+/// [`agent_transport_error_code`] gives the equivalent agent error, so a turn
+/// reports the same class whichever path its failure takes. The cause kind
+/// alone decides.
+pub fn turn_failure_error_code(turn_error: &meerkat_core::TurnErrorMetadata) -> ErrorCode {
+    use meerkat_core::TurnTerminalCauseKind as Cause;
+    match turn_error.kind {
+        Cause::LlmFailure | Cause::RetryExhausted => ErrorCode::ProviderError,
+        Cause::BudgetExhausted | Cause::TimeBudgetExceeded => ErrorCode::BudgetExhausted,
+        Cause::HookDenied => ErrorCode::HookDenied,
+        Cause::Unknown
+        | Cause::HookFailure
+        | Cause::ToolFailure
+        | Cause::StructuredOutputValidationFailed
+        | Cause::TurnLimitReached
+        | Cause::RuntimeApplyFailure
+        | Cause::FatalFailure => ErrorCode::InternalError,
+    }
+}
+
 /// Audience-safe session details, including typed runtime readiness.
 pub fn session_error_details(error: &meerkat_core::SessionError) -> Option<serde_json::Value> {
     match error {

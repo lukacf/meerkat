@@ -47,8 +47,9 @@ spelling, singular/plural forms, flags, and enum values matter.
 - `rkat run` has no hook flags; per-session hook overrides (`hooks_override`)
   exist only on RPC, REST, MCP and the SDKs.
 - There is no manual compaction command on any surface.
-- `rkat` has no JSON-lines event output; `--output json` prints only the final
-  result.
+- `rkat` has no JSON-lines event output; `rkat run --output json` prints one
+  final JSON document: the result, the pending document, or the failure
+  document when the run fails (stdout is not empty on failure).
 - `rkat session interrupt` cannot stop a turn running in another process.
 
 ## Root
@@ -211,6 +212,27 @@ Output flag rules: `--json` cannot be combined with `--output html`, nor
 flags require HTML output; `--html-template` and `--html-template-file` are
 mutually exclusive; HTML output cannot be combined with `--schema`;
 `--stream` and `--no-stream` are mutually exclusive.
+
+JSON output (`--output json` or `--json`): stdout ends with exactly one JSON
+document. It is the run result on success, the pending document
+(`"status": "pending_tool_call"`) when the run waits for an external tool
+result, or the failure document when the run fails:
+`{"error": {"code", "category", "message", "details"}}`, the error envelope
+of the other surfaces. `code` is the public error code and `message` the
+text of stderr's `Error:` line. For a turn that ended in failure,
+`details.error` is the typed turn error (`kind`, `retryable`, `provider`,
+`model`, `reason`, `detail`) and `code` follows its `kind`: `PROVIDER_ERROR`
+(`llm_failure`, `retry_exhausted`), `BUDGET_EXHAUSTED` (`budget_exhausted`,
+`time_budget_exceeded`), `HOOK_DENIED` (`hook_denied`), otherwise
+`INTERNAL_ERROR`. The failure is transient when `kind` is `retry_exhausted`
+or `retryable` is `true`. A typed error before the turn prints its own code
+and data; a check made by the CLI itself prints `INTERNAL_ERROR` without
+`details`. Exit statuses do not change with the output mode (a failed turn
+exits 1 whatever the document's code) and stderr keeps its `Error:` line.
+With `--stream` the streamed text precedes the document. An argument the
+parser refuses (exit 2) prints no document, text and HTML output print none,
+and no command other than `rkat run` prints one (`rkat help --output json`
+included).
 
 Resume targets: full UUID, UUID prefix/tail handle, `<realm>:<uuid>` (the
 active realm), `last`, `~`, `~0`, or `~N`.

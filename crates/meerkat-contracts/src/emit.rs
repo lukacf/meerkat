@@ -890,6 +890,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ErrorCode": schema_for!(crate::error::ErrorCode),
         "ErrorCategory": schema_for!(crate::error::ErrorCategory),
         "WireError": schema_for!(crate::error::WireError),
+        // The `rkat run --output json` failure document.
+        "WireRunFailure": schema_for!(crate::error::WireRunFailure),
         "CapabilityHint": schema_for!(crate::error::CapabilityHint),
         // Machine-readable numeric allocation for generated SDK factories.
         // ErrorCode remains the semantic vocabulary authority; this projection

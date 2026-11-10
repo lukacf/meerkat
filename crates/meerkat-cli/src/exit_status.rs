@@ -12,9 +12,19 @@
 //! assigns no public code, and a failure with no typed owner (an argument,
 //! configuration or lookup check made by the CLI itself), exits
 //! [`EXIT_ERROR`](crate::EXIT_ERROR).
+//!
+//! `rkat run --output json` also writes the failure as a document on stdout
+//! ([`failure_document`]): the same typed owner's code and wire data in the
+//! [`WireError`] envelope. A turn that ended in failure ([`FailedTurn`])
+//! carries its typed turn error there under the shared turn-failure code,
+//! and still exits [`EXIT_ERROR`](crate::EXIT_ERROR): the document's code is
+//! never the exit status of a failed turn.
 
-use meerkat_contracts::ErrorCode;
-use meerkat_contracts::error::{agent_transport_error_code, session_transport_error_code};
+use meerkat_contracts::error::{
+    agent_transport_error_code, session_error_details, session_transport_error_code,
+    turn_failure_error_code,
+};
+use meerkat_contracts::{ErrorCode, WireError, WireRunFailure};
 
 /// What a typed owner in the error chain says about its public code.
 enum OwnerCode {
@@ -28,6 +38,47 @@ impl From<Option<ErrorCode>> for OwnerCode {
     fn from(code: Option<ErrorCode>) -> Self {
         code.map_or(Self::Uncoded, Self::Public)
     }
+}
+
+/// A turn that ended in failure: the runtime's reason text and the typed
+/// turn error it completed the turn with.
+///
+/// It is a typed owner without an exit code of its own: the command exits
+/// [`EXIT_ERROR`](crate::EXIT_ERROR) whatever the turn's cause, and the
+/// failure document reads the cause's code from the typed error.
+#[derive(Debug)]
+pub(crate) struct FailedTurn {
+    reason: String,
+    error: meerkat_core::TurnErrorMetadata,
+}
+
+impl FailedTurn {
+    pub(crate) fn new(reason: String, error: meerkat_core::TurnErrorMetadata) -> Self {
+        Self { reason, error }
+    }
+}
+
+impl std::fmt::Display for FailedTurn {
+    /// The text stderr has always shown for a failed turn: the reason, then
+    /// the typed error as JSON.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "turn abandoned: {}; error=", self.reason)?;
+        match serde_json::to_string(&self.error) {
+            Ok(json) => f.write_str(&json),
+            Err(_) => f.write_str("<unserializable>"),
+        }
+    }
+}
+
+impl std::error::Error for FailedTurn {}
+
+/// Whether a failed command also writes its failure document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FailureDocument {
+    /// stderr only: every command and output mode but the one below.
+    None,
+    /// `rkat run` with JSON output: the document is the last one on stdout.
+    JsonStdout,
 }
 
 /// The public error code of a failed command, from the first typed owner in
@@ -49,10 +100,74 @@ pub(crate) fn failure_exit_status(error: &anyhow::Error) -> u8 {
     failure_error_code(error).map_or(crate::EXIT_ERROR, code_exit_status)
 }
 
+/// The failure document of a failed command: the first typed owner in
+/// `error`'s chain decides its code and details, as it decides the exit
+/// status, and the message is the text stderr shows.
+///
+/// - A failed turn: the shared turn-failure code of its cause kind, and the
+///   typed turn error as `details.error`.
+/// - Another typed owner with a public code: that code, and the owner's wire
+///   data when it has any (a session error's data, a mob error's typed
+///   console detail).
+/// - A typed owner without a public code, and a failure with no typed owner:
+///   `INTERNAL_ERROR`, no details.
+pub(crate) fn failure_document(error: &anyhow::Error) -> WireRunFailure {
+    let owner = error
+        .chain()
+        .find_map(|cause| owner_code(cause).map(|code| (cause, code)));
+    let (code, details) = match owner {
+        Some((cause, code)) => match cause.downcast_ref::<FailedTurn>() {
+            Some(turn) => (
+                turn_failure_error_code(&turn.error),
+                serde_json::to_value(&turn.error)
+                    .ok()
+                    .map(|turn_error| serde_json::json!({ "error": turn_error })),
+            ),
+            None => match code {
+                OwnerCode::Public(code) => (code, owner_details(cause)),
+                OwnerCode::Uncoded => (ErrorCode::InternalError, None),
+            },
+        },
+        None => (ErrorCode::InternalError, None),
+    };
+    let mut wire = WireError::new(code, error.to_string());
+    wire.details = details;
+    WireRunFailure { error: wire }
+}
+
+/// The wire data of the typed owner that decided the code.
+fn owner_details(owner: &(dyn std::error::Error + 'static)) -> Option<serde_json::Value> {
+    if let Some(error) = owner.downcast_ref::<meerkat_core::SessionError>() {
+        return session_error_details(error);
+    }
+    #[cfg(feature = "mob")]
+    if let Some(detail) = mob_wire_detail(owner) {
+        return detail.detail_value().ok();
+    }
+    None
+}
+
+/// Write the failure document of `error` as one JSON document on stdout,
+/// when `document` asks for it.
+pub(crate) fn write_failure_document(error: &anyhow::Error, document: FailureDocument) {
+    if document != FailureDocument::JsonStdout {
+        return;
+    }
+    match serde_json::to_string_pretty(&failure_document(error)) {
+        Ok(json) => println!("{json}"),
+        Err(render) => eprintln!("Warning: failed to render the failure document: {render}"),
+    }
+}
+
 /// Report a failed command on stderr and return its exit status. A mob
 /// error that carries a typed console detail also prints one `detail:` line
-/// rendered from the typed fields, never from a display string.
-pub(crate) fn report_failure(error: &anyhow::Error) -> std::process::ExitCode {
+/// rendered from the typed fields, never from a display string. After the
+/// stderr lines, `document` decides whether the failure document follows on
+/// stdout.
+pub(crate) fn report_failure(
+    error: &anyhow::Error,
+    document: FailureDocument,
+) -> std::process::ExitCode {
     if failure_error_code(error) == Some(ErrorCode::BudgetExhausted) {
         eprintln!("Budget exhausted: {error}");
     } else {
@@ -64,6 +179,7 @@ pub(crate) fn report_failure(error: &anyhow::Error) -> std::process::ExitCode {
     {
         eprintln!("detail: {json}");
     }
+    write_failure_document(error, document);
     std::process::ExitCode::from(failure_exit_status(error))
 }
 
@@ -88,6 +204,10 @@ pub(crate) fn session_not_found(id: &meerkat_core::SessionId) -> anyhow::Error {
 
 /// `Some` when `cause` is a typed owner; `None` when the chain continues.
 fn owner_code(cause: &(dyn std::error::Error + 'static)) -> Option<OwnerCode> {
+    // A failed turn exits with the generic status whatever its cause kind.
+    if cause.downcast_ref::<FailedTurn>().is_some() {
+        return Some(OwnerCode::Uncoded);
+    }
     #[cfg(feature = "mob")]
     if let Some(code) = mob_owner_code(cause) {
         return Some(code);
@@ -214,6 +334,14 @@ fn deciding_mob_wire_detail(
     error: &anyhow::Error,
 ) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
     let owner = error.chain().find(|cause| owner_code(*cause).is_some())?;
+    mob_wire_detail(owner)
+}
+
+/// The typed console detail of a mob-family owner.
+#[cfg(feature = "mob")]
+fn mob_wire_detail(
+    owner: &(dyn std::error::Error + 'static),
+) -> Option<meerkat_contracts::wire::WireMobErrorDetail> {
     if let Some(error) = owner.downcast_ref::<meerkat_mob::MobError>() {
         return error.wire_detail();
     }

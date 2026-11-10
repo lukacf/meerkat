@@ -4,13 +4,14 @@
 //! whether a provider request can carry it depends on the model and on the
 //! route that serves the request: the backend (a provider-matrix backend
 //! kind) and the provider API the request is sent on. This module names the
-//! route, what a client observes about it, and the reasons a level is
-//! refused. It decides nothing.
+//! route, what a client observes about it, the typed refusal of a level, and
+//! the reports of the level a request was sent with. It decides nothing.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Provider;
 use crate::model_profile::capabilities::EffortLevel;
 use crate::provider_matrix::{
     AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
@@ -171,26 +172,222 @@ impl ReasoningRouteObservation {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffortRefusalReason {
-    /// The route's stated levels for the model do not include the requested
-    /// level.
+    /// A source states the levels the route accepts for the model and the
+    /// requested level is not among them (an empty set: the route or the
+    /// model takes no effort).
     UnsupportedLevel,
     /// No source states the levels the route accepts for the model.
     SupportedLevelsUnknown,
-    /// The source of the levels exists and cannot be read now (an account
-    /// list that is not loaded).
+    /// The source of the levels exists and cannot be read now (an account's
+    /// model list that is not loaded). The one reason an identical later
+    /// request can succeed without a configuration change.
     SupportedLevelsUnavailable,
-    /// The request also sets a provider-specific effort.
+    /// The request also sets a provider-specific effort that differs from
+    /// the level.
     ConflictingProviderEffort,
-    /// The request also sets a thinking budget.
+    /// The request also sets a thinking budget: a budget and a level are two
+    /// controls.
     ConflictingThinkingBudget,
-    /// The request also sets a thinking type that the level cannot be
-    /// combined with.
+    /// The request also sets a thinking type the model accepts only at a
+    /// lower level.
     ConflictingThinkingType,
-    /// The request also carries a raw provider reasoning body.
+    /// The request also carries a raw provider reasoning body, which may
+    /// carry an effort of its own.
     ConflictingReasoningBody,
-    /// The request also sets a reasoning mode that the level cannot be
-    /// combined with.
+    /// The request also turns reasoning off.
     ConflictingReasoningMode,
+}
+
+/// The source of the effort levels a route accepts for a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningFactsSource {
+    /// The model's catalog row.
+    Catalog,
+    /// The account's model list.
+    Account,
+    /// The operator's model configuration.
+    Operator,
+}
+
+/// A refused `reasoning_effort` level: what was requested, for which model
+/// and route, and why. Raised before any provider request is sent.
+///
+/// `supported` and `facts` are always serialized, as `null` when absent
+/// (`facts` is absent exactly when `supported` is). The two `conflicting_*`
+/// fields are serialized only when present. The `Display` text is for people
+/// and is not a contract; read the fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReasoningEffortRefusal {
+    /// The level the request named.
+    pub requested: EffortLevel,
+    /// The provider family of the model.
+    pub provider: Provider,
+    /// The model the request would use.
+    pub model: String,
+    /// The route the request would be served on.
+    pub route: ReasoningRoute,
+    /// Why the level is refused.
+    pub reason: ReasoningEffortRefusalReason,
+    /// The levels the route accepts for the model: `None` when unknown or
+    /// unavailable, empty when the route or the model takes no effort.
+    pub supported: Option<Vec<EffortLevel>>,
+    /// The source of `supported`.
+    pub facts: Option<ReasoningFactsSource>,
+    /// For a conflict: the path of the conflicting setting, for example
+    /// `provider_params.provider_tag.effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_param: Option<String>,
+    /// For a conflict whose conflicting setting is itself a level: that
+    /// level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicting_level: Option<EffortLevel>,
+}
+
+impl fmt::Display for ReasoningEffortRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ReasoningEffortRefusalReason as Reason;
+
+        let requested = self.requested.as_wire_str();
+        let provider = self.provider.as_str();
+        let model = self.model.as_str();
+        let route = &self.route;
+        let param = self
+            .conflicting_param
+            .as_deref()
+            .unwrap_or("another reasoning setting");
+        match self.reason {
+            Reason::UnsupportedLevel => {
+                write!(
+                    f,
+                    "reasoning effort '{requested}' is not supported by {provider} model \
+                     '{model}' on {route}"
+                )?;
+                match self.supported.as_deref() {
+                    None => Ok(()),
+                    Some([]) => f.write_str("; this route accepts no reasoning effort"),
+                    Some(levels) => {
+                        f.write_str("; supported: ")?;
+                        for (index, level) in levels.iter().enumerate() {
+                            if index > 0 {
+                                f.write_str(", ")?;
+                            }
+                            f.write_str(level.as_wire_str())?;
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            Reason::SupportedLevelsUnknown => write!(
+                f,
+                "reasoning effort '{requested}' cannot be checked for {provider} model '{model}' \
+                 on {route}: no source states the levels this route accepts; provider_params can \
+                 set a provider-specific effort"
+            ),
+            Reason::SupportedLevelsUnavailable => write!(
+                f,
+                "reasoning effort '{requested}' cannot be checked for {provider} model '{model}' \
+                 on {route}: the account's model list is not loaded; try again once it is"
+            ),
+            Reason::ConflictingProviderEffort => {
+                write!(f, "reasoning effort '{requested}' conflicts with {param}")?;
+                if let Some(level) = self.conflicting_level {
+                    write!(f, " = '{}'", level.as_wire_str())?;
+                }
+                f.write_str("; set one of them")
+            }
+            Reason::ConflictingThinkingBudget => write!(
+                f,
+                "reasoning effort '{requested}' conflicts with {param}: a thinking budget and a \
+                 level are two controls; remove one"
+            ),
+            Reason::ConflictingThinkingType => write!(
+                f,
+                "reasoning effort '{requested}' conflicts with {param}: {provider} model \
+                 '{model}' accepts that thinking type only up to 'high'"
+            ),
+            Reason::ConflictingReasoningBody => write!(
+                f,
+                "reasoning effort '{requested}' conflicts with {param}: a raw reasoning body may \
+                 carry its own effort; remove one"
+            ),
+            Reason::ConflictingReasoningMode => write!(
+                f,
+                "reasoning effort '{requested}' conflicts with {param} = 'off'"
+            ),
+        }
+    }
+}
+
+/// Who decided the level a request was sent with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffortDecidedBy {
+    /// The level the request named.
+    Request,
+    /// A reasoning preference replaced the level.
+    Preference,
+}
+
+/// A resolved `reasoning_effort` level: what one provider request is sent
+/// with, for which model and route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReasoningEffortResolution {
+    /// The level the request named.
+    pub requested: EffortLevel,
+    /// The level sent.
+    pub level: EffortLevel,
+    /// The provider family of the model.
+    pub provider: Provider,
+    /// The model the request uses.
+    pub model: String,
+    /// The route the request is served on.
+    pub route: ReasoningRoute,
+    /// The wire paths the level is written to, for example
+    /// `reasoning.effort`.
+    pub fields: Vec<String>,
+    /// The source of the levels the route accepts for the model.
+    pub facts: ReasoningFactsSource,
+    /// Who decided `level`.
+    pub decided_by: ReasoningEffortDecidedBy,
+}
+
+/// One distinct resolution a run sent, with the number of provider requests
+/// that carried it. It has no `requested` of its own: the report holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReasoningEffortSent {
+    /// The level sent.
+    pub level: EffortLevel,
+    /// The provider family of the model.
+    pub provider: Provider,
+    /// The model the requests used.
+    pub model: String,
+    /// The route the requests were served on.
+    pub route: ReasoningRoute,
+    /// The wire paths the level was written to.
+    pub fields: Vec<String>,
+    /// The source of the levels the route accepts for the model.
+    pub facts: ReasoningFactsSource,
+    /// Who decided `level`.
+    pub decided_by: ReasoningEffortDecidedBy,
+    /// The number of provider requests sent with this resolution.
+    pub requests: u32,
+}
+
+/// The run result block: the level a run's requests named and the distinct
+/// resolutions the run sent, in first-use order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReasoningEffortReport {
+    /// The level the run's requests named.
+    pub requested: EffortLevel,
+    /// The distinct resolutions sent, in first-use order.
+    pub sent: Vec<ReasoningEffortSent>,
 }
 
 #[cfg(test)]

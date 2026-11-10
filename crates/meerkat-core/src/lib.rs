@@ -541,8 +541,10 @@ pub use realtime_transcript_sidecar::{
     RealtimeTranscriptSnapshotReasonV1,
 };
 pub use reasoning_effort::{
-    AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortRefusalReason,
-    ReasoningRoute, ReasoningRouteObservation,
+    AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
+    ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortReport,
+    ReasoningEffortResolution, ReasoningEffortSent, ReasoningFactsSource, ReasoningRoute,
+    ReasoningRouteObservation,
 };
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,

@@ -110,6 +110,9 @@ mod tests {
 
     #[test]
     fn mid_conversation_system_messages_use_catalog_rows() {
+        assert!(supports_mid_conversation_system_messages(
+            "claude-fable-5-2"
+        ));
         assert!(supports_mid_conversation_system_messages("claude-fable-5"));
         assert!(supports_mid_conversation_system_messages("claude-opus-5"));
         assert!(supports_mid_conversation_system_messages("claude-opus-4-8"));
@@ -346,7 +349,12 @@ mod sonnet_5_5_request_shaping {
 
     #[test]
     fn between_tools_is_refused_for_models_that_do_not_accept_it() {
-        for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-4-6"] {
+        for model in [
+            "claude-opus-5-5",
+            "claude-fable-5-2",
+            "claude-fable-5-1",
+            "claude-sonnet-4-6",
+        ] {
             let message = refusal(body(
                 model,
                 None,
@@ -414,6 +422,94 @@ mod sonnet_5_5_request_shaping {
             }),
         ));
         assert!(message.contains("top_k"), "{message}");
+    }
+
+    /// Claude Fable 5.2 follows its catalog row: thinking omitted names the
+    /// always-on adaptive default beside the binding control, a generic
+    /// temperature is omitted, each of the five effort levels lowers to
+    /// `output_config.effort`, and a thinking budget, `enabled`, `disabled`,
+    /// `between_tools` and `top_k` are refused locally.
+    #[test]
+    fn fable_5_2_request_shaping_follows_its_catalog_row() {
+        let model = "claude-fable-5-2";
+        let default = body(model, Some(0.7), None).unwrap();
+        assert_clean(&default);
+        assert_eq!(
+            default["thinking"],
+            adaptive_with_binding(),
+            "the always-on adaptive default is named beside the binding control"
+        );
+        assert!(
+            default.get("output_config").is_none(),
+            "no effort set, the API default applies: {default}"
+        );
+
+        for (effort, wire) in [
+            (AnthropicEffort::Low, "low"),
+            (AnthropicEffort::Medium, "medium"),
+            (AnthropicEffort::High, "high"),
+            (AnthropicEffort::XHigh, "xhigh"),
+            (AnthropicEffort::Max, "max"),
+        ] {
+            let sent = body(
+                model,
+                None,
+                Some(AnthropicProviderTag {
+                    effort: Some(effort),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+            assert_clean(&sent);
+            assert_eq!(sent["output_config"]["effort"], wire, "{sent}");
+            assert_eq!(sent["thinking"], adaptive_with_binding(), "{sent}");
+        }
+
+        for (tag, refused) in [
+            (
+                AnthropicProviderTag {
+                    thinking_budget_tokens: Some(4096),
+                    ..Default::default()
+                },
+                "thinking_budget_tokens",
+            ),
+            (
+                AnthropicProviderTag {
+                    thinking: Some(AnthropicThinkingConfig::Enabled {
+                        budget_tokens: 4096,
+                    }),
+                    ..Default::default()
+                },
+                "thinking type 'enabled'",
+            ),
+            (
+                AnthropicProviderTag {
+                    thinking: Some(AnthropicThinkingConfig::Disabled),
+                    ..Default::default()
+                },
+                "thinking type 'disabled'",
+            ),
+            (
+                AnthropicProviderTag {
+                    thinking: Some(AnthropicThinkingConfig::BetweenTools),
+                    ..Default::default()
+                },
+                "thinking type 'between_tools'",
+            ),
+            (
+                AnthropicProviderTag {
+                    top_k: Some(40),
+                    ..Default::default()
+                },
+                "top_k",
+            ),
+        ] {
+            let message = refusal(body(model, None, Some(tag)));
+            assert!(
+                message.contains(model) && message.contains(refused),
+                "{message}"
+            );
+        }
     }
 
     /// The portable per-turn overrides (what mob profiles, skills, and turn

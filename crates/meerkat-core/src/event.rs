@@ -707,6 +707,41 @@ impl TurnErrorMetadata {
         }
     }
 
+    /// The diagnostic facts of a turn whose LLM failure outlasted the retry
+    /// budget: the `retry_exhausted` cause with the provider and the typed
+    /// reason of `error`, the failure that ended the retries, in the fields
+    /// [`Self::from_agent_error`] fills for a failure that is not retried.
+    ///
+    /// `retryable` is `true`: the failure is of a class that was retried
+    /// until the budget ran out, so the same request may succeed later. It is
+    /// advice for the caller; nothing in the agent loop reads it, and the
+    /// retries a run makes are decided before this is built.
+    ///
+    /// `None` unless `error` is an LLM failure of a retried class
+    /// ([`crate::retry::LlmRetryFailure::from_agent_error`]). The kind is
+    /// always `retry_exhausted`: the terminal witness publishes these facts
+    /// only beside a generated terminal of that cause.
+    pub(crate) fn retry_exhausted_from_llm_error(error: &AgentError) -> Option<Self> {
+        crate::retry::LlmRetryFailure::from_agent_error(error)?;
+        let AgentError::Llm {
+            provider,
+            reason,
+            message,
+        } = error.primary_error()
+        else {
+            return None;
+        };
+        let mut metadata = Self::terminal(
+            TurnTerminalCauseKind::RetryExhausted,
+            TurnTerminalOutcome::Failed,
+            message.clone(),
+        );
+        metadata.provider = Some((*provider).to_string());
+        metadata.retryable = Some(true);
+        metadata.reason = Some(AgentErrorReason::from_llm_reason(reason));
+        Some(metadata)
+    }
+
     pub fn from_agent_error_report(
         report: &AgentErrorReport,
         detail: impl Into<String>,
@@ -5952,6 +5987,107 @@ mod tests {
             })
         );
         assert_eq!(serde_json::to_value(&decoded).unwrap(), with_facts);
+    }
+
+    /// The retry-exhausted facts are built only from an LLM failure of a
+    /// retried class, always under the `retry_exhausted` cause and with
+    /// `retryable: true`; every retried class keeps its own typed reason.
+    #[test]
+    fn retry_exhausted_facts_keep_the_typed_reason_of_each_retried_class() {
+        let details = serde_json::json!({ "status": 503 });
+        for (reason, expected_reason) in [
+            (
+                LlmFailureReason::RateLimited {
+                    retry_after: Some(std::time::Duration::from_secs(7)),
+                },
+                AgentErrorReason::LlmRateLimited {
+                    retry_after_ms: Some(7_000),
+                },
+            ),
+            (
+                LlmFailureReason::RateLimited { retry_after: None },
+                AgentErrorReason::LlmRateLimited {
+                    retry_after_ms: None,
+                },
+            ),
+            (
+                LlmFailureReason::NetworkTimeout { duration_ms: 30 },
+                AgentErrorReason::LlmNetworkTimeout { duration_ms: 30 },
+            ),
+            (
+                LlmFailureReason::CallTimeout { duration_ms: 40 },
+                AgentErrorReason::LlmCallTimeout { duration_ms: 40 },
+            ),
+            (
+                LlmFailureReason::StreamStalled { inactivity_ms: 50 },
+                AgentErrorReason::LlmCallTimeout { duration_ms: 50 },
+            ),
+            (
+                LlmFailureReason::ProviderError(crate::error::LlmProviderError::retryable(
+                    LlmProviderErrorKind::ServerOverloaded,
+                    details.clone(),
+                )),
+                AgentErrorReason::LlmProviderError {
+                    provider_error_kind: LlmProviderErrorKind::ServerOverloaded,
+                    provider_error_retryability: LlmProviderErrorRetryability::Retryable,
+                    provider_error: details.clone(),
+                },
+            ),
+        ] {
+            let error = AgentError::llm("self_hosted", reason, "provider diagnostic");
+            let metadata = TurnErrorMetadata::retry_exhausted_from_llm_error(&error)
+                .expect("a retried class has retry-exhausted facts");
+            assert_eq!(metadata.kind, TurnTerminalCauseKind::RetryExhausted);
+            assert_eq!(metadata.outcome, Some(TurnTerminalOutcome::Failed));
+            assert!(metadata.terminal);
+            assert_eq!(metadata.detail.as_deref(), Some("provider diagnostic"));
+            assert_eq!(metadata.provider.as_deref(), Some("self_hosted"));
+            assert_eq!(metadata.model, None);
+            assert_eq!(metadata.retryable, Some(true));
+            assert_eq!(metadata.reason, Some(expected_reason));
+        }
+
+        // A failure that is not retried has no retry-exhausted facts: it
+        // keeps the `llm_failure` form, and an error that is not an LLM
+        // failure has neither.
+        for reason in [
+            LlmFailureReason::ProviderError(crate::error::LlmProviderError::non_retryable(
+                LlmProviderErrorKind::InvalidRequest,
+                serde_json::json!({ "status": 400 }),
+            )),
+            LlmFailureReason::AuthError,
+            LlmFailureReason::InvalidModel("retired-model".to_string()),
+            LlmFailureReason::ContextExceeded {
+                max: 10,
+                requested: 20,
+            },
+        ] {
+            let error = AgentError::llm("self_hosted", reason, "provider diagnostic");
+            assert_eq!(
+                TurnErrorMetadata::retry_exhausted_from_llm_error(&error),
+                None,
+                "{error}"
+            );
+            assert_eq!(
+                TurnErrorMetadata::from_agent_error(&error).map(|metadata| metadata.kind),
+                Some(TurnTerminalCauseKind::LlmFailure),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            TurnErrorMetadata::retry_exhausted_from_llm_error(&AgentError::InternalError(
+                "not an LLM failure".to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            TurnErrorMetadata::retry_exhausted_from_llm_error(&AgentError::TerminalFailure {
+                outcome: TurnTerminalOutcome::Failed,
+                cause_kind: TurnTerminalCauseKind::RetryExhausted,
+                message: "retry exhausted".to_string(),
+            }),
+            None
+        );
     }
 
     #[test]

@@ -7247,6 +7247,38 @@ mod skill_activation_effect_tests {
             ),
             "{refused:?}"
         );
+
+        // The facts the retry-exhausted constructor builds are refused the
+        // same way beside this `llm_failure` terminal: it can only describe a
+        // terminal the machine itself ended as `retry_exhausted`.
+        let retried_failure = AgentError::llm(
+            "mock",
+            crate::error::LlmFailureReason::RateLimited { retry_after: None },
+            "Rate limited (429)",
+        );
+        let retry_exhausted =
+            crate::TurnErrorMetadata::retry_exhausted_from_llm_error(&retried_failure)
+                .expect("a rate limit is a retried class");
+        assert_eq!(
+            retry_exhausted.kind,
+            crate::TurnTerminalCauseKind::RetryExhausted
+        );
+        agent.terminal_error_metadata = Some(retry_exhausted);
+        agent.runtime_started_run_id = snapshot.terminal_run_id.clone();
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+        agent.record_runtime_terminal_failure_witness(&error);
+
+        let refused = agent
+            .take_runtime_terminal_failure_witness()
+            .expect_err("retry-exhausted facts beside another generated cause are refused");
+        assert!(
+            matches!(
+                &refused,
+                AgentError::InternalError(message)
+                    if message.contains("disagreed with generated terminal truth")
+            ),
+            "{refused:?}"
+        );
     }
 
     #[cfg(feature = "workspace-tests")]

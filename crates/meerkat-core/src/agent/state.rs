@@ -9089,12 +9089,17 @@ where
                 .map_err(|refusal| AgentError::OperationRefused { refusal })?
         };
         self.terminal_error_detail = Some(error.to_string());
-        // Diagnostic fidelity is safe to retain only when the generated cause
-        // remains LlmFailure. Retry exhaustion is a different generated cause
-        // and is intentionally reconstructed from terminal truth.
-        if retry_failure.is_none() {
-            self.terminal_error_metadata = crate::TurnErrorMetadata::from_agent_error(error);
-        }
+        // The typed provider facts ride beside the generated terminal as
+        // diagnostic data, under the cause the machine is about to commit:
+        // `LlmFailure` for a failure that is not retried, `RetryExhausted`
+        // for one that outlasted the retries. The terminal witness refuses
+        // facts whose kind is not the generated cause, so neither form can
+        // relabel the terminal.
+        self.terminal_error_metadata = if retry_failure.is_some() {
+            crate::TurnErrorMetadata::retry_exhausted_from_llm_error(error)
+        } else {
+            crate::TurnErrorMetadata::from_agent_error(error)
+        };
         let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
             run_id: ctx.run_id.clone(),
             failure,

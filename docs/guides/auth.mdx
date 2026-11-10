@@ -238,13 +238,14 @@ on the request after the refresh. A known-unavailable error includes the
 compatible model IDs observed for that account. A Copilot account lists some
 models under an ID that differs from the catalog's only in its separators:
 Claude models with a minor version carry a dot there (`claude-opus-5.5`) and
-a hyphen in the catalog (`claude-opus-5-5`). On a Copilot route either
-spelling works and names the same model: it runs as the catalog model, the
-session records the catalog ID, and the request to Copilot names the
-account's ID. Two IDs match when they are equal once every `.` is read as
-`-`. An ID the account lists exactly always wins, and an ID that matches two
-of the account's entries and none exactly is refused, naming both. An ID
-outside Meerkat's
+a hyphen in the catalog (`claude-opus-5-5`). A session created or resumed on
+a Copilot route takes either spelling, and both name the same model: it runs
+as the catalog model, the session records the catalog ID, and the request to
+Copilot names the account's ID. Two IDs match when they are equal once every
+`.` is read as `-`. An ID the account lists exactly always wins, and an ID
+that matches two of the account's entries and none exactly is refused,
+naming both. A live model switch and a fallback target take the catalog ID
+only. An ID outside Meerkat's
 built-in catalog runs when the request names a route of the account: the
 account's model list defines it, protocol and limits included (see
 [GitHub Copilot configured once](#github-copilot-configured-once)); a

@@ -675,6 +675,79 @@ pub struct CopilotModelSupports {
     pub max_thinking_budget: Option<u32>,
     #[serde(default)]
     pub min_thinking_budget: Option<u32>,
+    /// The reasoning effort levels the entry states for the model
+    /// (`capabilities.supports.reasoning_effort`), as the list words them.
+    /// Every string of the array is kept, a word that names no
+    /// [`EffortLevel`] and a repeated word included, so the statement
+    /// serializes as it was read and two lists that state different words
+    /// compare as different. `None` when the entry states no levels: the
+    /// field is absent, `null`, or anything other than an array. Elements of
+    /// the array that are not strings are skipped. A value of any other
+    /// shape never fails the parse of the model list.
+    /// [`Self::stated_effort_levels`] reads the levels.
+    ///
+    /// [`EffortLevel`]: meerkat_core::model_profile::capabilities::EffortLevel
+    #[serde(default, deserialize_with = "stated_reasoning_effort")]
+    pub reasoning_effort: Option<Vec<String>>,
+}
+
+impl CopilotModelSupports {
+    /// The reasoning effort levels the account's list states for the model:
+    /// `None` when its entry states none, otherwise the stated words that
+    /// name an [`EffortLevel`], each once, in the order the enum declares
+    /// them (`none` to `max`). A word that names no level is left out, so a
+    /// statement of such words only is `Some` and empty, like an empty
+    /// statement: the entry states that the model takes none of the levels
+    /// Meerkat knows.
+    ///
+    /// [`EffortLevel`]: meerkat_core::model_profile::capabilities::EffortLevel
+    #[must_use]
+    pub fn stated_effort_levels(
+        &self,
+    ) -> Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>> {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        let stated = self.reasoning_effort.as_ref()?;
+        let levels: std::collections::BTreeSet<EffortLevel> = stated
+            .iter()
+            .filter_map(|word| EffortLevel::from_wire_str(word))
+            .collect();
+        Some(levels.into_iter().collect())
+    }
+}
+
+/// Reads [`CopilotModelSupports::reasoning_effort`] without ever refusing
+/// the value: an array gives its strings, in order, and skips every other
+/// element; any other value gives `None`.
+fn stated_reasoning_effort<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Statement {
+        Array(Vec<Element>),
+        Other(serde::de::IgnoredAny),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Element {
+        Word(String),
+        Other(serde::de::IgnoredAny),
+    }
+
+    Ok(match Statement::deserialize(deserializer)? {
+        Statement::Array(elements) => Some(
+            elements
+                .into_iter()
+                .filter_map(|element| match element {
+                    Element::Word(word) => Some(word),
+                    Element::Other(_) => None,
+                })
+                .collect(),
+        ),
+        Statement::Other(_) => None,
+    })
 }
 
 /// The state of the account's policy for a model, as `/models` states it.
@@ -1431,6 +1504,330 @@ mod tests {
                 }),
                 "{model}"
             );
+        }
+    }
+
+    /// The reasoning effort levels an account's model list states per model,
+    /// in `capabilities.supports.reasoning_effort`. The fixture list
+    /// (`fixtures/copilot_models_generic.json`) is hand-written and generic:
+    /// invented entries in the shape of the service's list, with only the
+    /// fields Meerkat reads. It names no real model and no account.
+    mod listed_effort_levels {
+        use super::*;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::model_profile::capabilities::EffortLevel as Level;
+
+        const FIXTURE_LIST: &str = include_str!("fixtures/copilot_models_generic.json");
+
+        fn fixture_list() -> Vec<CopilotModel> {
+            serde_json::from_str::<CopilotModelsEnvelope>(FIXTURE_LIST)
+                .expect("the fixture list parses")
+                .data
+        }
+
+        /// What a one-model list states for its model when the entry's
+        /// `reasoning_effort` is `statement`.
+        fn stated_by(statement: serde_json::Value) -> Option<Vec<EffortLevel>> {
+            let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+                "data": [{
+                    "id": "account-model-1",
+                    "capabilities": {"supports": {"reasoning_effort": statement}}
+                }]
+            }))
+            .expect("the model list parses");
+            listed.data[0].capabilities.supports.stated_effort_levels()
+        }
+
+        /// The fixture list parses, and every entry states exactly what the
+        /// fixture writes for it: the ladder with `none`, the ladder without
+        /// it, `low` to `high`, a statement with a word that names no level
+        /// (left out of the levels, kept in the statement), an empty
+        /// statement, and no statement.
+        #[test]
+        fn the_fixture_list_states_levels_per_model() {
+            let models = fixture_list();
+            let stated: Vec<(&str, Option<Vec<EffortLevel>>)> = models
+                .iter()
+                .map(|model| {
+                    (
+                        model.id.as_str(),
+                        model.capabilities.supports.stated_effort_levels(),
+                    )
+                })
+                .collect();
+            let low_to_max = vec![
+                Level::Low,
+                Level::Medium,
+                Level::High,
+                Level::Xhigh,
+                Level::Max,
+            ];
+            let low_to_high = vec![Level::Low, Level::Medium, Level::High];
+            assert_eq!(
+                stated,
+                [
+                    (
+                        "fixture-responses-a",
+                        Some(vec![
+                            Level::None,
+                            Level::Low,
+                            Level::Medium,
+                            Level::High,
+                            Level::Xhigh,
+                            Level::Max,
+                        ])
+                    ),
+                    ("fixture-responses-b", Some(low_to_max.clone())),
+                    ("fixture-responses-c", Some(low_to_high.clone())),
+                    ("fixture-messages-a", Some(low_to_max)),
+                    ("fixture-messages-b", None),
+                    ("fixture-chat-a", Some(low_to_high)),
+                    ("fixture-chat-b", Some(Vec::new())),
+                    ("fixture-legacy-a", None),
+                ]
+            );
+            let with_unknown_word = models
+                .iter()
+                .find(|model| model.id == "fixture-responses-c")
+                .expect("the fixture's entry with a word that names no level");
+            assert_eq!(
+                with_unknown_word.capabilities.supports.reasoning_effort,
+                Some(vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                    "ultra".to_string(),
+                ])
+            );
+        }
+
+        /// A `reasoning_effort` that is not an array of strings states no
+        /// levels, and never fails the list: a failed entry would lose the
+        /// whole account's models. The entries around it keep everything
+        /// else they state.
+        #[test]
+        fn a_malformed_statement_never_fails_the_list() {
+            let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+                "data": [
+                    {"id": "a-word", "capabilities": {"supports": {"reasoning_effort": "high"}}},
+                    {"id": "an-object", "capabilities": {"supports": {"reasoning_effort": {"a": 1}}}},
+                    {"id": "a-number", "capabilities": {"supports": {"reasoning_effort": 7}}},
+                    {"id": "a-null", "capabilities": {"supports": {"reasoning_effort": null}}},
+                    {
+                        "id": "a-mixed-array",
+                        "supported_endpoints": ["/responses"],
+                        "capabilities": {
+                            "limits": {"max_output_tokens": 16},
+                            "supports": {
+                                "streaming": true,
+                                "reasoning_effort": [1, "low", null],
+                                "tool_calls": true
+                            }
+                        }
+                    },
+                    {
+                        "id": "a-nested-array",
+                        "capabilities": {"supports": {
+                            "reasoning_effort": [["high"], {"level": "max"}, true, 2.5, "medium"]
+                        }}
+                    }
+                ]
+            }))
+            .expect("a malformed statement never fails the list");
+            let statements: Vec<_> = listed
+                .data
+                .iter()
+                .map(|model| model.capabilities.supports.stated_effort_levels())
+                .collect();
+            assert_eq!(
+                statements,
+                [
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec![EffortLevel::Low]),
+                    Some(vec![EffortLevel::Medium]),
+                ]
+            );
+            let mixed = &listed.data[4];
+            assert_eq!(
+                mixed.supported_endpoints,
+                Some(vec![CopilotEndpoint::Responses])
+            );
+            assert_eq!(mixed.capabilities.limits.max_output_tokens, Some(16));
+            assert_eq!(mixed.capabilities.supports.streaming, Some(true));
+            assert_eq!(mixed.capabilities.supports.tool_calls, Some(true));
+        }
+
+        /// A word that names no level is left out, a repeated level counts
+        /// once, and the levels come in the order of [`EffortLevel`],
+        /// whatever order the list states them in.
+        #[test]
+        fn words_that_are_not_levels_are_left_out() {
+            assert_eq!(
+                stated_by(serde_json::json!(["low", "ultra", "x_high", "high", "low"])),
+                Some(vec![EffortLevel::Low, EffortLevel::High])
+            );
+            assert_eq!(
+                stated_by(serde_json::json!([
+                    "max", "HIGH", "none", " low", "minimal"
+                ])),
+                Some(vec![
+                    EffortLevel::None,
+                    EffortLevel::Minimal,
+                    EffortLevel::Max
+                ])
+            );
+            assert_eq!(stated_by(serde_json::json!(["ultra"])), Some(Vec::new()));
+        }
+
+        /// An empty statement is a statement: the model takes no level. An
+        /// entry without the field states nothing.
+        #[test]
+        fn an_empty_statement_is_stated_and_empty() {
+            assert_eq!(stated_by(serde_json::json!([])), Some(Vec::new()));
+            let silent: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+                "data": [
+                    {"id": "account-model-1", "capabilities": {"supports": {"streaming": true}}},
+                    {"id": "account-model-2"}
+                ]
+            }))
+            .expect("the model list parses");
+            for model in &silent.data {
+                assert_eq!(
+                    model.capabilities.supports.stated_effort_levels(),
+                    None,
+                    "{}",
+                    model.id
+                );
+            }
+            assert_ne!(stated_by(serde_json::json!([])), None);
+        }
+
+        /// The statement is kept as the list words it, so it serializes as
+        /// it was read: words that name no level and repeated words stay.
+        #[test]
+        fn a_supports_block_round_trips_its_statement() {
+            let stated: CopilotModelSupports = serde_json::from_value(serde_json::json!({
+                "streaming": true,
+                "reasoning_effort": ["low", "ultra", 3, "low", "max"]
+            }))
+            .expect("a supports block");
+            assert_eq!(
+                stated.reasoning_effort,
+                Some(vec![
+                    "low".to_string(),
+                    "ultra".to_string(),
+                    "low".to_string(),
+                    "max".to_string()
+                ])
+            );
+            let wire = serde_json::to_value(&stated).expect("serializes");
+            assert_eq!(
+                wire["reasoning_effort"],
+                serde_json::json!(["low", "ultra", "low", "max"])
+            );
+            let read_back: CopilotModelSupports =
+                serde_json::from_value(wire).expect("reads its own form");
+            assert_eq!(read_back, stated);
+
+            let silent = CopilotModelSupports {
+                streaming: Some(true),
+                ..Default::default()
+            };
+            assert_eq!(silent.reasoning_effort, None);
+            let read_back: CopilotModelSupports =
+                serde_json::from_value(serde_json::to_value(&silent).expect("serializes"))
+                    .expect("reads its own form");
+            assert_eq!(read_back, silent);
+        }
+
+        /// The statement belongs to the entry, whatever endpoint serves the
+        /// model: the fixture's Responses, Messages and Chat Completions
+        /// entries each give the statement written for them through the
+        /// account's snapshot, and the entry that states neither an endpoint
+        /// list nor levels gives none.
+        #[test]
+        fn fixture_entries_keep_their_statement_on_every_endpoint() {
+            let snapshot =
+                CopilotModelSnapshot::from_models(fixture_list()).expect("unique model ids");
+            let listed = |id: &str| snapshot.model(id).expect("a fixture entry");
+
+            let on_responses = listed("fixture-responses-a");
+            assert_eq!(
+                on_responses.route_for(Provider::OpenAI),
+                Some(CopilotEndpoint::Responses)
+            );
+            assert_eq!(
+                on_responses.capabilities.supports.stated_effort_levels(),
+                Some(vec![
+                    Level::None,
+                    Level::Low,
+                    Level::Medium,
+                    Level::High,
+                    Level::Xhigh,
+                    Level::Max,
+                ])
+            );
+
+            let on_messages = listed("fixture-messages-a");
+            assert_eq!(
+                on_messages.route_for(Provider::Anthropic),
+                Some(CopilotEndpoint::Messages)
+            );
+            assert_eq!(
+                on_messages.capabilities.supports.adaptive_thinking,
+                Some(true)
+            );
+            assert_eq!(
+                on_messages.capabilities.supports.stated_effort_levels(),
+                Some(vec![
+                    Level::Low,
+                    Level::Medium,
+                    Level::High,
+                    Level::Xhigh,
+                    Level::Max,
+                ])
+            );
+
+            let budget_only = listed("fixture-messages-b");
+            assert_eq!(
+                budget_only.route_for(Provider::Anthropic),
+                Some(CopilotEndpoint::Messages)
+            );
+            assert_eq!(
+                (
+                    budget_only.capabilities.supports.min_thinking_budget,
+                    budget_only.capabilities.supports.max_thinking_budget,
+                ),
+                (Some(1000), Some(20000))
+            );
+            assert_eq!(
+                budget_only.capabilities.supports.stated_effort_levels(),
+                None
+            );
+
+            let on_chat_completions = listed("fixture-chat-a");
+            for provider in [Provider::Gemini, Provider::OpenAI] {
+                assert_eq!(
+                    on_chat_completions.route_for(provider),
+                    Some(CopilotEndpoint::ChatCompletions),
+                    "{provider:?}"
+                );
+            }
+            assert_eq!(
+                on_chat_completions
+                    .capabilities
+                    .supports
+                    .stated_effort_levels(),
+                Some(vec![Level::Low, Level::Medium, Level::High])
+            );
+
+            let silent = listed("fixture-legacy-a");
+            assert_eq!(silent.supported_endpoints, None);
+            assert_eq!(silent.capabilities.supports.reasoning_effort, None);
+            assert_eq!(silent.capabilities.supports.stated_effort_levels(), None);
         }
     }
 }

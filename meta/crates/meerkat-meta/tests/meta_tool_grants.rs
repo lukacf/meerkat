@@ -937,8 +937,9 @@ async fn meta_tool_grant_refusals_are_typed() {
 }
 
 /// An identity created at runtime is store-owned (its record is its row in
-/// the mob's identity store) and Meta's verbs do not act on it yet: a grant
-/// to it is `subject_unknown`, although Core's roster holds its member.
+/// the mob's identity store) and Meta's grant methods do not act on it yet:
+/// a grant to it is `subject_unknown`, although the identity runtime serves
+/// it and Core's roster holds its member.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_are_grantable() {
     let temp = tempfile::tempdir().unwrap();

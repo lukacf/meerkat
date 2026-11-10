@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Download one asset of a public GitHub release through the GitHub API with
+# the job's own token, for a CI step that installs a pinned tool from a
+# release:
+#
+#   scripts/ci-release-asset-download OWNER/REPO TAG ASSET OUTPUT
+#
+# The step passes the token as `GH_TOKEN: ${{ github.token }}` (a fork's pull
+# request gets a read-only token, which is enough for a public release) and
+# unsets it as soon as this returns. `gh release download` finds the asset
+# through the API and fetches it from the API's asset URL, an authenticated
+# request. Exit 0 once OUTPUT holds the asset. Any other exit leaves no OUTPUT
+# behind and says why on stderr (no token, no gh, or three failed tries); the
+# step then downloads the release's anonymous URL itself, as it did before,
+# and checks what it got exactly as before, whichever way it came.
+#
+# The anonymous URL, https://github.com/OWNER/REPO/releases/download/TAG/ASSET,
+# is served by the web host, and a token sent there does not make it an API
+# request: on 2026-11-08 that host answered anonymous downloads with 504 for
+# hours, the ones an action sent with the job's token in an Authorization
+# header too, while `gh release download` kept working in the same jobs.
+#
+# gh reads ASSET as a pattern, so a name with a glob character is refused:
+# the asset is always one exact name.
+set -euo pipefail
+
+usage() {
+  echo "usage: ci-release-asset-download OWNER/REPO TAG ASSET OUTPUT" >&2
+  exit 2
+}
+
+[[ $# -eq 4 ]] || usage
+repo="$1"
+tag="$2"
+asset="$3"
+output="$4"
+if [[ ! "${repo}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ || -z "${tag}" || -z "${asset}" || -z "${output}" ]]; then
+  usage
+fi
+case "${asset}" in
+  */* | *\** | *\?* | *\[* | *\\*)
+    echo "ci-release-asset-download: '${asset}' is not one exact asset name" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${GH_TOKEN:-}" ]]; then
+  echo "ci-release-asset-download: no job token, so ${asset} is not fetched through the API" >&2
+  exit 1
+fi
+if ! command -v gh > /dev/null 2>&1; then
+  echo "ci-release-asset-download: no gh on PATH, so ${asset} is not fetched through the API" >&2
+  exit 1
+fi
+
+for attempt in 1 2 3; do
+  if gh release download "${tag}" --repo "${repo}" --pattern "${asset}" --output "${output}" --clobber; then
+    echo "ci-release-asset-download: ${asset} of ${repo} ${tag} fetched through the API with the job token"
+    exit 0
+  fi
+  rm -f -- "${output}"
+  if (( attempt < 3 )); then
+    sleep "$((attempt * 2))"
+  fi
+done
+echo "ci-release-asset-download: gh release download of ${asset} of ${repo} ${tag} failed 3 times" >&2
+exit 1

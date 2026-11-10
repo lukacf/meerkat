@@ -7219,13 +7219,25 @@ mod tests {
             params: None,
             id: Some(RpcId::Num(11)),
         };
-        let healthy = serde_json::to_value(
-            router
-                .dispatch(health_request())
-                .await
-                .expect("health response"),
-        )
-        .expect("serialize health");
+        // While the session's first turn still holds the session registry or
+        // the session's authority, a probe that must not block reports
+        // `unreadable:<dimension>` at `degraded` for that one scrape, and the
+        // next successful read clears it. Wait (bounded) for a read that saw
+        // every dimension ok before the fault is injected.
+        let ok_by = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let healthy = loop {
+            let read = serde_json::to_value(
+                router
+                    .dispatch(health_request())
+                    .await
+                    .expect("health response"),
+            )
+            .expect("serialize health");
+            if read["result"]["status"] == "ok" || tokio::time::Instant::now() >= ok_by {
+                break read;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
         assert_eq!(
             healthy["result"]["checks"]["session_durability"], "ok",
             "a freshly created session is durability-ready: {healthy}"

@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -196,6 +196,11 @@ permits neither. A model-only launch tool can still own a view. App actions use
 fresh native authorization, pre- and post-tool hooks and normal execution
 policy, including review when required. A post-hook refusal withholds the result
 while preserving already settled effects. View-only users cannot invoke them.
+An app action runs for the Console caller who makes it: on a console that
+requires sign-in, a person's action carries that person as its original
+requester, and on an open console, or for a service or a token principal, it
+carries none. It never borrows the requester of the model run whose result
+the app shows.
 
 App resource reads and tool execution can proceed while the model turn is still
 running. A response with no session effects or hook notices does not wait for
@@ -248,8 +253,16 @@ Gateway custody also differs. `rpc_gateway` installs a SQLite console timeline
 store only when its init request configures `persistent_state`; long-lived
 `--persistent` process mode alone does not make the timeline durable. Without
 persistent state, its timeline stays in memory. The console-only
-`meta_gateway` also keeps its timeline in memory. Do not infer timeline
-durability from the presence of the same browser shell and route names.
+`meta_gateway` installs the same store in its state directory when it runs
+with `persistent_sessions: true`, and keeps its timeline in memory without
+them. Do not infer timeline durability from the presence of the same browser
+shell and route names.
+
+The console audit log (`meta/console/audit`, which `audit.view` reads) and
+the gating state follow the metadata store the same way: durable for
+`rpc_gateway` over persistent state or a host store realm and for
+`meta_gateway` with persistent sessions, kept for the process otherwise.
+Both reads report it as `retention`.
 
 ## Layout
 
@@ -392,8 +405,12 @@ counts.
 | --- | --- |
 | Pending | Current requests, each marked **For you** or **Waiting for** its approver, with Approve, Reject, and Escalate controls when the caller can decide them; requests decided elsewhere stay, saying by whom. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
-| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
+| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. A decision whose record names its verified decider reads "Decided by" that principal, the approver label it decided as, and the assurance it was authenticated with (for example "alice@example.test (as Release manager) - person authenticated"); an older record keeps the approver label. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
+
+When the gateway keeps the gating records in its memory (`meta/gating/audit`
+reports `retention: "process"`), the Audit and Auto tabs say so: "Kept in the
+gateway's memory: decisions from before a gateway restart may be missing."
 
 Risk tiers display in words with their code: R0 Minimal, R1 Low, R2 Elevated and
 R3 High. A request's chip reads "High risk", with the tier code in its tooltip, and
@@ -464,18 +481,74 @@ as they were.
 
 - The side chat runs with the agent's role, profile and model overrides and
   tools, and inherits the agent's labels.
-- Its audience is exactly the agent's: every agent check on a side chat is
-  the agent's, so whoever may see the agent, send to it or retire it may do
-  the same with its side chats, a deny on the agent hides them, and a grant
-  on the side chat's own name grants nothing (see
-  [Side chats](/meta/concepts/access-control#side-chats)).
+- It records who opened it: your console principal, in its
+  `side_chat_creator` label (nothing on an open console when you sent no
+  token). The record grants nothing, and the console shows it only to you
+  and to the admins of an enforced access policy: other viewers of the side
+  chat see it without the label.
+- On a console with sign-in, a side chat is private to the person who
+  opened it: its audience is the agent's narrowed to that person, plus the
+  access admins (`admins`). Everyone else meets it on no surface (sidebar,
+  member lists, topology, timeline, streams, events, flow runs, peer lists,
+  inspection, memory, the audit log, the runtime's routing, delivery,
+  reconcile and storage reads). A request of theirs that names it, to
+  read it, send to it, close it or fork it, gets the answer that method
+  gives a member that does not exist (for example `-32602` `member not
+  found` from `meta/get_member`, or `404` `unknown_identity` from
+  `POST /console/send`); a request that would record something for it (an
+  announcement subscription, a schedule, a remembered fact, a topology edge,
+  a WorkGraph goal, attention target or supervisor, whether it names the
+  member, its owner key or its session) is refused as naming an unknown
+  member (`-32001`). This holds with or without an access configuration
+  (the SDK gateway's stdio plane is the trusted host plane: see
+  [Known limitations](/meta/concepts/access-control#known-limitations)). Its
+  header says who can see it:
+  **Private: only you and access admins can see it.**, or, to an access
+  admin, that it is private to the person who opened it. The members a
+  private side chat creates (a helper or member its turn spawns, the members
+  of a mob it creates and the helpers `delegate` runs for it, a `fork_off`
+  child, a helper forked from it) are private to the same person too, after
+  the side chat is closed as well. A private side chat convenes no council:
+  its `council` call is refused as a policy denial
+  (`private_member_council`), since the council's participants would carry
+  its conversation to members others share. The schedules its agent writes
+  are aimed at itself only (`private_member_schedule_target` refuses any
+  other target), and the schedule tools of an agent not private to you
+  neither list, read nor change them. A WorkGraph goal for it is refused for
+  you too (`private_member_workgraph_target`): it is built without WorkGraph
+  tools, so no binding can serve it.
+- On a console without sign-in, a side chat stays shared, and so does one
+  opened by a caller who is not a signed-in person (a service token) or
+  before side chats were private. A shared side chat's audience is exactly
+  the agent's: every agent check on it is the agent's, so whoever may see
+  the agent, send to it or retire it may do the same with its side chats, a
+  deny on the agent hides them, and a grant on the side chat's own name
+  grants nothing (see [Side chats](/meta/concepts/access-control#side-chats)).
+  Its header says it is shared.
+- A side chat's memory is its own: its `memory` tool writes to the side
+  chat's identity, never to the agent it was forked from. The memory
+  distiller never reads a private side chat's conversation, and the memory
+  steward never dreams over its memory or promotes any of it. A private
+  side chat's `memory` tool proposes nothing to its mob, and no one else is
+  shown a proposal it wrote.
+- A private side chat is where personal accounts on MCP servers are used:
+  a server the operator marked personal acts with the account of the person
+  who opened the side chat, for that person's own messages only (see
+  [Personal accounts on MCP servers](/meta/reference/configuration#personal-accounts-on-mcp-servers)).
+  An access admin who revokes a person's sessions suspends that person's
+  accounts in the side chats they opened before the revocation, while a side
+  chat opened after a fresh sign-in uses them again and the credentials are
+  kept.
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,
   `role_wiring`), so no agent seated after it is wired to it either, and the
   definition-wiring reconcile and the topology's declared edges leave it
   out, as they leave out every member exempt from those rules. A host's own
-  edge discovery policy is never handed one either.
+  edge discovery policy is never handed one either. No role-wide flow step
+  dispatches to it: only a run that names it in its `role_targets` reaches
+  it. A durable fork of it (its `fork_off` child, a helper forked from it)
+  is seated exempt in the same way.
 - It is listed under its agent in the sidebar, marked **Side chat**, and is
   kept until you close it: across a console reload and a gateway restart. It
   never idle-retires. **Close side chat** in its pane retires it, which, as
@@ -516,6 +589,42 @@ as they were.
 
 The fork takes the agent's conversation as it is now. Side chats are
 `meta/fork_member` on the console RPC.
+
+### Private replies
+
+Some replies are meant for the one person who asked, such as an answer that
+a data owner released after reviewing it. Such a reply never lands in a
+shared conversation:
+
+- A request made in a conversation private to the person (their own side
+  chat on a console with sign-in, or a member such a side chat created) gets
+  the reply in that conversation, which only they and the access admins see.
+- A request made in a shared agent gets the reply as an item of the person's
+  own attention list (`meta/console/attention`), which only that person
+  reads and dismisses (`meta/console/attention/dismiss`). Nothing is added to
+  the agent's conversation, and no other viewer's stream carries it. So does
+  a request whose private conversation is gone by the time the reply comes.
+
+The console counts the person's items in **Needs you** and lists them in its
+inbox after the approvals. Each names the agent that answered and opens the
+chat it answers, and **Dismiss** takes it off the list (a read-only console
+offers no Dismiss). A reply whose text a payload policy hid reads
+**Content hidden by policy** and is dismissed the same way. A reply in the
+person's own conversation reads there as the agent's message.
+
+An item shows no more of its reply than the conversation would: the
+console's payload policy applies as the list is read, and an item is listed
+only while the person may view the agent it came from.
+
+Each console send records where it came from (its `user_input` frame's
+`thread`): the agent, the interaction, and who may read the replies to it.
+Only a person signed in on a console with sign-in can receive private
+replies: a request from an open console, a service or a token that names no
+person has no private reply route, and a reply to it is refused. The
+attention list is kept in the realm's metadata store, as the console audit
+log is: across restarts for `rpc_gateway` over a state directory or a host
+store realm and for `meta_gateway` with persistent sessions, and for the
+life of the process otherwise.
 
 ### Schedules
 
@@ -1021,9 +1130,36 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     `connector`, `scheduler`, `policy`, `flow` or `system`. It is stored on
     the `user_input` frame, and the transcript labels the turn from it
     ("Operator", "Operator probe", "Scheduled turn", ...). Any other value
-    is refused. Automated checks such as release-gate probes should send
+    is refused. `scheduler`, `connector`, `flow`, `policy` and `system` belong
+    to Meerkat's own internal emitters, such as a schedule's fire, so a send
+    over HTTP that declares one is refused (400 `reserved_origin_kind`).
+    Automated checks such as release-gate probes should send
     `operator_probe`; the stock console sends `operator`. A declared
     `origin_kind` is part of the idempotent request, so a retry must repeat it.
+
+    The `user_input` frame names its `sender`, set by the Console from the
+    caller it authenticated (the connection), never from the request:
+    `kind`, `assurance`, `display_name` and `caller_scope`, as
+    `meta/console/whoami` reports the caller. A client shows its own
+    messages by comparing the frame's `caller_scope` with its own. An
+    automated check names itself by sending with its service token. On a
+    console that requires sign-in, a person's send carries the person's
+    qualified principal to the agent's run as the run's original requester
+    (Meerkat's `ToolDispatchContext::requester`); the stored frame keeps it
+    and no view returns it, neither on the send's frame nor on the run's
+    transcript identities that the session history's frames, the run's
+    event frames and the agent and mob event streams show. Other callers'
+    sends carry none, and so does
+    every ungoverned send on an Open console (see
+    [Access control](/meta/concepts/access-control#requesters-on-an-open-console)).
+
+    On a console that requires sign-in, the agent's model also reads each
+    person's message with a sender label: an injected-context row "Message
+    from" and the person's display name, right before the message, a steer
+    included. The agent tells people apart from it without parsing the
+    message. A service's, a token principal's and an anonymous caller's
+    messages, a schedule's fire and every message on an Open console carry
+    no label.
 
     `idempotency_key` must be unique per send; the stock console mints one
     UUID per send. An idempotent retry reuses the same key in the same
@@ -1147,6 +1283,9 @@ Primary RPC methods on `/console/rpc`:
   an agent's console schedules (see [Schedules](#schedules)); the list is
   gated by `agent.view` and the writes by `agent.send` and `schedule.manage`
   for the agent, and each send is a Console send by the schedule's sender
+- `meta/console/attention` and `meta/console/attention/dismiss` - the
+  caller's own attention items (see [Private replies](#private-replies)); a
+  caller reads and dismisses only its own
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

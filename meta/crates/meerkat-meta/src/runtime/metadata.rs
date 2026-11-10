@@ -660,9 +660,54 @@ impl LifecycleEffectKind {
     }
 }
 
+/// Why a lifecycle side effect ended without running to its answer.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LifecycleEffectFailureCause {
+    /// It failed: each attempt it was allowed answered an error or did not
+    /// answer within its deadline, or the host answered it with an error.
+    #[default]
+    Failed,
+    /// It did not run: the realm's agent memory background budget did not
+    /// admit its run within the side effect's wait for it. A denial of the
+    /// budget is no failed attempt; the attempts recorded beside this cause
+    /// are those that ran and failed before it.
+    BudgetBusy,
+}
+
+impl LifecycleEffectFailureCause {
+    /// The cause's wire name: `failed` or `budget_busy`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Failed => "failed",
+            Self::BudgetBusy => "budget_busy",
+        }
+    }
+
+    /// Whether the side effect failed, the cause a record or an event
+    /// written without one reads as. Such a cause is left off the wire.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed)
+    }
+}
+
 /// A lifecycle side effect Core's journal owed an identity that failed: its
 /// every attempt missed its deadline or failed, or the host answered it with
-/// an error. The projection recorded it before its cursor moved past the
+/// an error; or that did not run, the realm's agent memory background
+/// budget not admitting its run within its wait (its `cause`). The
+/// projection recorded it before its cursor moved past the
 /// event that owed it, and reported it on the error hook; the side effect
 /// is not run again, except a compaction harvest, whose fallback runs
 /// after it and removes the record once it harvested the discards. Kept in
@@ -692,6 +737,14 @@ pub struct LifecycleEffectFailure {
     pub attempts: u32,
     /// What the last attempt failed with.
     pub error: String,
+    /// Why it ended: it failed, or the realm's background budget kept it
+    /// from running. Left out while it is `failed`, so a record written
+    /// before the field existed reads as failed.
+    #[serde(
+        default,
+        skip_serializing_if = "LifecycleEffectFailureCause::is_failed"
+    )]
+    pub cause: LifecycleEffectFailureCause,
     /// When the failure was recorded, in Unix milliseconds.
     pub recorded_at_ms: u64,
 }
@@ -723,6 +776,7 @@ impl LifecycleEffectFailure {
             session_id: None,
             attempts,
             error: error.into(),
+            cause: LifecycleEffectFailureCause::Failed,
             recorded_at_ms,
         }
     }
@@ -731,6 +785,13 @@ impl LifecycleEffectFailure {
     #[must_use]
     pub fn with_session(mut self, session_id: Option<meerkat_core::types::SessionId>) -> Self {
         self.session_id = session_id;
+        self
+    }
+
+    /// The failure, with why it ended (`failed` unless set).
+    #[must_use]
+    pub fn with_cause(mut self, cause: LifecycleEffectFailureCause) -> Self {
+        self.cause = cause;
         self
     }
 }

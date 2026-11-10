@@ -646,6 +646,116 @@ async fn a_family_grant_opens_a_gated_family_of_a_meta_member_and_its_revoke_clo
     rig.shutdown().await;
 }
 
+/// An identity grant answers `applies`, whether it applies to the member's
+/// running build, as Meerkat's own `tool_grants/grant` answers it: while no
+/// build of the member is live here (before its first delivery) a grant
+/// applies `at_next_build`, and the member's first build opens the tool;
+/// once that build is live and gates the tool, a grant applies `now`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_grant_answers_whether_it_applies_to_the_members_running_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let params = json!({
+        "identity": IDENTITY,
+        "target": tool_target(),
+        "duration_ms": TEN_MINUTES_MS,
+    });
+
+    let before = rig.grant(params.clone()).await;
+    assert_eq!(
+        before["applies"],
+        json!("at_next_build"),
+        "no build of the member is live here before its first delivery: {before:#?}"
+    );
+    let open = rig.probe().await;
+    assert_eq!(
+        grant_refusal(&open),
+        None,
+        "the member's first build opens the grant: {open}"
+    );
+
+    let live = rig.grant(params).await;
+    assert_eq!(
+        live["applies"],
+        json!("now"),
+        "the member's live build gates the tool: {live:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// An identity's list answers the member's `gate`, as Meerkat's own
+/// `tool_grants/list` answers it: `next_build`, the gate the member's next
+/// build resolves, and `running`, what its live build gates (`null` while no
+/// build of the member is live here). A retired identity's list answers its
+/// history without a gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_list_answers_the_members_gate_and_a_retired_identitys_none() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let list = json!({"identity": IDENTITY, "include_ended": true});
+
+    let idle = rig.rpc("meta/tool_grants/list", list.clone()).await;
+    assert!(idle["error"].is_null(), "{idle:#?}");
+    let gate = &idle["result"]["gate"];
+    assert!(
+        gate.is_object(),
+        "the list answers the member's gate: {idle:#?}"
+    );
+    assert_eq!(
+        gate["next_build"]["gated"]["tools"],
+        json!([GATED_TOOL]),
+        "the next build gates the tool: {idle:#?}"
+    );
+    assert_eq!(
+        gate["running"],
+        Value::Null,
+        "no build of the member is live here before its first delivery: {idle:#?}"
+    );
+
+    let closed = rig.probe().await;
+    assert_eq!(
+        grant_refusal(&closed),
+        Some("tool_grant_required"),
+        "{closed}"
+    );
+    let live = rig.rpc("meta/tool_grants/list", list.clone()).await;
+    assert!(live["error"].is_null(), "{live:#?}");
+    assert_eq!(
+        live["result"]["gate"]["running"]["gated"]["tools"],
+        json!([GATED_TOOL]),
+        "the running gate names the tool the live build gates: {live:#?}"
+    );
+    assert_eq!(
+        live["result"]["gate"]["next_build"]["gated"]["tools"],
+        json!([GATED_TOOL]),
+        "{live:#?}"
+    );
+
+    rig.grant(json!({
+        "identity": IDENTITY,
+        "target": tool_target(),
+        "duration_ms": TEN_MINUTES_MS,
+    }))
+    .await;
+    rig.runtime
+        .mob_handle()
+        .retire(meerkat_meta::member_comms_id::roster_member_id_for_identity(IDENTITY))
+        .await
+        .expect("Core retires the member");
+    let retired = rig.rpc("meta/tool_grants/list", list).await;
+    assert!(retired["error"].is_null(), "{retired:#?}");
+    assert!(
+        retired["result"].get("gate").is_none(),
+        "a retired identity's list answers no gate: {retired:#?}"
+    );
+    assert_eq!(
+        retired["result"]["grants"].as_array().map(Vec::len),
+        Some(1),
+        "its history stays readable: {retired:#?}"
+    );
+    rig.shutdown().await;
+}
+
 /// A registered identity Core does not hold (Core retired its member, as a
 /// host or a seal does) is granted: the grant seats it through the declared
 /// apply's one-identity door, Dormant, and wakes nothing; the member's first

@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [128b3095a4b6](https://github.com/lukacf/meerkat/commit/128b3095a4b6debb9d10f611c7e6622e502ae86d) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -12,7 +12,7 @@ The Rust crate `meerkat-meta` is the primary interface for Meta. All other inter
 
 ```toml Cargo.toml
 [dependencies]
-meerkat-meta = "0.9.10"
+meerkat-meta = "0.9.11"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
@@ -351,33 +351,31 @@ calls them at these points:
   the identity's fresh life, and when a declared role migration moves it to
   its new role. That call publishes the identity's customizer tools and
   records the customized spawn spec in the seat or rotation. It builds
-  nothing, except where the seat step builds the member from it: a seat
-  that revives the archived session of a member Core retired after it was
-  built (a respawn, for example), and a declared role migration's restamp
-  of the member onto its session. `meta/identity/resolved_tools`, which
-  reports the tools a build actually resolved, answers `no_build_recorded`
-  until the member's first build. Each of
-  these calls gets the runtime's real context: every registered identity as
-  `active_peers`, the roster's managed edges, and the runtime services. It
-  also runs at every build of the member (each wake Core makes), right
+  nothing, except a declared role migration's restamp of the member onto
+  its session, which builds the member from it: a seat that revives the
+  archived session of a member Core retired after it was built (a respawn,
+  for example) is a Dormant seat and builds nothing.
+  `meta/identity/resolved_tools`, which reports the tools a build actually
+  resolved, answers `no_build_recorded` until the member's first build. Each
+  of these calls gets the runtime's real context: every registered identity
+  as `active_peers`, the roster's managed edges, and the runtime services.
+  It also runs at every build of the member (each wake Core makes), right
   before the build. A start over identities Core already holds calls it for
   none of them until they are built.
 - `after_create` is called after each seat, fresh life or migration that
   ran `customize_build`, with the session the identity is bound to, as at an
   identity's creation. A wake's build never calls it.
 
-A respawn of a built member calls `customize_build` once and `after_create`
-once, with the session the respawn keeps, and Core builds the member once,
-with that call's tools: Core keeps the retired member's session archived, so
-the respawn's seat revives the member on it, and Core's wake then finds the
-member live. The same holds for a materialization, a warm or a delivery
-whose seat step builds the member: the member stays live for it. The roster
-pass asks Core to release a member its seat step built, so that identity is
-then like a lazily seated one. A lazily seated identity (one seated with
-nothing built yet) gets two `customize_build` calls before its first run:
-its seat's, then its first build's. A respawn of a member that was never
-built does the same: its seat calls `customize_build`, and its build calls
-it again.
+A respawn of a built member seats it again on the session Core kept
+archived when it retired it, Dormant and building nothing, and the wake that
+follows builds it once, as for a lazily seated identity: `after_create` is
+told once, with the session the respawn keeps. A materialization, a warm or
+a delivery of an identity Core seats again on its archived session builds
+the member once, at its wake, and the roster pass builds nothing. A lazily
+seated identity (one seated with nothing built yet) gets two
+`customize_build` calls before its first run: its seat's, then its first
+build's. A respawn does the same: its seat calls `customize_build`, and its
+build calls it again.
 
 `after_create` is best-effort: the seat or build stands whatever it answers.
 The gateway calls it once Core's journal records the seat, with no lock of
@@ -404,9 +402,9 @@ that never answers delays later side effects by at most its bound. Calls are
 attempted at least once: a gateway stopped between the seat and the call
 (killed, or a shutdown whose share of the drain window closed first) makes
 it at its next start when its metadata store is durable (`rpc_gateway` over
-a state directory or a host store realm; `meta_gateway` keeps it in memory,
-so there it holds within the process only), and one stopped during the call
-may make it again, so key what it does by the session. The context's `model`
+a state directory or a host store realm; a launch that keeps it in memory
+holds it within the process only), and one stopped during the call may make
+it again, so key what it does by the session. The context's `model`
 is the build's model, else the model of the profile when the mob definition
 declares it inline; it is empty for a realm-bound profile the build sets no
 model for. A call made at a later start reports the identity's roster labels

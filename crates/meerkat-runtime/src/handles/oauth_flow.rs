@@ -27,7 +27,7 @@ use crate::store::RuntimeStore;
 use super::RuntimeAuthLeaseHandle;
 use super::auth_lease::{AuthLeaseReleaseObserver, AuthLeaseReleasePermit, ReleasedOAuthFlows};
 
-type StoreSlot = Arc<Mutex<Option<Weak<dyn RuntimeStore>>>>;
+type StoreSlot = Arc<BoundStores>;
 type PayloadLock = Arc<Mutex<()>>;
 type RemovedBrowserSnapshotKeys = Vec<BrowserSnapshotKey>;
 type RemovedDeviceSnapshotKeys = Vec<DeviceSnapshotKey>;
@@ -47,20 +47,83 @@ fn expires_at_millis(duration: Duration) -> Result<u64, OAuthFlowError> {
         .ok_or(OAuthFlowError::DeviceExpiryOutOfRange)
 }
 
+/// The runtime stores an OAuth flow authority persists through, newest last.
+///
+/// Every store bound here is one authority: a machine bundle binds each handle
+/// of its store, such as a second `SqliteRuntimeStore` over the same database.
+/// A lookup takes the newest bound store that is still open and forgets the
+/// dropped ones, so dropping a later handle leaves the earlier ones serving.
+/// Only weak references are held: no store is kept open. With no store bound
+/// the authority is ephemeral and persists nothing; once every bound store is
+/// dropped, persistence fails.
+#[derive(Debug)]
+struct BoundStores {
+    stores: Mutex<Vec<Weak<dyn RuntimeStore>>>,
+}
+
+/// What a lookup of [`BoundStores`] finds.
+enum BoundStore {
+    /// No store was ever bound.
+    Unbound,
+    /// Every bound store was dropped.
+    Dropped,
+    /// The newest bound store that is still open.
+    Open(Arc<dyn RuntimeStore>),
+}
+
+impl BoundStores {
+    fn new(store: Option<Weak<dyn RuntimeStore>>) -> Self {
+        Self {
+            stores: Mutex::new(store.into_iter().collect()),
+        }
+    }
+
+    /// Binds `store` as the newest; binding a bound store again moves it
+    /// there. The dropped stores are forgotten.
+    fn bind(&self, store: &Arc<dyn RuntimeStore>) {
+        let store = Arc::downgrade(store);
+        let mut stores = self
+            .stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        stores.retain(|bound| bound.strong_count() > 0 && !Weak::ptr_eq(bound, &store));
+        stores.push(store);
+    }
+
+    /// The newest bound store that is still open. Finding one forgets the
+    /// dropped stores; when every bound store was dropped they are kept, so
+    /// each later lookup finds [`BoundStore::Dropped`] too, never
+    /// [`BoundStore::Unbound`].
+    fn lookup(&self) -> BoundStore {
+        let mut stores = self
+            .stores
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stores.is_empty() {
+            return BoundStore::Unbound;
+        }
+        let Some(open) = stores.iter().rev().find_map(Weak::upgrade) else {
+            return BoundStore::Dropped;
+        };
+        stores.retain(|bound| bound.strong_count() > 0);
+        BoundStore::Open(open)
+    }
+}
+
 fn load_oauth_snapshot_for_release(
     store: &StoreSlot,
     operation: &'static str,
 ) -> Result<Option<OAuthFlowRegistrySnapshot>, DslTransitionError> {
-    let store = store
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    let Some(store) = store else {
-        return Ok(None);
+    let store = match store.lookup() {
+        BoundStore::Unbound => return Ok(None),
+        BoundStore::Dropped => {
+            return Err(DslTransitionError::no_matching(
+                operation,
+                "runtime store is no longer available",
+            ));
+        }
+        BoundStore::Open(store) => store,
     };
-    let store = store.upgrade().ok_or_else(|| {
-        DslTransitionError::no_matching(operation, "runtime store is no longer available")
-    })?;
     let Some(bytes) = store
         .load_auth_oauth_flow_snapshot()
         .map_err(|err| DslTransitionError::no_matching(operation, err.to_string()))?
@@ -514,20 +577,16 @@ impl RuntimeOAuthFlowHandle {
     /// nothing is durable; a store that cannot be read proves nothing.
     fn durable_holds_browser_attempt(&self, state: &str) -> Result<bool, OAuthFlowError> {
         let operation = "probe_oauth_browser_admission";
-        let bound = self
-            .store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some(store) = bound else {
-            return Ok(false);
+        let store = match self.store.lookup() {
+            BoundStore::Unbound => return Ok(false),
+            BoundStore::Dropped => {
+                return Err(OAuthFlowError::PersistenceFailed {
+                    operation,
+                    detail: "runtime store is no longer available".to_string(),
+                });
+            }
+            BoundStore::Open(store) => store,
         };
-        let store = store
-            .upgrade()
-            .ok_or_else(|| OAuthFlowError::PersistenceFailed {
-                operation,
-                detail: "runtime store is no longer available".to_string(),
-            })?;
         let Some(bytes) = store.load_auth_oauth_flow_snapshot().map_err(|err| {
             OAuthFlowError::PersistenceFailed {
                 operation,
@@ -661,7 +720,7 @@ impl RuntimeOAuthFlowHandle {
         store: Option<Weak<dyn RuntimeStore>>,
     ) -> Self {
         let registry = Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding));
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(BoundStores::new(store));
         let payload_lock = Arc::new(Mutex::new(()));
         let release_observer = Arc::new(OAuthPayloadReleaseObserver {
             registry: Arc::clone(&registry),
@@ -684,11 +743,11 @@ impl RuntimeOAuthFlowHandle {
         handle
     }
 
+    /// Binds another handle of the store this authority persists through. It
+    /// persists through the newest bound handle that is still open, so
+    /// dropping a later handle leaves the earlier ones serving.
     pub(crate) fn bind_persistent_store(&self, store: &Arc<dyn RuntimeStore>) {
-        *self
-            .store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(store));
+        self.store.bind(store);
     }
 
     pub(crate) fn with_scoped_lifecycle(&self, lifecycle: Arc<RuntimeAuthLeaseHandle>) -> Self {
@@ -1002,11 +1061,10 @@ impl RuntimeOAuthFlowHandle {
     }
 
     fn store(&self) -> Option<Arc<dyn RuntimeStore>> {
-        self.store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(Weak::upgrade)
+        match self.store.lookup() {
+            BoundStore::Open(store) => Some(store),
+            BoundStore::Unbound | BoundStore::Dropped => None,
+        }
     }
 
     fn persist_registry_payloads_removing(
@@ -1555,18 +1613,15 @@ fn persist_registry_snapshot(
     now_millis: u64,
     policy: SnapshotPersistPolicy<'_>,
 ) -> Result<(), OAuthFlowError> {
-    let store = store
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    let Some(store) = store else {
-        return Ok(());
-    };
-    let Some(store) = store.upgrade() else {
-        return Err(OAuthFlowError::PersistenceFailed {
-            operation,
-            detail: "runtime store is no longer available".to_string(),
-        });
+    let store = match store.lookup() {
+        BoundStore::Unbound => return Ok(()),
+        BoundStore::Dropped => {
+            return Err(OAuthFlowError::PersistenceFailed {
+                operation,
+                detail: "runtime store is no longer available".to_string(),
+            });
+        }
+        BoundStore::Open(store) => store,
     };
     let mut durable_admission_rejection: Option<DslTransitionError> = None;
     let mut update = |current: Option<&[u8]>| -> Result<Vec<u8>, crate::store::RuntimeStoreError> {
@@ -2545,6 +2600,38 @@ pub(crate) mod tests {
         assert_quarantine_isolated(
             "device",
             meerkat_auth_core::oauth_flow::OAuthFlowRecordKind::Device,
+        );
+    }
+
+    /// A lookup takes the newest bound store that is still open, so a later
+    /// store that is dropped leaves an earlier one serving. Once every bound
+    /// store is dropped, each lookup finds them dropped (persistence fails)
+    /// rather than unbound, until an open store is bound again.
+    #[test]
+    fn bound_stores_serve_the_newest_open_store_and_stay_dropped_until_one_binds() {
+        let stores = BoundStores::new(None);
+        assert!(matches!(stores.lookup(), BoundStore::Unbound));
+
+        let first = memory_store();
+        let second = memory_store();
+        stores.bind(&first);
+        stores.bind(&second);
+        stores.bind(&first);
+        assert!(matches!(stores.lookup(), BoundStore::Open(open) if Arc::ptr_eq(&open, &first)));
+        drop(first);
+        assert!(matches!(stores.lookup(), BoundStore::Open(open) if Arc::ptr_eq(&open, &second)));
+        drop(second);
+        for _ in 0..2 {
+            assert!(matches!(stores.lookup(), BoundStore::Dropped));
+        }
+
+        let reopened = memory_store();
+        stores.bind(&reopened);
+        assert!(matches!(stores.lookup(), BoundStore::Open(open) if Arc::ptr_eq(&open, &reopened)));
+        assert_eq!(
+            stores.stores.lock().unwrap().len(),
+            1,
+            "binding forgets the dropped stores"
         );
     }
 

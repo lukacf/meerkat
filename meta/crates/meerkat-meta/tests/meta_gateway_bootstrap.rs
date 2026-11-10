@@ -2000,3 +2000,660 @@ fn meta_gateway_starts_an_existing_dotted_state_directory() {
         "the dotted directory is the state directory"
     );
 }
+
+/// A persistent `meta_gateway` keeps its metadata (the console audit log,
+/// the attention list, the gating owner's state, the identity records) and
+/// its console log (the console's requests and their answers) in its state
+/// directory, so a restart keeps them. Each row starts the real binary twice
+/// over one state directory, signed in as one person, its members on a
+/// loopback model.
+#[cfg(unix)]
+mod durable_console_state {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, ChildStdin, Command, Stdio};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+
+    const MODEL: &str = "durable-console-test";
+    const IDENTITY: &str = "agent:specialist";
+    const SECRET: &str = "durable-console-signing-key-with-enough-bytes";
+    const PERSON_SUBJECT: &str = "durable-person-subject";
+    const PERSON_EMAIL: &str = "durable.person@example.com";
+    /// The loopback model's answer to every request.
+    const ANSWER: &str = "DURABLE-ANSWER 41c7";
+    const QUESTION: &str = "DURABLE-QUESTION 9e2b: what does the report say?";
+    const IDEMPOTENCY_KEY: &str = "durable-request-1";
+    const SETTLE: Duration = Duration::from_mins(2);
+
+    // -- Loopback model -------------------------------------------------------
+
+    /// Every chat-completions request the loopback model answered.
+    #[derive(Default)]
+    struct ModelLog {
+        requests: Vec<Value>,
+    }
+
+    async fn chat_completions(
+        axum::extract::State(log): axum::extract::State<Arc<Mutex<ModelLog>>>,
+        axum::Json(request): axum::Json<Value>,
+    ) -> impl axum::response::IntoResponse {
+        log.lock().unwrap().requests.push(request);
+        let delta = json!({ "choices": [{ "delta": { "content": ANSWER } }] });
+        let payload = format!(
+            "data: {delta}\n\ndata: {{\"choices\":[{{\"finish_reason\":\"stop\"}}],\
+             \"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1}}}}\n\ndata: [DONE]\n\n"
+        );
+        ([("content-type", "text/event-stream")], payload)
+    }
+
+    async fn models() -> impl axum::response::IntoResponse {
+        axum::Json(json!({ "data": [] }))
+    }
+
+    /// Start a loopback chat-completions server that records each request and
+    /// answers [`ANSWER`]; its base URL.
+    fn start_model(log: Arc<Mutex<ModelLog>>) -> String {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("model runtime");
+            runtime.block_on(async move {
+                let app = axum::Router::new()
+                    .route(
+                        "/v1/chat/completions",
+                        axum::routing::post(chat_completions),
+                    )
+                    .route("/chat/completions", axum::routing::post(chat_completions))
+                    .route("/v1/models", axum::routing::get(models))
+                    .route("/models", axum::routing::get(models))
+                    .with_state(log);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind the loopback model");
+                tx.send(listener.local_addr().expect("model address"))
+                    .expect("report the model address");
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve the loopback model");
+            });
+        });
+        let address = rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("loopback model address");
+        format!("http://{address}")
+    }
+
+    fn message_text(message: &Value) -> String {
+        match &message["content"] {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        }
+    }
+
+    /// How many requests reached the model as an answer to `text`: the
+    /// requests whose last message carries it.
+    fn asked(log: &Mutex<ModelLog>, text: &str) -> usize {
+        log.lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|request| {
+                request["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .is_some_and(|message| message_text(message).contains(text))
+            })
+            .count()
+    }
+
+    // -- Workspace ------------------------------------------------------------
+
+    /// Write `workspace`'s `config/mob.toml` (the mob `mob_id` with one
+    /// turn-driven profile on the loopback model at `model_url`) and the host
+    /// config that routes that model there; the host config's path.
+    fn write_workspace(workspace: &Path, mob_id: &str, model_url: &str) -> PathBuf {
+        let config = workspace.join("config");
+        std::fs::create_dir_all(&config).expect("config dir");
+        std::fs::write(
+            config.join("mob.toml"),
+            format!(
+                "[mob]\nid = \"{mob_id}\"\n\n[profiles.specialist]\nmodel = \"{MODEL}\"\n\
+                 provider = \"self_hosted\"\nexternal_addressable = true\n\
+                 runtime_mode = \"turn_driven\"\n\n[profiles.specialist.tools]\ncomms = true\n"
+            ),
+        )
+        .expect("mob.toml");
+        let mut host = format!(
+            "[self_hosted]\ndefault_model = \"{MODEL}\"\n\n[self_hosted.servers.loop]\n\
+             base_url = \"{model_url}\"\n\n[self_hosted.models.\"{MODEL}\"]\nserver = \"loop\"\n\
+             remote_model = \"{MODEL}\"\ndisplay_name = \"Durable console test model\"\n\
+             family = \"{MODEL}\"\n"
+        );
+        for realm in ["global".to_string(), format!("mob.{mob_id}")] {
+            host.push_str(&format!(
+                "\n[realm.\"{realm}\"]\ndefault_binding = \"loop\"\n\n\
+                 [realm.\"{realm}\".backend.loop]\nprovider = \"self_hosted\"\n\
+                 backend_kind = \"self_hosted\"\n\n[realm.\"{realm}\".auth.loop]\n\
+                 provider = \"self_hosted\"\nauth_method = \"none\"\n\
+                 source = {{ kind = \"platform_default\" }}\n\n\
+                 [realm.\"{realm}\".binding.loop]\nbackend_profile = \"loop\"\n\
+                 auth_profile = \"loop\"\ndefault_model = \"{MODEL}\"\nprovider_default = true\n"
+            ));
+        }
+        let host_config = workspace.join("host-config.toml");
+        std::fs::write(&host_config, host).expect("host config");
+        host_config
+    }
+
+    /// The state directory of `workspace`'s launches.
+    fn state_dir(workspace: &Path) -> PathBuf {
+        workspace.join("store")
+    }
+
+    /// A console token of the one person the rows sign in as.
+    fn person_token() -> String {
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &json!({
+                "iss": "http://127.0.0.1/meta-gateway",
+                "aud": "persistent-gateway",
+                "sub": PERSON_SUBJECT,
+                "email": PERSON_EMAIL,
+                "exp": chrono::Utc::now().timestamp() + 3600,
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .expect("sign the console token")
+    }
+
+    /// Poll `condition` until it holds or `deadline` runs out; `false` on
+    /// timeout.
+    fn eventually(deadline: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        loop {
+            if condition() {
+                return true;
+            }
+            if start.elapsed() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    // -- Gateway process ------------------------------------------------------
+
+    /// One persistent `meta_gateway` over `workspace`'s state directory, its
+    /// console signed in by a shared secret whose tokens name persons.
+    struct Gateway {
+        child: Child,
+        _stdin: ChildStdin,
+        stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+        http_base_url: String,
+    }
+
+    impl Gateway {
+        fn start(workspace: &Path, host_config: &Path) -> Self {
+            let params = json!({
+                "workspace_root": workspace,
+                "store_path": state_dir(workspace),
+                "persistent_sessions": true,
+                "meerkat_config_path": host_config,
+                "identity_roster": [{ "identity": IDENTITY, "profile": "specialist" }],
+                "auth_config": {
+                    "provider": "jwt",
+                    "shared_secret": SECRET,
+                    "accounts": "personal",
+                    "email_allowlist": [PERSON_EMAIL],
+                },
+            });
+            let mut command = Command::new(env!("CARGO_BIN_EXE_meta_gateway"));
+            command
+                .current_dir(workspace)
+                .env("XDG_STATE_HOME", workspace.join("xdg-state"))
+                .env("XDG_CONFIG_HOME", workspace.join("xdg-config"))
+                .env("RUST_LOG", "info")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            // The members' model is the loopback one: no provider key reaches
+            // the gateway, so nothing can call a real provider.
+            for name in [
+                "RKAT_ANTHROPIC_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "RKAT_OPENAI_API_KEY",
+                "OPENAI_API_KEY",
+                "RKAT_GEMINI_API_KEY",
+                "GEMINI_API_KEY",
+                "RKAT_SELF_HOSTED_API_KEY",
+            ] {
+                command.env_remove(name);
+            }
+            let mut child = command.spawn().expect("spawn meta_gateway");
+            let mut stdin = child.stdin.take().expect("gateway stdin");
+            let stdout = child.stdout.take().expect("gateway stdout");
+            let mut stderr = child.stderr.take().expect("gateway stderr");
+            let stderr = std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = stderr.read_to_end(&mut bytes);
+                bytes
+            });
+            writeln!(
+                stdin,
+                "{}",
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "meta/init", "params": params })
+            )
+            .expect("write init");
+            stdin.flush().expect("flush init");
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let _ = BufReader::new(stdout).read_line(&mut line);
+                let _ = tx.send(line);
+            });
+            let mut gateway = Self {
+                child,
+                _stdin: stdin,
+                stderr: Some(stderr),
+                http_base_url: String::new(),
+            };
+            let line = rx
+                .recv_timeout(Duration::from_secs(90))
+                .expect("meta_gateway answers meta/init");
+            let response: Value = serde_json::from_str(&line).expect("init answer JSON");
+            assert!(response.get("error").is_none(), "init failed: {response}");
+            assert_eq!(response["result"]["launch_state"], "created", "{response}");
+            gateway.http_base_url = response["result"]["http_base_url"]
+                .as_str()
+                .expect("HTTP base URL")
+                .trim_end_matches('/')
+                .to_owned();
+            gateway
+        }
+
+        /// `POST {base}{path}` as the holder of `bearer`: the status and the
+        /// JSON body.
+        fn post(&self, path: &str, bearer: &str, body: &Value) -> (u16, Value) {
+            let response = Self::client()
+                .post(format!("{}{path}", self.http_base_url))
+                .bearer_auth(bearer)
+                .json(body)
+                .send()
+                .expect("HTTP request");
+            let status = response.status().as_u16();
+            (status, response.json().unwrap_or(Value::Null))
+        }
+
+        /// `GET {base}{path}` as the holder of `bearer`: the JSON body of a
+        /// successful answer.
+        fn get(&self, path: &str, bearer: &str) -> Value {
+            Self::client()
+                .get(format!("{}{path}", self.http_base_url))
+                .bearer_auth(bearer)
+                .send()
+                .expect("HTTP request")
+                .error_for_status()
+                .expect("HTTP status")
+                .json()
+                .expect("HTTP JSON")
+        }
+
+        fn client() -> reqwest::blocking::Client {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_mins(1))
+                .build()
+                .expect("HTTP client")
+        }
+
+        /// The result of one console JSON-RPC call as the holder of
+        /// `bearer`, which must not fail.
+        fn call(&self, bearer: &str, method: &str, params: Value) -> Value {
+            let (status, answer) = self.post(
+                "/console/rpc",
+                bearer,
+                &json!({ "jsonrpc": "2.0", "id": 2, "method": method, "params": params }),
+            );
+            assert!(
+                status == 200 && answer.get("error").is_none_or(Value::is_null),
+                "{method} failed ({status}): {answer}"
+            );
+            answer["result"].clone()
+        }
+
+        /// Stop the gateway with SIGTERM and wait for its graceful shutdown.
+        fn stop(mut self) {
+            assert!(
+                Command::new("kill")
+                    .args(["-TERM", &self.child.id().to_string()])
+                    .status()
+                    .expect("signal the gateway")
+                    .success()
+            );
+            let deadline = Instant::now() + Duration::from_mins(1);
+            let status = loop {
+                if let Some(status) = self.child.try_wait().expect("gateway exit status") {
+                    break status;
+                }
+                assert!(Instant::now() < deadline, "graceful shutdown timed out");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let bytes = self
+                .stderr
+                .take()
+                .expect("stderr reader")
+                .join()
+                .expect("stderr drain");
+            let stderr = String::from_utf8_lossy(&bytes);
+            assert!(status.success(), "gateway exit {status}: {stderr}");
+            assert!(
+                stderr.contains("meta_gateway shutdown complete; exiting"),
+                "{stderr}"
+            );
+        }
+    }
+
+    impl Drop for Gateway {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if std::thread::panicking()
+                && let Some(stderr) = self.stderr.take()
+                && let Ok(bytes) = stderr.join()
+            {
+                eprintln!("meta_gateway stderr: {}", String::from_utf8_lossy(&bytes));
+            }
+        }
+    }
+
+    /// The person's console timeline of the identity.
+    fn timeline(gateway: &Gateway, bearer: &str) -> Vec<Value> {
+        gateway.call(
+            bearer,
+            "meta/console/query_timeline",
+            json!({ "identity": IDENTITY, "limit": 500 }),
+        )["frames"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// How many console sends of [`QUESTION`] and how many answers to it
+    /// `frames` hold: the `user_input` frames a console send recorded
+    /// (`source.kind` `send`) that carry it, and the completed interactions
+    /// that carry [`ANSWER`]. A console started again also shows the
+    /// restored session's history (`source.kind` `session_history`), which
+    /// repeats the conversation and is no send of its own.
+    fn requests_and_answers(frames: &[Value]) -> (usize, usize) {
+        let carrying = |frame: &&Value, kind: &str, text: &str| {
+            frame["kind"] == kind && frame["payload"].to_string().contains(text)
+        };
+        (
+            frames
+                .iter()
+                .filter(|frame| {
+                    carrying(frame, "user_input", QUESTION) && frame["source"]["kind"] == "send"
+                })
+                .count(),
+            frames
+                .iter()
+                .filter(|frame| carrying(frame, "interaction_complete", ANSWER))
+                .count(),
+        )
+    }
+
+    /// The pending approvals' ids, as the console lists them.
+    fn pending_approvals(gateway: &Gateway, bearer: &str) -> Vec<String> {
+        gateway.call(bearer, "meta/gating/pending", json!({}))["pending"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["pending_id"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// Leave an approval pending in the gating owner's state in the metadata
+    /// store of `workspace`'s state directory, as a gating owner writes it
+    /// there: its pending id.
+    fn leave_pending_approval(workspace: &Path) -> String {
+        let mut owner = meerkat_meta::start_meta_runtime(
+            meerkat_meta::MetaConfig {
+                modules: Vec::new(),
+                discovery: meerkat_meta::DiscoverySpec {
+                    namespace: "durable-gating".to_string(),
+                    modules: Vec::new(),
+                },
+                pre_spawn: Vec::new(),
+            },
+            Vec::new(),
+            Duration::from_secs(5),
+        )
+        .expect("a gating owner");
+        let pending = owner
+            .evaluate_gating_action(meerkat_meta::GatingEvaluateRequest {
+                action: "deploy release".to_string(),
+                actor_id: "specialist".to_string(),
+                risk_tier: meerkat_meta::GatingRiskTier::R3,
+                rationale: None,
+                requested_approver: None,
+                approval_recipient: None,
+                approval_channel: None,
+                approval_timeout_ms: Some(3_600_000),
+                entity: None,
+                topic: None,
+            })
+            .pending_id
+            .expect("an R3 action waits for approval");
+        let state = serde_json::to_string(&owner.gating_state_snapshot()).expect("gating state");
+        let _ = owner.shutdown();
+        let layout = meerkat_meta::storage_layout::MetaStorageLayout::standalone_from_store_path(
+            &state_dir(workspace),
+            workspace.join("xdg-state"),
+        );
+        std::fs::create_dir_all(layout.state_dir()).expect("state dir");
+        let metadata = meerkat_meta::SqliteMetadataStore::open(
+            layout.metadata_db().expect("the metadata database").path,
+        )
+        .expect("the state directory's metadata store");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(meerkat_meta::PersistentMetadataStore::set_realm_document(
+                &metadata,
+                "gating/state",
+                Some(&state),
+            ))
+            .expect("write the gating state");
+        pending
+    }
+
+    /// A console request made before a restart is known after it and
+    /// answered once: the send is settled delivered, the timeline holds the
+    /// request and its answer once, and the same request again (the same
+    /// idempotency key) is answered from the first send, without asking the
+    /// model again. The identity's tool record a warm wrote before the
+    /// restart answers its resolved tools after it, while Core holds the
+    /// member Dormant.
+    #[test]
+    fn a_console_request_and_its_answer_survive_a_restart() {
+        let log = Arc::new(Mutex::new(ModelLog::default()));
+        let model = start_model(Arc::clone(&log));
+        let workspace = TempDir::new().expect("workspace");
+        let host_config = write_workspace(workspace.path(), "meta-durable-console", &model);
+        let person = person_token();
+        let send = json!({
+            "identity": IDENTITY,
+            "content": QUESTION,
+            "origin": "console",
+            "idempotency_key": IDEMPOTENCY_KEY,
+            "handling_mode": "queue",
+        });
+        let recover = json!({
+            "identity": IDENTITY,
+            "origin": "console",
+            "idempotency_key": IDEMPOTENCY_KEY,
+        });
+
+        let first = Gateway::start(workspace.path(), &host_config);
+        let (status, sent) = first.post("/console/send", &person, &send);
+        assert_eq!(status, 200, "the request is accepted: {sent}");
+        let interaction = sent["interaction_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("an accepted request names its interaction: {sent}"))
+            .to_owned();
+        assert!(
+            eventually(SETTLE, || {
+                first.post("/console/send/recover", &person, &recover).1["status"] == "delivered"
+            }),
+            "the request is delivered before the restart"
+        );
+        assert!(
+            eventually(SETTLE, || {
+                requests_and_answers(&timeline(&first, &person)) == (1, 1)
+            }),
+            "the request is answered before the restart: {:#?}",
+            timeline(&first, &person)
+        );
+        assert_eq!(asked(&log, QUESTION), 1, "the model is asked once");
+        // A warm writes the identity's tool record, one of the identity
+        // records the state directory's metadata store keeps.
+        let warmed = first.call(
+            &person,
+            "meta/identity/warm",
+            json!({ "identity": IDENTITY }),
+        );
+        first.stop();
+
+        let second = Gateway::start(workspace.path(), &host_config);
+        // Read before anything wakes the member: Core holds it Dormant, so
+        // its resolved tools are the tool record the warm wrote.
+        let resolved = second.call(
+            &person,
+            "meta/identity/resolved_tools",
+            json!({ "identity": IDENTITY }),
+        );
+        let mut recorded = warmed.clone();
+        recorded["tools_source"] = json!("recorded");
+        assert_eq!(
+            resolved, recorded,
+            "the tool record written before the restart answers after it (warmed: {warmed})"
+        );
+        let (status, recovered) = second.post("/console/send/recover", &person, &recover);
+        assert_eq!(
+            (
+                status,
+                recovered["status"].clone(),
+                recovered["interaction_id"].clone()
+            ),
+            (200, json!("delivered"), json!(interaction)),
+            "the request made before the restart is known after it: {recovered}"
+        );
+        let frames = timeline(&second, &person);
+        assert_eq!(
+            requests_and_answers(&frames),
+            (1, 1),
+            "the timeline holds the request and its answer once after the restart: {frames:#?}"
+        );
+        let (status, again) = second.post("/console/send", &person, &send);
+        assert_eq!(status, 200, "the same request again is answered: {again}");
+        assert_eq!(
+            again["interaction_id"],
+            json!(interaction),
+            "the same request again is answered from the first send: {again}"
+        );
+        assert!(
+            !eventually(Duration::from_secs(3), || asked(&log, QUESTION) > 1),
+            "the model is not asked again"
+        );
+        let frames = timeline(&second, &person);
+        assert_eq!(
+            requests_and_answers(&frames),
+            (1, 1),
+            "the answer is delivered once: {frames:#?}"
+        );
+        // The Console offers to send an uncertain request again only over
+        // send records that outlive a restart.
+        let experience = second.get("/console/experience", &person);
+        assert_eq!(experience["send_dedupe"]["durable"], true, "{experience}");
+        second.stop();
+    }
+
+    /// The metadata a persistent launch keeps survives a restart: an approval
+    /// pending in the state directory is pending after the start and after
+    /// the next one, the console audit row of a change made before the
+    /// restart is read after it, and the gating audit, the console audit and
+    /// the attention list report that they are kept across restarts.
+    ///
+    /// meta_gateway serves no method that opens an approval (its console
+    /// decides them only), so the row leaves one in the state directory's
+    /// metadata store first, as a gating owner writes its state there.
+    #[test]
+    fn a_pending_approval_and_the_console_audit_survive_a_restart() {
+        let log = Arc::new(Mutex::new(ModelLog::default()));
+        let model = start_model(Arc::clone(&log));
+        let workspace = TempDir::new().expect("workspace");
+        let host_config = write_workspace(workspace.path(), "meta-durable-metadata", &model);
+        let pending = leave_pending_approval(workspace.path());
+        let person = person_token();
+
+        let first = Gateway::start(workspace.path(), &host_config);
+        assert_eq!(
+            pending_approvals(&first, &person),
+            vec![pending.clone()],
+            "the approval pending in the state directory is pending after the start"
+        );
+        let gating_audit = first.call(&person, "meta/gating/audit", json!({ "limit": 1 }));
+        assert_eq!(gating_audit["retention"], "durable", "{gating_audit}");
+        first.call(
+            &person,
+            "meta/mob_labels/set",
+            json!({ "labels": { "restart-row": "before" } }),
+        );
+        // The console writes a change's audit row on the server, at most two
+        // seconds after its answer: the restart comes once the row is there.
+        let audited = |gateway: &Gateway| {
+            gateway.call(&person, "meta/console/audit", json!({ "log": "changes" }))
+        };
+        assert!(
+            eventually(Duration::from_secs(10), || {
+                audited(&first)["records"]
+                    .to_string()
+                    .contains("meta/mob_labels/set")
+            }),
+            "the change is in the console audit before the restart"
+        );
+        first.stop();
+
+        let second = Gateway::start(workspace.path(), &host_config);
+        assert_eq!(
+            pending_approvals(&second, &person),
+            vec![pending],
+            "the approval is still pending after a restart"
+        );
+        let audit = audited(&second);
+        assert_eq!(audit["retention"], "durable", "{audit}");
+        assert!(
+            audit["records"].to_string().contains("meta/mob_labels/set"),
+            "the change made before the restart is in the console audit after it: {audit}"
+        );
+        let attention = second.call(&person, "meta/console/attention", json!({}));
+        assert_eq!(attention["retention"], "durable", "{attention}");
+        assert!(
+            log.lock().unwrap().requests.is_empty(),
+            "no member was asked anything"
+        );
+        second.stop();
+    }
+}

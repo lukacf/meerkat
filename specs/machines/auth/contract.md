@@ -63,6 +63,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveOAuthLoginCredentialDisposition`(credential_present: Bool, force_refresh: Bool, refresh_allowed: Bool)
 - `ResolveSourceCredentialPublication`(credential_material_fingerprint: String)
 
+## CI Profile Samples
+The CI profile samples `RestoreAuthoritySnapshot`.`last_refresh` as `{None}`, `RestoreAuthoritySnapshot`.`refresh_attempt` as `{0}`, `RestoreCredentialLifecycleSnapshot`.`last_refresh` as `{None}` and `RestoreCredentialLifecycleSnapshot`.`refresh_attempt` as `{0}`; the Deep profile and every composition explore each field's whole domain.
+
 ## Signals
 
 ## Effects

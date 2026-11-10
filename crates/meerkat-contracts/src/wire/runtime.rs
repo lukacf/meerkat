@@ -573,7 +573,8 @@ pub enum WireAnthropicEffort {
     Medium,
     High,
     Max,
-    #[serde(rename = "xhigh")]
+    // Written `xhigh`. `x_high`, the core type's written spelling, reads too.
+    #[serde(rename = "xhigh", alias = "x_high")]
     XHigh,
 }
 
@@ -1726,6 +1727,104 @@ mod turn_input_options_tests {
             serde_json::json!({ "turn_tool_overlay": {} }),
         ] {
             assert!(serde_json::from_value::<WireTurnInputOptions>(request).is_err());
+        }
+    }
+}
+
+/// The Claude effort level above `high` is written `xhigh` by the wire type
+/// (and sent to Anthropic so) and `x_high` by the core type. Every request
+/// surface reads both spellings.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod claude_effort_spelling_tests {
+    use super::WireAnthropicEffort;
+    use meerkat_core::lifecycle::run_primitive::{
+        AnthropicEffort, AnthropicProviderTag, ProviderParamsOverride, ProviderTag,
+    };
+
+    fn is_claude_xhigh(params: &ProviderParamsOverride) -> bool {
+        matches!(
+            params.provider_tag,
+            Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                effort: Some(AnthropicEffort::XHigh),
+                ..
+            }))
+        )
+    }
+
+    fn claude_params(spelling: &str) -> serde_json::Value {
+        serde_json::json!({"provider_tag": {"provider": "anthropic", "effort": spelling}})
+    }
+
+    #[test]
+    fn wire_claude_effort_reads_the_x_high_spelling() {
+        let effort: WireAnthropicEffort = serde_json::from_value(serde_json::json!("x_high"))
+            .expect("the core type's written spelling reads");
+        assert_eq!(effort, WireAnthropicEffort::XHigh);
+    }
+
+    /// Pin: the wire type keeps writing `xhigh`.
+    #[test]
+    fn wire_claude_effort_keeps_writing_xhigh() {
+        assert_eq!(
+            serde_json::to_value(WireAnthropicEffort::XHigh).expect("serialize"),
+            serde_json::json!("xhigh")
+        );
+        let effort: WireAnthropicEffort =
+            serde_json::from_value(serde_json::json!("xhigh")).expect("written spelling reads");
+        assert_eq!(effort, WireAnthropicEffort::XHigh);
+    }
+
+    /// Each type reads what the other writes, so a value read from one
+    /// surface can be sent to any other.
+    #[test]
+    fn core_and_wire_claude_effort_read_each_other() {
+        let core = serde_json::to_value(AnthropicEffort::XHigh).expect("serialize core");
+        let wire = serde_json::to_value(WireAnthropicEffort::XHigh).expect("serialize wire");
+        assert_eq!(
+            serde_json::from_value::<WireAnthropicEffort>(core).expect("the wire type reads core"),
+            WireAnthropicEffort::XHigh
+        );
+        assert_eq!(
+            serde_json::from_value::<AnthropicEffort>(wire).expect("the core type reads wire"),
+            AnthropicEffort::XHigh
+        );
+    }
+
+    /// REST `POST /sessions` reads the Claude effort in either spelling and
+    /// hands the build the same level.
+    #[test]
+    fn rest_create_session_reads_claude_xhigh_in_either_spelling() {
+        for spelling in ["xhigh", "x_high"] {
+            let request: crate::wire::RestCreateSessionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "prompt": "hello",
+                    "provider_params": claude_params(spelling),
+                }))
+                .unwrap_or_else(|error| panic!("REST create with `{spelling}`: {error}"));
+            let params: ProviderParamsOverride =
+                request.provider_params.expect("provider params").into();
+            assert!(is_claude_xhigh(&params), "{spelling}");
+        }
+    }
+
+    /// Mob profiles (inline `mob/create` profiles and `mob/spawn` profile
+    /// overrides) read the Claude effort in either spelling.
+    #[test]
+    fn mob_profiles_read_claude_xhigh_in_either_spelling() {
+        for spelling in ["xhigh", "x_high"] {
+            let profile = serde_json::json!({
+                "model": "claude-opus-4-8",
+                "provider_params": claude_params(spelling),
+            });
+            let inline: crate::wire::MobProfileInput = serde_json::from_value(profile.clone())
+                .unwrap_or_else(|error| panic!("inline mob profile with `{spelling}`: {error}"));
+            let spawn: crate::wire::WireMobProfile = serde_json::from_value(profile)
+                .unwrap_or_else(|error| panic!("spawn profile with `{spelling}`: {error}"));
+            for params in [inline.provider_params, spawn.provider_params] {
+                let params: ProviderParamsOverride = params.expect("provider params").into();
+                assert!(is_claude_xhigh(&params), "{spelling}");
+            }
         }
     }
 }

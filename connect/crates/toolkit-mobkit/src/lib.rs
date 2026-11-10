@@ -848,6 +848,8 @@ pub mod observe_helper_probe {
     pub fn clear() {
         PROBE.lock().unwrap_or_else(PoisonError::into_inner).take();
     }
+    // Only the native host's Find reaches the step.
+    #[cfg(all(feature = "native-host", unix))]
     pub(crate) fn observe(call: &str) {
         let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if let Some(probe) = probe {
@@ -989,10 +991,13 @@ pub mod source_hold_probe {
             let _ = hold.join();
         }
     }
+    // Only the native host's helper work reaches a site.
+    #[cfg(all(feature = "native-host", unix))]
     pub(crate) fn observe(site: Site, key: &str) -> Option<Hold> {
         let probe = PROBE.lock().unwrap_or_else(PoisonError::into_inner).clone();
         probe.and_then(|probe| probe(site, key))
     }
+    #[cfg(all(feature = "native-host", unix))]
     pub(crate) fn retain(hold: JoinHandle<()>) {
         HOLDS
             .lock()

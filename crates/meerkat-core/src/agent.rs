@@ -251,6 +251,17 @@ pub trait AgentLlmClient: Send + Sync {
         Err(crate::ControllerFactsUnavailable)
     }
 
+    /// Request-free observation of the route this client serves requests on,
+    /// for the provider-neutral `reasoning_effort` option: the backend, the
+    /// provider API, and what the account and the operator state about the
+    /// effort levels of the selected model. Implementations must not perform
+    /// I/O, resolve credentials or manufacture a model request. `None` means
+    /// the client reports no route; a wrapper reports the route of the client
+    /// it delegates to and must not guess one.
+    fn reasoning_route(&self) -> Option<crate::ReasoningRouteObservation> {
+        None
+    }
+
     /// Prepare an existing controller credential without sending a model request.
     /// Native admission authenticates the caller before invoking this cold path
     /// and rechecks current authority afterward. This is not an operation permit

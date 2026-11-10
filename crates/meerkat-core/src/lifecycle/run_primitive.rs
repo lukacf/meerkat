@@ -748,6 +748,15 @@ pub struct OpenAiProviderTag {
     /// request (used by client_compatible endpoints).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning_override: Option<bool>,
+    /// Request-local marker: `reasoning_effort` on this copy of the tag was
+    /// written from the provider-neutral `reasoning_effort` option after it
+    /// was resolved for the request's route. Set only on one request's own
+    /// copy. Never serialized: it cannot be persisted into session params or
+    /// sent on a wire, and a serialized form that names it is refused. Never
+    /// merged from defaults.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub reasoning_effort_resolved: bool,
 }
 
 /// Gemini 3 reasoning levels accepted by the API.
@@ -1345,6 +1354,9 @@ impl ProviderTag {
                     supports_temperature_override: target_supports_temperature_override,
                     supports_reasoning_override: target_supports_reasoning_override,
                     prompt_cache_options: target_prompt_cache_options,
+                    // Request-local: the target keeps its own marker and a
+                    // default's marker is ignored.
+                    reasoning_effort_resolved: _,
                 } = target;
                 let OpenAiProviderTag {
                     reasoning_effort: default_reasoning_effort,
@@ -1366,6 +1378,7 @@ impl ProviderTag {
                     supports_temperature_override: default_supports_temperature_override,
                     supports_reasoning_override: default_supports_reasoning_override,
                     prompt_cache_options: default_prompt_cache_options,
+                    reasoning_effort_resolved: _,
                 } = default;
                 fill(target_reasoning_effort, default_reasoning_effort);
                 fill(target_reasoning_mode, default_reasoning_mode);
@@ -1545,6 +1558,9 @@ impl ProviderTag {
                     supports_temperature_override: target_supports_temperature_override,
                     supports_reasoning_override: target_supports_reasoning_override,
                     prompt_cache_options: target_prompt_cache_options,
+                    // Request-local: no build default sets the marker, so
+                    // there is nothing to clear and the target keeps its own.
+                    reasoning_effort_resolved: _,
                 } = target;
                 let OpenAiProviderTag {
                     reasoning_effort: default_reasoning_effort,
@@ -1566,6 +1582,7 @@ impl ProviderTag {
                     supports_temperature_override: default_supports_temperature_override,
                     supports_reasoning_override: default_supports_reasoning_override,
                     prompt_cache_options: default_prompt_cache_options,
+                    reasoning_effort_resolved: _,
                 } = default;
                 clear(target_reasoning_effort, default_reasoning_effort);
                 clear(target_reasoning_mode, default_reasoning_mode);
@@ -3475,7 +3492,7 @@ mod tests {
         assert_eq!(
             via_params,
             serde_json::json!({
-                "provider_tag": {"provider": "openai", "reasoning_effort": "high"}
+                "provider_tag": {"provider": "open_ai", "reasoning_effort": "high"}
             })
         );
 

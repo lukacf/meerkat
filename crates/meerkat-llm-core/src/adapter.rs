@@ -674,6 +674,10 @@ impl AgentLlmClient for LlmClientAdapter {
         ))
     }
 
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.client.reasoning_route()
+    }
+
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
         let selection = self.controller_model_selection()?;
         Some(meerkat_core::ControllerModelClient::new(selection, self))

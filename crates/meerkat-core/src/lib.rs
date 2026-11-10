@@ -540,6 +540,10 @@ pub use realtime_transcript_sidecar::{
     RealtimeTranscriptSidecarError, RealtimeTranscriptSidecarRecord,
     RealtimeTranscriptSnapshotReasonV1,
 };
+pub use reasoning_effort::{
+    AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortRefusalReason,
+    ReasoningRoute, ReasoningRouteObservation,
+};
 pub use retry::{
     DEFAULT_STREAM_INACTIVITY_TIMEOUT, LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan,
     LlmRetrySchedule, MIN_MODEL_STREAM_INACTIVITY_TIMEOUT, RetryPolicy, select_retry_delay,

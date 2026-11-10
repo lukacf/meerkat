@@ -108,6 +108,16 @@ pub trait LlmClient: Send + Sync {
         Err(meerkat_core::ControllerFactsUnavailable)
     }
 
+    /// Request-free observation of the route this client serves requests on,
+    /// for the provider-neutral `reasoning_effort` option: the backend, the
+    /// provider API, and what the account and the operator state about the
+    /// effort levels of the selected model. No I/O, no credential resolution,
+    /// no model request. `None` reports no route. Wrappers delegate to the
+    /// client they wrap.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        None
+    }
+
     /// Prepare replay messages together with any opaque, request-scoped route
     /// witness required to keep later lowering and dispatch coherent.
     fn project_replay_request(

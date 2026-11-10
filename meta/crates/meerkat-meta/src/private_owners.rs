@@ -161,9 +161,9 @@ fn unknown_mob_owner(mob_id: &str) -> MobError {
 /// for as long as the mob does.
 fn undecidable_mob_owner(mob_id: &str) -> MobError {
     MobError::WiringError(format!(
-        "who mob '{mob_id}' is private to cannot be read: its creation record says several \
-         rosters named the session that created it and picks none, so no member can be spawned \
-         into it"
+        "who mob '{mob_id}' is private to cannot be read: its creation record does not say \
+         which member created it (several rosters named the session that created it, or the \
+         record is of a kind this release does not know), so no member can be spawned into it"
     ))
 }
 
@@ -184,9 +184,10 @@ enum CreatingMember<'a> {
     Named(&'a meerkat_mob::MobId, &'a meerkat_mob::AgentIdentity),
     /// The record names no member: the mob is private to no one.
     NoMember,
-    /// Several rosters named the session that created the mob and the record
-    /// picks none: which member created it cannot be read, and so neither
-    /// can who the mob is private to.
+    /// The record does not say which member created the mob: several rosters
+    /// named the session that created it and the record picks none, or the
+    /// record is of a kind this release does not know. Who the mob is
+    /// private to cannot be read from it.
     Undecidable,
 }
 
@@ -195,7 +196,9 @@ enum CreatingMember<'a> {
 /// `mob_create` (`OperatorMember`) both name one. The host, a session no
 /// roster named and a store from before creations were recorded name none.
 /// A session several rosters named (`Ambiguous`) is not decidable: one of
-/// those members created the mob, and the record does not say which.
+/// those members created the mob, and the record does not say which. A
+/// record of a kind this release does not know is not decidable either: it
+/// may name a member.
 fn creating_member(provenance: &meerkat_mob::MobProvenance) -> CreatingMember<'_> {
     use meerkat_mob::MobProvenance;
     match provenance {
@@ -215,8 +218,8 @@ fn creating_member(provenance: &meerkat_mob::MobProvenance) -> CreatingMember<'_
         | MobProvenance::Unrecorded => CreatingMember::NoMember,
         MobProvenance::Ambiguous { .. } => CreatingMember::Undecidable,
         // `MobProvenance` is open to new variants: one this release does
-        // not know names no member here.
-        _ => CreatingMember::NoMember,
+        // not know may name a member, so it is not taken to name none.
+        _ => CreatingMember::Undecidable,
     }
 }
 

@@ -15,12 +15,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   builds the variant literally adds `cause:
   LifecycleEffectFailureCause::Failed`, and one that destructures it without
   `..` names the field.
+
 - Rust: `meta_extension_state::SqliteExtensionDocumentStore::from_connection`
   and `meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
   take a rusqlite 0.41 `Connection`, no longer a rusqlite 0.37 one. A host
   that opens that connection with its own rusqlite moves to rusqlite 0.41
   with Meta (see Upgrade). The semver gate does not measure which version of
   a dependency's type a signature names.
+
+### Security
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): `meerkat-meta` and
+  `meta-extension-state` require rusqlite 0.41.1 (libsqlite3-sys 0.39.1).
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  of a different page size. Stored values keep their encoding: rusqlite's
+  `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
+  0.37 had.
+
+### Upgrade
+
+- Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
+  from (0.9.11), so an existing Forge folder starts a fresh setup team in its
+  state directory on its first start. Saved setups, proposals, provider
+  settings and installed applications stay, and the previous setup team's
+  state is kept unchanged, but the new team does not recall earlier
+  conversations. To carry them over, follow the installer README's "Work with
+  the setup team" before that first start.
+
+- A Rust host that depends on rusqlite (or libsqlite3-sys) itself moves to
+  rusqlite 0.41 (libsqlite3-sys 0.39) together with Meta: libsqlite3-sys
+  links one SQLite per build (`links = "sqlite3"`), so Cargo refuses a
+  graph that holds rusqlite 0.37 next to rusqlite 0.41.
 
 ### Added
 
@@ -64,6 +90,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a withdrawn promotion gate as expired: the stage is discarded and a
   proposal-sourced gate's proposal stays held (re-dreamable), as after a
   timeout.
+
+- Forge runs the Meerkat release it is built from instead of older pinned
+  releases. Its Guide runs that release's Meta and Core (0.9.11; until now
+  Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
+  published Meta from the monorepo's `meta-v` release (0.9.11; until now the
+  standalone repository's 0.9.6), and the protected application receiver
+  selects that release (until now Meta 0.9.7 with Core 0.9.8). A source
+  checkout installs its own `sdk/python` for the Guide, and a packaged Forge
+  carries the release's published `meerkat-meta` wheel and `rpc_gateway`, which
+  the release inputs pin. No older Meta wheel is vendored, and nothing
+  downloads a Meta runtime from the standalone repository.
+
+- Forge: the Guide accepts a profile auth binding (`auth_binding` with `realm`,
+  `binding` and an optional `profile`) in its launcher-selected model route and
+  names it in each of its profiles, which Core's mob profiles apply.
 
 ### Fixed
 
@@ -133,22 +174,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   start of an earlier release did. A launch without persistent sessions
   keeps both in memory, as before.
 
-### Security
-
-- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): `meerkat-meta` and
-  `meta-extension-state` require rusqlite 0.41.1 (libsqlite3-sys 0.39.1).
-  SQLite before 3.54.0 can return uninitialized page-cache memory to
-  ordinary queries when it opens a database together with a write-ahead log
-  of a different page size. Stored values keep their encoding: rusqlite's
-  `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
-  0.37 had.
-
-### Upgrade
-
-- A Rust host that depends on rusqlite (or libsqlite3-sys) itself moves to
-  rusqlite 0.41 (libsqlite3-sys 0.39) together with Meta: libsqlite3-sys
-  links one SQLite per build (`links = "sqlite3"`), so Cargo refuses a
-  graph that holds rusqlite 0.37 next to rusqlite 0.41.
+- Forge: **Rebuild with updated runtime** on an application built without a
+  selected product runtime (an ordinary application an earlier Forge built)
+  compiled a new package for MobKit 0.8.47. It now rebuilds the application on
+  the Meta runtime Forge started with, keeping its application source, and a
+  Forge without a selected Meta runtime refuses the rebuild and says so.
 
 ## [0.9.11] - 2026-11-09
 

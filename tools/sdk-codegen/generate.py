@@ -179,6 +179,9 @@ MOB_RPC_CONTRACT_TYPES = [
     # The keyed member-send receipt, listed before the result that carries
     # it; its status union is an alias (MOB_RPC_CONTRACT_ALIAS_TYPES).
     "WireContinuationReceipt",
+    # The unkeyed member-send admission, listed before the result that
+    # carries it.
+    "WireMemberInputAdmission",
     "MobMemberSendResult",
     "MobIngressInteractionParams",
     "MobIngressInteractionResult",
@@ -917,6 +920,9 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         # The keyed member-send receipt is a schema-local `$defs` entry of
         # `MobMemberSendResult`; promoted so `continuation` stays typed.
         "WireContinuationReceipt",
+        # Likewise the unkeyed member-send admission, so `admission` stays
+        # typed.
+        "WireMemberInputAdmission",
         # A `mob/list` row's failure: keep it typed instead of widening it to
         # an opaque object map.
         "WireMobLifecycleFailure",
@@ -7486,6 +7492,7 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_alias("WireHandlingMode")
     append_alias("WireContinuationStatus")
     append_interface("WireContinuationReceipt")
+    append_interface("WireMemberInputAdmission")
     append_interface("MobMemberSendResult")
     append_alias("WireWorkExecutionLifecyclePhase")
     append_interface("WireWorkGraphFlowWorkRef")

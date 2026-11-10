@@ -7101,6 +7101,39 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_mob_member_content_keeps_the_admission() -> None:
+    """An unkeyed send's answer names the input the member's runtime
+    admitted; the receipt keeps it, and a malformed one is refused."""
+    client = MeerkatClient()
+    answers: list[dict[str, object]] = [
+        {"session_id": "session-1", "input_id": "input-1"},
+        {"session_id": "session-1"},
+    ]
+
+    async def fake_request(
+        _method: str, _params: dict[str, object]
+    ) -> dict[str, object]:
+        return {
+            "mob_id": "mob-1",
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "steer",
+            "admission": answers.pop(0),
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    receipt = await client.send_mob_member_content(
+        "mob-1", "agent-a", "same words", handling_mode="steer"
+    )
+    assert receipt["admission"] == {"session_id": "session-1", "input_id": "input-1"}
+    with pytest.raises(MeerkatError, match="invalid admission"):
+        await client.send_mob_member_content(
+            "mob-1", "agent-a", "same words", handling_mode="steer"
+        )
+
+
+@pytest.mark.asyncio
 async def test_send_mob_member_content_rejects_missing_runtime_identity() -> None:
     client = MeerkatClient()
 

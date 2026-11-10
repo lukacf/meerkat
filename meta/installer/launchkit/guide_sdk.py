@@ -1,58 +1,94 @@
-"""The Guide's one exact selected Meta release and its reviewed client wheel.
+"""The Guide runs the workspace's own Meta release.
 
-SELECTED_VERSION names the single Meta release and client wheel the Guide runs.
-CORE_REQUIREMENT retains that Meta source's exact declared Core dependency.
-Runtime admission and the product verifier check each side independently;
-equal release numbers are not a compatibility rule.
+Meta, Core and Connect share this repository's version and release together.
+SELECTED_VERSION is that version: the Guide runs Meta of it with Core of the
+same version, never an older, separately pinned release.
 
-Packaged products carry the published client wheel of that release, which
-includes the public helper transport wait option. The pin below binds its
-exact release commit, that commit's sdk/python tree and the published wheel's
-SHA-256 and byte size. A selection whose release has not published yet keeps
-these fields None, and every use of the pin refuses until all four are filled
-together. The wheel confers no application SDK, native gateway or
-persisted-state compatibility.
+In a source checkout, the development environment and the installer workflow
+install this commit's Meta Python SDK (sdk/python), and a gateway the Guide
+runs is built from the same commit. A packaged Forge carries the same
+release's published client wheel and rpc_gateway: the release inputs pin both
+by size and SHA-256, the package manifest records them, and packaging and
+product verification refuse a client of another release. The client wheel
+confers no application SDK, native gateway or persisted-state compatibility.
+
+scripts/bump-sdk-versions.sh moves SELECTED_VERSION with Meta's version and
+scripts/verify-version-parity.sh checks that they agree.
 """
 
-import hashlib
+from email.parser import BytesParser
+import io
 import re
+import zipfile
+import zlib
 
-SELECTED_VERSION = "0.9.3"
-WHEEL = f"vendor/guide/meerkat_meta-{SELECTED_VERSION}-py3-none-any.whl"
-# Meta v0.9.3: its release commit, that commit's sdk/python tree, and the
-# SHA-256 and byte size of meerkat_meta-0.9.3-py3-none-any.whl on PyPI.
-SOURCE = "3b0073a834b93725c20cfa97bbd6db099348ece6"
-# From SOURCE's crates/meerkat-meta/Cargo.toml, dependencies.meerkat-core.version.
-# Update with the selected Meta source, never infer from its version number.
-CORE_REQUIREMENT = "=0.9.3"
-TREE = "d41781b733c506ed0355bd7aad4323dc77ebcda6"
-SHA256 = "3e87446e560b94ab6d9d0b3dfac5868b2603db7739316e251aefb5e3b4b4d610"
-SIZE = 166988
+SELECTED_VERSION = "0.9.11"
+DISTRIBUTION = "meerkat-meta"
+MAX_WHEEL_BYTES = 32 * 1024 * 1024
+# The largest dist-info entry verify() reads, METADATA or WHEEL. The client
+# wheel's METADATA is about a kilobyte; a long description would fit too.
+MAX_DIST_INFO_BYTES = 1024 * 1024
 
 
 def declared_core_version():
-    if type(CORE_REQUIREMENT) is not str or re.fullmatch(r"=[0-9]+\.[0-9]+\.[0-9]+", CORE_REQUIREMENT) is None:
-        raise ValueError("The Guide needs its selected Meta source's exact Core requirement.")
-    return CORE_REQUIREMENT[1:]
+    """The Core version of the Guide's Meta release: the same workspace version."""
+    if type(SELECTED_VERSION) is not str or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", SELECTED_VERSION) is None:
+        raise ValueError("The Guide needs the workspace's exact Meta version.")
+    return SELECTED_VERSION
 
 
-def require_pinned():
-    declared_core_version()
-    if not (type(SOURCE) is str and re.fullmatch("[0-9a-f]{40}", SOURCE)
-            and type(TREE) is str and re.fullmatch("[0-9a-f]{40}", TREE)
-            and type(SHA256) is str and re.fullmatch("[0-9a-f]{64}", SHA256)
-            and type(SIZE) is int and SIZE > 0):
-        raise ValueError(
-            f"The Guide client SDK pin is pending the published Meta {SELECTED_VERSION} wheel.")
+def wheel_path():
+    """Where a packaged Forge carries the Guide's client wheel."""
+    return f"vendor/guide/meerkat_meta-{declared_core_version()}-py3-none-any.whl"
 
 
-def selection():
-    require_pinned()
-    return {"path": WHEEL, "version": SELECTED_VERSION, "source": SOURCE,
-        "tree": TREE, "sha256": SHA256, "bytes": SIZE}
+def selection(sha256, size):
+    """The package manifest's record of the Guide's client wheel."""
+    if type(sha256) is not str or re.fullmatch("[0-9a-f]{64}", sha256) is None or type(size) is not int or size <= 0:
+        raise ValueError("The Guide client wheel needs its exact size and SHA-256.")
+    return {"path": wheel_path(), "version": declared_core_version(), "sha256": sha256, "bytes": size}
+
+
+def _dist_info_entry(archive, name, refusal):
+    """One dist-info entry's bytes, refused past MAX_DIST_INFO_BYTES.
+
+    MAX_WHEEL_BYTES bounds only the compressed wheel, and a small entry can
+    expand to gigabytes. The entry's declared size is checked first, and the
+    read stops past the bound whatever the entry declares. Only stored and
+    deflated entries are read: zipfile expands those no further than a read
+    asks, but expands each compressed chunk of its other methods in full.
+    """
+    entry = archive.getinfo(name)
+    if (entry.file_size > MAX_DIST_INFO_BYTES
+            or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
+        raise ValueError(refusal)
+    with archive.open(entry) as stream:
+        content = stream.read(MAX_DIST_INFO_BYTES + 1)
+    if len(content) > MAX_DIST_INFO_BYTES:
+        raise ValueError(refusal)
+    return content
 
 
 def verify(content):
-    require_pinned()
-    if len(content) != SIZE or hashlib.sha256(content).hexdigest() != SHA256:
-        raise ValueError("The Guide client SDK differs from its reviewed wheel.")
+    """Refuse bytes that are not the meerkat-meta wheel of the Guide's release.
+
+    Byte identity is the release inputs' pin and the package manifest's record.
+    This reads only the wheel's own metadata, each entry within
+    MAX_DIST_INFO_BYTES; nothing is imported or installed. An entry zipfile
+    cannot read (corrupt, truncated, encrypted, or of an unsupported method)
+    is the same refusal.
+    """
+    version = declared_core_version()
+    refusal = f"The Guide client is not the published Meta {version} wheel."
+    info = f"meerkat_meta-{version}.dist-info/"
+    try:
+        if type(content) is not bytes or not 0 < len(content) <= MAX_WHEEL_BYTES:
+            raise ValueError(refusal)
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            metadata = BytesParser().parsebytes(_dist_info_entry(archive, info + "METADATA", refusal))
+            wheel = BytesParser().parsebytes(_dist_info_entry(archive, info + "WHEEL", refusal))
+    except (ValueError, KeyError, EOFError, NotImplementedError, RuntimeError, zipfile.BadZipFile, zlib.error):
+        raise ValueError(refusal) from None
+    if (metadata.get_all("Name") != [DISTRIBUTION] or metadata.get_all("Version") != [version]
+            or wheel.get_all("Root-Is-Purelib") != ["true"] or wheel.get_all("Tag") != ["py3-none-any"]):
+        raise ValueError(refusal)

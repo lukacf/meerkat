@@ -53,6 +53,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   ready even while one currentness check takes longer than the whole
   budget, so the members after it are attached.
 
+- After a host loss, or a close that ran out of its 30-second join bound, an
+  access decision whose native issuance was still pending no longer stays
+  pending. The next host settles it when it starts, from what the native grant
+  owner recorded, and issues nothing itself: a decision whose grant the owner
+  recorded is settled as issued, and one it recorded no grant for ends as not
+  issued, so a fresh approval of the same request, or an exact retry of the
+  decision, is accepted and issues its grant once even when its evidence,
+  approving parent or computed deadline differ, while a request with different
+  content is refused as a conflict.
+
 ### Security
 
 - The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): Connect builds with
@@ -60,6 +70,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   return uninitialized page-cache memory to ordinary queries when it opens
   a database together with a write-ahead log of a different page size.
   Stored values keep their encoding.
+
+### Upgrade notes
+
+- Downgrade: an access decision the next host ended as not issued records the
+  issuance state `not_issued`. A Connect without this change answers a
+  conflict when that decision is applied or read again; other decisions are
+  unaffected.
 
 ## [0.9.11] - 2026-11-09
 

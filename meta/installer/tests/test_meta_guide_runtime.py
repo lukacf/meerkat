@@ -3,12 +3,17 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import tomllib
+from types import SimpleNamespace
 
 import pytest
 
-from launchkit import bootstrap, guide_runtime, guide_sdk
+from launchkit import bootstrap, guide_runtime, guide_sdk, planner, visual_review_runtime
 from launchkit.connect_installer_caller import CustodyError, ExactFile
+from launchkit.implementation_worker import implementation_mob_toml
+from launchkit.schema import DesignRequest
 from meerkat_meta.errors import GatewayStartupCleanupError
+from test_architect_startup_recovery import FakeRuntime, startup
 
 
 @pytest.fixture
@@ -51,29 +56,105 @@ def test_agent_builder_uses_original_gateway_and_model_binding(selected):
     assert len(builder.calls) == 1, "changed gateway bytes must be rejected before builder admission"
 
 
-@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
-def test_fresh_guide_refuses_an_auth_binding_the_selected_runtime_cannot_apply(selected, binding):
+BINDINGS = [{"realm": "global", "binding": "copilot_openai"},
+            {"realm": "fixture", "binding": "host", "profile": "work"}]
+INVALID_BINDINGS = ["fixture-host-route", {"realm": "fixture"}, {"binding": "host"},
+    {"realm": "fixture", "binding": ""}, {"realm": "fixture", "binding": "host", "origin": "configured"},
+    {"realm": "fixture", "binding": 7}, {"realm": "fixture", "binding": "host\x00"}, None]
+
+
+@pytest.mark.parametrize("binding", BINDINGS)
+def test_fresh_guide_applies_a_profile_auth_binding(selected, binding):
     route = {**selected.model_configuration, "auth_binding": binding}
-    with pytest.raises(bootstrap.GatewayInstallError, match="cannot apply an explicit auth binding"):
+    accepted = replace(selected, _model_route=route)
+    assert accepted.model_configuration == route
+    assert bootstrap.selected_guide_runtime() is selected
+
+
+@pytest.mark.parametrize("binding", INVALID_BINDINGS)
+def test_fresh_guide_refuses_an_invalid_auth_binding(selected, binding):
+    route = {**selected.model_configuration, "auth_binding": binding}
+    with pytest.raises(bootstrap.GatewayInstallError, match="original trusted model route"):
         replace(selected, _model_route=route)
     assert bootstrap.selected_guide_runtime() is selected
 
 
-@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
-def test_worker_restore_refuses_unsupported_auth_binding_before_admission(selected, monkeypatch, binding):
+@pytest.mark.parametrize("binding", BINDINGS)
+def test_worker_restore_keeps_the_auth_binding_and_refuses_an_invalid_one(selected, monkeypatch, binding):
+    route = {**selected.model_configuration, "auth_binding": binding}
+    monkeypatch.setattr(bootstrap, "_selected_guide_runtime", replace(selected, _model_route=route))
     control = bootstrap.export_selected_guide_context()
-    control["model_configuration"]["auth_binding"] = binding
+    assert control["model_configuration"]["auth_binding"] == binding
     monkeypatch.setattr(bootstrap, "_selected_guide_runtime", None)
-    with pytest.raises(bootstrap.GatewayInstallError, match="cannot apply an explicit auth binding"):
-        bootstrap.restore_selected_guide_context(control)
-    assert bootstrap.selected_guide_runtime() is None
+    assert bootstrap.restore_selected_guide_context(control).model_configuration == route
+    for invalid in INVALID_BINDINGS:
+        monkeypatch.setattr(bootstrap, "_selected_guide_runtime", None)
+        changed = json.loads(json.dumps(control))
+        changed["model_configuration"]["auth_binding"] = invalid
+        with pytest.raises(bootstrap.GatewayInstallError, match="original trusted model route"):
+            bootstrap.restore_selected_guide_context(changed)
+        assert bootstrap.selected_guide_runtime() is None
 
 
-@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
-def test_profile_authoring_refuses_unsupported_auth_binding_instead_of_emitting_ignored_toml(binding):
+@pytest.mark.parametrize("binding", BINDINGS)
+def test_profile_authoring_emits_the_auth_binding_as_profile_toml(binding):
+    import tomllib
     route = {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": binding}
-    with pytest.raises(RuntimeError, match="cannot apply an explicit auth binding"):
-        guide_runtime.model_profile_lines(route["provider"], route["model"], route)
+    lines = guide_runtime.model_profile_lines(route["provider"], route["model"], route)
+    assert lines[:2] == ['model = "gpt-6.1-sol"', 'provider = "openai"'] and len(lines) == 3
+    parsed = tomllib.loads("[profiles.guide]\n" + "\n".join(lines) + "\n")["profiles"]["guide"]
+    assert parsed == {"model": "gpt-6.1-sol", "provider": "openai", "auth_binding": binding}
+    for invalid in INVALID_BINDINGS:
+        with pytest.raises(RuntimeError, match="invalid auth binding"):
+            guide_runtime.model_profile_lines(route["provider"], route["model"], {**route, "auth_binding": invalid})
+
+
+@pytest.mark.parametrize("composition", ["setup team", "designer", "builder", "visual critic"])
+async def test_every_profile_forge_composes_names_the_selected_auth_binding(startup, monkeypatch, tmp_path, composition):
+    """Each mob Forge composes for its own agents names the launcher-selected
+    route's auth binding in every profile: the setup team, the planner's
+    designer, the builder's implementation and acceptance agents, and the
+    visual critic. The SDK is an inert double; no gateway, provider or native
+    process runs, and each start stops once its definition is composed."""
+    service, controller = startup
+    binding = {"realm": "fixture", "binding": "host", "profile": "work"}
+    route = {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": binding}
+    routed = bootstrap.SelectedGuideRuntime(bootstrap.selected_guide_runtime().gateway, guide_sdk.SELECTED_VERSION,
+        guide_sdk.declared_core_version(), "a" * 40, "b" * 40, route)
+    monkeypatch.setattr(bootstrap, "_selected_guide_runtime", routed)
+
+    class Composed(Exception):
+        """Stops a start once its mob definition is composed."""
+
+    if composition == "setup team":
+        controller.outcomes = [FakeRuntime()]
+        assert (await service.start())["status"] == "ready"
+        await service.shutdown()
+        definition = controller.mob_configs[-1]
+    elif composition == "designer":
+        controller.outcomes = [Composed()]
+        with pytest.raises(Composed):
+            await planner.design_team(DesignRequest(description="Plan a small research team."))
+        definition = controller.mob_configs[-1]
+    elif composition == "builder":
+        definition = implementation_mob_toml("openai", "gpt-6.1-sol",
+            model_configuration=routed.model_configuration, guide_runtime=routed)
+    else:
+        monkeypatch.setattr(visual_review_runtime, "planner_capability",
+            lambda: {"available": True, "provider": "openai"})
+        critic = visual_review_runtime.VisualReviewRuntime(tmp_path / "visual-critic")
+        critic.reviews = SimpleNamespace()
+        controller.outcomes = [Composed()]
+        with pytest.raises(Composed):
+            await critic.get_runtime()
+        definition = controller.mob_configs[-1]
+    profiles = tomllib.loads(definition)["profiles"]
+    assert set(profiles) == {"setup team": {"architect", "connectors", "reviewer", "visualizer"},
+        "designer": {"designer"}, "builder": {"implementation", "acceptance"},
+        "visual critic": {visual_review_runtime.REVIEW_PROFILE}}[composition]
+    for name, profile in profiles.items():
+        assert (profile["provider"], profile["model"], profile.get("auth_binding")) == (
+            "openai", "gpt-6.1-sol", binding), name
 
 
 def test_no_implicit_predecessor_runtime(monkeypatch):

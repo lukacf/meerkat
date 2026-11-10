@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Decide whether Core's pre-tag prebuild of one commit serves the release of another.
+
+Usage: release-prebuild-equivalent <prebuild-commit> <release-commit>
+
+A prebuild of commit P (release.yml dispatched on main with
+prebuild_release_artifacts) serves the tag of commit T when P is T, or when P
+is an ancestor of T and every path `git diff --name-only --no-renames P T`
+lists is a non-input of Core's release artifacts (its binaries and the Web
+SDK package):
+  - a path under another product's root (`root` in T's ci/products.json),
+    except a Cargo.toml there: Cargo resolves every workspace member's
+    manifest, and MODULE.bazel.lock records each one as an input;
+  - a product's changelog (`changelog` in T's ci/products.json);
+  - a path in CI_ONLY_PATHS, files only CI reads, each of them a
+    `scripts/ci-*` file (an entry outside that refuses every prebuild: this
+    file comes from the release commit, which must not be able to list its
+    own inputs here).
+Any other path, a commit that is not an ancestor, or an unreadable products
+file means that the tag builds its own artifacts. The release doctor checks
+that no release build job, local action or script it runs names a non-input
+(scripts/check_release_workflow_contract.py, check `prebuild-non-inputs`, which
+reads the rules below and follows the scripts named in a build job, the
+local actions it uses, a module's relative imports and the files the npm
+scripts a build script runs execute with node; a Make recipe or a cargo
+alias is not followed), and the published crates' standalone guard that no
+packaged crate reads outside its package.
+
+Prints both commits and every changed path with its reason. Exit status: 0
+when the prebuild serves the release, 1 when it does not, 2 on a usage error.
+Runs in a checkout whose history holds both commits.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+
+PRODUCTS_FILE = "ci/products.json"
+# Files only CI reads. A new entry needs the reason it is no input of any
+# release build; the doctor check fails while a build job, local action or
+# script names one.
+CI_ONLY_PATHS = {
+    "scripts/ci-cargo-lanes.mjs": "the CI planner",
+    "scripts/ci-row-durations.json": "the CI planner's measured row durations",
+    "scripts/ci-non-rust-readers.json": "the CI planner's inventory of non-Rust readers",
+}
+# Where a CI-only file may live: a `scripts/ci-*` file.
+CI_ONLY_SHAPE = re.compile(r"scripts/ci-[A-Za-z0-9_.+-]+")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+class Refusal(Exception):
+    """The prebuild does not serve the release."""
+
+
+def ci_only_paths() -> dict[str, str]:
+    """CI_ONLY_PATHS, refused whole when an entry is not a scripts/ci-* file."""
+    outside = sorted(path for path in CI_ONLY_PATHS if not CI_ONLY_SHAPE.fullmatch(path))
+    if outside:
+        raise Refusal(f"CI_ONLY_PATHS lists {', '.join(outside)}, outside scripts/ci-*")
+    return CI_ONLY_PATHS
+
+
+def product_rules(products_text: str) -> tuple[dict[str, str], dict[str, str]]:
+    """The other products' roots (as `root/`) and every product's changelog,
+    each mapped to its product's name, from ci/products.json's text."""
+    try:
+        products = json.loads(products_text)["products"]
+        if not isinstance(products, list) or not products:
+            raise ValueError("no products")
+        roots: dict[str, str] = {}
+        changelogs: dict[str, str] = {}
+        for product in products:
+            name, root, changelog = product["name"], product["root"], product["changelog"]
+            if not all(isinstance(value, str) for value in (name, root, changelog)) or not name or not changelog:
+                raise ValueError(f"product {product!r} has no name, root or changelog")
+            if root:
+                if root.startswith("/") or root.endswith("/") or any(part in ("", ".", "..") for part in root.split("/")):
+                    raise ValueError(f"product {name} has a malformed root {root!r}")
+                roots[f"{root}/"] = name
+            changelogs[changelog] = name
+    except (KeyError, TypeError, ValueError) as error:
+        raise Refusal(f"{PRODUCTS_FILE} is unreadable: {error}") from error
+    return roots, changelogs
+
+
+def non_input_reason(path: str, roots: dict[str, str], changelogs: dict[str, str]) -> str | None:
+    """Why `path` is no input of Core's release artifacts, or None when it may be one."""
+    if path in changelogs:
+        return f"{changelogs[path]}'s changelog"
+    ci_only = ci_only_paths()
+    if path in ci_only:
+        return f"read only by CI ({ci_only[path]})"
+    for root, name in roots.items():
+        if path.startswith(root):
+            if path.rsplit("/", 1)[-1] == "Cargo.toml":
+                return None
+            return f"under {name}'s root {root}"
+    return None
+
+
+def git(*args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["git", *args], capture_output=True, check=False)
+
+
+def changed_paths(prebuild: str, release: str) -> list[str]:
+    if git("merge-base", "--is-ancestor", prebuild, release).returncode != 0:
+        raise Refusal(f"{prebuild} is not an ancestor of {release} in this checkout's history")
+    diff = git("diff", "--name-only", "-z", "--no-renames", prebuild, release)
+    if diff.returncode != 0:
+        raise Refusal(f"git diff {prebuild} {release} failed: {diff.stderr.decode(errors='replace').strip()}")
+    return [path for path in diff.stdout.decode("utf-8", errors="surrogateescape").split("\0") if path]
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2 or not all(COMMIT.fullmatch(commit) for commit in argv):
+        print(__doc__.split("\n\n", 2)[1], file=sys.stderr)
+        return 2
+    prebuild, release = argv
+    if prebuild == release:
+        print(f"prebuild {prebuild} is the release commit")
+        return 0
+    try:
+        ci_only_paths()
+        products = git("show", f"{release}:{PRODUCTS_FILE}")
+        if products.returncode != 0:
+            raise Refusal(f"{PRODUCTS_FILE} is unreadable at {release}")
+        roots, changelogs = product_rules(products.stdout.decode("utf-8", errors="replace"))
+        paths = changed_paths(prebuild, release)
+    except Refusal as refusal:
+        print(f"prebuild {prebuild} does not serve release {release}: {refusal}")
+        return 1
+    reasons = {path: non_input_reason(path, roots, changelogs) for path in paths}
+    inputs = [path for path, reason in reasons.items() if reason is None]
+    if inputs:
+        print(
+            f"prebuild {prebuild} does not serve release {release}: "
+            f"{len(inputs)} of the {len(paths)} paths changed since may be inputs of Core's release artifacts"
+        )
+    else:
+        print(
+            f"prebuild {prebuild} serves release {release}: none of the {len(paths)} paths changed since "
+            "is an input of Core's release artifacts"
+        )
+    for path, reason in reasons.items():
+        print(f"  {path}: {reason or 'an input'}")
+    return 1 if inputs else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

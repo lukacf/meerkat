@@ -184,6 +184,12 @@ impl PreparedInstallationOwner {
         // fact survives adoption with this exact source; generic new/prepare
         // never receives it merely by attaching a runtime.
         originals.select_installed_pair_recovery()?;
+        // Settle the access decisions a lost host left pending before this
+        // host applies or reads one.
+        originals
+            .reconcile_pending_access()
+            .await
+            .map_err(|_| HostLifetimeError::Unavailable)?;
         let service_policy = tool_policy
             .bind_service_owner(
                 self.store.clone(),

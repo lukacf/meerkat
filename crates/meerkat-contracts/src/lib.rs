@@ -603,6 +603,7 @@ pub use wire::{
     WireMemberCustodyRestore,
     WireMemberHealthClass,
     WireMemberHistoryPageBody,
+    WireMemberInputAdmission,
     WireMemberLifecycleCapabilities,
     WireMemberPreviewUnavailable,
     WireMemberProgressEvent,

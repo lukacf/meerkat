@@ -5151,9 +5151,29 @@ impl MethodRouter {
                 adapter.input_state(&session_id, &input_id).await
             }
             meerkat_contracts::SessionInputStateSelector::IdempotencyKey(key) => {
-                adapter
-                    .input_state_by_idempotency_key(&session_id, key)
-                    .await
+                // A key a wire caller supplied is stored in the caller
+                // namespace (`IdempotencyKey::caller`), so that form is read
+                // first. Only when it names no input is the key read as it
+                // is, which keeps a key a host gave the Rust API, and a
+                // receipt's `delivery_id`, readable. Both reads stay in this
+                // session's index. A caller key equal to a raw key of the
+                // same session reads the caller's input.
+                let by_caller = match meerkat_runtime::IdempotencyKey::caller(key) {
+                    Ok(caller) => {
+                        adapter
+                            .input_state_by_idempotency_key(&session_id, &caller.0)
+                            .await
+                    }
+                    Err(_) => Ok(None),
+                };
+                match by_caller {
+                    Ok(None) => {
+                        adapter
+                            .input_state_by_idempotency_key(&session_id, key)
+                            .await
+                    }
+                    found => found,
+                }
             }
         };
         match stored {
@@ -16187,6 +16207,10 @@ mod tests {
         assert!(
             receipt.get("agent_runtime_id").is_none(),
             "binding-era agent_runtime_id must not leak from ingress helper"
+        );
+        assert!(
+            receipt["delivery"]["admission"]["input_id"].is_string(),
+            "the delivery names the input the member's runtime admitted: {receipt}"
         );
 
         let second_resp = router
@@ -27328,6 +27352,77 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             assert_eq!(replay["existing_id"], first["input_id"]);
         }
 
+        /// Read one input's stored state back with `session/input_status`
+        /// by an idempotency key.
+        async fn input_status_by_key(
+            router: &MethodRouter,
+            session_id: &str,
+            key: &str,
+        ) -> serde_json::Value {
+            result_value(
+                &router
+                    .dispatch(make_request(
+                        "session/input_status",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "selector": { "by": "idempotency_key", "value": key },
+                        }),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+        }
+
+        /// `session/input_status` by `idempotency_key` reads an input back by
+        /// the key its sender supplied: the key a wire caller gave
+        /// `session/external_event`, and a key a host gave the Rust API as it
+        /// is, which stays readable.
+        #[tokio::test]
+        async fn input_status_reads_an_input_back_by_the_key_its_sender_supplied() {
+            let (router, runtime, _temp) = keyed_router(false).await;
+            let session_id = create_session(&router).await;
+            let parsed = meerkat_core::SessionId::parse(&session_id).expect("session id");
+
+            // A host admits an event under its own key through the Rust API.
+            let host_id = match runtime
+                .accept_external_event_via_runtime_with_key(
+                    &parsed,
+                    "inbox.item".to_string(),
+                    serde_json::json!({ "body": "a host's keyed event" }),
+                    None,
+                    Some(meerkat_runtime::IdempotencyKey::new("host:item-8")),
+                )
+                .await
+                .expect("the host's event is admitted")
+            {
+                meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => input_id.to_string(),
+                other => panic!("the host's event is accepted, got {other:?}"),
+            };
+            let host_read = input_status_by_key(&router, &session_id, "host:item-8").await;
+            assert_eq!(
+                host_read["state"]["input_id"].as_str(),
+                Some(host_id.as_str()),
+                "a host's key reads its input back: {host_read}"
+            );
+
+            // A wire caller admits an event under its own key.
+            let sent = result_value(
+                &external_event(
+                    &router,
+                    &session_id,
+                    Some("inbox:msg-8"),
+                    serde_json::json!({ "body": "a caller's keyed event" }),
+                )
+                .await,
+            );
+            assert_eq!(sent["outcome_type"], "accepted", "{sent}");
+            let caller_read = input_status_by_key(&router, &session_id, "inbox:msg-8").await;
+            assert_eq!(
+                caller_read["state"]["input_id"], sent["input_id"],
+                "the key a caller gave session/external_event reads its input back: {caller_read}"
+            );
+        }
+
         #[cfg(feature = "mob")]
         async fn create_mob_with_worker(router: &MethodRouter, mob: &str) -> String {
             let create_resp = router
@@ -27444,6 +27539,10 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                 state == "pending" || state == "admitted",
                 "the first answer reports pending or admitted: {first}"
             );
+            assert!(
+                first.get("admission").is_none(),
+                "a keyed send's continuation names its input, not `admission`: {first}"
+            );
             let admitted = replay_until_admitted(&router, &mob_id, content, "item-7").await;
             let (replayed_id, replayed_at, _) = delivery(&admitted);
             assert_eq!(
@@ -27505,6 +27604,71 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
                     assert!(status["input_id"].is_string(), "{first}");
                 }
                 other => panic!("the first answer is pending or admitted, got {other}: {first}"),
+            }
+        }
+
+        /// Two unkeyed steers with identical content to one runtime-backed
+        /// member: each answer names the input the member's runtime admitted
+        /// for that send, so two callers can tell their sends apart, and
+        /// `session/input_status` reads each named input.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_unkeyed_answers_name_each_admitted_input() {
+            let (router, _runtime, _temp) = keyed_router(true).await;
+            let mob_id = create_mob_with_worker(&router, "mob-unkeyed-admission").await;
+            let mut answers = Vec::new();
+            for _ in 0..2 {
+                let sent = router
+                    .dispatch(make_request(
+                        "mob/member_send",
+                        serde_json::json!({
+                            "mob_id": mob_id,
+                            "agent_identity": "worker-1",
+                            "content": "The same words from two callers.",
+                            "handling_mode": "steer",
+                        }),
+                    ))
+                    .await
+                    .unwrap();
+                answers.push(result_value(&sent));
+            }
+            assert_ne!(
+                answers[0], answers[1],
+                "two sends of the same content get two different answers"
+            );
+            for sent in &answers {
+                assert!(
+                    sent.get("continuation").is_none(),
+                    "an unkeyed send answers no keyed receipt: {sent}"
+                );
+                let admission = &sent["admission"];
+                assert!(
+                    admission["session_id"].is_string() && admission["input_id"].is_string(),
+                    "an unkeyed send names the input its member admitted: {sent}"
+                );
+            }
+            assert_ne!(
+                answers[0]["admission"]["input_id"], answers[1]["admission"]["input_id"],
+                "each answer names its own input"
+            );
+            for sent in &answers {
+                let admission = &sent["admission"];
+                let followed = result_value(
+                    &router
+                        .dispatch(make_request(
+                            "session/input_status",
+                            serde_json::json!({
+                                "session_id": admission["session_id"],
+                                "selector": { "by": "input_id", "value": admission["input_id"] },
+                            }),
+                        ))
+                        .await
+                        .unwrap(),
+                );
+                assert_eq!(
+                    followed["state"]["input_id"], admission["input_id"],
+                    "session/input_status reads the input an unkeyed send names: {followed}"
+                );
             }
         }
 

@@ -8,12 +8,18 @@ listing parser, the manifest's workspace-only selection and name parity.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import importlib.util
+import io
+import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 SCRIPT = pathlib.Path(__file__).resolve().parent / "published_crates_standalone.py"
 spec = importlib.util.spec_from_file_location("published_crates_standalone", SCRIPT)
@@ -89,6 +95,137 @@ class FloorResolveProblem(unittest.TestCase):
     def test_any_other_error_reports_cargos_first_error_line(self):
         stderr = "warning: x\nerror: failed to parse manifest\n\nCaused by:\n  bad\n"
         self.assertEqual(pcs.resolve_problem(stderr), "failed to parse manifest")
+
+
+# A cargo stand-in for the floor stages: `metadata --no-deps` lists a Meta
+# product (meta-extension-state, meerkat-meta) and a Core crate; `package`
+# writes each selected crate's archive into CARGO_TARGET_DIR/package;
+# `metadata` in the scratch workspace rewrites its lock and lists meerkat-core
+# from crates.io (or fails as FLOOR_STUB_RESOLVE_ERROR says); `build` and
+# `check` succeed. Every call is logged with its working directory.
+FLOOR_CARGO_STUB = r'''
+import io, json, os, pathlib, sys, tarfile
+args, cwd = sys.argv[1:], pathlib.Path.cwd()
+with open(os.environ["FLOOR_STUB_LOG"], "a") as log:
+    log.write(json.dumps({"args": args, "cwd": str(cwd)}) + "\n")
+root = pathlib.Path(os.environ["FLOOR_STUB_ROOT"])
+crates = {"meta-extension-state": root / "meta/crates/meta-extension-state",
+          "meerkat-meta": root / "meta/crates/meerkat-meta", "meerkat-core": root / "crates/meerkat-core"}
+def package(name, path, source=None, kinds=("lib",)):
+    return {"id": f"{name} 0.8.31", "name": name, "version": "0.8.31", "source": source,
+            "manifest_path": str(path / "Cargo.toml"), "targets": [{"kind": [kind]} for kind in kinds]}
+if args[:2] == ["metadata", "--no-deps"]:
+    packages = [package(name, path) for name, path in crates.items()]
+    print(json.dumps({"packages": packages, "workspace_members": [p["id"] for p in packages]}))
+elif args[:1] == ["package"]:
+    target = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "package"
+    target.mkdir(parents=True, exist_ok=True)
+    for index, word in enumerate(args):
+        if args[index - 1] == "-p":
+            body = f"[package]\nname = \"{word}\"\nversion = \"0.8.31\"\n".encode()
+            with tarfile.open(target / f"{word}-0.8.31.crate", "w:gz") as archive:
+                info = tarfile.TarInfo(f"{word}-0.8.31/Cargo.toml")
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+elif args[:1] == ["metadata"]:
+    error = os.environ.get("FLOOR_STUB_RESOLVE_ERROR")
+    if error:
+        print(error, file=sys.stderr)
+        sys.exit(101)
+    (cwd / "Cargo.lock").write_text("# resolved by the stub\nmeerkat-core 0.8.31 registry\n")
+    registry = "registry+https://github.com/rust-lang/crates.io-index"
+    print(json.dumps({"packages": [
+        package("meta-extension-state", cwd / "meta-extension-state-0.8.31"),
+        package("meerkat-meta", cwd / "meerkat-meta-0.8.31", kinds=("lib", "bin")),
+        package("meerkat-core", root / "registry/meerkat-core", source=registry)]}))
+elif args[:1] in (["build"], ["check"]):
+    sys.exit(0)
+else:
+    print(f"floor cargo stub: unexpected command {args}", file=sys.stderr)
+    sys.exit(2)
+'''
+
+
+class FloorNoBuild(unittest.TestCase):
+    """`floor --no-build` packages, unpacks and resolves, records the
+    resolved lock's digest, builds nothing, publishes nothing and writes only
+    under --out (a cargo stand-in, no network)."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="floor-no-build-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.root = self.tmp / "repo"
+        for relative, text in {
+            "ci/products.json": json.dumps({"products": [
+                {"name": "core", "root": ""},
+                {"name": "meta", "root": "meta", "publish_order": ["meta-extension-state", "meerkat-meta"]}]}),
+            ".cargo/config.toml": '[env]\nLIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_FTS5"\n',
+            "Cargo.lock": "# the repository lock, the seed\n",
+            "meta/crates/meta-extension-state/Cargo.toml": "[package]\nname = \"meta-extension-state\"\n",
+            "meta/crates/meerkat-meta/Cargo.toml": "[package]\nname = \"meerkat-meta\"\n",
+            "crates/meerkat-core/Cargo.toml": "[package]\nname = \"meerkat-core\"\n",
+        }.items():
+            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / relative).write_text(text)
+        stub = self.tmp / "cargo"
+        stub.write_text(f"#!{sys.executable}\n" + FLOOR_CARGO_STUB)
+        stub.chmod(0o755)
+        self.log = self.tmp / "calls.jsonl"
+        self.env = {"CARGO_BIN": str(stub), "FLOOR_STUB_LOG": str(self.log), "FLOOR_STUB_ROOT": str(self.root)}
+
+    def files(self):
+        return {path.relative_to(self.tmp): (path.stat().st_mtime_ns, path.read_bytes())
+                for path in sorted(self.tmp.rglob("*")) if path.is_file() and path != self.log}
+
+    def run_floor(self, name, *, resolve_only, resolve_error=None):
+        out = self.tmp / name
+        env = dict(self.env, FLOOR_STUB_RESOLVE_ERROR=resolve_error or "")
+        with unittest.mock.patch.dict(os.environ, env), \
+                contextlib.redirect_stdout(io.StringIO()) as stdout:
+            status = pcs.floor(self.root, "meta", out, "release", False, resolve_only=resolve_only)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.log.write_text("")
+        return status, json.loads((out / "floor.json").read_text()), calls, stdout.getvalue(), out
+
+    def test_no_build_resolves_records_the_lock_and_builds_nothing(self):
+        status, report, calls, stdout, out = self.run_floor("out", resolve_only=True)
+        self.assertEqual(status, 0)
+        self.assertEqual((report["stage"], report["problems"]), ("resolve", []))
+        self.assertEqual(report["registry_dependencies"], ["meerkat-core 0.8.31"])
+        lock = (out / "ws" / "Cargo.lock").read_bytes()
+        self.assertTrue(lock.startswith(b"# resolved by the stub"))
+        self.assertEqual(report["lock_sha256"], hashlib.sha256(lock).hexdigest())
+        self.assertEqual([call["args"][0] for call in calls], ["metadata", "package", "metadata"])
+        self.assertIn("--no-verify", calls[1]["args"])
+        self.assertFalse([call for call in calls
+                          if {"build", "check", "publish", "install", "login", "yank", "owner"} & set(call["args"])])
+        self.assertIn("resolution only, nothing built", stdout)
+
+    def test_no_build_writes_nothing_outside_its_output_dir(self):
+        before = self.files()
+        self.run_floor("out", resolve_only=True)
+        after = self.files()
+        written = {path for path in after if path.parts[0] == "out"}
+        self.assertTrue(written)
+        self.assertEqual({path: value for path, value in after.items() if path not in written}, before)
+
+    def test_a_full_floor_resolves_to_the_same_lock_and_then_builds(self):
+        _, resolved, _, _, _ = self.run_floor("resolve", resolve_only=True)
+        status, built, calls, stdout, _ = self.run_floor("build", resolve_only=False)
+        self.assertEqual(status, 0)
+        self.assertEqual((built["stage"], built["problems"]), ("build", []))
+        self.assertEqual(built["lock_sha256"], resolved["lock_sha256"])
+        self.assertEqual(calls[-1]["args"], ["build", "--workspace", "--lib", "--bins"])
+        self.assertIn("releasable against published dependencies", stdout)
+
+    def test_no_build_names_a_declaration_crates_io_cannot_resolve(self):
+        error = "error: failed to select a version for the requirement `meerkat-core = \"=0.8.31\"`"
+        status, report, calls, _, _ = self.run_floor("out", resolve_only=True, resolve_error=error)
+        self.assertEqual(status, 1)
+        self.assertEqual(report["stage"], "resolve")
+        self.assertIn('meerkat-core = "=0.8.31"', report["problems"][0])
+        self.assertNotIn("lock_sha256", report)
+        self.assertEqual([call["args"][0] for call in calls], ["metadata", "package", "metadata"])
 
 
 class StripComments(unittest.TestCase):

@@ -52,6 +52,13 @@ git add \
   "$ROOT/MODULE.bazel" \
   "$ROOT/docs/quickstart.mdx" \
   "$ROOT/docs/sdks/rust.mdx"
+# Meta Forge's Guide version and development Meta SDK pin, which
+# bump-sdk-versions.sh moves with Meta's version.
+for forge_file in "$ROOT/installer/launchkit/guide_sdk.py" "$ROOT/installer/pyproject.toml"; do
+  if [ -f "$forge_file" ]; then
+    git add "$forge_file"
+  fi
+done
 # Collect the tracked BUILD.bazel paths first. A literal or glob pathspec that
 # matches nothing is FATAL to `git add`, and the release-script test fixture is
 # a synthetic repo that may carry none, so passing the pattern straight to git

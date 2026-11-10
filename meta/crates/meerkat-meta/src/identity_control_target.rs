@@ -134,6 +134,17 @@ where
         crate::member_comms_id::runtime_alias_str(requested_identity).into_owned();
     let generated_runtime_alias =
         crate::member_comms_id::is_reserved_generated_alias(&requested_identity);
+    // The plain name of an identity created at runtime that the identity
+    // runtime has not registered yet (one created since its last roster pass)
+    // is registered from its row first, so it resolves as any registered
+    // identity. Best effort: any other name, and a read Core could not serve,
+    // resolves as before, and the operation's own door answers it.
+    if !generated_runtime_alias
+        && let Some(identity_runtime) = identity_runtime
+        && let Ok(identity) = AgentIdentity::parse(&requested_identity)
+    {
+        let _ = identity_runtime.admit_unregistered_name(&identity).await;
+    }
     let statuses = match identity_runtime {
         Some(identity_runtime) => identity_runtime.statuses().await.map_err(|error| {
             IdentityControlResolutionError::HistoryUnavailable {

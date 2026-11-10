@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 const DEADLINE: Duration = Duration::from_secs(120);
 const REALM: &str = "json-failure";
 const MODEL: &str = "loopback-model";
+/// The variable a static-bearer route of these rows reads its token from.
+const TOKEN_ENV: &str = "RUN_JSON_FAILURE_LOOPBACK_TOKEN";
 
 fn rkat_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
@@ -44,6 +46,9 @@ fn rkat_binary() -> PathBuf {
 enum Script {
     /// Every request gets this status and body.
     Status { status: u16, body: String },
+    /// Every request gets this status; the body repeats the request's
+    /// `authorization` header, as a proxy or gateway can.
+    EchoAuthorization { status: u16 },
     /// The first request streams one text delta and a tool call; every later
     /// request gets this status and body.
     DeltaThenStatus { status: u16, body: String },
@@ -90,8 +95,8 @@ fn streamed_delta_and_tool_call() -> String {
 
 const STREAMED_TEXT: &str = "streamed-before-the-failure";
 
-/// Read one whole HTTP request (headers and body).
-fn read_request(socket: &mut TcpStream) -> Option<()> {
+/// Read one whole HTTP request (headers and body); returns its header block.
+fn read_request(socket: &mut TcpStream) -> Option<String> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 8192];
     let header_end = loop {
@@ -118,16 +123,34 @@ fn read_request(socket: &mut TcpStream) -> Option<()> {
             Ok(read) => buffer.extend_from_slice(&chunk[..read]),
         }
     }
-    Some(())
+    Some(raw_headers)
 }
 
 fn serve(mut socket: TcpStream, script: &Script, request_index: usize) {
     let _ = socket.set_read_timeout(Some(Duration::from_secs(30)));
-    if read_request(&mut socket).is_none() {
+    let Some(headers) = read_request(&mut socket) else {
         return;
-    }
+    };
     let (status, content_type, body) = match script {
         Script::Status { status, body } => (*status, "application/json", body.clone()),
+        Script::EchoAuthorization { status } => {
+            let authorization = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                })
+                .unwrap_or_default();
+            let body = serde_json::json!({
+                "error": {
+                    "message": format!("rejected request with header authorization: {authorization}"),
+                    "type": "invalid_request_error"
+                }
+            })
+            .to_string();
+            (*status, "application/json", body)
+        }
         Script::DeltaThenStatus { status, body } => {
             if request_index == 0 {
                 (200, "text/event-stream", streamed_delta_and_tool_call())
@@ -173,10 +196,26 @@ struct Roots {
     project: PathBuf,
     state: PathBuf,
     user: PathBuf,
+    /// The bearer token of a static-bearer route, passed to `rkat` in
+    /// `TOKEN_ENV`.
+    token: Option<String>,
 }
 
-/// Fresh roots whose realm config routes `MODEL` to the loopback server.
+/// Fresh roots whose realm config routes `MODEL` to the loopback server
+/// without a credential.
 fn roots(port: u16) -> Roots {
+    roots_with_token(port, None)
+}
+
+/// Fresh roots whose realm config routes `MODEL` to the loopback server;
+/// with a token, the route signs its requests with it as a static bearer.
+fn roots_with_token(port: u16, token: Option<String>) -> Roots {
+    let auth = match token {
+        Some(_) => format!(
+            "auth_method = \"static_bearer\"\nsource = {{ kind = \"env\", env = \"{TOKEN_ENV}\" }}"
+        ),
+        None => "auth_method = \"none\"\nsource = { kind = \"platform_default\" }".to_string(),
+    };
     let temp = tempfile::TempDir::new().unwrap();
     let home = temp.path().to_path_buf();
     let project = temp.path().join("project");
@@ -206,8 +245,7 @@ server = "loopback"
 
 [realm."{REALM}".auth.loopback]
 provider = "self_hosted"
-auth_method = "none"
-source = {{ kind = "platform_default" }}
+{auth}
 
 [realm."{REALM}".binding.loopback]
 backend_profile = "loopback"
@@ -222,6 +260,7 @@ auth_profile = "loopback"
         project,
         state,
         user,
+        token,
     }
 }
 
@@ -270,8 +309,12 @@ fn rkat_in_realm(roots: &Roots, realm: &str, args: &[&str]) -> Finished {
         "RKAT_TEST_CLIENT",
         "RUST_LOG",
         "RUST_BACKTRACE",
+        TOKEN_ENV,
     ] {
         command.env_remove(name);
+    }
+    if let Some(token) = &roots.token {
+        command.env(TOKEN_ENV, token);
     }
     command
         .current_dir(&roots.project)
@@ -513,6 +556,43 @@ fn streamed_text_precedes_the_failure_document() {
         finished.stdout.trim_end().ends_with('}'),
         "the document is the last thing on stdout: {}",
         finished.stdout
+    );
+}
+
+/// A provider (or a proxy in front of it) that repeats the request's
+/// credential in its error body: the credential reaches neither the failure
+/// document nor stderr. The route's authorizer removes it from the provider
+/// text before the error leaves the client; the document adds no redaction
+/// of its own, and the rest of the provider's answer still reaches the
+/// typed error.
+#[test]
+fn a_credential_echoed_by_the_provider_does_not_reach_stdout() {
+    // Credential-shaped, assembled here so no scanner reads it as a secret.
+    let token = format!("sk-{}", "loopbackcredential".repeat(3));
+    let roots = roots_with_token(
+        start_loopback(Script::EchoAuthorization { status: 400 }),
+        Some(token.clone()),
+    );
+    let finished = run_turn(&roots, &["--output", "json"]);
+    assert_eq!(finished.status, Some(1), "stderr:\n{}", finished.stderr);
+    let document = last_document(&finished);
+    assert_eq!(document["error"]["code"], "PROVIDER_ERROR", "{document}");
+    let detail = document["error"]["details"]["error"]["detail"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("rejected request with header authorization: Bearer [REDACTED]"),
+        "the provider's answer reaches the typed error without the credential: {document}"
+    );
+    assert!(
+        !finished.stdout.contains(&token),
+        "the credential reached stdout: {}",
+        finished.stdout
+    );
+    assert!(
+        !finished.stderr.contains(&token),
+        "the credential reached stderr: {}",
+        finished.stderr
     );
 }
 

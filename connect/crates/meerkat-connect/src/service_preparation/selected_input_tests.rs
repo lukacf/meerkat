@@ -1,5 +1,13 @@
 //! Public tool-result and original-custody controls using inert local resources.
 //! These cover result shapes, not installed root transport or native readiness.
+//!
+//! The inert resource fixture (`resources::local_round`) runs its protocol
+//! child on the standard library of TOOLKIT_SHARED_TEST_PYTHON. The console
+//! row gives that variable to every case, the physical shared setup controls
+//! included, so it selects the interpreter `scripts/connect-test-python`
+//! prepares: the whole pinned set of `scripts/connect-test-python-requirements.txt`,
+//! mcp 2.2.0 and its closure, among them httpx2, anyio, jsonschema and
+//! referencing.
 use super::*;
 use crate::{
     protected_parent::selected_input::{SelectedInput, digest, inert_test_input},
@@ -154,6 +162,11 @@ async fn lazy_prepare_results_project_only_completed_selected_input() {
     // Copy completion alone does not finish the pending tool request.
     assert!(futures_util::poll!(result.as_mut()).is_pending());
     let (first, handoff) = tokio::join!(result, request.handoff(prepared));
+    // Report both joined results when either fails.
+    assert!(
+        first.is_ok() && handoff.is_ok(),
+        "lazy preparation result: {first:?}; handoff: {handoff:?}"
+    );
     handoff.unwrap();
     let first = first.unwrap();
     assert_projection(&first, true, &input);

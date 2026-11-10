@@ -37,11 +37,11 @@ def ordinary_gateway(product, content=b"inert ordinary Meta RPC gateway, never e
 
 def packaged(product, bundle_source, monkeypatch, tmp_path, *, gateway=True, meta_version="0.9.4"):
     from launchkit import product_distribution
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product, meta_version)
     selected = ordinary_gateway(product) if gateway else None
     output = tmp_path / "selected-product.zip"
-    product_distribution.package(root, target, guide, output,
+    product_distribution.package(root, target, guide, output, guide_wheel=sdk,
         **({"ordinary_gateway": selected} if gateway else {}))
     extracted = tmp_path / "selected-product"
     with zipfile.ZipFile(output) as archive:
@@ -169,16 +169,16 @@ def test_ordinary_gateway_binding_refuses_drift(product, bundle_source, tmp_path
 
 def test_package_refuses_gateway_bytes_that_differ_from_their_pin(product, bundle_source, tmp_path, monkeypatch):
     from launchkit import distribution, product_distribution
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     target, _, _ = development(product, "0.9.4")
     selected = ordinary_gateway(product)
     output = tmp_path / "refused.zip"
     with pytest.raises(distribution.DistributionError, match="ordinary Meta gateway"):
-        product_distribution.package(root, target, guide, output,
+        product_distribution.package(root, target, guide, output, guide_wheel=sdk,
             ordinary_gateway=ExactFile(selected.path, "e" * 64))
     assert not output.exists()
     with pytest.raises(distribution.DistributionError, match="exact product inputs"):
-        product_distribution.package(root, target, guide, output, ordinary_gateway=str(selected.path))
+        product_distribution.package(root, target, guide, output, guide_wheel=sdk, ordinary_gateway=str(selected.path))
     assert not output.exists()
 
 

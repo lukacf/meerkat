@@ -4,7 +4,7 @@ description: "Runtime-owned R0-R3 policy evaluation, pending approvals, safe-dra
 icon: "shield-check"
 ---
 
-*Mirrored from Meerkat Meta main at [10d49fde733f](https://github.com/lukacf/meerkat/commit/10d49fde733fc7eb7fd1c18b73bad31e0423303c) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [80cc57488f8b](https://github.com/lukacf/meerkat/commit/80cc57488f8b6d8a94369bb339940baa22d13c75) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 Gating is a policy service owned by the Meta runtime. A caller submits an action, actor, and risk tier. The runtime evaluates that request, records the result, and may create a pending approval entry.
 
@@ -12,10 +12,10 @@ Gating is a policy service owned by the Meta runtime. A caller submits an action
 Gating does not perform the proposed action. The caller must enforce the returned `outcome` before it invokes delivery, changes state, or performs another side effect.
 </Warning>
 
-There is no gating module or gating MCP tool. The runtime implements the evaluate, pending, decide, and audit contracts directly.
+There is no gating module or gating MCP tool. The runtime implements the evaluate, pending, decide, withdraw, and audit contracts directly.
 
 <Note>
-With Console access control enabled, `gating.view` controls access to pending approvals and audit records, while `gating.decide` controls submission of a gating decision. These permissions do not grant access to the underlying tool, account or recipient.
+With Console access control enabled, `gating.view` controls access to pending approvals and audit records, while `gating.decide` controls submission of a gating decision. No console permission withdraws a request: withdrawal is the embedding host's. These permissions do not grant access to the underlying tool, account or recipient.
 
 The `r0`-`r3` values below belong to the Meta gating service. They do not activate native R1/R2/R3 operation review or human-consent integration. An `allowed` result or approval record does not establish that the action ran; use the action's execution result to determine what happened.
 </Note>
@@ -71,7 +71,7 @@ An `r3` evaluation creates a `GatingPendingEntry` with the action and actor iden
 
 If both `approval_recipient` and `approval_channel` are present, the runtime resolves a route, then commits the pending entry and its `pending_created` audit, and only then sends a `gating_approval_request` through the loaded router and delivery modules, so a notification never names a gate the runtime does not hold. A missing module or routing failure is recorded in the `pending_created` detail and as an `approval_notification` event with disposition `not_sent`. The send outcome is recorded as a separate `approval_notification` audit event with `disposition` `acknowledged`, `not_delivered`, `not_sent` (refused before the delivery module was called) or `unknown` (the module call failed, so it may or may not have gone out), plus the route and delivery ids. The outcome never changes the committed gate: there is no automatic retry, no restored or renewed entry, and an unknown outcome is not reported as delivered. After applying due timeout settlements, a refused decision leaves the requested pending entry, its position, the IDs and the audit unchanged. These commits are in memory; `gating_state_snapshot` exports state for a host to persist, and exporting it is not a durable commit.
 
-The stock gateways (`meta_gateway` and `rpc_gateway`) keep that state in the realm's metadata store themselves, as does a runtime built with `UnifiedRuntimeBuilder::keep_gating_state(true)`: they restore it before anything evaluates a gating action, and write it after every change and at shutdown, so pending entries and the audit survive a restart. It is as durable as the store: a state directory or a host store realm keeps it across restarts, while `meta_gateway` keeps its metadata in memory, and so its gating state. The writes follow the changes they record, so a crash can lose the last ones. A stored state that cannot be read or restored is logged and left as it is, and that process keeps gating in memory only. A host that persists the snapshot itself leaves `keep_gating_state` off: an owner restores only once. `meta/gating/audit` reports which applies as `retention` (`durable` or `process`).
+The stock gateways (`meta_gateway` and `rpc_gateway`) keep that state in the realm's metadata store themselves, as does a runtime built with `UnifiedRuntimeBuilder::keep_gating_state(true)`: they restore it before anything evaluates a gating action, and write it after every change and at shutdown, so pending entries and the audit survive a restart. It is as durable as the store: a state directory or a host store realm keeps it across restarts (`rpc_gateway` with `persistent_state`, and `meta_gateway` with `persistent_sessions: true`, keep it in the state directory's metadata store), while a launch without one keeps its metadata in memory, and so its gating state. The writes follow the changes they record, so a crash can lose the last ones. A stored state that cannot be read or restored is logged and left as it is, and that process keeps gating in memory only. A host that persists the snapshot itself leaves `keep_gating_state` off: an owner restores only once. `meta/gating/audit` reports which applies as `retention` (`durable` or `process`).
 
 The TypeScript and Python `GatingPendingEntry` projections retain the requested approver, notification recipient and channel, optional route and delivery references, deadline, rationale, and the recorded origin (identity with optional conversation and interaction). Their `GatingAuditEntry` projections keep the owner's `pending_id` and event `detail` as returned. The console shows the requested approver separately from the actor. Missing optional fields remain unknown; the actor is never substituted for the approver. Route and delivery IDs are notification references, not confirmation of receipt, a human decision, or action execution.
 
@@ -113,7 +113,7 @@ Resolve a pending entry with:
 | `reject` | `safe_draft` | `rejection_decided` |
 | `escalate` | `pending_approval` | `escalation_decided` and a `pending_created` entry for the successor |
 
-Escalation goes to a configured successor approver. The successor entry keeps the same action, candidate and deadline, and its `requested_approver` is the successor. Routes map the escalated entry's requested approver to a successor, with an optional default for entries that name none or have no specific route. Without a route, escalation is refused (`NoEscalationRoute`, or invalid params over JSON-RPC) and the entry stays pending until it is decided or times out. Clearing the requested approver is not proof that every `gating.decide` holder is qualified, so an unrouted escalation never opens the request to anyone. Embedding hosts configure routes with `set_gating_escalation_routes`. `rpc_gateway` reads an `escalation` object from `gating_config_path`, and `meta_gateway` reads an `[escalation]` table from `config/gating.toml` (`default = "..."` and an `[escalation.routes]` table). An unknown key inside the escalation configuration fails startup. Successors created before this change and restored from a saved snapshot have no requested approver, so any `gating.decide` holder can decide them until they are decided or expire. For `rpc_gateway`:
+Escalation goes to a configured successor approver. Withdrawing the original pending id after an escalation withdraws the live successor (see [Withdrawal](#withdrawal)). The successor entry keeps the same action, candidate and deadline, and its `requested_approver` is the successor. Routes map the escalated entry's requested approver to a successor, with an optional default for entries that name none or have no specific route. Without a route, escalation is refused (`NoEscalationRoute`, or invalid params over JSON-RPC) and the entry stays pending until it is decided, times out, or is withdrawn. Clearing the requested approver is not proof that every `gating.decide` holder is qualified, so an unrouted escalation never opens the request to anyone. Embedding hosts configure routes with `set_gating_escalation_routes`. `rpc_gateway` reads an `escalation` object from `gating_config_path`, and `meta_gateway` reads an `[escalation]` table from `config/gating.toml` (`default = "..."` and an `[escalation.routes]` table). An unknown key inside the escalation configuration fails startup. Successors created before this change and restored from a saved snapshot have no requested approver, so any `gating.decide` holder can decide them until they are decided or expire. For `rpc_gateway`:
 
 ```json
 {
@@ -126,6 +126,12 @@ Escalation goes to a configured successor approver. The successor entry keeps th
 ```
 
 Approval by the original `actor_id` is rejected. When `requested_approver` is set, every decision must come from that approver. Escalation creates a successor pending entry and returns its ID in `next_pending_id`; routing is described above.
+
+## Withdrawal
+
+The requester can withdraw a pending entry it no longer needs with `meta/gating/withdraw`. A withdrawal is not a decision: the entry leaves the queue with no approver, its outcome is `safe_draft`, and the audit records `request_withdrawn` with `reason`, `withdrawn_by` (`host`), the route and delivery ids and the entry's origin in `detail`, never the action's payload. Only the embedding host withdraws (its stdio gateway, or the library's `withdraw_gating_action`), on behalf of the requests it minted; the console has no withdraw route (`-32601`), so a session that may decide a request still cannot withdraw it, and a candidate launch refuses it (`-32047` `candidate_launch`). An escalated request is followed hop by hop along the `next_pending_id` its escalations recorded to the live successor, which is withdrawn; the result names the id actually withdrawn. Observers (`GatingResolutionObserver`) receive cause `withdrawn` with `approved: false`, which is not a rejection. The console shows a withdrawn request as a departed card without decision buttons. The agent memory steward settles a withdrawn promotion gate as expired: the proposal behind it stays held, as after a timeout.
+
+A pending entry ends exactly once, in one of: `approval_decided`, `rejection_decided`, `escalation_decided` (the request continues under the successor), `timeout_fallback` or `request_withdrawn`. After any of them, a decision or a withdrawal of that id answers an unknown id.
 
 ## Audit records
 
@@ -155,6 +161,7 @@ The current runtime writes these event types:
 - `rejection_decided`
 - `escalation_decided`
 - `timeout_fallback`
+- `request_withdrawn`
 
 The audit log and pending queue are bounded runtime collections. They are not the unified event stream. They survive a restart where the runtime keeps the gating state (see [Pending approval](#pending-approval)).
 
@@ -178,6 +185,7 @@ The JSON-RPC methods are:
 - `meta/gating/evaluate`
 - `meta/gating/pending`
 - `meta/gating/decide`
+- `meta/gating/withdraw`
 - `meta/gating/audit`
 
 ## See also

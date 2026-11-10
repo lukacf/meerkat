@@ -97,7 +97,7 @@ def _verify_native_bindings(data, target, root=None):
         raise legacy.DistributionError("Supplemental native files must have one explicit program binding.")
 
 
-def candidate_readme(guide, target, origin, *, ordinary=False, glibc_floor=None):
+def candidate_readme(guide, target, origin, *, guide_wheel_sha256, ordinary=False, glibc_floor=None):
     # The legacy field name carries the resource library's exact host version.
     linux = "Linux x86_64" + (f" with exactly glibc {glibc_floor[0]}.{glibc_floor[1]}" if glibc_floor else "")
     host = (linux if target.target == "linux-x86_64"
@@ -185,8 +185,8 @@ configuration files to upload or publish.
 
 - Guide Core: `{guide.core_source}`
 - Guide Meta: `{guide.meta_source}`
-- Guide client SDK: `{guide_sdk.SELECTED_VERSION}` (source `{guide_sdk.SOURCE}`)
-- Guide client SDK wheel: `{guide_sdk.SHA256}`
+- Guide client SDK: `meerkat-meta {guide.version}`
+- Guide client SDK wheel: `{guide_wheel_sha256}`
 - Application Meta SDK wheel: `{target.meta_wheel.sha256}`
 - Toolkit SDK wheel: `{target.toolkit_wheel.sha256}`
 - Native product descriptor: `{target.assembly.sha256}`
@@ -231,7 +231,7 @@ def _ordinary(path, limit, *, allow_empty=False):
 def _public_path(name):
     if name in PUBLIC_EXTRA or name in {name for role in NATIVE_PROGRAMS for name in _native_paths(role).values()}:
         return True
-    if name.startswith("vendor/product/") or name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY, guide_sdk.WHEEL}:
+    if name.startswith("vendor/product/") or name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY, guide_sdk.wheel_path()}:
         from pathlib import PurePosixPath
 
         path = PurePosixPath(name)
@@ -253,21 +253,32 @@ def _product_inputs(target, artifacts):
     return selected
 
 
-def _pinned_guide_sdk():
+def _guide_version():
     try:
-        guide_sdk.require_pinned()
+        return guide_sdk.declared_core_version()
     except ValueError as exc:
         raise legacy.DistributionError(str(exc)) from exc
 
 
-def package(root, target, guide, output, *, ordinary_gateway=None, native_programs=None):
+def _guide_client(path):
+    """Verify the Guide client's own wheel metadata: the workspace Meta release."""
+    try:
+        guide_sdk.verify(legacy._read(path))
+    except ValueError as exc:
+        raise legacy.DistributionError(str(exc)) from exc
+
+
+def package(root, target, guide, output, *, guide_wheel, ordinary_gateway=None, native_programs=None):
     """Select public source and the actual owner's complete product closure.
 
     The target and guide selection come from the original trusted packaging
     owner. The existing native reader still validates the producer records and
     exact wheel/source/dependency bytes. This is not installed useful-work proof.
-    An optional ordinary gateway is the owner's Meta RPC gateway release for
-    the target's Meta SDK version, for applications without a setup helper.
+    guide_wheel is the published meerkat-meta client wheel of the Guide's Meta
+    release, pinned by the release inputs; the package carries it for Forge's
+    own environment. An optional ordinary gateway is the owner's Meta RPC
+    gateway release for the target's Meta SDK version, for applications
+    without a setup helper.
     """
     from .bootstrap import SelectedGuideRuntime
     from .connect_installer_caller import ExactFile
@@ -275,11 +286,16 @@ def package(root, target, guide, output, *, ordinary_gateway=None, native_progra
 
     root, output = Path(root).resolve(strict=True), Path(output).absolute()
     if (type(target) is not MetaToolkitRuntimeTarget or type(guide) is not SelectedGuideRuntime
+            or type(guide_wheel) is not ArtifactFile or type(guide_wheel.size) is not int
+            or type(guide_wheel.sha256) is not str or not legacy.HEX.fullmatch(guide_wheel.sha256)
             or ordinary_gateway is not None and type(ordinary_gateway) is not ExactFile
             or output.exists() or output.is_symlink()):
         raise legacy.DistributionError("Select exact product inputs and a fresh archive output.")
-    _pinned_guide_sdk()
+    _guide_version()
     guide.recheck()
+    if _ordinary(guide_wheel.path, guide_sdk.MAX_WHEEL_BYTES) != (guide_wheel.sha256, guide_wheel.size):
+        raise legacy.DistributionError("The Guide client wheel differs from its pinned release bytes.")
+    _guide_client(guide_wheel.path)
     artifacts = selected_runtime_artifacts(target)
     selection = candidate_selection(target, verified_artifacts=artifacts)
     # The source manifest is copied explicitly so historical producer locators
@@ -323,12 +339,13 @@ def package(root, target, guide, output, *, ordinary_gateway=None, native_progra
     paths["dependency_wheels"] = ["vendor/product/" + pin.path.relative_to(target.artifact_root).as_posix()
         for pin in target.dependency_wheels]
     source_files["vendor/guide/rpc_gateway"] = guide.gateway.path
-    source_files[guide_sdk.WHEEL] = root / guide_sdk.WHEEL
+    source_files[guide_sdk.wheel_path()] = guide_wheel.path
     if ordinary_gateway is not None:
         source_files[ORDINARY_GATEWAY] = ordinary_gateway.path
     with tempfile.TemporaryDirectory(prefix="forge-product-dom-") as temporary:
         candidate_document = Path(temporary).resolve(strict=True) / "README.md"
         candidate_document.write_text(candidate_readme(guide, target, artifacts.origin,
+            guide_wheel_sha256=guide_wheel.sha256,
             ordinary=ordinary_gateway is not None, glibc_floor=artifacts.glibc_floor))
         candidate_document.chmod(0o600)
         source_files["README.md"] = candidate_document
@@ -360,8 +377,8 @@ def package(root, target, guide, output, *, ordinary_gateway=None, native_progra
             raise legacy.DistributionError("The product distribution exceeds its bounds.")
         # Bind the bytes observed for this archive, not an earlier SDK read.
         # The application's wheel remains selected separately for its own env.
-        if file_records[guide_sdk.WHEEL] != {"sha256": guide_sdk.SHA256, "bytes": guide_sdk.SIZE}:
-            raise legacy.DistributionError("The Guide client SDK differs from its reviewed wheel.")
+        if file_records[guide_sdk.wheel_path()] != {"sha256": guide_wheel.sha256, "bytes": guide_wheel.size}:
+            raise legacy.DistributionError("The Guide client wheel differs from its pinned release bytes.")
         guide_hash, guide_size = _ordinary(guide.gateway.path, MAX_PRODUCT_ARCHIVE_BYTES)
         ordinary = None
         if ordinary_gateway is not None:
@@ -372,7 +389,7 @@ def package(root, target, guide, output, *, ordinary_gateway=None, native_progra
         data = {"format": FORMAT, "product": {"selection": selection, "paths": paths},
             "guide": {"version": guide.version, "core_version": guide.core_version,
                 "meta_source": guide.meta_source, "core_source": guide.core_source,
-                "sdk": guide_sdk.selection(),
+                "sdk": guide_sdk.selection(guide_wheel.sha256, guide_wheel.size),
                 "gateway": {"path": "vendor/guide/rpc_gateway", "sha256": guide_hash, "bytes": guide_size}},
             "frontend_source_sha256": legacy._frontend_inputs(root),
             "dom_dependencies_sha256": dom_hash, "files": file_records, "file_modes": modes,
@@ -420,7 +437,7 @@ def package(root, target, guide, output, *, ordinary_gateway=None, native_progra
 
 def verify(root):
     """Verify an extracted product without model or native process execution."""
-    _pinned_guide_sdk()
+    _guide_version()
     root = Path(root).resolve(strict=True)
     raw = legacy._read(root / legacy.MANIFEST)
     data = json.loads(raw, object_pairs_hook=legacy._unique_object)
@@ -497,18 +514,16 @@ def verify(root):
     if ordinary is not None and ordinary["version"] != target.meta.version:
         raise legacy.DistributionError("The ordinary Meta gateway is not the selected Meta SDK's release.")
     guide = data["guide"]
+    wheel = guide_sdk.wheel_path()
     if (type(guide) is not dict or guide.keys() != {"version", "core_version", "meta_source", "core_source", "gateway", "sdk"}
             or guide["version"] != guide_sdk.SELECTED_VERSION
             or guide["core_version"] != guide_sdk.declared_core_version()
-            or guide["sdk"] != guide_sdk.selection()
-            or guide_sdk.WHEEL not in data["files"]
+            or wheel not in data["files"]
+            or guide["sdk"] != guide_sdk.selection(data["files"][wheel]["sha256"], data["files"][wheel]["bytes"])
             or guide["gateway"] != {"path": "vendor/guide/rpc_gateway",
                 **data["files"]["vendor/guide/rpc_gateway"]}
             or any(type(guide[name]) is not str or not re.fullmatch("[0-9a-f]{40}", guide[name])
                 for name in ("meta_source", "core_source"))):
         raise legacy.DistributionError("The product guide differs from its selected native bytes.")
-    try:
-        guide_sdk.verify(legacy._read(root / guide_sdk.WHEEL))
-    except ValueError as exc:
-        raise legacy.DistributionError(str(exc)) from exc
+    _guide_client(root / wheel)
     return data

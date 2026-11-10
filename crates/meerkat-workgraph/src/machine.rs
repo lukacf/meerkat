@@ -2681,6 +2681,59 @@ mod tests {
     }
 
     #[test]
+    fn manually_blocked_items_cannot_be_claimed_and_an_update_keeps_them_blocked() {
+        // Claim is admitted only from Open (`ClaimOpen`) or from InProgress with an
+        // expired lease (`ClaimExpiredInProgress`). A manually Blocked item has no
+        // transition back to Open: an update keeps it Blocked, and it stays unclaimable.
+        let now = Utc::now();
+        let item = create("parked", now);
+        let (item, _) = WorkGraphMachine::block_item(item, 1, now).expect("block");
+        assert_eq!(item.status, WorkStatus::Blocked);
+        let claim = |item: WorkItem, revision: u64| {
+            WorkGraphMachine::claim_item(
+                item,
+                ClaimWorkItemRequest {
+                    id: WorkItemId::generated(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: revision,
+                    owner: owner("worker"),
+                    lease_seconds: None,
+                    lease_expires_at: None,
+                },
+                now,
+            )
+        };
+        let error = claim(item.clone(), 2).expect_err("a blocked item is not claimable");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+
+        let (updated, _) = WorkGraphMachine::update_item(
+            item,
+            UpdateWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 2,
+                title: Some("still parked".to_string()),
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            },
+            now,
+        )
+        .expect("update a blocked item");
+        assert_eq!(updated.status, WorkStatus::Blocked);
+        assert!(!WorkGraphMachine::is_ready(&updated, now));
+        let error = claim(updated, 3).expect_err("still not claimable after an update");
+        assert!(matches!(error, WorkGraphError::InvalidTransition(_)));
+    }
+
+    #[test]
     fn completed_close_is_completion_policy_gated_by_machine() {
         let now = Utc::now();
         let item = create_with_policy(

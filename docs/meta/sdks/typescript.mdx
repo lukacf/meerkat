@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from Meerkat Meta main at [10d49fde733f](https://github.com/lukacf/meerkat/commit/10d49fde733fc7eb7fd1c18b73bad31e0423303c) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [80cc57488f8b](https://github.com/lukacf/meerkat/commit/80cc57488f8b6d8a94369bb339940baa22d13c75) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -278,7 +278,9 @@ const granted = await runtime.grantTool("agent-a", {
   decisionRef: "approval-7", // your own record of the decision
 });
 const grantId = (granted.grant as { grant_id: string }).grant_id;
-await runtime.listToolGrants("agent-a", { includeEnded: true });
+granted.applies; // "now", "not_mounted" or "at_next_build"
+const listed = await runtime.listToolGrants("agent-a", { includeEnded: true });
+listed.gate; // { running, next_build }
 await runtime.toolGrantAudit("agent-a", { limit: 50 });
 await runtime.revokeToolGrant(grantId, { reason: "done" });
 
@@ -292,8 +294,11 @@ try {
 ```
 
 Name exactly one of `tool` and `family`, and exactly one of `durationMs` and
-`expiresAtMs`. Every refusal rejects with `ToolGrantRequestRefusedError`; its
-kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+`expiresAtMs`. A grant answers `applies`, whether it applies to the member's
+running build, and a list answers the member's `gate` (none for a retired
+identity); both are advisory. Every refusal rejects with
+`ToolGrantRequestRefusedError`; its kinds are
+`TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/meta/api/rpc#scoped-tool-grants).
 
 ## Realm MCP administration
@@ -441,6 +446,11 @@ compatibility with existing TypeScript objects; parsed responses use `null` when
 a field is absent or malformed. Unknown outcome strings are preserved.
 `nextPendingId` identifies an escalation successor; the SDK does not automatically
 retry or execute the action. See [Gating](/meta/concepts/gating) for decision semantics.
+
+`handle.gatingWithdraw(pendingId, reason?)` withdraws a pending request this host
+minted, with no decision: it returns `pendingId`, `actionId`, `actorId`,
+`outcome` (`safe_draft`), `withdrawnAtMs`, `withdrawnBy` and `reason`. A request
+that was already decided, timed out or withdrawn is refused as an unknown id.
 
 `ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
 objects to `.modules(...)`, whose public parameter type is `unknown[]`.

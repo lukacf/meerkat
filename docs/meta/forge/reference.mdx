@@ -4,7 +4,7 @@ description: "Release packages, the Forge launcher and its settings, files and f
 icon: "book"
 ---
 
-*Mirrored from Meerkat Meta main at [10d49fde733f](https://github.com/lukacf/meerkat/commit/10d49fde733fc7eb7fd1c18b73bad31e0423303c) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [80cc57488f8b](https://github.com/lukacf/meerkat/commit/80cc57488f8b6d8a94369bb339940baa22d13c75) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 ## Releases
 
@@ -30,12 +30,16 @@ gh attestation verify meta-forge-0.3.0-linux-x86_64.zip --repo lukacf/meerkat-me
 On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`.
 
 Each package's `README.md` names the destination it supports and its exact
-runtime selections:
+runtime selections. The release inputs a package is built with select them:
+its guide runs the Meta and Core release they select for it, the Meerkat
+release the package is built from, and its agent teams install that Meta
+release from its published assets; its applications run the Meta and Toolkit
+release of the product the inputs select, which can be an earlier release.
 
-| Package | Supported destination | Guide runtime | Application runtime | Agent team runtime |
-| --- | --- | --- | --- | --- |
-| `linux-x86_64` | Linux x86_64 with exactly glibc 2.39 | Meta 0.9.3, Core 0.9.3 | Meta 0.9.7 and Toolkit 0.9.5 | Meta 0.9.6 |
-| `macos-arm64` | Apple Silicon macOS 13.5 or newer | Meta 0.9.3, Core 0.9.3 | Meta 0.9.4 and Toolkit 0.9.4 | Meta 0.9.6 |
+| Package | Supported destination |
+| --- | --- |
+| `linux-x86_64` | Linux x86_64 with exactly glibc 2.39 |
+| `macos-arm64` | Apple Silicon macOS 13.5 or newer |
 
 Forge releases made from the Meerkat monorepo are published in
 `lukacf/meerkat` under the tag `meta-installer-v<version>`, as packages named
@@ -138,7 +142,7 @@ applications without a connection setup helper as `ordinary_runtime`.
 | `standalone-manifest.json` | Pins the package's source, assets, SDKs, native product, checker dependencies and guide gateway. |
 | `requirements-standalone.txt` | Forge's exact Python dependency pins. |
 | `launchkit/`, `web/` | Forge's server and prebuilt interface. |
-| `vendor/guide/` | The guide's Meta RPC gateway and Meta SDK wheel. |
+| `vendor/guide/` | The guide's Meta RPC gateway and Meta SDK wheel: the published artifacts of the package's Meta release. |
 | `vendor/product/` | The application runtime: Meta and Toolkit SDK wheels, the Connect gateway archive, dependency wheels and the model catalog. |
 | `vendor/ordinary/` | The Meta RPC gateway for applications without a connection setup helper. |
 | `checker-dependencies/` | The dependency closure for application DOM checks. |

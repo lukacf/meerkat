@@ -34,6 +34,30 @@ RUN = 101
 TRAILING_RUN = 102
 ATTEMPT = 2
 CI = 99
+# The release commit's first parent, whose copy of the root's product-scoped
+# CI evidence reader judges a failed exact-main CI run, and the commit's tree.
+PARENT_SHA = "1" * 40
+SOURCE_TREE = "2" * 40
+EVIDENCE_READER = Path(__file__).resolve().parents[2] / "scripts" / "ci-product-evidence.mjs"
+# The Core release the root Cargo.toml pins, and the tree of crates/ that
+# both the source commit and Core's tag carry unless a test changes one.
+CORE = "0.8.31"
+CORE_TAG = f"refs/tags/v{CORE}"
+CRATES_TREE = "c" * 40
+# Core's crates as the checkout lists them, each one's checksum in the
+# crates.io index, the toolchain's rustc -vV, and Meta's publish order.
+CORE_CRATE_NAMES = ("meerkat-sqlite", "meerkat-core", "meerkat")
+INDEX_CKSUM = {name: hashlib.sha256(name.encode()).hexdigest() for name in CORE_CRATE_NAMES}
+TOOLCHAIN = "rustc 1.97.0 (fixture 2026-10-01)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu"
+META_ORDER = ("meta-extension-state", "meerkat-meta")
+META_SHA256 = {"meta-extension-state": "e" * 64, "meerkat-meta": "f" * 64}
+
+
+def attempt_endpoint(run_id, attempt):
+    """The record of one attempt of a workflow run, which every stage reads
+    for the attempt it bound (never the run's own record, which answers its
+    latest attempt)."""
+    return helper.repo_endpoint(f"actions/runs/{run_id}/attempts/{attempt}")
 
 
 FAKE_GH = r'''
@@ -208,6 +232,9 @@ class CandidateProtocolTests(unittest.TestCase):
     def setUp(self):
         self.root = Path.cwd() / (".release-candidate-test-" + uuid.uuid4().hex)
         self.root.mkdir()
+        # Registered at once: the directory goes even when the rest of setUp
+        # fails.
+        self.addCleanup(shutil.rmtree, self.root, True)
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         gh = bin_dir / "gh"
@@ -231,15 +258,45 @@ class CandidateProtocolTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, self.environment)
         self.env_patch.start()
         self.protocol = True
+        # git as the release jobs' checkouts answer it: the crates/ trees by
+        # revision, the root manifest's Core pin, and whether origin has
+        # Core's tag. Every git call is recorded in order.
+        self.crates_trees = {f"{SHA}:crates": CRATES_TREE, f"{CORE_TAG}^{{commit}}:crates": CRATES_TREE}
+        self.core_pin = f'"={CORE}"'
+        self.core_tag_on_origin = True
+        self.git_calls = []
+        # The crates.io sparse index by crate (a crate absent here reads as
+        # HTTP 404), crates whose read fails, and the toolchain.
+        self.index = {name: [{"name": name, "vers": "0.8.30", "cksum": "0" * 64, "yanked": False},
+                             {"name": name, "vers": CORE, "cksum": INDEX_CKSUM[name], "yanked": False}]
+                      for name in CORE_CRATE_NAMES}
+        self.unreadable = set()
+        self.toolchain = TOOLCHAIN
+        # The release commit's first parent holds the CI evidence reader, and
+        # the commit changes these paths against it (`git diff --name-status
+        # --no-renames` lines).
+        self.parent_reader = True
+        self.changed_paths = ("M\tmeta/crates/meerkat-meta/src/lib.rs",)
+        # Root build inputs whose id differs from the default, by "REV:PATH".
+        self.root_inputs = {}
+        for name, effect in (("index_entries", self.index_response),
+                             ("core_crate_list", lambda: list(CORE_CRATE_NAMES)),
+                             ("rustc_version", lambda: self.toolchain)):
+            # An older release-candidate.py may lack one: only the tests of
+            # what it lacks fail then, so the suite still shows which.
+            if not hasattr(helper, name):
+                continue
+            patch = mock.patch.object(helper, name, side_effect=effect)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.git_patch = mock.patch.object(helper, "git", side_effect=self.git_response)
         self.git_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(self.git_patch.stop)
-        self.addCleanup(shutil.rmtree, self.root)
         self.state["api"][helper.repo_endpoint(f"git/ref/tags/{TAG}")] = {
             "object": {"type": "commit", "sha": SHA}}
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")] = self.run_info()
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = self.run_info(ci=True)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)] = self.run_info()
+        self.state["api"][attempt_endpoint(CI, 1)] = self.run_info(ci=True)
         self.target_files = {}
         self.artifact_ids = []
         listing = []
@@ -268,15 +325,98 @@ class CandidateProtocolTests(unittest.TestCase):
         self.save()
 
     def git_response(self, *args):
+        self.git_calls.append(args)
+        if args == ("rev-parse", "--verify", f"{SHA}^1"):
+            return PARENT_SHA
+        if args == ("rev-parse", "--verify", f"{SHA}^{{tree}}"):
+            return SOURCE_TREE
+        if args == ("show", f"{PARENT_SHA}:scripts/ci-product-evidence.mjs"):
+            if not self.parent_reader:
+                raise helper.ProtocolError("git show failed: fatal: path 'scripts/ci-product-evidence.mjs' "
+                                           f"does not exist in '{PARENT_SHA}'")
+            return EVIDENCE_READER.read_text().strip()
+        if args == ("diff", "--name-status", "--no-renames", PARENT_SHA, SHA):
+            return "\n".join(self.changed_paths)
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            # A root build input's id: the same at every revision unless a
+            # test says otherwise ("" when the revision has no such path).
+            return self.root_inputs.get(args[3], "root-input:" + args[3].split(":", 1)[1])
+        if args[:2] == ("rev-parse", "--verify") and args[2].endswith(":crates"):
+            if args[2] not in self.crates_trees:
+                raise helper.ProtocolError(f"git rev-parse failed: fatal: invalid object name '{args[2]}'")
+            return self.crates_trees[args[2]]
         if args[:2] == ("rev-parse", "HEAD"):
             return SHA
         if args[:2] == ("rev-parse", "--verify"):
             return SHA
+        if args == ("show", f"{SHA}:Cargo.toml"):
+            return f'[workspace.dependencies]\nmeerkat-core = {{ version = {self.core_pin}, path = "crates/meerkat-core" }}\n'
+        if args == ("show", f"{SHA}:ci/products.json"):
+            return json.dumps({"products": [{"name": "core", "root": ""},
+                                            {"name": "meta", "root": "meta", "publish_order": list(META_ORDER)}]})
         if args[0] == "show":
             return f'[package]\nname = "meerkat-meta"\nversion = "{VERSION}"\n'
+        if args[0] == "fetch":
+            self.assertEqual(args, ("fetch", "--no-tags", "origin", f"+{CORE_TAG}:{CORE_TAG}"))
+            if not self.core_tag_on_origin:
+                raise helper.ProtocolError(f"git fetch failed: fatal: couldn't find remote ref {CORE_TAG}")
+            return ""
         if args[0] == "ls-tree":
             return "meta/scripts/release-candidate.py\n" if self.protocol else "Cargo.toml\n"
         self.fail(f"unexpected git command: {args}")
+
+    def index_response(self, name):
+        if name in self.unreadable or name not in self.index:
+            raise helper.ProtocolError(f"crates.io index read for {name} failed: HTTP Error 404: Not Found")
+        return copy.deepcopy(self.index[name])
+
+    def fresh(self, label):
+        return self.root / f"{label}-{uuid.uuid4().hex[:8]}"
+
+    def step_files(self):
+        """Point GITHUB_OUTPUT and GITHUB_STEP_SUMMARY at new files."""
+        os.environ.update(GITHUB_OUTPUT=str(self.fresh("output")), GITHUB_STEP_SUMMARY=str(self.fresh("summary")))
+
+    def outputs(self):
+        path = Path(os.environ["GITHUB_OUTPUT"])
+        return dict(line.split("=", 1) for line in path.read_text().splitlines()) if path.exists() else {}
+
+    def summary(self):
+        path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+        return path.read_text() if path.exists() else ""
+
+    def floor_dir(self, *, stage="build", problems=(), dependencies=("meerkat 0.8.31", "meerkat-core 0.8.31"),
+                  lock=b"# resolved lock\n", lock_sha256=None, resolution=False):
+        """A floor check's --out directory: floor.json and the scratch
+        workspace's resolved lock (stage resolve for a --no-build run)."""
+        folder = self.fresh("floor")
+        (folder / "ws").mkdir(parents=True)
+        (folder / "ws" / "Cargo.lock").write_bytes(lock)
+        report = {"product": "meta", "mode": "release", "crates": list(META_ORDER),
+                  "stage": "resolve" if resolution else stage, "problems": list(problems),
+                  "registry_dependencies": sorted(dependencies),
+                  "lock_sha256": lock_sha256 or hashlib.sha256(lock).hexdigest()}
+        (folder / "floor.json").write_text(json.dumps(report))
+        return folder
+
+    def floor_bind(self, folder):
+        """floor-bind in candidate mode; returns the record it wrote (None
+        when it bound none)."""
+        os.environ["RELEASE_MODE"] = "candidate"
+        self.step_files()
+        self.command("floor-bind", "--floor-dir", str(folder))
+        record = self.outputs()["record"]
+        return json.loads(record) if record else None
+
+    def floor_args(self, record, checksums=META_SHA256):
+        args = ["--floor-record-json", json.dumps(record)]
+        for name, value in checksums.items():
+            args += ["--meta-crate-sha256", f"{name}={value}"]
+        return args
+
+    def bound_record(self):
+        """The record a core candidate binds once its floor build succeeded."""
+        return {**self.floor_bind(self.floor_dir()), "meta_crates": dict(META_SHA256)}
 
     def run_info(self, *, ci=False):
         return {"id": CI if ci else RUN, "run_attempt": 1 if ci else ATTEMPT,
@@ -333,7 +473,7 @@ class CandidateProtocolTests(unittest.TestCase):
         packed = self.root / "candidate.zip"
         self.pack(packed, directory, [helper.MANIFEST, helper.PROVENANCE, "index.json", "checksums.sha256"])
         metadata = self.add_artifact(300, f"meta-candidate-manifest-{ATTEMPT}", packed)
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(status="completed", conclusion="success")
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(status="completed", conclusion="success")
         self.save()
         stdout, _ = self.command("selection", "--manifest-file", str(directory / helper.MANIFEST),
                                 "--artifact-id", "300", "--artifact-digest", metadata["digest"][7:])
@@ -363,15 +503,11 @@ class CandidateProtocolTests(unittest.TestCase):
             })
         self.save()
 
-    def tier_candidate(self, tier, run_id, manifest_aid):
-        """A schema 2 candidate run that built and binds exactly one tier.
-
-        The run's artifact listing holds only that tier's targets, each
-        archive attested by that run; collection, the manifest artifact and
-        the emitted selection follow meta-release.yml's candidate jobs.
-        """
+    def tier_run(self, tier, run_id):
+        """A tiered candidate run in progress whose artifact listing holds
+        only that tier's targets, each archive attested by that run."""
         run = dict(self.run_info(), id=run_id)
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")] = run
+        self.state["api"][attempt_endpoint(run_id, ATTEMPT)] = run
         listing = []
         for offset, target in enumerate(helper.assets.TIER_TARGETS[tier]):
             extension = dict(helper.assets.TARGET_ARCHIVES)[target]
@@ -390,21 +526,37 @@ class CandidateProtocolTests(unittest.TestCase):
         self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}/artifacts?per_page=100")] = [
             {"artifacts": listing, "total_count": len(listing)}]
         self.save()
-        directory = self.root / f"candidate-{tier}"
+
+    def tier_candidate(self, tier, run_id, manifest_aid, *, schema=None, collect_args=()):
+        """A tiered candidate run that built and binds exactly one tier.
+
+        The run's artifact listing holds only that tier's targets, each
+        archive attested by that run; collection, the manifest artifact and
+        the emitted selection follow meta-release.yml's candidate jobs.
+        schema=2 or 3 rewrites the collected manifest as an earlier workflow
+        wrote it, before it is attested and selected; collect_args are the
+        floor record arguments meta-release.yml hands collection.
+        """
+        self.tier_run(tier, run_id)
+        directory = self.root / f"candidate-{tier}-{run_id}"
         with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": str(run_id), "RELEASE_MODE": "candidate",
                                           "RELEASE_TIER": tier}):
             self.command("collect", "--output-dir", str(directory), "--ci-run-id", str(CI),
-                         "--ci-run-attempt", "1", "--tier", tier)
+                         "--ci-run-attempt", "1", "--tier", tier, *collect_args)
         _, manifest_name, _ = helper.tier_proof_names(tier)
         manifest = helper.read_json(directory / manifest_name)
+        if schema in (2, 3):
+            dropped = ("floor_record",) if schema == 3 else ("floor_record", "core_crates_tree")
+            manifest = {key: value for key, value in manifest.items() if key not in dropped}
+            manifest["schema_version"] = schema
+            (directory / manifest_name).write_bytes(helper.json_bytes(manifest))
         self.state["verification"][manifest_name] = verified_fixture(
             manifest_name, helper.assets.sha256(directory / manifest_name), run_id=run_id)
         (directory / helper.PROVENANCE).write_text(f'{{"manifest":{run_id}}}\n')
-        packed = self.root / f"candidate-{tier}.zip"
+        packed = self.root / f"candidate-{tier}-{run_id}.zip"
         self.pack(packed, directory, [manifest_name, helper.PROVENANCE, *helper.assets.metadata_names(tier)])
         metadata = self.add_artifact(manifest_aid, f"meta-candidate-manifest-{ATTEMPT}", packed, run_id)
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")].update(
-            status="completed", conclusion="success")
+        self.state["api"][attempt_endpoint(run_id, ATTEMPT)].update(status="completed", conclusion="success")
         self.save()
         stdout, _ = self.command("selection", "--manifest-file", str(directory / manifest_name),
                                  "--artifact-id", str(manifest_aid), "--artifact-digest", metadata["digest"][7:])
@@ -429,8 +581,8 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_schema2_core_promotion_publishes_only_the_core_tier(self):
         core, manifest = self.promote_core()
-        self.assertEqual((core["schema_version"], core["tier"]), (2, "core"))
-        self.assertEqual((manifest["schema_version"], manifest["tier"]), (2, "core"))
+        self.assertEqual((core["schema_version"], core["tier"]), (helper.TIERED_SCHEMA, "core"))
+        self.assertEqual((manifest["schema_version"], manifest["tier"]), (helper.TIERED_SCHEMA, "core"))
         self.assertEqual({item["target"] for item in manifest["artifacts"]},
                          set(helper.assets.TIER_TARGETS["core"]))
         self.assertFalse(self.state["release"]["draft"])
@@ -450,7 +602,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.promote_core()
         before = self.release_files()
         trailing, manifest = self.tier_candidate("trailing", TRAILING_RUN, 301)
-        self.assertEqual((trailing["schema_version"], trailing["tier"]), (2, "trailing"))
+        self.assertEqual((trailing["schema_version"], trailing["tier"]), (helper.TIERED_SCHEMA, "trailing"))
         self.state["calls"] = []
         self.save()
         self.assets_mode(trailing)
@@ -722,7 +874,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.assertIn("every present file verified", stdout)
         reads = [call["args"][1] for call in self.state["calls"] if call["args"][0] == "api"]
         self.assertIn(helper.repo_endpoint("actions/artifacts/301/zip"), reads)
-        self.assertIn(helper.repo_endpoint(f"actions/runs/{TRAILING_RUN}"), reads)
+        self.assertIn(attempt_endpoint(TRAILING_RUN, ATTEMPT), reads)
 
     def test_a_planted_manifest_bundle_beside_a_receipt_fails(self):
         trailing = self.partial_trailing("candidate-manifest-trailing.json")
@@ -747,12 +899,17 @@ class CandidateProtocolTests(unittest.TestCase):
         self.command("recover")
         os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
         self.command("verify-published")
+        # A failed CI run counts only through its attestation: none here.
+        self.state["api"][helper.repo_endpoint(
+            f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1&per_page=100")] = [
+            {"artifacts": [], "total_count": 0}]
         for endpoint, change, message in (
-            (f"actions/runs/{TRAILING_RUN}", {"conclusion": "failure"}, "not completed-success"),
-            (f"actions/runs/{RUN}", {"conclusion": "cancelled"}, "not completed-success"),
-            (f"actions/runs/{CI}", {"conclusion": "failure"}, "not completed-success"),
+            (f"actions/runs/{TRAILING_RUN}/attempts/{ATTEMPT}", {"conclusion": "failure"}, "not completed-success"),
+            (f"actions/runs/{RUN}/attempts/{ATTEMPT}", {"conclusion": "cancelled"}, "not completed-success"),
+            (f"actions/runs/{CI}/attempts/1", {"conclusion": "failure"}, "exact-tree attestation"),
+            (f"actions/runs/{CI}/attempts/1", {"conclusion": "cancelled"}, "not completed-success"),
         ):
-            with self.subTest(endpoint=endpoint):
+            with self.subTest(endpoint=endpoint, change=change):
                 original = dict(self.state["api"][helper.repo_endpoint(endpoint)])
                 self.state["api"][helper.repo_endpoint(endpoint)].update(change)
                 self.save()
@@ -762,13 +919,15 @@ class CandidateProtocolTests(unittest.TestCase):
                 self.save()
 
     def test_core_verification_requires_the_manifests_ci_run_green(self):
+        """...or red only in rows Meta does not depend on: a red Meta row
+        fails the published-release check."""
         self.promote_core()
         os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
         self.command("verify-published")
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")].update(conclusion="failure")
-        self.save()
+        self.red_ci({"Main unit tests (meta)": "meta"})
         _, error = self.command("verify-published", success=False)
-        self.assertIn("not completed-success", error)
+        self.assertIn("does not count for Meta", error)
+        self.assertIn("meta depends on job Main unit tests (meta)", error)
 
     def test_assets_outside_the_tier_file_names_fail_verification(self):
         self.promote_core()
@@ -832,39 +991,481 @@ class CandidateProtocolTests(unittest.TestCase):
             ({"tier": "core"}, "schema 1 has no tier"),
             ({"schema_version": 2}, "schema 2 requires tier"),
             ({"schema_version": 2, "tier": "everything"}, "schema 2 requires tier"),
-            ({"schema_version": 3}, "unsupported schema version"),
+            ({"schema_version": 3}, "schema 3 requires tier"),
+            ({"schema_version": 4}, "schema 4 requires tier"),
+            ({"schema_version": 5}, "unsupported schema version"),
         ):
             with self.subTest(change=change):
                 with self.assertRaisesRegex(helper.ProtocolError, message):
                     helper.validate_manifest(dict(v1_manifest, **change))
                 with self.assertRaisesRegex(helper.ProtocolError, message):
                     helper.validate_selection(dict(v1_selection, **change))
-        # A schema 2 manifest must hold exactly its tier's targets.
+        # A tiered manifest must hold exactly its tier's targets.
         core, core_manifest = self.tier_candidate("core", 103, 302)
         widened = dict(core_manifest, artifacts=v1_manifest["artifacts"])
         with self.assertRaisesRegex(helper.ProtocolError, "target outside the candidate tier|invalid target"):
             helper.validate_manifest(widened)
 
+    def test_collection_binds_the_core_crates_tree_the_legs_built(self):
+        """A candidate may build before Core's tag exists: collection reads no
+        tag, and binds the tree of crates/ at the source commit (the in-tree
+        Core the gateways embed) in the attested schema 3 manifest."""
+        core, manifest = self.tier_candidate("core", RUN, 300)
+        self.assertEqual((core["schema_version"], manifest["schema_version"]),
+                         (helper.TIERED_SCHEMA, helper.TIERED_SCHEMA))
+        self.assertEqual(manifest["core_crates_tree"], CRATES_TREE)
+        self.assertIn(("rev-parse", "--verify", f"{SHA}:crates"), self.git_calls)
+        self.assertFalse([call for call in self.git_calls if call[0] == "fetch" or CORE_TAG in " ".join(call)])
+        for value in (None, "C" * 40, "c" * 64, "c" * 39, 7):
+            with self.subTest(value=value), self.assertRaisesRegex(helper.ProtocolError, "invalid Core crates tree"):
+                helper.validate_manifest(dict(manifest, core_crates_tree=value))
+        unbound = {key: value for key, value in manifest.items() if key != "core_crates_tree"}
+        with self.assertRaisesRegex(helper.ProtocolError, "invalid candidate manifest fields"):
+            helper.validate_manifest(unbound)
+        # Schema 2 manifests carry no tree (nor a floor record), and accept none.
+        legacy = {key: value for key, value in unbound.items() if key != "floor_record"}
+        helper.validate_manifest(dict(legacy, schema_version=2))
+        with self.assertRaisesRegex(helper.ProtocolError, "invalid candidate manifest fields"):
+            helper.validate_manifest(dict(manifest, schema_version=2))
+
+    def stage_core(self, selected, name, *, success=True):
+        os.environ.update(RELEASE_MODE="promote", SOURCE_SHA="", ARTIFACT_SELECTION=json.dumps(selected))
+        self.state["calls"] = []
+        self.save()
+        self.git_calls.clear()
+        return self.command("stage", "--output-dir", str(self.root / f"assets-{name}"),
+                            "--proof-dir", str(self.root / f"proofs-{name}"), success=success)
+
+    def test_promotion_compares_the_bound_core_with_cores_tag_after_fetching_it(self):
+        core, _ = self.tier_candidate("core", RUN, 300)
+        self.stage_core(core, "match")
+        fetch = self.git_calls.index(("fetch", "--no-tags", "origin", f"+{CORE_TAG}:{CORE_TAG}"))
+        self.assertLess(self.git_calls.index(("show", f"{SHA}:Cargo.toml")), fetch)
+        self.assertLess(fetch, self.git_calls.index(("rev-parse", "--verify", f"{CORE_TAG}^{{commit}}:crates")))
+        self.assertTrue((self.root / "assets-match").is_dir())
+
+    def test_promotion_refuses_a_candidate_built_with_other_root_build_inputs_than_cores_tag(self):
+        """Besides crates/, the workspace's root manifest, lock, toolchain and
+        Cargo configuration decide how the gateways compile Core: each must
+        be Core's tag's (a tag that only changed Cargo.lock does not admit a
+        candidate built with the older lock), and a path neither has is
+        equal."""
+        core, _ = self.tier_candidate("core", RUN, 300)
+        for path in helper.CORE_ROOT_INPUTS:
+            for case, overrides in (("differs", {f"{CORE_TAG}^{{commit}}:{path}": "f" * 40}),
+                                    ("only the source has it", {f"{CORE_TAG}^{{commit}}:{path}": ""})):
+                with self.subTest(path=path, case=case):
+                    self.root_inputs = overrides
+                    _, error = self.stage_core(core, f"{path.strip('.')}-{case.split()[0]}", success=False)
+                    self.assertIn(f"{path} differ from Core's v{CORE}", error)
+                    self.assertFalse(self.writes())
+        self.root_inputs = {f"{SHA}:.cargo": "", f"{CORE_TAG}^{{commit}}:.cargo": ""}
+        self.stage_core(core, "neither")
+
+    def test_promotion_refuses_a_candidate_whose_core_is_not_cores_tag(self):
+        """The check the legs made before schema 3 (git diff --quiet v<Core>
+        HEAD -- crates/), moved to promotion: it refuses before any target
+        artifact is read and writes nothing."""
+        core, _ = self.tier_candidate("core", RUN, 300)
+        trees = dict(self.crates_trees)
+        cases = (
+            ("differs", lambda: self.crates_trees.update({f"{CORE_TAG}^{{commit}}:crates": "d" * 40}),
+             f"crates/ differs from Core's v{CORE}: this candidate embeds unreleased Core"),
+            ("no-tag", lambda: setattr(self, "core_tag_on_origin", False), "couldn't find remote ref"),
+            ("no-pin", lambda: setattr(self, "core_pin", f'"{CORE}"'), "pins no exact meerkat-core version"),
+            ("moved-source", lambda: self.crates_trees.update({f"{SHA}:crates": "e" * 40}),
+             "candidate Core crates tree does not match its source commit"),
+        )
+        for name, change, message in cases:
+            with self.subTest(case=name):
+                self.crates_trees, self.core_tag_on_origin, self.core_pin = dict(trees), True, f'"={CORE}"'
+                change()
+                _, error = self.stage_core(core, name, success=False)
+                self.assertIn(message, error)
+                self.assertFalse((self.root / f"assets-{name}").exists())
+                zips = [call["args"][1] for call in self.state["calls"]
+                        if call["args"][0] == "api" and call["args"][1].endswith("/zip")]
+                self.assertEqual(zips, [helper.repo_endpoint("actions/artifacts/300/zip")])
+                self.assertFalse(self.writes())
+
+    def test_trailing_recovery_refuses_a_candidate_whose_core_is_not_cores_tag(self):
+        """The trailing tier's legs build the same commit; its recovery stages
+        it the same way, so its gateways are held to Core's tag too."""
+        self.promote_core()
+        before = self.release_files()
+        trailing, _ = self.tier_candidate("trailing", TRAILING_RUN, 301)
+        self.crates_trees[f"{CORE_TAG}^{{commit}}:crates"] = "d" * 40
+        self.state["calls"] = []
+        self.save()
+        self.assets_mode(trailing)
+        _, error = self.command("recover", success=False)
+        self.assertIn(f"crates/ differs from Core's v{CORE}", error)
+        self.assertFalse(self.writes())
+        self.assertEqual(self.release_files(), before)
+
+    def test_schema_2_candidates_stage_without_the_core_tag_check(self):
+        """Schema 2 candidates built in this repository compared crates/ with
+        Core's tag in their build legs, so staging reads no tag for them; a
+        selection must still name its manifest's schema."""
+        core, manifest = self.tier_candidate("core", RUN, 300, schema=2)
+        self.assertEqual((core["schema_version"], manifest["schema_version"]), (2, 2))
+        self.assertNotIn("core_crates_tree", manifest)
+        del self.crates_trees[f"{CORE_TAG}^{{commit}}:crates"]
+        self.core_tag_on_origin = False
+        self.stage_core(core, "schema2")
+        self.assertFalse([call for call in self.git_calls if call[0] == "fetch" or call[-1].endswith(":crates")])
+        _, error = self.stage_core(dict(core, schema_version=3), "relabelled", success=False)
+        self.assertIn("candidate schema/tier mismatch", error)
+
+    # The published-floor record (schema 4).
+
+    def floor_index(self):
+        os.environ["RELEASE_MODE"] = "candidate"
+        self.step_files()
+        self.command("floor-index")
+        return self.outputs(), self.summary()
+
+    def test_floor_index_lets_a_candidate_bind_a_record_only_with_every_core_crate_published(self):
+        outputs, summary = self.floor_index()
+        self.assertEqual(outputs, {"core_published": "true"})
+        self.assertIn(f"Every Core crate is on crates.io at {CORE}", summary)
+        pristine = copy.deepcopy(self.index)
+        for case, change, named in (
+            ("older version only", lambda: self.index["meerkat"].pop(), "meerkat"),
+            ("yanked", lambda: self.index["meerkat"][1].update(yanked=True), "meerkat (yanked)"),
+            ("absent", lambda: self.index.pop("meerkat-core"), "meerkat-core (index unreadable"),
+            ("unreadable", lambda: self.unreadable.add("meerkat-sqlite"), "meerkat-sqlite (index unreadable"),
+        ):
+            with self.subTest(case=case):
+                self.index, self.unreadable = copy.deepcopy(pristine), set()
+                change()
+                outputs, summary = self.floor_index()
+                self.assertEqual(outputs, {"core_published": "false"})
+                self.assertIn("binds no floor record", summary)
+                self.assertIn(named, summary)
+        os.environ["RELEASE_MODE"] = "promote"
+        self.command("floor-index", success=False)
+
+    def test_floor_bind_records_what_the_floor_build_proved(self):
+        lock = b"# the resolved lock\n"
+        record = self.floor_bind(self.floor_dir(lock=lock))
+        self.assertEqual(record, {
+            "core_version": CORE,
+            "core_crates": [{"name": "meerkat", "version": CORE, "checksum": INDEX_CKSUM["meerkat"]},
+                            {"name": "meerkat-core", "version": CORE, "checksum": INDEX_CKSUM["meerkat-core"]}],
+            "source_sha": SHA, "crates_tree": CRATES_TREE, "lock_sha256": hashlib.sha256(lock).hexdigest(),
+            "toolchain": TOOLCHAIN})
+        self.assertIn("Bound the floor record", self.summary())
+
+    def test_floor_bind_binds_nothing_it_cannot_prove(self):
+        pristine = copy.deepcopy(self.index)
+        for case, folder, change in (
+            ("resolution only", lambda: self.floor_dir(resolution=True), None),
+            ("build problems", lambda: self.floor_dir(problems=["error: x"]), None),
+            ("another lock", lambda: self.floor_dir(lock_sha256="9" * 64), None),
+            ("not a Core crate", lambda: self.floor_dir(dependencies=("serde 1.0.0", "meerkat 0.8.31")), None),
+            ("another version", lambda: self.floor_dir(dependencies=("meerkat 0.8.30",)), None),
+            ("no Core crate", lambda: self.floor_dir(dependencies=()), None),
+            ("yanked", self.floor_dir, lambda: self.index["meerkat"][1].update(yanked=True)),
+            ("unreadable index", self.floor_dir, lambda: self.unreadable.add("meerkat-core")),
+        ):
+            with self.subTest(case=case):
+                self.index, self.unreadable = copy.deepcopy(pristine), set()
+                if change:
+                    change()
+                self.assertIsNone(self.floor_bind(folder()))
+                self.assertIn("could not be bound", self.summary())
+
+    def test_collection_binds_the_core_floor_record_with_the_meta_crate_checksums(self):
+        record = self.bound_record()
+        bound = {key: value for key, value in record.items() if key != "meta_crates"}
+        core, manifest = self.tier_candidate("core", RUN, 300, collect_args=self.floor_args(bound))
+        self.assertEqual(manifest["floor_record"], record)
+        self.assertEqual(manifest["schema_version"], helper.TIERED_SCHEMA)
+        # Without one (Core not yet published) the manifest binds null.
+        _, plain = self.tier_candidate("core", 103, 302)
+        self.assertIsNone(plain["floor_record"])
+
+    def test_collection_refuses_a_floor_record_that_does_not_fit(self):
+        record = {key: value for key, value in self.bound_record().items() if key != "meta_crates"}
+        self.tier_run("core", 105)
+        self.tier_run("trailing", 106)
+
+        def collect(tier, run_id, args):
+            with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": str(run_id), "RELEASE_MODE": "candidate",
+                                              "RELEASE_TIER": tier}):
+                return self.command("collect", "--output-dir", str(self.fresh("refused")), "--ci-run-id", str(CI),
+                                    "--ci-run-attempt", "1", "--tier", tier, *args, success=False)[1]
+
+        for case, args, message in (
+            ("another commit", self.floor_args(dict(record, source_sha=OTHER_SHA)), "another source commit"),
+            ("another tree", self.floor_args(dict(record, crates_tree="d" * 40)), "another crates/ tree"),
+            ("a missing checksum", self.floor_args(record, {"meerkat-meta": "f" * 64}), "invalid floor record Meta crates"),
+            ("an unknown crate", self.floor_args(record, {**META_SHA256, "other": "1" * 64}), "unexpected Meta crate"),
+            ("checksums in the record", self.floor_args(dict(record, meta_crates=META_SHA256)), "without Meta crate"),
+            ("an unknown field", self.floor_args(dict(record, extra=1)), "invalid floor record fields"),
+            ("checksums alone", ["--meta-crate-sha256", "meerkat-meta=" + "f" * 64], "checksums without a floor record"),
+        ):
+            with self.subTest(case=case):
+                self.assertIn(message, collect("core", 105, args))
+        self.assertIn("only the core tier binds a floor record", collect("trailing", 106, self.floor_args(record)))
+        self.assertIn("release protocol error", collect("core", 105, ["--floor-record-json", "{not json"]))
+
+    def read_floor_record(self, selected):
+        os.environ.update(RELEASE_MODE="promote", SOURCE_SHA="", ARTIFACT_SELECTION=json.dumps(selected))
+        self.step_files()
+        output = self.fresh("floor-record")
+        self.command("floor-record", "--output", str(output))
+        return json.loads(output.read_text()), self.outputs()
+
+    def test_floor_record_reads_the_verified_core_candidates_record(self):
+        record = self.bound_record()
+        bound = {key: value for key, value in record.items() if key != "meta_crates"}
+        core, _ = self.tier_candidate("core", RUN, 300, collect_args=self.floor_args(bound))
+        self.assertEqual(self.read_floor_record(core), (record, {"present": "true"}))
+        # Read through the same verification stage applies: the attestation.
+        self.state["verify_failure"] = True
+        self.save()
+        self.assertEqual(self.read_floor_record(core), (None, {"present": "false"}))
+        self.state["verify_failure"] = False
+        self.save()
+        for schema, run_id, aid in ((3, 103, 302), (None, 104, 303)):
+            with self.subTest(schema=schema):
+                legacy, _ = self.tier_candidate("core", run_id, aid, schema=schema)
+                self.assertEqual(self.read_floor_record(legacy), (None, {"present": "false"}))
+        self.assertEqual(self.read_floor_record(dict(core, run_id=999)), (None, {"present": "false"}))
+
+    def reuse(self, *, record=None, resolution=None, checksums=META_SHA256):
+        """floor-reuse in promote mode: (reuse output, job summary)."""
+        record = self.bound_record() if record is None else record
+        record_file = self.fresh("record")
+        record_file.write_text(record if isinstance(record, str) else json.dumps(record))
+        if resolution is None:
+            resolution = self.floor_dir(resolution=True, dependencies=("meerkat 0.8.31", "meerkat-core 0.8.31"))
+        os.environ["RELEASE_MODE"] = "promote"
+        self.step_files()
+        args = ["floor-reuse", "--record", str(record_file), "--resolution", str(resolution)]
+        for name, value in checksums.items():
+            args += ["--meta-crate-sha256", f"{name}={value}"]
+        self.command(*args)
+        return self.outputs()["reuse"], self.summary()
+
+    def assert_full_build(self, reason, **kwargs):
+        reuse, summary = self.reuse(**kwargs)
+        self.assertEqual(reuse, "false", summary)
+        self.assertIn("The floor check builds", summary)
+        self.assertIn(reason, summary)
+
+    def test_floor_reuse_when_everything_the_record_binds_still_holds(self):
+        reuse, summary = self.reuse()
+        self.assertEqual(reuse, "true", summary)
+        self.assertIn("Reused the candidate's floor record", summary)
+
+    def test_floor_reuse_refuses_an_absent_record(self):
+        self.assert_full_build("the candidate bound no floor record", record="null")
+
+    def test_floor_reuse_refuses_an_unreadable_record(self):
+        self.assert_full_build("unreadable floor record", record="{not json")
+
+    def test_floor_reuse_refuses_a_record_with_an_unknown_field(self):
+        self.assert_full_build("invalid floor record", record=dict(self.bound_record(), extra=1))
+
+    def test_floor_reuse_refuses_a_record_of_another_commit_or_crates_tree(self):
+        self.assert_full_build("another source commit", record=dict(self.bound_record(), source_sha=OTHER_SHA))
+        self.assert_full_build("another crates/ tree", record=dict(self.bound_record(), crates_tree="d" * 40))
+
+    def test_floor_reuse_refuses_another_declared_core_version(self):
+        record = self.bound_record()
+        self.core_pin = '"=0.8.32"'
+        self.assert_full_build("now declares Core 0.8.32", record=record)
+
+    def test_floor_reuse_refuses_a_changed_index_checksum(self):
+        record = self.bound_record()
+        self.index["meerkat-core"][1]["cksum"] = "1" * 64
+        self.assert_full_build("meerkat-core 0.8.31 has another index checksum", record=record)
+
+    def test_floor_reuse_refuses_a_yanked_core_crate(self):
+        record = self.bound_record()
+        self.index["meerkat"][1]["yanked"] = True
+        self.assert_full_build("meerkat 0.8.31 is yanked", record=record)
+
+    def test_floor_reuse_refuses_a_core_crate_gone_from_the_index(self):
+        record = self.bound_record()
+        self.index["meerkat"].pop()
+        self.assert_full_build("meerkat 0.8.31 is not in the crates.io index", record=record)
+
+    def test_floor_reuse_refuses_an_unreadable_index(self):
+        record = self.bound_record()
+        self.unreadable.add("meerkat-core")
+        self.assert_full_build("crates.io index read for meerkat-core failed", record=record)
+
+    def test_floor_reuse_refuses_a_changed_lock(self):
+        self.assert_full_build("the re-resolved lock differs", resolution=self.floor_dir(
+            resolution=True, lock=b"# another resolution\n"))
+
+    def test_floor_reuse_refuses_a_failed_re_resolution(self):
+        self.assert_full_build("the re-resolution failed", resolution=self.floor_dir(
+            resolution=True, problems=["declared dependency versions do not resolve from crates.io: x"]))
+        self.assert_full_build("no re-resolution report", resolution=self.fresh("missing"))
+
+    def test_floor_reuse_refuses_other_resolved_core_crates(self):
+        self.assert_full_build("resolves other Core crates", resolution=self.floor_dir(
+            resolution=True, dependencies=("meerkat 0.8.31", "meerkat-core 0.8.31", "meerkat-sqlite 0.8.31")))
+
+    def test_floor_reuse_refuses_changed_meta_crate_bytes(self):
+        self.assert_full_build("meerkat-meta now packages to " + "0" * 64,
+                               checksums={**META_SHA256, "meerkat-meta": "0" * 64})
+        self.assert_full_build("meta-extension-state now packages to nothing",
+                               checksums={"meerkat-meta": META_SHA256["meerkat-meta"]})
+
+    def test_floor_reuse_refuses_another_toolchain(self):
+        record = self.bound_record()
+        self.toolchain = TOOLCHAIN.replace("1.97.0", "1.97.1")
+        self.assert_full_build("the toolchain differs", record=record)
+
+    def test_floor_reuse_is_promote_only_and_never_fails_the_job(self):
+        with mock.patch.object(helper, "floor_mismatches", side_effect=RuntimeError("boom")):
+            reuse, summary = self.reuse()
+        self.assertEqual(reuse, "false")
+        self.assertIn("the record check failed", summary)
+        os.environ["RELEASE_MODE"] = "candidate"
+        self.command("floor-reuse", "--record", str(self.fresh("x")), "--resolution", str(self.fresh("y")),
+                     success=False)
+
     def test_collection_refuses_rather_than_waits_while_main_ci_is_not_green(self):
         """Builds start right after the merge, so collection is where main CI
-        must already be green; an unfinished run is refused at once."""
-        endpoint = helper.repo_endpoint(f"actions/runs/{CI}")
-        for status, conclusion in (("in_progress", None), ("queued", None), ("completed", "failure")):
+        must already be green (or red only in rows Meta does not depend on,
+        which its attestation shows); an unfinished run is refused at once,
+        and so is a failed run without an attestation."""
+        endpoint = attempt_endpoint(CI, 1)
+        listing = helper.repo_endpoint(f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1&per_page=100")
+        self.state["api"][listing] = [{"artifacts": [], "total_count": 0}]
+        for status, conclusion, reason in (("in_progress", None, "not completed-success"),
+                                           ("queued", None, "not completed-success"),
+                                           ("completed", "failure", "exact-tree attestation")):
             with self.subTest(status=status, conclusion=conclusion):
                 self.state["api"][endpoint].update(status=status, conclusion=conclusion)
                 self.state["calls"] = []
                 self.save()
                 _, error = self.command("collect", "--output-dir", str(self.root / f"refused-{status}"),
                                         "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)
-                self.assertIn("not completed-success", error)
+                self.assertIn(reason, error)
                 reads = [c for c in self.state["calls"] if c["args"][:2] == ["api", endpoint]]
                 self.assertEqual(len(reads), 1, "collection polled main CI instead of refusing")
                 self.assertFalse(any("/zip" in c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"))
                 self.assertFalse((self.root / f"refused-{status}").exists())
 
+    def red_ci(self, failed, *, result="failure", **overrides):
+        """Main CI run CI attempt 1 failed, and left an exact-tree attestation
+        whose product evidence shows only the `failed` jobs (name: product)
+        red; `overrides` replace attestation fields."""
+        self.state["api"][attempt_endpoint(CI, 1)].update(conclusion="failure")
+        jobs = [{"name": "Change classification", "conclusion": "success", "product": "core", "downstream": False},
+                {"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
+                {"name": "Main unit tests (meta)", "conclusion": "success", "product": "meta", "downstream": False},
+                *({"name": name, "conclusion": "failure", "product": product, "downstream": False}
+                  for name, product in failed.items())]
+        record = {"schema_version": 4, "validation_backend": "github-hosted-cargo", "validation_result": result,
+                  "repository": REPO, "commit_sha": SHA, "tree_sha": SOURCE_TREE, "workflow": "CI",
+                  "workflow_run_id": str(CI), "workflow_run_attempt": "1", "event": "push",
+                  "ref": "refs/heads/main", "plan": {"mode": "workspace"},
+                  "product_evidence": {"version": 1, "plan_errors": 0, "failed_lanes": ["Main unit tests"],
+                                       "jobs": jobs},
+                  **overrides}
+        folder = self.fresh("ci-attestation")
+        folder.mkdir()
+        (folder / "attestation.json").write_text(json.dumps(record))
+        packed = self.fresh("ci-attestation-zip")
+        self.pack(packed, folder, ["attestation.json"])
+        name = f"meerkat-ci-attestation-{SHA}-1"
+        metadata = self.add_artifact(777, name, packed, run_id=CI)
+        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}/artifacts?name={name}&per_page=100")] = [
+            {"artifacts": [metadata], "total_count": 1}]
+        self.save()
+
+    def test_the_candidate_path_completes_on_a_red_ci_run_meta_does_not_depend_on(self):
+        """A red main CI run that the candidate's gate accepted for Meta (only
+        a Connect row failed) carries the candidate through collection,
+        promotion, publication and the published-release check: each re-check
+        of the bound CI run judges its attestation with the release commit's
+        first parent's copy of the root's evidence reader, as the gate did."""
+        self.red_ci({"Main unit tests (connect[console])": "connect"})
+        core, manifest = self.promote_core()
+        self.assertEqual((manifest["ci"]["run_id"], manifest["ci"]["run_attempt"]), (CI, 1))
+        self.assertFalse(self.state["release"]["draft"])
+        reads = [c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"]
+        self.assertTrue(any(f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1" in r for r in reads),
+                        "the CI run's attestation was read")
+        self.assertIn(("show", f"{PARENT_SHA}:scripts/ci-product-evidence.mjs"), self.git_calls)
+        os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
+        stdout, _ = self.command("verify-published")
+        self.assertIn("trailing tier not added yet", stdout)
+
+    def test_a_red_ci_run_refuses_the_candidate_unless_the_parents_reader_accepts_it_for_meta(self):
+        connect = {"Main unit tests (connect[console])": "connect"}
+        for case, failed, setup, reason in (
+                ("a Meta row failed", {"Main unit tests (meta)": "meta"}, None,
+                 "meta depends on job Main unit tests (meta)"),
+                ("a Core row failed", {"Clippy (core)": "core"}, None, "meta depends on job Clippy (core)"),
+                ("the parent has no reader", connect, lambda: setattr(self, "parent_reader", False),
+                 "ci-product-evidence.mjs"),
+                ("the commit changes the reader", connect,
+                 lambda: setattr(self, "changed_paths", ("M\tscripts/ci-product-evidence.mjs",)),
+                 "changes scripts/ci-product-evidence.mjs"),
+                # Both names of a rename count: renaming an input away too.
+                ("the commit renames the products file", connect,
+                 lambda: setattr(self, "changed_paths", ("D\tci/products.json", "A\tci/products-renamed.json")),
+                 "changes ci/products.json"),
+                ("the commit moves a Core package under Meta's root", connect,
+                 lambda: setattr(self, "changed_paths", ("D\tcrates/meerkat-moved/Cargo.toml",
+                                                         "A\tmeta/crates/meerkat-moved/Cargo.toml")),
+                 "deletes the package manifest crates/meerkat-moved/Cargo.toml"),
+                ("the attestation names another commit", connect, None, "attestation")):
+            with self.subTest(case=case):
+                self.parent_reader, self.changed_paths = True, ("M\tmeta/crates/meerkat-meta/src/lib.rs",)
+                if setup:
+                    setup()
+                overrides = {"commit_sha": OTHER_SHA} if case == "the attestation names another commit" else {}
+                self.red_ci(failed, **overrides)
+                _, error = self.command("collect", "--output-dir", str(self.fresh("refused")),
+                                        "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)
+                self.assertIn(reason, error)
+
+    def test_a_candidate_stays_bound_to_the_ci_attempt_it_judged_when_the_run_is_re_run(self):
+        """The shape of ci.yml run 42570473155: once re-run, the run's own
+        record answers its latest attempt (2, green) while attempt 1 failed.
+        A candidate bound to attempt 1, red only in a Connect row, is judged
+        on attempt 1 wherever the bound run is read again (collection,
+        promotion, the published-release check), so the re-run that Connect's
+        own release asks for changes nothing a stage reads. A stage that
+        wants attempt 2 binds it explicitly."""
+        self.red_ci({"Main unit tests (connect[console])": "connect"})
+        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = {**self.run_info(ci=True), "run_attempt": 2}
+        for attempt, conclusion in ((1, "failure"), (2, "success")):
+            self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}/attempts/{attempt}")] = {
+                **self.run_info(ci=True), "run_attempt": attempt, "conclusion": conclusion}
+        self.save()
+        core, manifest = self.promote_core()
+        self.assertEqual((manifest["ci"]["run_id"], manifest["ci"]["run_attempt"]), (CI, 1))
+        self.assertFalse(self.state["release"]["draft"])
+        os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
+        stdout, _ = self.command("verify-published")
+        self.assertIn("trailing tier not added yet", stdout)
+        reads = [c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"]
+        self.assertIn(helper.repo_endpoint(f"actions/runs/{CI}/attempts/1"), reads)
+        self.assertNotIn(helper.repo_endpoint(f"actions/runs/{CI}"), reads,
+                         "a stage read the run's latest attempt instead of the bound one")
+        # Attempt 2, bound explicitly, is a green run: no attestation needed.
+        self.state["calls"] = []
+        self.save()
+        self.assertEqual(helper.verify_run(CI, 2, SHA, ci=True)["conclusion"], "success")
+        self.load()
+        self.assertEqual([c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"],
+                         [helper.repo_endpoint(f"actions/runs/{CI}/attempts/2")])
+
     def collect_with_own_run_reads(self, script, *, success=True, name="re-read"):
         """collect() with a scripted sequence of reads of its own run record."""
-        endpoint = helper.repo_endpoint(f"actions/runs/{RUN}")
+        endpoint = attempt_endpoint(RUN, ATTEMPT)
         self.state["api_script"] = {endpoint: script}
         self.state["calls"] = []
         self.save()
@@ -876,11 +1477,11 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collect_re_reads_its_own_run_until_github_reports_it_in_progress(self):
         """GitHub reported a running candidate as queued, then waiting, for a while."""
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         reads, sleep, error = self.collect_with_own_run_reads(
             [{"update": {"status": "queued"}}, {"update": {"status": "waiting"}},
              {"update": {"status": "in_progress"}}])
-        self.assertEqual(reads[:4], [run, run, run, helper.repo_endpoint(f"actions/runs/{CI}")])
+        self.assertEqual(reads[:4], [run, run, run, attempt_endpoint(CI, 1)])
         self.assertEqual(sleep.call_args_list, [mock.call(helper.RUN_REREAD_DELAY)] * 2)
         self.assertIn("read 1/40 missed", error)
         self.assertIn("status=queued", error)
@@ -889,7 +1490,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collect_re_reads_its_own_run_after_a_transient_api_failure(self):
         """GitHub answered 502, then dropped the connection, then answered."""
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         reads, sleep, error = self.collect_with_own_run_reads(
             [{"fail": "gh: HTTP 502: Bad Gateway"}, {"fail": "error connecting to api.github.com"}])
         self.assertEqual(reads[:3], [run, run, run])
@@ -899,7 +1500,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collect_refuses_at_once_when_its_own_run_is_wrong_or_the_read_fails_for_good(self):
         """Only a lagging status or a transient failure is read again."""
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         cases = {
             "identity": ([{"update": {"head_sha": OTHER_SHA, "status": "queued"}}],
                          "run source/workflow/event/ref mismatch"),
@@ -916,7 +1517,7 @@ class CandidateProtocolTests(unittest.TestCase):
                 self.assertFalse((self.root / f"refused-{label}").exists())
 
     def test_collect_refuses_once_its_own_run_never_reports_in_progress(self):
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         reads, sleep, error = self.collect_with_own_run_reads(
             [{"update": {"status": "queued"}}], success=False, name="never")
         self.assertEqual(reads, [run] * 40)
@@ -1148,7 +1749,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_stage_refuses_wrong_run_attempt_source_workflow_event_repository_or_failure(self):
         self.candidate()
-        endpoint = helper.repo_endpoint(f"actions/runs/{RUN}")
+        endpoint = attempt_endpoint(RUN, ATTEMPT)
         original = copy.deepcopy(self.state["api"][endpoint])
         changes = [
             ("id", 102), ("run_attempt", 3), ("head_sha", OTHER_SHA),
@@ -1201,8 +1802,8 @@ class CandidateProtocolTests(unittest.TestCase):
             self.command("stage", "--output-dir", str(self.root / "out"),
                          "--proof-dir", str(self.root / "proof"), success=False)
         changed = {**selected, "run_id": 102}
-        self.state["api"][helper.repo_endpoint("actions/runs/102")] = {
-            **self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")], "id": 102}
+        self.state["api"][attempt_endpoint(102, ATTEMPT)] = {
+            **self.state["api"][attempt_endpoint(RUN, ATTEMPT)], "id": 102}
         self.save()
         os.environ["ARTIFACT_SELECTION"] = json.dumps(changed)
         self.command("stage", "--output-dir", str(self.root / "out"),
@@ -1570,8 +2171,9 @@ class CandidateProtocolTests(unittest.TestCase):
         reads = [call["args"][1] for call in self.state["calls"] if call["args"][0] == "api"]
         self.assertFalse([read for read in reads if read.endswith("/zip")])
         # The receipt's run, its manifest artifact record and the CI run are read.
-        for endpoint in (f"actions/runs/{RUN}", "actions/artifacts/300", f"actions/runs/{CI}"):
-            self.assertIn(helper.repo_endpoint(endpoint), reads)
+        for endpoint in (attempt_endpoint(RUN, ATTEMPT), helper.repo_endpoint("actions/artifacts/300"),
+                         attempt_endpoint(CI, 1)):
+            self.assertIn(endpoint, reads)
 
     def test_deleted_receipt_does_not_downgrade_candidate_era_to_legacy(self):
         self.staged()
@@ -1650,7 +2252,7 @@ class CandidateProtocolTests(unittest.TestCase):
         receipt = {key: manifest[key] for key in (
             "schema_version", "repository", "source_sha", "version", "tag", "run_id", "run_attempt", "metadata")}
         receipt.update(kind="original-assets", artifacts=[{**item, "archives": [record]}])
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(event="push", head_branch=TAG)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(event="push", head_branch=TAG)
         self.state["verification"][record["name"]] = verified_fixture(
             record["name"], record["sha256"], ref=f"refs/tags/{TAG}", event="push")
         self.save()
@@ -1682,7 +2284,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.command("recover", success=False)
         self.assertFalse(self.writes())
         self.seed_release([p for p in paths if p.name != record["name"]])
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(event="push", head_branch=TAG)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(event="push", head_branch=TAG)
         self.state["api"][helper.repo_endpoint(f"actions/artifacts/{item['id']}")]["expired"] = True
         self.save()
         self.command("recover", success=False)
@@ -1702,7 +2304,7 @@ class CandidateProtocolTests(unittest.TestCase):
         receipt = {key: manifest[key] for key in (
             "schema_version", "repository", "source_sha", "version", "tag", "run_id", "run_attempt", "metadata")}
         receipt.update(kind="original-assets", artifacts=[{**item, "archives": [record]}])
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(event="push", head_branch=TAG)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(event="push", head_branch=TAG)
         self.state["verification"][record["name"]] = verified_fixture(
             record["name"], record["sha256"], ref=f"refs/tags/{TAG}", event="push")
         paths = list((self.root / "release-assets").iterdir())
@@ -2054,7 +2656,7 @@ class CandidateProtocolTests(unittest.TestCase):
     def test_source_checkout_and_ci_failure_refuse_collection_before_archives(self):
         for key, value in (("head_sha", OTHER_SHA), ("conclusion", "failure"), ("event", "workflow_dispatch"),
                            ("head_branch", "feature"), ("path", helper.WORKFLOW), ("run_attempt", 2)):
-            self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = {**self.run_info(ci=True), key: value}
+            self.state["api"][attempt_endpoint(CI, 1)] = {**self.run_info(ci=True), key: value}
             self.save()
             self.command("collect", "--output-dir", str(self.root / "candidate"),
                          "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)

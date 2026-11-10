@@ -119,7 +119,7 @@ recommended, S = supported):
 
 | Anthropic | Tier | Context / output | Thinking | Effort |
 |---|---|---|---|---|
-| `claude-fable-5-1`, `claude-fable-5` | R | 1M / 128K | adaptive only | low, medium, high, xhigh, max |
+| `claude-fable-5-2` (0.9.12), `claude-fable-5-1`, `claude-fable-5` | R | 1M / 128K | adaptive only | low, medium, high, xhigh, max |
 | `claude-opus-5-5` (default) | R | 1M / 128K | adaptive only | low..max |
 | `claude-opus-5` | R | 1M / 128K | adaptive or `disabled` (effort `high` or below) | low..max |
 | `claude-opus-4-8` | R | 1M / 128K | adaptive or `disabled` | low..max |
@@ -131,6 +131,23 @@ recommended, S = supported):
 | `claude-haiku-4-5`, `claude-haiku-4-5-20251001` | R | 200K / 64K | enabled (budget) or `disabled` | - |
 | `claude-sonnet-4-5` | S | 200K / 64K | enabled (budget) or `disabled` | - |
 | `claude-opus-4-5` | S | 200K / 64K | enabled (budget) or `disabled` | low, medium, high |
+
+The catalog keeps no per-platform model list and the client sends the model
+id unchanged on every Anthropic backend. Anthropic serves `claude-fable-5-2`
+on the Claude API, Claude Platform on AWS, Claude Models on Google Cloud and
+Microsoft Foundry, and on Amazon Bedrock only through inference profiles: the
+global profile `global.anthropic.claude-fable-5-2` or the US geographic
+profile `us.anthropic.claude-fable-5-2`. Bedrock offers no in-region access
+to it, so the bare `anthropic.claude-fable-5-2` does not run. Claude Mythos
+5.2 (`claude-mythos-5-2`) is a model the catalog does not list, as Claude
+Mythos 5.1 is: Anthropic serves it only to organizations it has verified, on
+the Claude API, Claude Models on Google Cloud and Microsoft Foundry, on
+Amazon Bedrock only through the inference profiles
+`global.anthropic.claude-mythos-5-2` and `us.anthropic.claude-mythos-5-2`,
+not on Claude Platform on AWS. Bedrock ids are not in the catalog: declared
+under `[models."global.anthropic.claude-fable-5-2"]` (quoted, as the id
+contains dots), it runs as a model id with no catalog row, without the
+`claude-fable-5-2` row's local refusals or defaults.
 
 | OpenAI | Tier | Context / output | Reasoning effort |
 |---|---|---|---|
@@ -194,8 +211,8 @@ Capability flags come from the catalog row, never from the model name:
   `gpt-realtime-2`; not the GPT-6 rows.
 - Provider-native web search: every text row except `gpt-5.3-codex`.
 - Forced tool choice (`required` or a named tool) is refused locally on
-  `claude-opus-5-5` and `claude-sonnet-5-5`
-  (`ModelDoesNotSupportForcedToolChoice`).
+  `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2` and
+  `claude-fable-5-1` (`ModelDoesNotSupportForcedToolChoice`).
 - Sampling: the Claude 5 family (including `claude-haiku-5-5`), Claude Opus
   4.8/4.7, all GPT-5.x and GPT-6 rows, `gemini-4-argon`, `gemini-3.8-flash`,
   `gemini-3.7-flash`, `gemini-3.6-flash` and `gemini-3.5-flash-lite` take no
@@ -237,8 +254,9 @@ Rust `AgentBuildConfig.provider_params`. A realm-level
   `{"type": "enabled", "budget_tokens": N}`, `{"type": "between_tools"}`,
   `{"type": "disabled"}`),
   `thinking_budget_tokens`, `effort` (`low`, `medium`, `high`, `xhigh`,
-  `max`), `top_k`, `inference_geo` (`{"kind": "us"}`, `{"kind": "global"}`,
-  `{"kind": "other", "region": "..."}`),
+  `max`; `x_high` is accepted as a spelling of `xhigh`, and Claude receives
+  `xhigh` either way), `top_k`, `inference_geo` (`{"kind": "us"}`,
+  `{"kind": "global"}`, `{"kind": "other", "region": "..."}`),
   `cache_control` (`disabled`,
   `automatic`, `system_prefix`, `system_and_conversation`), `cache_ttl`
   (`5m` default, `1h`).

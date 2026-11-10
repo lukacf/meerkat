@@ -173,6 +173,42 @@ impl InputAuthorizationAudit {
         }
     }
 
+    /// This live payload as its row was last durably written, given the
+    /// payload the stored row holds. A row write freezes the live records;
+    /// observations appended after it stay on the live buffer for the row's
+    /// next update, so the live records can run ahead of the stored ones by
+    /// such a suffix. When the stored records are a strict prefix of the live
+    /// ones, the image is that prefix, frozen; otherwise it is the live
+    /// records, frozen, and an exact compare against the stored row refuses
+    /// the difference as before. Pure: it neither drains nor acknowledges
+    /// either side.
+    pub(crate) fn committed_image(&self, stored: &Self) -> Result<Self, OperationObservationError> {
+        let live = self.freeze_for_persistence()?;
+        let stored = stored.freeze_for_persistence()?;
+        let (AuditPayload::Frozen(live_records), AuditPayload::Frozen(stored_records)) =
+            (&live.0, &stored.0)
+        else {
+            return Err(OperationObservationError);
+        };
+        if stored_records.len() < live_records.len() && live_records.starts_with(stored_records) {
+            return Ok(Self(AuditPayload::Frozen(
+                live_records[..stored_records.len()].into(),
+            )));
+        }
+        Ok(live)
+    }
+
+    /// Whether this payload and `other` hold the same records in the same
+    /// order. Pure: it neither drains nor acknowledges either side.
+    pub(crate) fn has_same_records(&self, other: &Self) -> Result<bool, OperationObservationError> {
+        let left = self.freeze_for_persistence()?;
+        let right = other.freeze_for_persistence()?;
+        let (AuditPayload::Frozen(left), AuditPayload::Frozen(right)) = (&left.0, &right.0) else {
+            return Err(OperationObservationError);
+        };
+        Ok(left == right)
+    }
+
     /// Derive a sink from this actual admitted row, never from an input-id map
     /// supplied by the operation. The caller must obtain scope/run/originals
     /// from the current native owner while it holds that row's custody.
@@ -278,4 +314,4 @@ fn malformed() -> OperationRefused {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

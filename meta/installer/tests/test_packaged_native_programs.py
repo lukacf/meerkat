@@ -26,19 +26,19 @@ def inputs(monkeypatch, request, tmp_path):
     linux_product(monkeypatch)
     specimen = request.getfixturevalue("product")
     bundle = request.getfixturevalue("bundle_source")
-    root, _, _, guide = guide_product_inputs(specimen, bundle, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(specimen, bundle, monkeypatch)
     target = specimen.target
     programs = {role: {
         "executable": put(specimen.root / role / "program", inert_elf(role)),
         "evidence": put(specimen.root / role / "original.json", b'{"scope":"inert source-only", "producer_path":"/original/path"}\n')}
         for role in ("collection", "provider")}
-    return root, target, guide, programs
+    return root, target, guide, programs, sdk
 
 
 def package(inputs, tmp_path):
-    root, target, guide, programs = inputs
+    root, target, guide, programs, sdk = inputs
     archive = tmp_path / "native.zip"
-    result = packaging.package(root, target, guide, archive, native_programs=programs)
+    result = packaging.package(root, target, guide, archive, guide_wheel=sdk, native_programs=programs)
     extracted = tmp_path / "extracted"
     with zipfile.ZipFile(archive) as source:
         source.extractall(extracted)
@@ -88,7 +88,7 @@ def test_unpacked_native_bindings_refuse_tampering(inputs, tmp_path, change):
 
 @pytest.mark.parametrize("change", ["pin", "size", "missing-evidence", "alias", "symlink", "hardlink", "script", "arm-elf", "wrong-target", "unknown-role", "empty"])
 def test_native_package_inputs_refuse_invalid_pins_before_archive_creation(inputs, tmp_path, change):
-    root, target, guide, programs = inputs
+    root, target, guide, programs, sdk = inputs
     row = programs["collection"]
     if change == "pin":
         row["executable"] = replace(row["executable"], sha256="a" * 64)
@@ -119,5 +119,5 @@ def test_native_package_inputs_refuse_invalid_pins_before_archive_creation(input
         programs = {}
     output = tmp_path / "refused.zip"
     with pytest.raises(distribution.DistributionError):
-        packaging.package(root, target, guide, output, native_programs=programs)
+        packaging.package(root, target, guide, output, guide_wheel=sdk, native_programs=programs)
     assert not output.exists()

@@ -3807,6 +3807,16 @@ class MeerkatClient:
         origin, is ordered only among keyed sends, refuses ``render_metadata``,
         is refused on a governed runtime, and needs a server contract of 0.9.5
         or later.
+
+        An unkeyed send answers ``admission`` (``session_id`` and
+        ``input_id``) when the member's runtime admitted it before the send
+        answered: match ``input_id`` against
+        ``boundary_append_applied.input_id`` and
+        ``boundary_appends_discarded.input_ids``, or follow it with
+        ``session/input_status``. It is absent for a keyed send, when the
+        answer precedes runtime admission (an autonomous member's inbox
+        delivery), for a member not served by a local runtime, and from a
+        server older than contract 0.9.12.
         """
         params: dict[str, Any] = {
             "mob_id": mob_id,
@@ -3860,7 +3870,26 @@ class MeerkatClient:
                 "INVALID_RESPONSE",
                 "Invalid mob/member_send response: a keyed send answers its continuation",
             )
+        admission = result.get("admission")
+        if admission is not None:
+            receipt["admission"] = self._parse_member_send_admission(admission)
         return receipt
+
+    @staticmethod
+    def _parse_member_send_admission(raw: Any) -> dict[str, str]:
+        context = "Invalid mob/member_send response: invalid admission"
+        if not isinstance(raw, dict):
+            raise MeerkatError("INVALID_RESPONSE", context)
+        session_id = raw.get("session_id")
+        input_id = raw.get("input_id")
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or not isinstance(input_id, str)
+            or not input_id
+        ):
+            raise MeerkatError("INVALID_RESPONSE", context)
+        return {"session_id": session_id, "input_id": input_id}
 
     @staticmethod
     def _parse_member_send_continuation(raw: Any) -> dict[str, Any]:

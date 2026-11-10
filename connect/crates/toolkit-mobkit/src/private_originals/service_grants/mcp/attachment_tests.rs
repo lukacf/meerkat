@@ -413,3 +413,124 @@ async fn catalog_scope_requires_explicit_parent_and_uses_exact_original_session(
             .is_none()
     );
 }
+
+/// A not-issued MCP decision keeps its live attachment and its catalog
+/// choice: another destination, or an added catalog grant that the parent
+/// grant would admit, under its route and decision id is answered as a
+/// conflict and issues nothing.
+#[tokio::test]
+async fn not_issued_mcp_access_refuses_a_changed_live_attachment_or_catalog() {
+    let dir = directory();
+    let path = dir.path().join("grants");
+    let config = config();
+    let selected = selection(&config);
+    let decision = live_decision(&config);
+    let mut with_catalog = decision.clone();
+    with_catalog.catalog = Some(PrivateServiceMcpCatalog::OriginalSession);
+    let adapter = selected_adapter_for_decision(
+        initialized(&path),
+        &dir.path().join("originals"),
+        &selected,
+        &with_catalog,
+    )
+    .await;
+    let ended = not_issued_mcp_access(&adapter, &decision, &selected).await;
+    let mut destination = decision;
+    let session = meerkat_core::SessionId::new();
+    let target = &mut destination.live_attachment.as_mut().unwrap().destination;
+    target.context = EvidenceId::new(session.to_string()).unwrap();
+    target.logical_runtime =
+        EvidenceId::new(meerkat_runtime::LogicalRuntimeId::for_session(&session).to_string())
+            .unwrap();
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "live attachment destination",
+        apply(&adapter, destination, selected.clone()),
+    )
+    .await;
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "catalog",
+        apply(&adapter, with_catalog, selected),
+    )
+    .await;
+}
+
+/// A fresh Console approval of a not-issued MCP decision's same request
+/// settles it although the approval presents a new operator parent and
+/// computed a new deadline: the grant issues once, under the new parent and
+/// with the new deadline.
+#[tokio::test]
+async fn not_issued_mcp_access_settles_for_a_fresh_approval_with_a_new_parent_and_deadline() {
+    let dir = directory();
+    let path = dir.path().join("grants");
+    let owner = initialized(&path);
+    let config = config();
+    let selected = selection(&config);
+    let decision = live_decision(&config);
+    let adapter = selected_adapter_for_decision(
+        owner.clone(),
+        &dir.path().join("originals"),
+        &selected,
+        &decision,
+    )
+    .await;
+    let route = adapter.routes.get().unwrap()[0].clone();
+    not_issued_mcp_access(&adapter, &decision, &selected).await;
+    let mut fresh = decision;
+    fresh.evidence.revision = EvidenceId::new("2").unwrap();
+    fresh.evidence.sha256 = "b".repeat(64);
+    fresh.permission.lifetime.expires_at_ms = Some(u64::MAX - 1);
+    let parent = operator_parent(&owner, &adapter, &selected, &fresh, "operator-parent-2");
+    assert!(Some(&parent) != route.application_parent.as_ref());
+    let before = std::fs::read(&path).unwrap();
+    let applied = apply_under(
+        &adapter,
+        fresh.clone(),
+        selected.clone(),
+        Some(parent.clone()),
+    )
+    .await;
+    assert!(
+        matches!(&applied, Ok(observation)
+            if observation.state == PrivateServiceGrantState::GrantIssued),
+        "a fresh Console approval of the ended decision's same request with a new parent and \
+         deadline was answered {}",
+        answer(&applied)
+    );
+    let issued = std::fs::read(&path).unwrap();
+    assert_ne!(issued, before, "the fresh approval issued the grant");
+    let lineage = adapter
+        .service_grant_lineage(&applied.unwrap().grant, &original(&adapter, "approved-b"))
+        .await
+        .unwrap();
+    assert!(
+        lineage[..1] == parent[..],
+        "the grant issued under the new parent"
+    );
+    let resolved = owner
+        .grants()
+        .resolve_lineage(&lineage, &route.logical_executor, None)
+        .unwrap();
+    assert!(
+        resolved.restrictions().lifetime == LifetimeRestriction::window(0, u64::MAX - 1),
+        "the grant carries the new deadline"
+    );
+    drop(resolved);
+    assert_eq!(
+        apply_under(&adapter, fresh, selected, Some(parent))
+            .await
+            .unwrap()
+            .state,
+        PrivateServiceGrantState::GrantIssued
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        issued,
+        "nothing issues twice"
+    );
+}

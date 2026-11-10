@@ -2563,6 +2563,43 @@ describe("MobHandle.gatingPending()", () => {
   });
 });
 
+describe("MobHandle.gatingWithdraw()", () => {
+  it("sends the pending id and reason and returns the withdrawal", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({
+      pending_id: "p-1",
+      action_id: "a-1",
+      actor_id: "identity:developer",
+      outcome: "safe_draft",
+      withdrawn_at_ms: 1700000000000,
+      withdrawn_by: "host",
+      reason: "obsolete",
+    }));
+
+    const result = await handle.gatingWithdraw("p-1", "obsolete");
+    assert.deepEqual(calls, [{
+      method: "meta/gating/withdraw",
+      params: { pending_id: "p-1", reason: "obsolete" },
+    }]);
+    assert.deepEqual(result, {
+      pendingId: "p-1",
+      actionId: "a-1",
+      actorId: "identity:developer",
+      withdrawnBy: "host",
+      outcome: "safe_draft",
+      withdrawnAtMs: 1700000000000,
+      reason: "obsolete",
+    });
+  });
+
+  it("omits an absent reason", async () => {
+    const { handle, calls, setResponse } = createMockRuntime();
+    setResponse(() => ({ pending_id: "p-1", action_id: "a-1", actor_id: "x", withdrawn_by: "host" }));
+    await handle.gatingWithdraw("p-1");
+    assert.deepEqual(calls, [{ method: "meta/gating/withdraw", params: { pending_id: "p-1" } }]);
+  });
+});
+
 describe("MobHandle.gatingDecide()", () => {
   for (const [decision, outcome, nextPendingId] of [
     ["approve", "allowed", null],

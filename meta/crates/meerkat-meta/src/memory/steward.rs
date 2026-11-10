@@ -3906,7 +3906,10 @@ impl StewardEngine {
                 token: promotion.stage_token.clone(),
             };
             let _ = self.store.discard_stage(token).await;
-            let status = if notice.cause == "timeout_fallback" {
+            // A withdrawal (`meta/gating/withdraw`) is the requester's, not an
+            // operator verdict: like a timeout it leaves the proposal held and
+            // re-dreamable instead of rejecting it.
+            let status = if notice.cause == "timeout_fallback" || notice.cause == "withdrawn" {
                 "expired"
             } else {
                 "denied"
@@ -7912,6 +7915,90 @@ mod tests {
                 .expect("proposals")
                 .is_empty(),
             "denied proposal must resolve as rejected"
+        );
+    }
+
+    /// A withdrawn gate is not an operator denial: the stage is discarded and
+    /// the promotion settles as expired, but a proposal-sourced gate's
+    /// proposal stays held (re-dreamable), exactly as after a timeout.
+    #[tokio::test]
+    async fn a_withdrawn_gate_expires_the_promotion_and_keeps_the_proposal() {
+        let fixture = build_fixture(
+            vec![empty_gather(), "PLACEHOLDER-CONSOLIDATE".to_string()],
+            vec!["gate-1"],
+        );
+        let proposal_id = fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("Clean gotcha", "genuinely shareable"),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose");
+        let gate_verdict = json_reply(serde_json::json!({
+            "ops": [],
+            "proposal_verdicts": [
+                {"proposal_id": proposal_id, "verdict": "promote_pending_gate",
+                 "rationale": "let the operator decide", "target_mob": "mob:main"}
+            ],
+            "quarantine_verdicts": [], "open_loop_escalations": [],
+            "contradictions": [], "working_set": []
+        }));
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            let slot = replies
+                .iter_mut()
+                .find(|reply| reply.as_str() == "PLACEHOLDER-CONSOLIDATE")
+                .expect("slot");
+            *slot = gate_verdict;
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        assert_eq!(run.verdicts.proposals_gated, 1, "{:?}", run.skips);
+
+        fixture
+            .engine
+            .resolve_gating_notice(GatingResolutionNotice {
+                pending_id: "gate-1".to_string(),
+                action_id: "gate-action-1".to_string(),
+                approved: false,
+                next_pending_id: None,
+                cause: "withdrawn".to_string(),
+            })
+            .await;
+        assert!(
+            fixture
+                .store
+                .pending_promotions(REALM)
+                .await
+                .expect("pending")
+                .is_empty(),
+            "the withdrawn gate's promotion is settled"
+        );
+        assert!(
+            fixture
+                .store
+                .manifest(&[mob_scope()], ManifestTier::Full)
+                .await
+                .expect("mob manifest")
+                .is_empty(),
+            "nothing is committed"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .pending_proposals(REALM, 8)
+                .await
+                .expect("proposals")
+                .len(),
+            1,
+            "a withdrawal never rejects the proposal"
         );
     }
 

@@ -63,6 +63,72 @@ fn count(audit: &InputAuthorizationAudit) -> usize {
         .len()
 }
 
+/// Stage one refusal on an actual input row's live audit, as an operation of
+/// `run_id` does after the row's last durable write: through the sink
+/// [`InputAuthorizationAudit::bind`] derives for the row under a governed
+/// original for it, with no row write of its own. Returns the observation's
+/// operation id.
+pub(crate) fn stage_refusal_after_row_write(
+    audit: &InputAuthorizationAudit,
+    row_input_id: &InputId,
+    owner_session_id: &SessionId,
+    run_id: &RunId,
+) -> OperationId {
+    let mut governed = crate::input_authority::tests::input("late-observation-requester");
+    governed.header_mut().id = row_input_id.clone();
+    let original = RetainedInputAuthority::from_input(&governed)
+        .unwrap()
+        .expect("the governed fixture input carries its authority association");
+    let execution_scope = OperationExecutionScope::RuntimeInput {
+        owner_session_id: owner_session_id.clone(),
+        runtime_epoch_id: meerkat_core::RuntimeEpochId::from_uuid(uuid::Uuid::from_u128(7)),
+        submitted_input_id: row_input_id.clone(),
+        canonical_input_id: row_input_id.clone(),
+    };
+    let sink = audit
+        .bind(
+            row_input_id,
+            execution_scope.clone(),
+            run_id.clone(),
+            std::slice::from_ref(&original),
+            false,
+        )
+        .expect("the actual row binds its sink under its governed original");
+    let operation_id = OperationId::new();
+    sink.append(AuthorizationAuditObservation {
+        operation_id: operation_id.clone(),
+        execution_scope,
+        run_id: Some(run_id.clone()),
+        context_revision: None,
+        review_attribution: None,
+        delegate_attribution: None,
+        observation: AuditObservation::Refused {
+            target: Arc::new(meerkat_authorization_contracts::audit::AuditTarget::Tool {
+                call_id: "call-after-row-write".into(),
+                tool_name: "late_tool".into(),
+                arguments_digest:
+                    meerkat_authorization_contracts::evidence::EvidenceDigest::from_array([5; 32]),
+                owners: Vec::new(),
+            }),
+            reason: OperationRefusalKind::MalformedFacts,
+            read: None,
+        },
+    })
+    .expect("the bound sink stages the refusal on the live row");
+    operation_id
+}
+
+/// The operation ids of a stored row's audit, in order.
+pub(crate) fn audit_operation_ids(audit: &InputAuthorizationAudit) -> Vec<OperationId> {
+    serde_json::from_value::<Vec<StoredAuthorizationAuditObservation>>(
+        serde_json::to_value(audit).unwrap(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|record| record.observation.operation_id)
+    .collect()
+}
+
 #[test]
 fn frozen_prefix_rollback_clone_and_concurrent_suffix_do_not_drain_or_alias() {
     let (audit, sink) = fixture();
@@ -119,6 +185,70 @@ fn installing_committed_prefix_preserves_live_sink_suffix_and_refuses_divergence
     let empty_live = InputAuthorizationAudit::default();
     let restored_prefix = empty_live.retain_live_with_committed(&committed).unwrap();
     assert_eq!(count(&restored_prefix), 1);
+}
+
+#[test]
+fn committed_image_is_only_the_stored_prefix_of_the_live_records() {
+    let bytes = |audit: &InputAuthorizationAudit| serde_json::to_vec(audit).unwrap();
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let stored = live.freeze_for_persistence().unwrap();
+    sink.append(event(&sink)).unwrap();
+    // The live records ran ahead of the stored ones by a suffix: the image is
+    // the stored prefix, and the live buffer keeps the suffix.
+    let image = live.committed_image(&stored).unwrap();
+    assert_eq!(bytes(&image), bytes(&stored));
+    assert_eq!(count(&live), 2);
+    // The image is frozen: a later append reaches only the live buffer.
+    sink.append(event(&sink)).unwrap();
+    assert_eq!(count(&image), 1);
+    assert_eq!(count(&live), 3);
+    // Every other relation leaves the live records, which an exact compare
+    // against the stored row refuses: equal records,
+    let current = live.freeze_for_persistence().unwrap();
+    assert_eq!(
+        bytes(&live.committed_image(&current).unwrap()),
+        bytes(&current)
+    );
+    // records that diverge from the live ones,
+    let (other, other_sink) = fixture();
+    other_sink.append(event(&other_sink)).unwrap();
+    assert_eq!(
+        bytes(&live.committed_image(&other).unwrap()),
+        bytes(&current)
+    );
+    // and stored records ahead of the live ones.
+    let behind = stored.restore_observations_for_owner().unwrap();
+    assert_eq!(
+        bytes(&behind.committed_image(&current).unwrap()),
+        bytes(&stored)
+    );
+    // Neither side changes.
+    assert_eq!(count(&live), 3);
+    assert_eq!(count(&other), 1);
+    assert_eq!(count(&stored), 1);
+}
+
+#[test]
+fn same_records_compares_every_record_in_order() {
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let stored = live.freeze_for_persistence().unwrap();
+    // A live buffer and a frozen copy of it hold the same records.
+    assert!(live.has_same_records(&stored).unwrap());
+    assert!(stored.has_same_records(&live).unwrap());
+    // A record one side lacks is a difference, in either direction,
+    sink.append(event(&sink)).unwrap();
+    assert!(!live.has_same_records(&stored).unwrap());
+    assert!(!stored.has_same_records(&live).unwrap());
+    // and so are different records of the same count.
+    let (other, other_sink) = fixture();
+    other_sink.append(event(&other_sink)).unwrap();
+    assert!(!other.has_same_records(&stored).unwrap());
+    // Neither side changes.
+    assert_eq!(count(&live), 2);
+    assert_eq!(count(&stored), 1);
+    assert_eq!(count(&other), 1);
 }
 
 #[test]

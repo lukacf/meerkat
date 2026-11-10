@@ -1161,6 +1161,55 @@ async fn gating_audit_cursor_is_filtered_by_origin_audience() {
     assert_eq!(empty["error"]["code"], json!(-32602), "{empty:#}");
 }
 
+/// Withdrawal belongs to the requester side (the embedding host's RPC): the
+/// console has no route for it, so even a session allowed to decide cannot
+/// withdraw a request, and the request stays pending until the host does.
+#[tokio::test]
+async fn the_console_cannot_withdraw_a_gate_and_the_host_can() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let mut config = gating_router_only_config();
+    config.rules.push(AccessRule {
+        id: "everyone-decides-gating".to_string(),
+        actions: vec!["gating.decide".to_string()],
+        ..AccessRule::default()
+    });
+    let controller = AccessController::new(config).expect("controller");
+    runtime.set_access_controller(controller);
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    gate_with_origin(&runtime, "router").await;
+    let pending = runtime.list_gating_pending().await;
+    let pending_id = pending[0].pending_id.clone();
+
+    let refused = rpc(
+        &app,
+        "meta/gating/withdraw",
+        json!({ "pending_id": pending_id, "reason": "from the console" }),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], json!(-32601), "{refused:#}");
+    assert_eq!(runtime.list_gating_pending().await.len(), 1);
+
+    let withdrawn = runtime
+        .withdraw_gating_action(meerkat_meta::GatingWithdrawRequest {
+            pending_id: pending_id.clone(),
+            reason: Some("obsolete".to_string()),
+        })
+        .await
+        .expect("the host withdraws");
+    assert_eq!(withdrawn.withdrawn_by, "host");
+    assert!(runtime.list_gating_pending().await.is_empty());
+    let audit = rpc(&app, "meta/gating/audit", json!({})).await;
+    let entries = audit["result"]["entries"].as_array().expect("entries");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["event_type"] == json!("request_withdrawn")
+                && entry["pending_id"] == json!(pending_id)),
+        "{audit:#}"
+    );
+}
+
 async fn next_gating_frame(
     body: &mut (impl futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
     buffered: &mut String,

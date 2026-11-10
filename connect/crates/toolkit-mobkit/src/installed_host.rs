@@ -402,6 +402,12 @@ impl InstalledToolkitHost {
                 .map_err(|_| HostLifetimeError::InvalidSelection)?,
         );
         originals.select_installed_pair_recovery()?;
+        // Settle the access decisions a lost host left pending before this
+        // host applies or reads one.
+        originals
+            .reconcile_pending_access()
+            .await
+            .map_err(|_| HostLifetimeError::Unavailable)?;
         let policy_store: Arc<dyn toolkit_store::ToolkitStore> = store.clone();
         #[cfg(test)]
         let policy_store = match prepare_policy {

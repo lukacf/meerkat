@@ -158,11 +158,11 @@ def test_package_transports_original_evidence_and_verifies_after_relocation(prod
     from test_development_product_selection import guide_product_inputs
 
     target = derivation(product)
-    root, _, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
+    root, sdk, _, guide = guide_product_inputs(product, bundle_source, monkeypatch)
     originals = {name: (product.final / name).read_bytes() for name in (
         "build-record.json", "derived-binary-record.json", "transformation-start.json", "transformation-result.json")}
     output = tmp_path / "inert-derived-product.zip"
-    result = product_distribution.package(root, target, guide, output)
+    result = product_distribution.package(root, target, guide, output, guide_wheel=sdk)
     assert result["native_executed"] is False and result["installed_use_accepted"] is False
     extracted = tmp_path / "relocated-derived-product"
     with zipfile.ZipFile(output) as archive:

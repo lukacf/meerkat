@@ -94,7 +94,7 @@ graph TD
 |---|---|---|
 | Rust library host | `UnifiedRuntimeBuilder` and direct typed adapters | The application chooses the exact providers, stores, and HTTP bind address. |
 | `rpc_gateway` | SDK-facing JSON-RPC over stdio; persistent launches also serve HTTP and the callback plane | SDK init options live mostly under strict `runtime_options`; this profile owns callback/provider bridges and SQLite console-log persistence. |
-| `meta_gateway` | Console/admin HTTP after a one-request init handshake | It does not accept post-init SDK JSON-RPC or expose the SDK callback plane; its console timeline is in memory. |
+| `meta_gateway` | Console/admin HTTP after a one-request init handshake | It does not accept post-init SDK JSON-RPC or expose the SDK callback plane; with `persistent_sessions: true` it keeps its console timeline and metadata in SQLite in its state directory, as `rpc_gateway` does with `persistent_state`, and in memory otherwise. |
 
 The binaries can both show a console, but that does not make them substitutes.
 An SDK host launches `rpc_gateway`. A console/admin deployment that does not

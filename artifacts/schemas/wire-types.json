@@ -134577,6 +134577,17 @@
       "MobMemberSendResult": {
         "description": "Response payload for host-side mob member delivery.",
         "properties": {
+          "admission": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireMemberInputAdmission"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The input the member's runtime admitted for an unkeyed send, named\nbefore the send answered: match `input_id` against\n`boundary_append_applied.input_id` and\n`boundary_appends_discarded.input_ids`, or read it with\n`session/input_status`. Absent for a keyed send (its `continuation`\nstatus names its input), when the answer precedes runtime admission\n(an autonomous member's inbox delivery), for a member that is not\nserved by a local runtime (not runtime-backed, peer-only or hosted\nelsewhere), and from a server older than contract 0.9.12."
+          },
           "agent_identity": {
             "description": "Identity-native member identity (0.6).",
             "type": "string"
@@ -134725,6 +134736,24 @@
           "steer"
         ],
         "type": "string"
+      },
+      "WireMemberInputAdmission": {
+        "description": "The member session's admission of a sent input: the same pair a keyed\nsend's `admitted` status names. `input_id` is the id the runtime\nadmitted, never a requested one.",
+        "properties": {
+          "input_id": {
+            "description": "The admitted input's id.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The member session that admitted the input.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "input_id"
+        ],
+        "type": "object"
       },
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
@@ -139650,6 +139679,24 @@
         ],
         "type": "string"
       },
+      "WireMemberInputAdmission": {
+        "description": "The member session's admission of a sent input: the same pair a keyed\nsend's `admitted` status names. `input_id` is the id the runtime\nadmitted, never a requested one.",
+        "properties": {
+          "input_id": {
+            "description": "The admitted input's id.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "The member session that admitted the input.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "input_id"
+        ],
+        "type": "object"
+      },
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
         "type": "string"
@@ -139658,6 +139705,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for host-side mob member delivery.",
     "properties": {
+      "admission": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMemberInputAdmission"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The input the member's runtime admitted for an unkeyed send, named\nbefore the send answered: match `input_id` against\n`boundary_append_applied.input_id` and\n`boundary_appends_discarded.input_ids`, or read it with\n`session/input_status`. Absent for a keyed send (its `continuation`\nstatus names its input), when the answer precedes runtime admission\n(an autonomous member's inbox delivery), for a member that is not\nserved by a local runtime (not runtime-backed, peer-only or hosted\nelsewhere), and from a server older than contract 0.9.12."
+      },
       "agent_identity": {
         "description": "Identity-native member identity (0.6).",
         "type": "string"
@@ -199315,6 +199373,26 @@
       "complete"
     ],
     "title": "WireMemberHistoryPageBody",
+    "type": "object"
+  },
+  "WireMemberInputAdmission": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The member session's admission of a sent input: the same pair a keyed\nsend's `admitted` status names. `input_id` is the id the runtime\nadmitted, never a requested one.",
+    "properties": {
+      "input_id": {
+        "description": "The admitted input's id.",
+        "type": "string"
+      },
+      "session_id": {
+        "description": "The member session that admitted the input.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "input_id"
+    ],
+    "title": "WireMemberInputAdmission",
     "type": "object"
   },
   "WireMemberInstructionDelivery": {

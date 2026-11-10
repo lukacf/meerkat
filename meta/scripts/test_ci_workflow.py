@@ -48,6 +48,7 @@ PULL_REQUEST_ONLY = " && github.event_name == 'pull_request'"
 # Meta's workspace packages: the only ones a Meta job names to Cargo.
 META_PACKAGES = ("meerkat-meta", "meta-extension-state", "meta-store-conformance")
 SETUP_SCCACHE = "./.github/actions/setup-sccache-ci"
+SETUP_MOLD = "./.github/actions/setup-mold-ci"
 
 
 def load(path: Path) -> dict:
@@ -363,7 +364,7 @@ class CiWorkflowTests(unittest.TestCase):
         reference_uses = [uses_of(step) for step in steps_of(reference)]
         reference_sccache = next(step for step in steps_of(reference) if uses_of(step) == SETUP_SCCACHE)
         reference_cache = next(step for step in steps_of(reference) if uses_of(step) == "Swatinem/rust-cache")
-        setup_order = [SETUP_RUST, SETUP_SCCACHE, "rui314/setup-mold", "Swatinem/rust-cache"]
+        setup_order = [SETUP_RUST, SETUP_SCCACHE, SETUP_MOLD, "Swatinem/rust-cache"]
         self.assertEqual([use for use in reference_uses if use in setup_order], setup_order)
         jobs = rust_jobs(meta)
         self.assertEqual(sorted(jobs), sorted(["test-python", "console-backends", "console-fixtures",
@@ -633,8 +634,8 @@ class CiWorkflowTests(unittest.TestCase):
                         self.assertNotIn("repository", step.get("with") or {})
 
     def test_the_root_files_meta_ci_runs_reach_every_lane(self):
-        """A change to a root file every compile job runs (the setup actions,
-        the script they run, the root wrapper) runs every lane, as the
+        """A change to a root file the compile jobs run (the setup actions,
+        the scripts they run, the root wrapper) runs every lane, as the
         wrapper and the warm-dependency fetch did in Meta's own repository:
         ci-changes.py's MONOREPO_JOB_FILES is exactly what meta-ci.yml uses."""
         workflow = load(CI_WORKFLOW)

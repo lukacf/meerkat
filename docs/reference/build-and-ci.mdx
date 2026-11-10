@@ -274,7 +274,7 @@ the exact-tree attestation; nightly and the release tag carry the rest):
 | `main-unit` per shard: `nextest --lib --bins` over the whole workspace, including the meerkat-mob chain (mob, mob-adaptive, mob-mcp, mob-pack, rpc, rest, mcp-server, rkat, web-runtime, integration-tests, machine-codegen: the crates whose unit-lane build graph contains mob); the `unit` rows a push would have run are its first rows, the same shards (Cargo unifies features across the packages of one run) and suites, and the rest of the workspace is packed around them | deferred | yes | `make test-unit` | Bazel unit lanes |
 | `integration` per suite: `nextest -p <package> --test '*'` for each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs` whose trigger packages or paths changed; plus the reader rows (below) | the suites whose package does not compile meerkat-mob, and the reader rows outside that chain | every selected suite, and reader rows for lib, bin and example targets when the push has no `main-unit` | `make test-int` | Bazel integration lanes |
 | `closure-tests`: the deterministic workspace test lanes (`scripts/pre-push-unit.sh`) for the test scope: integration-fast, HeadCanonical and `e2e-fast` rows over Core's members (`--workspace` and an `--exclude` for every other product's package), and each product's test binaries in rows that select exactly its packages | deferred | yes | `make test-int`, `make e2e-fast` | Bazel integration lanes |
-| `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure, one job per product's part of it, the parts in parallel | deferred | yes | - | - |
+| `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure, one job per product's part of it, the parts in parallel (a product's part checks every target when the plan reaches Core, and a second job checks it with the product's default features) | deferred | yes | - | - |
 | `rustdoc`: `cargo doc --no-deps` with `RUSTDOCFLAGS=-Dwarnings` over Core's members when the plan reaches Core (two parallel legs, default features and `--all-features`), and over each product's packages that the change reaches (`--all-features` only), in rows of that product (as few as hold no bin name twice, since Cargo refuses to document two bins of one name at once), so a Core change that breaks a product's link into a Core item fails: every crate's documentation, its intra-doc links included. Each row documents its packages together, so an error that only `cargo doc -p <crate>` shows (features unify across members) is outside it | deferred | yes | - | - |
 | `feature-check`: the changed packages' Bazel feature sets and the Make feature-matrix check rows | deferred | yes | feature matrix | Bazel graph |
 | `governed-jsonl`, `mcp-confinement-positive`: the non-MCP governed JSONL tests and the Linux positive confinement cases | when the pull request touches the lane's own inputs (`GUARD_LANE_INPUTS`: the files defining the selected cases and their crates' manifests), changes its definition between base and head (`GUARD_LANE_DEFINITIONS`: its ci.yml job without comments, the Makefile's confinement rule and assignments, the default nextest profile's selection, the selected modules' declarations) or has no diff, deferred otherwise | yes | - | - |
@@ -490,6 +490,25 @@ graph.
   download whose sha256 does not match the pin still fails the lane. Once
   installed, a server that stops answering mid-job degrades a compile to a
   plain rustc run (`SCCACHE_IGNORE_SERVER_IO_ERROR`) instead of failing it.
+- The lanes fetch the mold linker (`.github/actions/setup-mold-ci`, in
+  place of `rui314/setup-mold`), cargo-nextest and cargo-deny
+  (`setup-cargo-tool-ci`, in place of `taiki-e/install-action`: the releases
+  and sha256 values its manifest named, installed where it installed them),
+  the TLC jar (`setup-tlc-ci`) and wasm-pack from their GitHub releases the
+  same way: through the GitHub API with the job's own token first
+  (`scripts/ci-release-asset-download`; a fork's pull request gets a
+  read-only token, which is enough), and from the anonymous release URL as
+  before only when there is no token or that fails. The TLC jar, nextest and
+  cargo-deny are checked against their pinned sha256 either way, before
+  anything is unpacked or installed; mold and wasm-pack pin a release, as
+  before, but no checksum. A token sent to the
+  anonymous URL is not enough: on 2026-11-08 that host answered anonymous
+  downloads with 504 for hours, also those an action sent with the job's
+  token, while the API's downloads kept working.
+- `actions/setup-python` and `actions/setup-node` (for a version the runner
+  image does not cache), `bazelbuild/setup-bazelisk` and
+  `mozilla-actions/sccache-action` still download from the anonymous
+  release URL: no input of theirs routes the download through the API.
 - A release job whose checkout can be an older tag runs its setup action
   from `.release-tooling`, a sparse checkout of the workflow's own commit,
   but a local action that action calls in turn (`uses: ./.github/actions/...`)
@@ -640,13 +659,21 @@ and publishes the platform-specific release artifacts from the attested
 source. The critical Linux and macOS arm64 archives publish first; Windows
 binaries are cross-compiled and packaged with cargo-xwin (clang-cl, lld-link,
 the Windows SDK) on a hosted Ubuntu runner, then executed for verification on
-a windows-2025-vs2026 runner, and Intel macOS binaries are cross-compiled on an
-Apple silicon runner; those trailing archives are added afterwards, never
+a windows-2025-vs2026 runner, and Intel macOS binaries are cross-compiled on
+Apple silicon (on the owner's BuildBuddy backend by its Apple-silicon
+executors, then run and inspected on a hosted Apple silicon runner; on the
+GitHub-hosted backend by that runner); those trailing archives are added afterwards, never
 replacing a published asset. A pre-tag prebuild
 (`make release-prebuild`, a `release.yml` dispatch on `main` that publishes
 nothing) can build all of those artifacts for the release commit before the
-tag; the tag run of exactly that commit then publishes them after the same
-attestation checks as an asset recovery instead of rebuilding. Registry
+tag; the tag run of that commit, or of a later commit whose changes since
+touch no input of Core's release artifacts
+(`scripts/release-prebuild-equivalent`: other products' roots except their
+`Cargo.toml` files, product changelogs and a short list of CI-only files),
+then publishes them after the same attestation checks as an asset recovery
+instead of rebuilding. A run of exactly the tag commit is preferred, and a
+release built from an earlier commit's prebuild carries
+`prebuild-source-<version>.txt`, which names both commits. Registry
 publication remains GitHub-hosted.
 
 The repository pre-push dispatcher follows the same identity rule. A complete
@@ -655,7 +682,8 @@ of the identical tree, including its release tag, validates the pushed object
 and checked-out `HEAD` identity and then reuses the complete gate result.
 
 BuildBuddy remains an opt-in developer backend, the nightly full graph, and
-the release-tag validation and Linux and macOS arm64 packaging backend.
+the release-tag validation and Linux and macOS (arm64 and Intel) packaging
+backend.
 `.github/workflows/buildbuddy.yml` is `workflow_call`-only; `nightly.yml` and
 `release.yml` call it, `ci.yml` never does.
 

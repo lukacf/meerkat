@@ -73,7 +73,6 @@ def selected_meta_094(tmp_path, monkeypatch):
     starts generation v2. The release is pinned before the selection is built,
     the same way test_meta_guide_runtime.selected builds it."""
     monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", "0.9.4")
-    monkeypatch.setattr(guide_sdk, "CORE_REQUIREMENT", "=0.9.4")
     tmp_path.chmod(0o700)
     gateway = tmp_path / "inert-rpc-gateway"
     gateway.write_bytes(b"inert test fixture, never execute\n")

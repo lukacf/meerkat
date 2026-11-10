@@ -80,13 +80,32 @@ Use `rkat models` for every supported ID and its current limits.
     |----------------|---------|------------|-------------|
     | `claude-opus-5-5` | 1M | 128K | Default Anthropic model; thinking always on, effort default `medium` |
     | `claude-opus-5` | 1M | 128K | Previous Opus generation |
-    | `claude-fable-5-1` | 1M | 128K | Recommended Fable model |
-    | `claude-fable-5` | 1M | 128K | Recommended previous Fable generation |
+    | `claude-fable-5-2` | 1M | 128K | Recommended Fable model; thinking always on, effort default `high`, no forced tool choice, no sampling parameters |
+    | `claude-fable-5-1` | 1M | 128K | Recommended previous Fable generation |
+    | `claude-fable-5` | 1M | 128K | Recommended earlier Fable generation |
     | `claude-opus-4-8` | 1M | 128K | Recommended previous Opus generation |
     | `claude-sonnet-5-5` | 1M | 128K | Recommended Sonnet model; adaptive thinking, effort default `high`, no sampling parameters |
     | `claude-sonnet-5` | 1M | 128K | Legacy Sonnet generation (still available upstream; prefer `claude-sonnet-5-5`); accepts forced tool choice, no mid-conversation system messages |
     | `claude-sonnet-4-6` | 1M | 64K | Previous Sonnet generation |
     | `claude-haiku-5-5` | 1M | 128K | Recommended Haiku model; adaptive thinking, effort default `medium`, no sampling parameters |
+
+    Meerkat sends the model id unchanged on every Anthropic backend and keeps
+    no list of the platforms that serve each model. Anthropic serves
+    `claude-fable-5-2` on the Claude API, Claude Platform on AWS, Claude
+    Models on Google Cloud and Microsoft Foundry, and on Amazon Bedrock only
+    through inference profiles: the global profile
+    `global.anthropic.claude-fable-5-2` or the US geographic profile
+    `us.anthropic.claude-fable-5-2`. Bedrock offers no in-region access to
+    it, so the bare `anthropic.claude-fable-5-2` does not run. Claude Mythos
+    5.2 (`claude-mythos-5-2`) is a model the catalog does not list, as Claude
+    Mythos 5.1 is: Anthropic serves it only to organizations it has verified,
+    on the Claude API, Claude Models on Google Cloud and Microsoft Foundry, on
+    Amazon Bedrock only through the inference profiles
+    `global.anthropic.claude-mythos-5-2` and `us.anthropic.claude-mythos-5-2`,
+    and not on Claude Platform on AWS. Bedrock ids are not in the catalog:
+    declared under `[models."global.anthropic.claude-fable-5-2"]` (quoted, as
+    the id contains dots), it runs as a model id with no catalog row, without
+    the `claude-fable-5-2` row's local refusals or defaults.
 
     ```toml
     [agent]
@@ -354,17 +373,25 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     thinking off on the models that accept it: Claude Opus 4.8, Opus 4.7,
     Sonnet 5, Sonnet 4.6, Sonnet 4.5, Haiku 4.5 and Opus 4.5 at any effort,
     and Claude Opus 5 and Haiku 5.5 at `high` effort or below; Claude
-    Fable 5.1, Fable 5, Opus 5.5 and Sonnet 5.5 refuse it. A thinking type or
+    Fable 5.2, Fable 5.1, Fable 5, Opus 5.5 and Sonnet 5.5 refuse it. A
+    thinking type or
     budget (`thinking_budget_tokens`) the model does not accept, `top_k` on a
     model without top-k support, and `between_tools` or a capped `disabled`
     above `high` effort are refused when the agent is built and again before
     each request, never sent to Anthropic. A generic `temperature` is omitted
     for models that reject sampling parameters.
 
-    Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a replayed
-    thinking block only while the system prompt, the tools and the earlier
-    messages it was produced under are unchanged, and accounts created on or
-    after 2026-08-31 refuse a request that replays one after a change.
+    `effort` sets the response effort: `low`, `medium`, `high`, `xhigh` or
+    `max`; each model's `params_schema` lists the levels it accepts. Every
+    request surface also accepts `x_high` as a spelling of `xhigh`, and
+    Meerkat sends `xhigh` to Claude either way. Responses, events and stored
+    records can carry either spelling, so a client reading them accepts both.
+
+    Claude Fable 5.2, Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a
+    replayed thinking block only while the system prompt, the tools and the
+    earlier messages it was produced under are unchanged, and refuse a
+    request that replays one after a change: Claude Fable 5.2 on every
+    account, the others on accounts created on or after 2026-08-31.
     Meerkat changes the tools mid-session as MCP servers connect, so it asks
     Anthropic to drop such blocks instead
     (`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`, with
@@ -394,6 +421,11 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     model answers that turn without the dropped reasoning and the prompt
     cache restarts at the first dropped block; Meerkat logs a warning
     naming each dropped block.
+
+    A session that moves from Claude Fable 5.2 to any model other than
+    Claude Mythos 5.2 loses Fable 5.2's thinking for the turns that run
+    there, because Anthropic drops those blocks for every other model; the
+    request still succeeds.
 
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,

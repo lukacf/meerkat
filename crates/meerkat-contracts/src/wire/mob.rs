@@ -1888,6 +1888,29 @@ pub struct MobMemberSendResult {
     /// unkeyed send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<WireContinuationReceipt>,
+    /// The input the member's runtime admitted for an unkeyed send, named
+    /// before the send answered: match `input_id` against
+    /// `boundary_append_applied.input_id` and
+    /// `boundary_appends_discarded.input_ids`, or read it with
+    /// `session/input_status`. Absent for a keyed send (its `continuation`
+    /// status names its input), when the answer precedes runtime admission
+    /// (an autonomous member's inbox delivery), for a member that is not
+    /// served by a local runtime (not runtime-backed, peer-only or hosted
+    /// elsewhere), and from a server older than contract 0.9.12.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<WireMemberInputAdmission>,
+}
+
+/// The member session's admission of a sent input: the same pair a keyed
+/// send's `admitted` status names. `input_id` is the id the runtime
+/// admitted, never a requested one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMemberInputAdmission {
+    /// The member session that admitted the input.
+    pub session_id: String,
+    /// The admitted input's id.
+    pub input_id: String,
 }
 
 /// The receipt of a keyed member send: the durable continuation it was

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of the AuthMachine's source-credential publication.
 #
-# usage: source_credential_publication_audit.sh <max-steps> [--mutants] [extra tlc args...]
+# usage: source_credential_publication_audit.sh <max-steps> [--mutants] [--whole-domain] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds a second credential
@@ -21,16 +21,28 @@
 # keeping the withdrawn publication's time (refused by the generated
 # invariant released_publication_only_without_credential). An anchor this
 # script expects but cannot find fails the run.
+#
+# The CI profile samples a restore's last_refresh and refresh_attempt, which
+# set only the state fields of those names, and nothing reads those fields.
+# --whole-domain assigns each input field the CI profile samples its Deep
+# domain, the field's whole domain, instead: the space this audit explored
+# before the CI profile sampled them. Both forms reach the same witnesses and
+# refuse the same mutants; nightly's machine-verify-deep job runs this one.
 set -euo pipefail
 
-usage="usage: source_credential_publication_audit.sh <max-steps> [--mutants] [extra tlc args...]"
+usage="usage: source_credential_publication_audit.sh <max-steps> [--mutants] [--whole-domain] [extra tlc args...]"
 max_steps="${1:?${usage}}"
 shift
 run_mutants=false
-if [[ "${1:-}" == "--mutants" ]]; then
-  run_mutants=true
+whole_domain=false
+while [[ "${1:-}" == "--mutants" || "${1:-}" == "--whole-domain" ]]; do
+  if [[ "$1" == "--mutants" ]]; then
+    run_mutants=true
+  else
+    whole_domain=true
+  fi
   shift
-fi
+done
 if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 4 )); then
   echo "error: max-steps must be an integer >= 4 (the longest witness is 4 steps)" >&2
   exit 2
@@ -67,6 +79,19 @@ write_cfg() {
   AuditGenerationNeverDecreases
 INVARIANTS${invariants}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
+  if [[ "${whole_domain}" == "true" ]]; then
+    # Each input field the CI profile samples ranges over its Deep domain,
+    # which the generated model defines next to the CI samples.
+    if ! awk '
+      /^  InputSamples_[A-Za-z0-9_]+ <- InputSamples_[A-Za-z0-9_]+Ci$/ { sub(/Ci$/, "Deep"); sampled++ }
+      { print }
+      END { if (sampled == 0) exit 3 }
+    ' "${cfg}" > "${cfg}.next"; then
+      echo "error: --whole-domain found no sampled input field in ${ci_cfg}" >&2
+      exit 1
+    fi
+    mv "${cfg}.next" "${cfg}"
+  fi
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
 }
 
@@ -304,5 +329,8 @@ PY
     exit 1
   fi
   echo "mutant publication-keeps-released-bound refused by released_publication_only_without_credential"
+fi
+if [[ "${whole_domain}" == "true" ]]; then
+  echo "source-credential publication audit explored each sampled input field's whole domain"
 fi
 echo "source-credential publication audit passed at model_step_count <= ${max_steps}"

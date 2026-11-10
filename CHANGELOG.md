@@ -139,6 +139,15 @@ them.
   and the error names none of the document's content. Affects 0.6.34
   through 0.9.11.
 
+- `meerkat-mcp`: rmcp's built-in reqwest Streamable HTTP client is no longer
+  built (meerkat-mcp stopped enabling rmcp's unused
+  `transport-streamable-http-client-reqwest` feature), and reqwest 0.13,
+  which only that client used, leaves the dependency graph of every Meerkat
+  binary. RUSTSEC-2026-0462 (unbounded response bodies in that client, rmcp
+  before 3.9.0) does not affect Meerkat, whose own MCP client bounds every
+  response body and SSE event at 64 MiB, so an audit that reports rmcp 1.8
+  by version can ignore it.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

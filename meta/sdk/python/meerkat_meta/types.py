@@ -1025,6 +1025,31 @@ class GatingDecisionResult:
 
 
 @dataclass(frozen=True)
+class GatingWithdrawResult:
+    """A requester's withdrawal of its own pending request: no decision, no
+    approver, and nothing runs (``outcome`` is ``safe_draft``)."""
+    pending_id: str
+    action_id: str
+    actor_id: str
+    withdrawn_by: str
+    outcome: str | None = None
+    withdrawn_at_ms: int | None = None
+    reason: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> GatingWithdrawResult:
+        return cls(
+            pending_id=data["pending_id"],
+            action_id=data["action_id"],
+            actor_id=data["actor_id"],
+            withdrawn_by=data["withdrawn_by"],
+            outcome=data.get("outcome"),
+            withdrawn_at_ms=data.get("withdrawn_at_ms"),
+            reason=data.get("reason"),
+        )
+
+
+@dataclass(frozen=True)
 class GatingAuditEntry:
     """An entry in the gating audit log.
 
@@ -2430,13 +2455,21 @@ class ErrorEvent:
             runtime_id = context.get("agent_runtime_id", "")
             effect = context.get("effect", "")
             attempts = context.get("attempts", 0)
-            # A compaction harvest's error says itself whether a fallback
-            # harvest follows; any other side effect is not run again.
-            settled = "" if effect == "compaction_harvest" else ", and is not run again"
-            message = (
-                f"the {effect} of {identity} ({runtime_id}) failed after {attempts} "
-                f"attempts{settled}: {error}"
-            )
+            if context.get("cause") == "budget_busy":
+                # The realm's background budget did not admit the side
+                # effect's run within its wait: it did not run, and no
+                # attempt of it failed for that; the attempts that failed
+                # before it are named.
+                after = f" after {attempts} failed attempts" if attempts else ""
+                message = f"the {effect} of {identity} ({runtime_id}) did not run{after}: {error}"
+            else:
+                # A compaction harvest's error says itself whether a fallback
+                # harvest follows; any other side effect is not run again.
+                settled = "" if effect == "compaction_harvest" else ", and is not run again"
+                message = (
+                    f"the {effect} of {identity} ({runtime_id}) failed after {attempts} "
+                    f"attempts{settled}: {error}"
+                )
         elif category == ErrorCategory.LIFECYCLE_PROJECTION_OFF:
             message = str(context.get("detail", ""))
         elif category == ErrorCategory.MOB_ANNOUNCEMENT_ESCALATED:

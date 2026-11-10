@@ -687,6 +687,47 @@ fn load_personal_accounts(
         .then(|| meerkat_meta::PersonalMcpAccounts::new(config).owner_check()))
 }
 
+/// The metadata store and the console log a persistent launch keeps in its
+/// state directory: the stores `rpc_gateway` keeps there under a
+/// `persistent_state` directory (`MetaStorageLayout::metadata_db` and
+/// `console_db`). The runtime keeps its console audit log, its attention
+/// list, the gating owner's state, its mob event cursor and the identity
+/// records in the one, the console's requests, their threads and the
+/// timeline in the other, so a restart keeps them.
+struct StateDirConsoleStores {
+    metadata: Arc<dyn meerkat_meta::PersistentMetadataStore>,
+    console_log: Arc<dyn meerkat_meta::ConsoleLogStore>,
+}
+
+/// Open [`StateDirConsoleStores`] under `layout`; the error is the init's
+/// storage refusal.
+fn open_state_dir_console_stores(
+    layout: &MetaStorageLayout,
+) -> Result<StateDirConsoleStores, String> {
+    let metadata_path = layout
+        .metadata_db()
+        .map_err(|error| error.to_string())?
+        .path;
+    let metadata = meerkat_meta::SqliteMetadataStore::open(&metadata_path).map_err(|error| {
+        format!(
+            "failed to open the meta metadata store at {}: {error}",
+            metadata_path.display()
+        )
+    })?;
+    let console_log_path = layout.console_db().map_err(|error| error.to_string())?.path;
+    let console_log =
+        meerkat_meta::SqliteConsoleLogStore::open(&console_log_path).map_err(|error| {
+            format!(
+                "failed to open the meta console store at {}: {error}",
+                console_log_path.display()
+            )
+        })?;
+    Ok(StateDirConsoleStores {
+        metadata: Arc::new(metadata),
+        console_log: Arc::new(console_log),
+    })
+}
+
 /// Returns (session_service, runtime_adapter, binary_blob_store).
 ///
 /// The session service and explicit runtime adapter share the same runtime
@@ -876,10 +917,10 @@ fn build_persistent_session_service(
         )
     });
     // Blob slot resolved fail-closed above (local disk under
-    // <store_dir>/blobs). The console timeline and metadata cursor of this
-    // surface are in-memory by contract (`UnifiedRuntime::bootstrap` keeps
-    // its defaults) — a declared default, documented and health-visible
-    // (M4), not an error.
+    // <store_dir>/blobs). The console log and the metadata store of this
+    // launch are the state directory's SQLite stores, opened before this
+    // runs (`open_state_dir_console_stores`, which refuses init when either
+    // does not open).
     let mut slots = vec![
         meerkat_meta::storage_health::StorageSlotSummary::persistent(
             "sessions",
@@ -896,17 +937,13 @@ fn build_persistent_session_service(
         meerkat_meta::storage_health::blob_slot_summary(
             meerkat_meta::storage_health::BlobDurability::PersistentDisk,
         ),
-        meerkat_meta::storage_health::StorageSlotSummary::declared_ephemeral(
+        meerkat_meta::storage_health::StorageSlotSummary::persistent(
             "console",
-            "InMemoryConsoleLogStore",
-            "declared default of this surface (UnifiedRuntime::bootstrap keeps in-memory \
-             console/metadata)",
+            "SqliteConsoleLogStore",
         ),
-        meerkat_meta::storage_health::StorageSlotSummary::declared_ephemeral(
+        meerkat_meta::storage_health::StorageSlotSummary::persistent(
             "metadata",
-            "InMemoryMetadataStore",
-            "declared default of this surface (UnifiedRuntime::bootstrap keeps in-memory \
-             console/metadata)",
+            "SqliteMetadataStore",
         ),
         schedule_slot,
         workgraph_slot,
@@ -3114,6 +3151,17 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         })?;
     // Every member factory below composes its MCP routers under this custody.
     let member_mcp_custody = meerkat_meta::MemberMcpCustody::new();
+    // The persistent launch keeps the runtime's metadata and its console log
+    // in the state directory, where rpc_gateway keeps them under
+    // `persistent_state`: a store that does not open refuses init, never an
+    // in-memory fallback.
+    let console_stores = if persistent_sessions {
+        Some(open_state_dir_console_stores(&layout).map_err(|message| {
+            refuse_init(&request_id, meerkat_meta::STORAGE_RESOLUTION_CODE, message)
+        })?)
+    } else {
+        None
+    };
     let session_bootstrap = if persistent_sessions {
         let (
             service,
@@ -3361,12 +3409,12 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             meerkat_meta::storage_health::StorageSlotSummary::declared_ephemeral(
                 "console",
                 "InMemoryConsoleLogStore",
-                "declared default of this surface",
+                "declared by the default ephemeral launch",
             ),
             meerkat_meta::storage_health::StorageSlotSummary::declared_ephemeral(
                 "metadata",
                 "InMemoryMetadataStore",
-                "declared default of this surface",
+                "declared by the default ephemeral launch",
             ),
             meerkat_meta::storage_health::StorageSlotSummary::declared_ephemeral(
                 "workgraph",
@@ -3429,6 +3477,12 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             },
             Duration::from_secs(30),
         );
+    // A persistent launch's runtime keeps its metadata in the state
+    // directory's metadata store.
+    let bootstrap_plan = match &console_stores {
+        Some(stores) => bootstrap_plan.with_persistent_metadata(Arc::clone(&stores.metadata)),
+        None => bootstrap_plan,
+    };
     let mut composition = meerkat_meta::gateway_composition::GatewayComposition::prepare(
         meerkat_meta::gateway_composition::GatewayCompatibilityProfile::ConsoleHttp,
         bootstrap_plan,
@@ -3437,6 +3491,11 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
     .await
     .context("failed to bootstrap local runtime")?;
     let runtime = composition.runtime_mut();
+    // And its console log in the state directory's console store, installed
+    // right after the bootstrap, as rpc_gateway installs it.
+    if let Some(stores) = console_stores {
+        runtime.set_console_log_store(stores.console_log);
+    }
 
     // Load contacts.toml if present. This enables meta/cross_mob/directory
     // (lookup of known mob addresses) without requiring peer mob handles.
@@ -3584,6 +3643,11 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         // The held-completion marks a held bootstrap left in the same
         // directory refuse an ordinary wake of their members here too.
         irt.set_held_completion_state_dir(persistent_sessions.then(|| store_dir.to_path_buf()));
+        // Its identity records (each build's tool record, each rotation's
+        // intent, the lifecycle projection's cursor and the side effects it
+        // owes) go to the runtime's metadata store, as rpc_gateway's do: the
+        // state directory's on a persistent launch, so a restart keeps them.
+        meerkat_meta::gateway_wiring::keep_identity_records_in_runtime_metadata(&irt, runtime);
 
         let roster = Arc::new(MutableRosterProvider::new(identity_roster_seed));
         let mob_definition = mob_handle.definition().clone();

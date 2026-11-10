@@ -81,7 +81,10 @@ name: CI
 #   closure-tests   - the deterministic workspace test lanes
 #                     (scripts/pre-push-unit.sh) for the test scope
 #   closure-check   - cargo check --all-features (lib and bin targets) over
-#                     the reverse-dependency closure of the changed packages
+#                     the reverse-dependency closure of the changed packages,
+#                     one job per product's part; after a Core change a
+#                     product's part checks every target, once with every
+#                     feature and once with its default features
 #   rustdoc         - (xN) cargo doc --no-deps with rustdoc's lints denied
 #                     (RUSTDOCFLAGS=-Dwarnings): Core's members in one leg
 #                     with default features and one with --all-features,
@@ -316,6 +319,9 @@ env:
   # Target set for the closure-check lane: "lib" checks lib and bin targets
   # of the closure; "all" adds every test target (--all-targets), which
   # measured 16 min after a meerkat-mob change and does not fit the budget.
+  # A row of the plan can still ask for every target (a product's part after
+  # a Core change, with every feature and with its default features;
+  # closure_check_rows in scripts/ci-cargo-lanes.mjs).
   CLOSURE_CHECK_TARGETS: lib
 
 jobs:
@@ -398,6 +404,7 @@ jobs:
       floor_check_matrix: ${{ steps.plan.outputs.floor_check_matrix }}
       downstream_products: ${{ steps.plan.outputs.downstream_products }}
       connect_checks: ${{ steps.plan.outputs.connect_checks }}
+      row_products: ${{ steps.plan.outputs.row_products }}
     steps:
       # Depth 2 is HEAD and its parents. The classifier diffs a pull
       # request's merge commit against its first parent, or a push against
@@ -639,7 +646,7 @@ jobs:
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
 
-      - name: Release prebuild lookup selects only usable exact-commit prebuilds
+      - name: Release prebuild lookup selects only usable prebuilds that serve the commit
         run: scripts/test-release-find-prebuild.sh
 
       - name: Standalone census check passes only on a green main run at the given commit
@@ -806,7 +813,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -979,7 +986,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1023,7 +1030,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1065,12 +1072,16 @@ jobs:
     # classification), but a budget failure is reported while a cancelled
     # shard is a failed lane. A shard is sized to about 13 minutes hosted
     # (776 s, the longest shard of this assignment on the 0.9.9 release
-    # runs), but one audit cannot be split across shards: in 0.9.11
-    # audits-s takes 1109 s locally with 4 TLC workers, 756 s of it the
-    # AuthMachine source-credential publication audit alone, so about
-    # 2000-2400 s at the 1.8-2.15x hosted factor of its run class, past 30
-    # minutes. 60 leaves headroom.
-    timeout-minutes: 60
+    # runs), but one audit cannot be split across shards: the durable
+    # decision audit with --mutants, alone in audits-j, took 1120 s on main
+    # push 42552143103, near 20 minutes. On that push audits-s took 3072 s
+    # (1111 s locally with 4 TLC workers) while the AuthMachine
+    # source-credential publication audit explored the whole domains of a
+    # restore's last_refresh and refresh_attempt, which nothing reads (797 s
+    # of it locally). The auth CI profile samples them now: audits-s takes
+    # 396 s locally (that audit 87 s), about 1100 s at that push's 2.77x.
+    # 30 leaves headroom.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -1114,8 +1125,17 @@ jobs:
     # minutes cold, as after a release version bump. A push gets 120 minutes.
     # A pull request that invalidates meerkat-mob's build leaves the products'
     # rows to the push, and its own rows took at most 18m38s cold (pull
-    # request run 42485928170); it gets 60.
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
+    # request run 42485928170). One that leaves that build alone still lints
+    # Connect, in Connect's own row or, for a Meta or Core change that reaches
+    # it, in a downstream row, and such a row reaches meerkat-connect after
+    # about 36 minutes. On pull request run 42623540413 Connect's row (lib and
+    # bin targets) took 56 of its 60 minutes; on pull request run 42633674366
+    # a downstream row (every target) was cancelled at 60 while it linted
+    # meerkat-connect, which takes 28 minutes for every target, so that row
+    # needs about 65 minutes. A pull request gets 90: such a row fails the
+    # pull-request execution budget (CI_MAX_EXEC_SECONDS) either way, but a
+    # budget failure is reported while a cancelled row is a failed lane.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1144,7 +1164,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1197,7 +1217,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 60 || 120 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 90 || 120 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}
@@ -1220,7 +1240,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1284,7 +1304,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1302,7 +1322,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1436,7 +1458,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1591,7 +1613,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1602,7 +1624,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
 
       - name: Confinement eligibility on this runner (evidence before and after)
         shell: bash
@@ -1711,7 +1735,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1723,7 +1747,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1832,7 +1858,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1844,7 +1870,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -1946,7 +1974,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -1957,7 +1985,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2049,7 +2079,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2060,7 +2090,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2186,7 +2218,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2197,7 +2229,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2316,7 +2350,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2327,7 +2361,9 @@ jobs:
           cache-on-failure: true
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2418,7 +2454,9 @@ jobs:
         uses: ./.github/actions/setup-rust-ci
 
       - name: Install nextest
-        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
+        uses: ./.github/actions/setup-cargo-tool-ci
+        with:
+          tool: nextest
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
@@ -2459,10 +2497,14 @@ jobs:
     # job (51m49s on main push 41608949055) and waited for the stagger job.
     # Connect's part is the longest: 52m56s on release-branch push
     # 42321043843 and 59m21s of the old 60 on main push 42497143053. It
-    # gets 90 minutes, on a pull request too (whose plan holds no part).
+    # gets 90 minutes, on a pull request too (whose plan holds no part). A
+    # product's part after a Core change checks every target (the row's
+    # `targets`, see closure_check_rows), so it gets 120, and a second job
+    # checks that part again with the product's default features (the row's
+    # `features`), which --all-features never compiles.
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.targets == 'all' && 120 || 90 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}
@@ -2485,7 +2527,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2506,6 +2548,8 @@ jobs:
         shell: bash
         env:
           CLOSURE: ${{ matrix.packages }}
+          ROW_TARGETS: ${{ matrix.targets }}
+          ROW_FEATURES: ${{ matrix.features }}
         run: |
           set -euo pipefail
           [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
@@ -2514,11 +2558,18 @@ jobs:
           # products' requests must not reach Core's.
           [[ "${CLOSURE}" != *";"* ]] || { echo "::error::a closure-check job holds more than one product's part"; exit 1; }
           targets=()
-          if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
+          # A product's part after a Core change checks its test targets too.
+          if [[ "${ROW_TARGETS}" == "all" || "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
             targets+=(--all-targets)
           fi
+          # Every feature, or the product's default features: the code a
+          # product compiles only without one of its features calls Core too.
+          features=(--all-features)
+          if [[ "${ROW_FEATURES}" == "default" ]]; then
+            features=()
+          fi
           # shellcheck disable=SC2086
-          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
+          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" "${features[@]}"
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -2526,7 +2577,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-closure-check-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-closure-check-${{ matrix.product }}-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3
@@ -2664,7 +2715,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2737,7 +2788,7 @@ jobs:
           key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
 
       - name: Setup mold linker
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -2875,7 +2926,7 @@ jobs:
 
       - name: Setup mold linker
         if: ${{ github.event_name == 'push' }}
-        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        uses: ./.github/actions/setup-mold-ci
 
       - name: Cache cargo registry
         if: ${{ github.event_name == 'push' }}
@@ -2998,13 +3049,25 @@ jobs:
       - name: Install wasm-pack
         if: ${{ needs.changes.outputs.example_web_wasm == 'true' }}
         shell: bash
+        # Through the GitHub API with the job's token first, from the
+        # anonymous release URL only when there is no token or that fails
+        # (scripts/ci-release-asset-download).
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="0.13.1"
           archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
-            --output "/tmp/${archive}"
+          fetched=false
+          if scripts/ci-release-asset-download wasm-bindgen/wasm-pack "v${version}" "${archive}" "/tmp/${archive}"; then
+            fetched=true
+          fi
+          unset GH_TOKEN
+          if [[ "${fetched}" != true ]]; then
+            curl --fail --location --retry 5 --retry-delay 2 \
+              "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+              --output "/tmp/${archive}"
+          fi
           tar -xzf "/tmp/${archive}" -C /tmp
           install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
           wasm-pack --version
@@ -3120,13 +3183,25 @@ jobs:
 
       - name: Install wasm-pack
         shell: bash
+        # Through the GitHub API with the job's token first, from the
+        # anonymous release URL only when there is no token or that fails
+        # (scripts/ci-release-asset-download).
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="0.13.1"
           archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
-            --output "/tmp/${archive}"
+          fetched=false
+          if scripts/ci-release-asset-download wasm-bindgen/wasm-pack "v${version}" "${archive}" "/tmp/${archive}"; then
+            fetched=true
+          fi
+          unset GH_TOKEN
+          if [[ "${fetched}" != true ]]; then
+            curl --fail --location --retry 5 --retry-delay 2 \
+              "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+              --output "/tmp/${archive}"
+          fi
           tar -xzf "/tmp/${archive}" -C /tmp
           install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
           wasm-pack --version
@@ -3279,9 +3354,9 @@ jobs:
     # Meerkat Connect's non-Rust checks (its former checks.yml): the build
     # receipt, packaging, library release, candidate and installed-acceptance
     # script tests, the product and starter preparation tests, the immutable
-    # preparation and product readback tests, the hosted MCP callback
-    # tests, the docs check and the TypeScript SDK suite with the embedded
-    # Console panel test. None of them builds native code or needs an
+    # preparation, product readback and setup MCP adapter tests, the hosted
+    # MCP callback tests, the docs check and the TypeScript SDK suite with the
+    # embedded Console panel test. None of them builds native code or needs an
     # account. Every change under connect/ selects them (the plan's product
     # lane connect_checks). Connect's standalone repo-cargo wrapper test is
     # not run here: the monorepo builds with the root scripts/repo-cargo.
@@ -3360,12 +3435,13 @@ jobs:
         # out by name: its fixture bundle is the macOS arm64 build, which the
         # official installer refuses on this Linux runner ("official setup
         # supports macOS arm64 only"). The two Enterprise readbacks (Linux
-        # x86_64 bundles) run.
+        # x86_64 bundles) run. test_mcp_adapter checks the setup MCP adapter
+        # with the real SDK (the mcp==2.2.0 installed above).
         env:
           PYTHONPATH: sdk/consumer-setup/tests
         run: >-
           python3 -B -m unittest -v
-          test_product_local_session test_immutable_release
+          test_product_local_session test_immutable_release test_mcp_adapter
           test_product_official_readback.OfficialProductTests.test_enterprise_readback_preserves_selected_host_profile_and_operation_subset
           test_product_official_readback.OfficialProductTests.test_enterprise_identity_readback_preserves_protected_account_selection
 
@@ -3442,6 +3518,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check lane results
+        id: lanes
         shell: bash
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
@@ -3604,11 +3681,18 @@ jobs:
           echo "changes=${CHANGES_RESULT} fmt-governance=${FMT_GOVERNANCE_RESULT} ci-lanes-selftest=${CI_LANES_SELFTEST_RESULT} path-classifier-selftest=${PATH_CLASSIFIER_SELFTEST_RESULT} ratchets=${RATCHETS_RESULT} governance-gates=${GOVERNANCE_GATES_RESULT} tlc-audits=${TLC_AUDITS_RESULT}"
           echo "clippy=${CLIPPY_RESULT} unit=${UNIT_RESULT} governed-jsonl=${GOVERNED_JSONL_RESULT} mcp-confinement-positive=${MCP_CONFINEMENT_POSITIVE_RESULT} integration=${INTEGRATION_RESULT} (${INTEGRATION_COUNT} suites) closure-tests=${CLOSURE_TESTS_RESULT} (${CLOSURE_TEST_COUNT} rows, ${HOOK_BINARY_COUNT} hook binaries, ${HOOK_RETAINED_COUNT} of them lib binaries left to the main and nightly unit lanes, ${TEST_SCOPE_COUNT}-package scope) main-unit=${MAIN_UNIT_RESULT} closure-check=${CLOSURE_CHECK_RESULT} rustdoc=${RUSTDOC_RESULT} feature-check=${FEATURE_CHECK_RESULT} wasm-check=${WASM_CHECK_RESULT} sdk-host=${SDK_HOST_RESULT} example-web=${EXAMPLE_WEB_RESULT} wasm-timers=${WASM_TIMERS_RESULT} bazel-graph=${BAZEL_GRAPH_RESULT}"
           failed=0
+          # Each lane flagged below, and each plan-level error, for the
+          # product evidence (scripts/ci-product-evidence.mjs): a release
+          # accepts a failed run only when every flagged lane failed in rows
+          # its product does not depend on and the plan itself held.
+          flagged_lanes=()
+          plan_errors=0
           require_success() {
             local lane="$1" result="$2"
             if [[ "${result}" != "success" ]]; then
               echo "::error::${lane} must succeed on every run (result: ${result})."
               failed=1
+              flagged_lanes+=("${lane}")
             fi
           }
           require_ran() {
@@ -3616,6 +3700,7 @@ jobs:
             if [[ "${result}" != "success" ]]; then
               echo "::error::${lane} must run and succeed for a build-relevant change (result: ${result})."
               failed=1
+              flagged_lanes+=("${lane}")
             fi
           }
           forbid_failure() {
@@ -3625,6 +3710,7 @@ jobs:
               *)
                 echo "::error::${lane} did not complete successfully (result: ${result})."
                 failed=1
+                flagged_lanes+=("${lane}")
                 ;;
             esac
           }
@@ -3646,22 +3732,22 @@ jobs:
             echo "release projection: lanes reuse CI run ${RELEASE_EVIDENCE_RUN_ID} attempt ${RELEASE_EVIDENCE_RUN_ATTEMPT} of ${RELEASE_EVIDENCE_COMMIT} (verified next)"
             if [[ "${MODE}" != "release-projection" || "${RUST_CHANGED}" != "false" || "${EXAMPLE_WEB}" != "false" || "${EXAMPLE_WEB_WASM}" != "false" || "${GENERATED_CONTRACT}" != "true" || "${BAZEL_GRAPH}" != "true" ]]; then
               echo "::error::an inconsistent release-projection plan (mode=${MODE} rust_changed=${RUST_CHANGED} example_web=${EXAMPLE_WEB} example_web_wasm=${EXAMPLE_WEB_WASM} generated_contract=${GENERATED_CONTRACT} bazel_graph=${BAZEL_GRAPH})."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
             if ! [[ "${RELEASE_EVIDENCE_COMMIT}" =~ ^[0-9a-f]{40}$ && "${RELEASE_EVIDENCE_RUN_ID}" =~ ^[1-9][0-9]*$ && "${RELEASE_EVIDENCE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]; then
               echo "::error::the release-projection plan names no completed CI run to reuse (commit='${RELEASE_EVIDENCE_COMMIT}' run='${RELEASE_EVIDENCE_RUN_ID}' attempt='${RELEASE_EVIDENCE_RUN_ATTEMPT}')."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
             # The readers' and meerkat-contracts' lib and bin unit rows.
             if [[ "${UNIT_SHARD_COUNT}" =~ ^[0-9]+$ ]] && (( UNIT_SHARD_COUNT > 0 )); then
               require_ran "Unit tests" "${UNIT_RESULT}"
             else
               echo "::error::a release-projection plan must run its readers' unit rows (unit_shard_count='${UNIT_SHARD_COUNT}')."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
           elif [[ "${MODE}" == "release-projection" ]]; then
             echo "::error::mode release-projection without the release_projection flag."
-            failed=1
+            failed=1; plan_errors=$((plan_errors + 1))
           fi
           if [[ "${MACHINE_AUTHORITY}" == "true" ]]; then
             require_ran "Bounded TLC audits" "${TLC_AUDITS_RESULT}"
@@ -3678,7 +3764,7 @@ jobs:
           if [[ "${RUST_CHANGED}" == "true" ]]; then
             if ! [[ "${SHARD_COUNT}" =~ ^[0-9]+$ ]] || (( SHARD_COUNT < 1 )); then
               echo "::error::a build-relevant change produced no lanes (shard_count='${SHARD_COUNT}')."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
             require_ran "Clippy" "${CLIPPY_RESULT}"
             # The push runs every lane; a pull request leaves these to it
@@ -3695,7 +3781,7 @@ jobs:
             if [[ "${PLAN_EVENT}" != "push" || -n "${DEFERRED_TO_PUSH}" ]]; then push_plan_whole=false; fi
             if [[ "${IS_PULL_REQUEST}" != "true" && "${push_plan_whole}" != "true" ]]; then
               echo "::error::a push plan left lanes to a later push (event=${PLAN_EVENT} closure_check=${CLOSURE_CHECK} rustdoc=${RUSTDOC} governed_jsonl=${GOVERNED_JSONL} mcp_confinement_positive=${MCP_CONFINEMENT_POSITIVE} deferred='${DEFERRED_TO_PUSH}')."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
             if [[ "${CLOSURE_CHECK}" == "true" ]]; then
               require_ran "Closure check" "${CLOSURE_CHECK_RESULT}"
@@ -3723,7 +3809,7 @@ jobs:
               forbid_failure "Feature combinations" "${FEATURE_CHECK_RESULT}"
             else
               echo "::error::the plan carries no feature-combination count (feature_check_count='${FEATURE_CHECK_COUNT}')."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
             # Fail closed on the unit plan: every changed package is either in
             # a pull-request unit shard, in a push's unit rows (which run in
@@ -3739,7 +3825,7 @@ jobs:
               forbid_failure "Unit tests" "${UNIT_RESULT}"
             else
               echo "::error::a build-relevant change produced neither a unit lane nor a deferred package list."
-              failed=1
+              failed=1; plan_errors=$((plan_errors + 1))
             fi
           elif [[ "${CHANGES_RESULT}" == "success" ]]; then
             for lane in Clippy:"${CLIPPY_RESULT}" "Unit tests":"${UNIT_RESULT}" "Closure check":"${CLOSURE_CHECK_RESULT}" Rustdoc:"${RUSTDOC_RESULT}" "Governed JSONL":"${GOVERNED_JSONL_RESULT}" "MCP confinement positive":"${MCP_CONFINEMENT_POSITIVE_RESULT}" "Feature combinations":"${FEATURE_CHECK_RESULT}"; do
@@ -3799,7 +3885,7 @@ jobs:
             require_ran "Integration tests" "${INTEGRATION_RESULT}"
           elif [[ "${CHANGES_RESULT}" == "success" && ! "${INTEGRATION_COUNT}" =~ ^[0-9]+$ ]]; then
             echo "::error::the plan carries no integration suite count (integration_count='${INTEGRATION_COUNT}')."
-            failed=1
+            failed=1; plan_errors=$((plan_errors + 1))
           else
             forbid_failure "Integration tests" "${INTEGRATION_RESULT}"
           fi
@@ -3810,7 +3896,7 @@ jobs:
             require_ran "Closure tests" "${CLOSURE_TESTS_RESULT}"
           elif [[ "${CHANGES_RESULT}" == "success" && ! "${CLOSURE_TEST_COUNT}" =~ ^[0-9]+$ ]]; then
             echo "::error::the plan carries no closure test count (closure_test_count='${CLOSURE_TEST_COUNT}')."
-            failed=1
+            failed=1; plan_errors=$((plan_errors + 1))
           else
             forbid_failure "Closure tests" "${CLOSURE_TESTS_RESULT}"
           fi
@@ -3855,6 +3941,10 @@ jobs:
           if [[ -n "${DOWNSTREAM_PRODUCTS}" ]]; then
             echo "downstream type-check rows (in the Clippy lane): ${DOWNSTREAM_PRODUCTS}"
           fi
+          {
+            echo "plan_errors=${plan_errors}"
+            echo "failed_lanes=$(jq -cn '$ARGS.positional' --args "${flagged_lanes[@]}")"
+          } >> "${GITHUB_OUTPUT:-/dev/null}"
           if (( failed )); then
             exit 1
           fi
@@ -3958,6 +4048,7 @@ jobs:
         # unreadable, a lane GUARD_LANE_JOBS cannot name, or a named lane
         # with no completed job fails a pull request.
         if: ${{ !cancelled() }}
+        id: budget
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -4360,19 +4451,63 @@ jobs:
       # The exact-tree attestation of a push to main or to a release/**
       # branch; it records the ref, and release.yml's require_ci_green accepts
       # it only from main or from the release branch of the tag's version (a
-      # maintenance release). Pull-request and dispatch runs write none.
+      # maintenance release). Pull-request and dispatch runs write none. A
+      # failed run is attested too (validation_result failure), with the
+      # product evidence below: a release whose product depends on none of
+      # the failed rows can proceed (scripts/ci-product-evidence.mjs); every
+      # reader that wants a green run checks validation_result.
       - name: Checkout attested source tree
-        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
+        if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
+      # Which product each job of this attempt belongs to and how it
+      # concluded, with the lanes the lane check flagged and its plan-level
+      # errors. A failure to record it leaves the evidence out, which keeps
+      # every release on the whole-run requirement.
+      - name: Record each job's product
+        if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
+        id: product_evidence
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROW_PRODUCTS: ${{ needs.changes.outputs.row_products }}
+          FAILED_LANES: ${{ steps.lanes.outputs.failed_lanes }}
+          PLAN_ERRORS: ${{ steps.lanes.outputs.plan_errors }}
+          # The plan's row count per lane job: a lane wave it did not run is
+          # listed, skipped, under its job's unexpanded matrix name.
+          WAVE_COUNTS: >-
+            {"clippy": "${{ needs.changes.outputs.shard_first_count }}",
+            "clippy-rest": "${{ needs.changes.outputs.shard_rest_count }}",
+            "unit": "${{ needs.changes.outputs.unit_shard_count }}",
+            "main-unit": "${{ needs.changes.outputs.main_unit_first_count }}",
+            "main-unit-rest": "${{ needs.changes.outputs.main_unit_rest_count }}",
+            "main-unit-archive-build": "${{ needs.changes.outputs.main_archive_build_count }}",
+            "main-unit-archive-run": "${{ needs.changes.outputs.main_archive_run_count }}",
+            "integration": "${{ needs.changes.outputs.integration_count }}",
+            "closure-tests": "${{ needs.changes.outputs.closure_test_first_count }}",
+            "closure-tests-rest": "${{ needs.changes.outputs.closure_test_rest_count }}",
+            "feature-check": "${{ needs.changes.outputs.feature_check_first_count }}",
+            "feature-check-rest": "${{ needs.changes.outputs.feature_check_rest_count }}"}
+          # As the budget step: a server error listing the jobs is retried.
+          API_RETRY_DELAYS: 5 10 20
+        run: |
+          set -euo pipefail
+          node scripts/ci-product-evidence.mjs record --output "${RUNNER_TEMP}/product-evidence.json"
+          echo "path=${RUNNER_TEMP}/product-evidence.json" >> "${GITHUB_OUTPUT}"
+
       - name: Build exact-tree CI attestation
-        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
+        if: ${{ !cancelled() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
         id: attestation
         shell: bash
         # CLIPPY_RESULT, CLOSURE_TESTS_RESULT and MAIN_UNIT_PACKED_RESULT come
         # from the check step: each combines its lane's two waves. So does
         # MAIN_UNIT_RESULT, the packed waves plus the archived lanes.
         env:
+          LANES_OUTCOME: ${{ steps.lanes.outcome }}
+          RELEASE_EVIDENCE_OUTCOME: ${{ steps.release_evidence.outcome }}
+          BUDGET_OUTCOME: ${{ steps.budget.outcome }}
+          PRODUCT_EVIDENCE: ${{ steps.product_evidence.outcome == 'success' && steps.product_evidence.outputs.path || '' }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           FMT_GOVERNANCE_RESULT: ${{ needs.fmt-governance.result }}
           RATCHETS_RESULT: ${{ needs.ratchets.result }}
@@ -4412,11 +4547,24 @@ jobs:
           destination="${RUNNER_TEMP}/meerkat-ci-attestation"
           mkdir -p "${destination}"
           tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          # Green only when every step of the gate before this one that can
+          # fail it succeeded: the lane check, a release projection's reused
+          # evidence, and the budget step (which reports on a push and can
+          # still fail). A failed gate is never attested as green.
+          validation_result=failure
+          if [[ "${LANES_OUTCOME}" == "success" && ( "${RELEASE_EVIDENCE_OUTCOME}" == "success" || "${RELEASE_EVIDENCE_OUTCOME}" == "skipped" ) && "${BUDGET_OUTCOME}" == "success" ]]; then
+            validation_result=success
+          fi
+          product_evidence='null'
+          if [[ -n "${PRODUCT_EVIDENCE}" ]]; then
+            product_evidence="$(jq -c . "${PRODUCT_EVIDENCE}")"
+          fi
           # A release-projection run attests its own lanes plus the parent
           # run whose test evidence it reused (verified by the gate above);
-          # require_ci_green verifies that evidence again.
+          # require_ci_green verifies that evidence again. A failed one
+          # records none: nothing accepts a failed release projection.
           reused='null'
-          if [[ "${RELEASE_PROJECTION}" == "true" ]]; then
+          if [[ "${RELEASE_PROJECTION}" == "true" && "${validation_result}" == "success" ]]; then
             if [[ "${MODE}" != "release-projection" || -z "${REUSED_RUN_ID}" || -z "${REUSED_RUN_ATTEMPT}" || -z "${REUSED_COMMIT}" || -z "${REUSED_TREE}" ]]; then
               echo "::error::a release-projection run without verified reused evidence cannot be attested."
               exit 1
@@ -4440,7 +4588,7 @@ jobs:
                 workflow_run_attempt: $workflow_run_attempt,
                 attestation_artifact: $attestation_artifact
               }')"
-          elif [[ "${MODE}" == "release-projection" ]]; then
+          elif [[ "${MODE}" == "release-projection" && "${RELEASE_PROJECTION}" != "true" ]]; then
             echo "::error::mode release-projection without the release_projection flag cannot be attested."
             exit 1
           fi
@@ -4479,6 +4627,8 @@ jobs:
             --argjson main_unit_shard_count "${MAIN_UNIT_SHARD_COUNT:-0}" \
             --argjson generated_contract "$([[ "${GENERATED_CONTRACT}" == "true" ]] && echo true || echo false)" \
             --argjson reused "${reused}" \
+            --arg validation_result "${validation_result}" \
+            --argjson product_evidence "${product_evidence}" \
             '{
               schema_version: 4,
               repository: $repository,
@@ -4490,7 +4640,7 @@ jobs:
               event: $event,
               ref: $ref,
               validation_backend: "github-hosted-cargo",
-              validation_result: "success",
+              validation_result: $validation_result,
               plan: {
                 mode: $mode,
                 package_count: $package_count,
@@ -4520,12 +4670,13 @@ jobs:
                 wasm_timers: $wasm_timers,
                 bazel_graph: $bazel_graph
               }
-            } + (if $reused == null then {} else {reused_test_evidence: $reused} end)' > "${destination}/attestation.json"
-          echo "tree_sha=${tree_sha}"
+            } + (if $reused == null then {} else {reused_test_evidence: $reused} end)
+              + (if $product_evidence == null then {} else {product_evidence: $product_evidence} end)' > "${destination}/attestation.json"
+          echo "tree_sha=${tree_sha} validation_result=${validation_result}"
           echo "path=${destination}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload exact-tree CI attestation
-        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
+        if: ${{ !cancelled() && steps.attestation.outcome == 'success' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: meerkat-ci-attestation-${{ github.sha }}-${{ github.run_attempt }}

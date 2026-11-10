@@ -9,8 +9,10 @@
 # gate" accepts the critical archives of a prebuild whose trailing lanes are
 # still running, and no other job name is accepted. A prebuild run (one whose
 # "Release prebuild gate" job ran; every other dispatch lists it as skipped)
-# never waited for exact-main CI: it is refused unless --prebuild comes from
-# the tag run of exactly its commit.
+# never waited for exact-main CI: it is refused unless --prebuild comes from a
+# tag run, and that tag's commit is the run's head or has it as an ancestor
+# whose prebuild serves it (scripts/release-prebuild-equivalent); the stamps
+# then name the run's head.
 
 set -euo pipefail
 
@@ -94,15 +96,16 @@ gates() {
 }
 
 # verify <label> <expected status> [extra verifier options]; GITHUB_REF from
-# CALLER_REF (an asset recovery dispatched on main by default).
+# CALLER_REF (an asset recovery dispatched on main by default), the checkout
+# from VERIFY_REPO and the release tag from VERIFY_TAG.
 verify() {
   local label="$1" expected="$2" status
   shift 2
   set +e
-  (cd "${TEST_ROOT}/repo" && PATH="${TEST_ROOT}/bin:${PATH}" GITHUB_REPOSITORY="${REPO}" \
+  (cd "${VERIFY_REPO:-${TEST_ROOT}/repo}" && PATH="${TEST_ROOT}/bin:${PATH}" GITHUB_REPOSITORY="${REPO}" \
     GITHUB_REF="${CALLER_REF:-refs/heads/main}" \
     "${VERIFIER}" --source-run "${RUN_ID}" "$@" --stamps "${TEST_ROOT}/stamps" \
-    "${TEST_ROOT}/artifacts" v0.0.0) >"${TEST_ROOT}/${label}.log" 2>&1
+    "${TEST_ROOT}/artifacts" "${VERIFY_TAG:-v0.0.0}") >"${TEST_ROOT}/${label}.log" 2>&1
   status=$?
   set -e
   [[ "${status}" -eq "${expected}" ]] || fail "${label}: expected exit ${expected}, got ${status}" "$(cat "${TEST_ROOT}/${label}.log")"
@@ -157,5 +160,46 @@ gates '"success"' '"success"'
 
 echo "${LATER_SHA}" >"${TEST_ROOT}/stamps/rkat-0.0.0-x86_64-unknown-linux-gnu.tar.gz.source-commit"
 verify stamp-names-another-commit 1
+
+# A prebuild of an ancestor of the tag commit serves the tag run only when
+# every path changed since is a non-input of Core's release artifacts; its
+# stamps must name that ancestor, the commit its build jobs checked out.
+HISTORY="${TEST_ROOT}/history"
+git_history() {
+  git -C "${HISTORY}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false -c tag.gpgsign=false "$@"
+}
+mkdir -p "${HISTORY}/ci" "${HISTORY}/src" "${HISTORY}/connect"
+git_history init -q -b main
+cp "${REPO_ROOT}/ci/products.json" "${HISTORY}/ci/products.json"
+echo 'fn main() {}' >"${HISTORY}/src/main.rs"
+echo '# Changelog' >"${HISTORY}/CHANGELOG.md"
+git_history add -A
+git_history commit -q -m prebuilt
+PREBUILT_SHA="$(git_history rev-parse HEAD)"
+echo '- a fix' >>"${HISTORY}/CHANGELOG.md"
+echo '- a fix' >"${HISTORY}/connect/CHANGELOG.md"
+git_history add -A
+git_history commit -q -m 'release notes only'
+git_history tag v0.0.0
+echo 'fn helper() {}' >>"${HISTORY}/src/main.rs"
+git_history commit -q -am 'a source change'
+git_history tag v0.0.1
+TAG_SHA="$(git_history rev-parse 'v0.0.0^{commit}')"
+
+gates '"success"' '"success"' '"success"'
+echo "${PREBUILT_SHA}" >"${TEST_ROOT}/run_sha"
+echo "${PREBUILT_SHA}" >"${TEST_ROOT}/stamps/rkat-0.0.0-x86_64-unknown-linux-gnu.tar.gz.source-commit"
+VERIFY_REPO="${HISTORY}" CALLER_REF=refs/tags/v0.0.0 verify prebuild-of-serving-ancestor 0 --prebuild
+grep -Fq "prebuild ${PREBUILT_SHA} serves release ${TAG_SHA}" "${TEST_ROOT}/prebuild-of-serving-ancestor.log" ||
+  fail "prebuild-of-serving-ancestor: the equivalence is not printed" "$(cat "${TEST_ROOT}/prebuild-of-serving-ancestor.log")"
+VERIFY_REPO="${HISTORY}" CALLER_REF=refs/tags/v0.0.0 verify ancestor-prebuild-for-a-recovery 1
+VERIFY_REPO="${HISTORY}" VERIFY_TAG=v0.0.1 CALLER_REF=refs/tags/v0.0.1 verify ancestor-prebuild-with-an-input-since 1 --prebuild
+grep -Fq "src/main.rs: an input" "${TEST_ROOT}/ancestor-prebuild-with-an-input-since.log" ||
+  fail "ancestor-prebuild-with-an-input-since: the input is not named" "$(cat "${TEST_ROOT}/ancestor-prebuild-with-an-input-since.log")"
+echo "${TAG_SHA}" >"${TEST_ROOT}/stamps/rkat-0.0.0-x86_64-unknown-linux-gnu.tar.gz.source-commit"
+VERIFY_REPO="${HISTORY}" CALLER_REF=refs/tags/v0.0.0 verify ancestor-prebuild-stamped-with-the-tag-commit 1 --prebuild
+grep -Fq "expected the prebuild's commit ${PREBUILT_SHA}" "${TEST_ROOT}/ancestor-prebuild-stamped-with-the-tag-commit.log" ||
+  fail "ancestor-prebuild-stamped-with-the-tag-commit: the stamp mismatch is not named" \
+    "$(cat "${TEST_ROOT}/ancestor-prebuild-stamped-with-the-tag-commit.log")"
 
 echo "release asset provenance contract holds"

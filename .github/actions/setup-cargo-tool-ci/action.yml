@@ -1,0 +1,93 @@
+name: Setup a cargo tool for CI
+description: >-
+  Install cargo-nextest or cargo-deny as taiki-e/install-action did for these
+  lanes: the release and sha256 its manifest named at the pins the workflows
+  used (nextest 0.9.148, the Linux gnu build; cargo-deny 0.20.2, the musl
+  build), into the same directory: $CARGO_HOME/bin when the cargo on PATH is
+  there, else $HOME/.install-action/bin, added to PATH. The release archive
+  comes through the GitHub API with the job's own token first
+  (scripts/ci-release-asset-download), and from the anonymous release URL, as
+  install-action fetched it, only when there is no token or that fails: on
+  2026-11-08 the release host answered anonymous downloads with 504 for hours,
+  and install-action's retries held lanes for up to 36 minutes. The token is
+  unset before anything else runs. The archive is unpacked only once its
+  sha256 matches the pin, whichever way it came; a mismatch fails the step
+  without trying the other way.
+
+inputs:
+  tool:
+    description: The tool to install, nextest or cargo-deny.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install the tool
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+        # Renovate proposes new releases (renovate.json); the sha256 beside
+        # each changes with it, or the install fails until it matches.
+        NEXTEST_VERSION: "0.9.148"
+        NEXTEST_SHA256: 223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f523290dc
+        CARGO_DENY_VERSION: "0.20.2"
+        CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_OS}/${RUNNER_ARCH}" != "Linux/X64" ]]; then
+          echo "::error::setup-cargo-tool-ci pins Linux x86_64 builds only, not ${RUNNER_OS}/${RUNNER_ARCH}" >&2
+          exit 1
+        fi
+        case "${TOOL}" in
+          nextest)
+            repo=nextest-rs/nextest
+            tag="cargo-nextest-${NEXTEST_VERSION}"
+            asset="cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            sha256="${NEXTEST_SHA256}"
+            member=cargo-nextest
+            bin=cargo-nextest
+            ;;
+          cargo-deny)
+            repo=EmbarkStudios/cargo-deny
+            tag="${CARGO_DENY_VERSION}"
+            asset="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            sha256="${CARGO_DENY_SHA256}"
+            member="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny"
+            bin=cargo-deny
+            ;;
+          *)
+            echo "::error::setup-cargo-tool-ci installs nextest or cargo-deny, not '${TOOL}'" >&2
+            exit 1
+            ;;
+        esac
+        # install-action's directory: $CARGO_HOME/bin when the cargo on PATH
+        # lives there, else $HOME/.install-action/bin, which it put on PATH.
+        bin_dir="${CARGO_HOME:-${HOME}/.cargo}/bin"
+        cargo_path="$(type -P cargo || true)"
+        add_path=false
+        if [[ ! -e "${bin_dir}" || "${cargo_path}" != "${bin_dir}/cargo"* ]]; then
+          bin_dir="${HOME}/.install-action/bin"
+          add_path=true
+        fi
+        work="${RUNNER_TEMP}/setup-cargo-tool-ci/${TOOL}"
+        archive="${work}/${asset}"
+        mkdir -p "${work}"
+        fetched=false
+        if bash "${GITHUB_ACTION_PATH}/../../../scripts/ci-release-asset-download" \
+          "${repo}" "${tag}" "${asset}" "${archive}"; then
+          fetched=true
+        fi
+        unset GH_TOKEN
+        if [[ "${fetched}" != true ]]; then
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 10 -o "${archive}" \
+            "https://github.com/${repo}/releases/download/${tag}/${asset}"
+        fi
+        echo "${sha256}  ${archive}" | sha256sum --check --strict -
+        tar -xzf "${archive}" -C "${work}" "${member}"
+        mkdir -p "${bin_dir}"
+        install -m 0755 "${work}/${member}" "${bin_dir}/${bin}"
+        if [[ "${add_path}" == true ]]; then
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+        fi
+        "${bin_dir}/${bin}" "${bin#cargo-}" --version

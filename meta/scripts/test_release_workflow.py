@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Offline behavioral contracts for release protocol v1 and registry publication."""
 
+import base64
 import hashlib
 import importlib.util
+import io
 import itertools
 import json
 import os
@@ -12,12 +14,18 @@ import subprocess
 import sys
 import unittest
 import uuid
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
+# The workflow GitHub runs for Meta's releases: the monorepo root's
+# meta-release.yml. RELEASE_WORKFLOW above is Meta's earlier workflow, which
+# GitHub no longer runs (nothing under meta/.github runs); the helpers below
+# read it unless a test hands them this path.
+META_RELEASE_WORKFLOW = ROOT.parent / ".github/workflows/meta-release.yml"
 _CANDIDATE_SPEC = importlib.util.spec_from_file_location("release_candidate", ROOT / "scripts/release-candidate.py")
 release_candidate = importlib.util.module_from_spec(_CANDIDATE_SPEC)
 _CANDIDATE_SPEC.loader.exec_module(release_candidate)
@@ -54,7 +62,7 @@ def typescript_publish_script() -> str:
     return "\n".join(script_lines)
 
 
-def job_block(name: str) -> str:
+def job_block(name: str, workflow: Path | None = None) -> str:
     """The workflow text for exactly one job, bounded by the next job header.
 
     Slicing to end-of-file is only safe for the last job. `publish_sdk_packages`
@@ -62,7 +70,7 @@ def job_block(name: str) -> str:
     strings this file asserts about the SDK gate, so an unbounded slice would
     pass against unmodified code.
     """
-    lines = RELEASE_WORKFLOW.read_text().splitlines()
+    lines = (workflow or RELEASE_WORKFLOW).read_text().splitlines()
     start = lines.index(f"  {name}:")
     for offset, line in enumerate(lines[start + 1 :], start=start + 1):
         if re.fullmatch(r"  [A-Za-z_][A-Za-z0-9_-]*:", line):
@@ -70,9 +78,9 @@ def job_block(name: str) -> str:
     return "\n".join(lines[start:])
 
 
-def job_condition(name: str) -> str:
+def job_condition(name: str, workflow: Path | None = None) -> str:
     """The raw `if:` expression of one job, with block scalar folding undone."""
-    block = job_block(name).splitlines()
+    block = job_block(name, workflow).splitlines()
     matches = [i for i, line in enumerate(block) if line.startswith("    if:")]
     if not matches:
         return "true"
@@ -115,7 +123,7 @@ def evaluate_condition(expression: str, *, statuses=(), run_cancelled=False, **c
         "contains": lambda value, part: part in value,
     }
     tokens = re.findall(
-        r"\s+|'(?:[^']|'')*'|(?:github|needs|inputs)(?:\.[A-Za-z_][A-Za-z0-9_-]*)+"
+        r"\s+|'(?:[^']|'')*'|(?:github|needs|inputs|steps)(?:\.[A-Za-z_][A-Za-z0-9_-]*)+"
         r"|[A-Za-z_][A-Za-z0-9_]*|&&|\|\||==|!=|[!(),]", expression
     )
     if "".join(tokens) != expression:
@@ -124,7 +132,7 @@ def evaluate_condition(expression: str, *, statuses=(), run_cancelled=False, **c
     operators = {"&&": " and ", "||": " or ", "!": " not ",
                  "true": "True", "false": "False"}
     for token in tokens:
-        if token.startswith(("github.", "needs.", "inputs.")):
+        if token.startswith(("github.", "needs.", "inputs.", "steps.")):
             name = token.replace(".", "_").replace("-", "_")
             if name not in context:
                 raise AssertionError(f"condition references unsupplied name: {name}")
@@ -138,8 +146,8 @@ def evaluate_condition(expression: str, *, statuses=(), run_cancelled=False, **c
     return bool(eval("".join(translated).strip(), {"__builtins__": {}}, {**context, **functions}))
 
 
-def job_needs(name: str) -> list[str]:
-    lines = [line for line in job_block(name).splitlines() if line.startswith("    needs:")]
+def job_needs(name: str, workflow: Path | None = None) -> list[str]:
+    lines = [line for line in job_block(name, workflow).splitlines() if line.startswith("    needs:")]
     if not lines:
         return []
     if len(lines) != 1 or not re.fullmatch(r"    needs: \[[a-z_, ]+\]", lines[0]):
@@ -147,7 +155,7 @@ def job_needs(name: str) -> list[str]:
     return [value.strip() for value in lines[0].split("[", 1)[1][:-1].split(",")]
 
 
-def job_ancestors(name: str) -> list[str]:
+def job_ancestors(name: str, workflow: Path | None = None, jobs: tuple | None = None) -> list[str]:
     """Every job upstream of `name` through `needs`, transitively, in workflow order.
 
     GitHub evaluates a job's status functions over this whole chain, not only
@@ -159,28 +167,30 @@ def job_ancestors(name: str) -> list[str]:
     skipped outside candidate mode) is an ancestor, although both of
     release_validate's own needs succeeded.
     """
+    order = jobs or JOBS
     seen: set[str] = set()
-    pending = list(job_needs(name))
+    pending = list(job_needs(name, workflow))
     while pending:
         job = pending.pop()
         if job not in seen:
             seen.add(job)
-            pending.extend(job_needs(job))
+            pending.extend(job_needs(job, workflow))
     if name in seen:
         raise AssertionError(f"{name} depends on itself")
-    return sorted(seen, key=lambda job: (JOBS.index(job) if job in JOBS else len(JOBS), job))
+    return sorted(seen, key=lambda job: (order.index(job) if job in order else len(order), job))
 
 
-def job_runs(name: str, *, run_cancelled=False, **context) -> bool:
+def job_runs(name: str, *, run_cancelled=False, workflow: Path | None = None, jobs: tuple | None = None,
+             **context) -> bool:
     """Apply GitHub's status semantics: status functions, explicit or the
     implicit success() of a condition without one, read every ancestor."""
-    expression = job_condition(name)
-    dependencies = job_needs(name)
+    expression = job_condition(name, workflow)
+    dependencies = job_needs(name, workflow)
     references = set(re.findall(r"\bneeds\.([A-Za-z_][A-Za-z0-9_]*)\.", expression))
     if references - set(dependencies):
         raise AssertionError(f"{name} references undeclared needs: {references - set(dependencies)}")
     statuses = []
-    for dependency in job_ancestors(name):
+    for dependency in job_ancestors(name, workflow, jobs):
         key = f"needs_{dependency}_result"
         if key not in context:
             raise AssertionError(f"unsupplied dependency status: {key}")
@@ -204,10 +214,22 @@ WORK_JOBS = (
     "build_binaries", "collect_candidate", "verify_release_assets", "publish_github_release",
     "publish_sdk_packages", "verify_crate_packages", "publish_registries",
 )
+# meta-release.yml's jobs in dependency order: the published-floor check
+# needs the CI gate; collection needs the floor check and the crate
+# checksums; the GitHub release and the crates need the floor check.
+META_JOBS = (
+    "resolve_release", "build_binaries", "require_ci_green", "release_validate", "floor_check",
+    "verify_release_assets", "verify_crate_packages", "collect_candidate", "publish_github_release",
+    "publish_sdk_packages", "publish_registries",
+)
+# Its jobs that publish something (to GitHub or a registry).
+META_PUBLICATION_JOBS = (
+    "publish_github_release", "publish_sdk_packages", "publish_registries",
+)
 
 
 def protocol_context(mode="promote", publish=True, dry=False, *, event="workflow_dispatch",
-                     tag="v0.8.31"):
+                     tag="v0.8.31", jobs: tuple | None = None):
     return {
         "github_event_name": event,
         "github_ref": "refs/tags/v0.8.31" if event == "push" else "refs/heads/main",
@@ -222,25 +244,39 @@ def protocol_context(mode="promote", publish=True, dry=False, *, event="workflow
         "needs_resolve_release_outputs_publish_packages": str(publish).lower(),
         "needs_resolve_release_outputs_dry_run": str(dry).lower(),
         "needs_resolve_release_outputs_tag": tag,
-        **{f"needs_{job}_result": "success" for job in JOBS},
+        **{f"needs_{job}_result": "success" for job in (jobs or JOBS)},
     }
 
 
-def release_results(context, failures=None):
+def release_results(context, failures=None, *, workflow: Path | None = None, jobs: tuple | None = None):
     """Run the actual job DAG with successful steps unless explicitly refused."""
     context = dict(context)
     results = {}
-    for job in JOBS:
-        result = (failures or {}).get(job, "success") if job_runs(job, **context) else "skipped"
+    for job in jobs or JOBS:
+        ran = job_runs(job, workflow=workflow, jobs=jobs, **context)
+        result = (failures or {}).get(job, "success") if ran else "skipped"
         results[job] = result
         context[f"needs_{job}_result"] = result
     return results
 
 
-def ci_gate_script() -> str:
-    """The require_ci_green github-script body, extracted verbatim."""
-    lines = step_block("Refuse unless exact-main CI is already green for this commit",
-                       "require_ci_green").splitlines()
+def meta_context(mode="promote", publish=True, dry=False, *, event="workflow_dispatch", tier="core", record=""):
+    """protocol_context for meta-release.yml's jobs and its meta-v tags: a
+    candidate's tier, and the floor record its floor check bound ('' for
+    none)."""
+    context = protocol_context(mode, publish, dry, event=event, tag="meta-v0.8.31", jobs=META_JOBS)
+    context.update(needs_resolve_release_outputs_tier=tier, needs_floor_check_outputs_record=record)
+    return context
+
+
+def meta_results(context, failures=None):
+    """release_results over meta-release.yml."""
+    return release_results(context, failures, workflow=META_RELEASE_WORKFLOW, jobs=META_JOBS)
+
+
+def github_script_body(step_name: str, job: str, workflow: Path | None = None) -> str:
+    """An actions/github-script step's `script: |` body, extracted verbatim."""
+    lines = step_block(step_name, job, workflow).splitlines()
     start = lines.index("          script: |")
     body: list[str] = []
     for line in lines[start + 1 :]:
@@ -248,6 +284,11 @@ def ci_gate_script() -> str:
             break
         body.append(line[12:] if line else "")
     return "\n".join(body)
+
+
+def ci_gate_script() -> str:
+    """The require_ci_green github-script body, extracted verbatim."""
+    return github_script_body("Refuse unless exact-main CI is already green for this commit", "require_ci_green")
 
 
 def run_ci_gate(runs, release_sha="deadbeef", *, ci_bypass="false", raw_env=None):
@@ -340,9 +381,9 @@ DYNAMIC_OPENSSL = DYNAMIC_RUSTLS + (
 )
 
 
-def step_block(step_name: str, job: str = "build_binaries") -> str:
+def step_block(step_name: str, job: str = "build_binaries", workflow: Path | None = None) -> str:
     """The text of exactly one step, bounded by the next `- name:`."""
-    lines = job_block(job).splitlines()
+    lines = job_block(job, workflow).splitlines()
     start = lines.index(f"      - name: {step_name}")
     for offset, line in enumerate(lines[start + 1 :], start=start + 1):
         if line.startswith("      - name: "):
@@ -350,9 +391,9 @@ def step_block(step_name: str, job: str = "build_binaries") -> str:
     return "\n".join(lines[start:])
 
 
-def step_script(step_name: str, job: str = "build_binaries") -> str:
+def step_script(step_name: str, job: str = "build_binaries", workflow: Path | None = None) -> str:
     """One step's `run: |` body, de-indented, verbatim."""
-    lines = step_block(step_name, job).splitlines()
+    lines = step_block(step_name, job, workflow).splitlines()
     run = lines.index("        run: |")
     body: list[str] = []
     for line in lines[run + 1 :]:
@@ -1988,6 +2029,760 @@ class ReleaseCacheReuseTests(unittest.TestCase):
         for step in ("Publish extension document crate", "Publish Rust crate"):
             script = step_script(step, "publish_registries")
             self.assertEqual(script.count("--locked --no-verify"), 2, step)
+
+
+class MetaReleaseJobGraphTests(unittest.TestCase):
+    """meta-release.yml, the workflow GitHub runs for Meta's releases, under
+    GitHub's status semantics: candidates build before Core's tag and run no
+    floor check, and a promotion publishes nothing before the floor check
+    succeeded."""
+
+    TRACKED = ("build_binaries", "floor_check", "collect_candidate", "verify_release_assets",
+               "publish_github_release", "publish_sdk_packages", "verify_crate_packages", "publish_registries")
+
+    def needs(self, job):
+        return job_needs(job, META_RELEASE_WORKFLOW)
+
+    def condition(self, job):
+        return job_condition(job, META_RELEASE_WORKFLOW)
+
+    def test_every_event_and_mode_runs_exactly_its_jobs(self):
+        for event, mode, publish, dry, tier in itertools.product(
+            ("push", "workflow_dispatch"), ("tag", "candidate", "promote", "existing", "assets"),
+            (False, True), (False, True), ("core", "trailing"),
+        ):
+            with self.subTest(event=event, mode=mode, publish=publish, dry=dry, tier=tier):
+                results = meta_results(meta_context(mode, publish, dry, event=event, tier=tier))
+                expected = set()
+                floor = mode in ("promote", "existing") or (mode == "candidate" and tier == "core")
+                if event == "push":
+                    if floor:
+                        expected = {"floor_check"}
+                elif mode == "candidate":
+                    expected = {"build_binaries", "collect_candidate"} | ({"floor_check"} if floor else set())
+                elif mode == "promote":
+                    expected = {"floor_check", "verify_release_assets"}
+                    if not dry:
+                        expected.add("publish_github_release")
+                    if publish:
+                        expected.update(("publish_sdk_packages", "verify_crate_packages", "publish_registries"))
+                elif mode == "existing":
+                    expected = {"floor_check"}
+                    if publish:
+                        expected.update(("publish_sdk_packages", "verify_crate_packages", "publish_registries"))
+                        if not dry:
+                            expected.add("verify_release_assets")
+                elif mode == "assets" and not publish and not dry:
+                    expected = {"publish_github_release"}
+                self.assertEqual({job for job in self.TRACKED if results[job] == "success"}, expected)
+
+    def test_a_candidates_core_tier_checks_the_floor_and_its_trailing_tier_does_not(self):
+        """The core tier's floor check reads the index once (and builds only
+        when Core's crates are published); the trailing tier, whose record
+        nothing reads, runs none."""
+        core = meta_results(meta_context("candidate", False, False, tier="core"))
+        trailing = meta_results(meta_context("candidate", False, False, tier="trailing"))
+        self.assertEqual((core["floor_check"], core["collect_candidate"]), ("success", "success"))
+        self.assertEqual((trailing["floor_check"], trailing["collect_candidate"]), ("skipped", "success"))
+        self.assertIn("floor_check", self.needs("collect_candidate"))
+        for gate in ("require_ci_green", "release_validate", "build_binaries", "floor_check"):
+            for status in ("failure", "cancelled", "skipped"):
+                with self.subTest(gate=gate, status=status):
+                    refused = meta_results(meta_context("candidate", False, False), {gate: status})
+                    self.assertEqual(refused["collect_candidate"], "skipped")
+
+    def test_collection_binds_a_record_only_with_the_crate_checksums(self):
+        """A bound record makes verify_crate_packages run in candidate mode,
+        and collection waits for its checksums; without a record it skips."""
+        plain = meta_results(meta_context("candidate", False, False))
+        self.assertEqual((plain["verify_crate_packages"], plain["collect_candidate"]), ("skipped", "success"))
+        bound = meta_results(meta_context("candidate", False, False, record='{"core_version":"0.8.31"}'))
+        self.assertEqual((bound["verify_crate_packages"], bound["collect_candidate"]), ("success", "success"))
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                refused = meta_results(meta_context("candidate", False, False, record="{}"),
+                                       {"verify_crate_packages": status})
+                self.assertEqual(refused["collect_candidate"], "skipped")
+        collect = step_script("Collect verified original artifacts", "collect_candidate", META_RELEASE_WORKFLOW)
+        self.assertIn('--floor-record-json "$FLOOR_RECORD"', collect)
+        for crate, variable in (("meta-extension-state", "EXTENSION_SHA256"), ("meerkat-meta", "META_SHA256")):
+            self.assertIn(f'--meta-crate-sha256 "{crate}=${variable}"', collect)
+        block = job_block("collect_candidate", META_RELEASE_WORKFLOW)
+        self.assertIn("FLOOR_RECORD: ${{ needs.floor_check.outputs.record }}", block)
+        self.assertIn("EXTENSION_SHA256: ${{ needs.verify_crate_packages.outputs.extension_sha256 }}", block)
+        self.assertIn("META_SHA256: ${{ needs.verify_crate_packages.outputs.meta_sha256 }}", block)
+        self.assertIn("record: ${{ steps.bind.outputs.record }}", job_block("floor_check", META_RELEASE_WORKFLOW))
+
+    def test_the_build_legs_no_longer_read_cores_tag(self):
+        """The comparison of crates/ with Core's tag moved to promotion
+        (release-candidate.py stage), so the legs need no tag."""
+        legs = job_block("build_binaries", META_RELEASE_WORKFLOW)
+        for text in ("refs/tags/v", "git diff", "git fetch", "Require the in-tree Core"):
+            with self.subTest(text=text):
+                self.assertNotIn(text, legs)
+
+    def test_every_publication_of_a_promotion_waits_for_the_floor_check(self):
+        self.assertIn("floor_check", self.needs("publish_github_release"))
+        self.assertIn("needs.floor_check.result == 'success'", self.condition("publish_github_release"))
+        published = meta_results(meta_context("promote", True, False))
+        for job in (*META_PUBLICATION_JOBS, "verify_crate_packages"):
+            self.assertEqual(published[job], "success", job)
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                results = meta_results(meta_context("promote", True, False), {"floor_check": status})
+                self.assertEqual(results["verify_release_assets"], "success")
+                for job in (*META_PUBLICATION_JOBS, "verify_crate_packages"):
+                    self.assertEqual(results[job], "skipped", job)
+
+    def test_asset_recovery_adds_to_a_published_release_without_a_floor_check(self):
+        results = meta_results(meta_context("assets", False, False))
+        self.assertEqual((results["floor_check"], results["publish_github_release"]), ("skipped", "success"))
+
+    FLOOR_STEPS = (
+        "Check once whether every Core crate is on crates.io",
+        "Read the accepted candidate's floor record",
+        "Re-resolve the packaged Meta crates against crates.io without building",
+        "Package the Meta crates without a patch",
+        "Reuse the candidate's floor record only if everything it binds still holds",
+        "Wait until every Core crate is on crates.io at the declared version",
+        "Build the packaged Meta crates against published Core",
+        "Bind the floor record",
+    )
+
+    def floor_steps(self, mode, *, published="", present="", reuse=""):
+        """The floor_check steps that run, under GitHub's step semantics with
+        every earlier step successful, given the steps' outputs."""
+        context = {"needs_resolve_release_outputs_mode": mode,
+                   "steps_published_outputs_core_published": published,
+                   "steps_record_outputs_present": present, "steps_reuse_outputs_reuse": reuse}
+        ran = []
+        for step in self.FLOOR_STEPS:
+            block = step_block(step, "floor_check", META_RELEASE_WORKFLOW).splitlines()
+            conditions = [i for i, line in enumerate(block) if line.startswith("        if:")]
+            self.assertEqual(len(conditions), 1, step)
+            value = block[conditions[0]].split(":", 1)[1].strip()
+            if value == ">-":
+                folded = []
+                for line in block[conditions[0] + 1:]:
+                    if not line.startswith("          "):
+                        break
+                    folded.append(line.strip())
+                value = " ".join(folded)
+            if evaluate_condition(value, **context):
+                ran.append(step)
+        return ran
+
+    def test_a_candidate_builds_and_binds_only_when_cores_crates_are_published(self):
+        published = self.floor_steps("candidate", published="true")
+        self.assertEqual(published, ["Check once whether every Core crate is on crates.io",
+                                     "Build the packaged Meta crates against published Core", "Bind the floor record"])
+        self.assertEqual(self.floor_steps("candidate", published="false"),
+                         ["Check once whether every Core crate is on crates.io"])
+
+    def test_a_promotion_builds_unless_the_record_holds(self):
+        full = ["Read the accepted candidate's floor record",
+                "Wait until every Core crate is on crates.io at the declared version",
+                "Build the packaged Meta crates against published Core"]
+        checks = ["Re-resolve the packaged Meta crates against crates.io without building",
+                  "Package the Meta crates without a patch",
+                  "Reuse the candidate's floor record only if everything it binds still holds"]
+        self.assertEqual(self.floor_steps("promote", present="false"), full)
+        self.assertEqual(self.floor_steps("promote", present="true", reuse="false"),
+                         [full[0], *checks, *full[1:]])
+        self.assertEqual(self.floor_steps("promote", present="true", reuse="true"), [full[0], *checks])
+        # A registry retry builds as before.
+        self.assertEqual(self.floor_steps("existing"), full[1:])
+
+    def test_the_floor_record_steps_run_the_workflow_tools_and_only_one_holds_the_token(self):
+        block = job_block("floor_check", META_RELEASE_WORKFLOW)
+        for command in ("floor-index", "floor-record --output", "floor-reuse", "floor-bind --floor-dir"):
+            self.assertIn(f"python3 .release-tools/meta/scripts/release-candidate.py {command}", block)
+        self.assertEqual(block.count("GH_TOKEN"), 1)
+        self.assertIn("GH_TOKEN: ${{ github.token }}",
+                      step_block("Read the accepted candidate's floor record", "floor_check", META_RELEASE_WORKFLOW))
+        self.assertNotIn("secrets.", block)
+        for step in ("Re-resolve the packaged Meta crates against crates.io without building",
+                     "Package the Meta crates without a patch"):
+            self.assertIn("continue-on-error: true", step_block(step, "floor_check", META_RELEASE_WORKFLOW))
+        self.assertIn("--no-build", step_block("Re-resolve the packaged Meta crates against crates.io without building",
+                                               "floor_check", META_RELEASE_WORKFLOW))
+
+    def test_the_ci_gate_needs_only_the_resolver_and_runs_in_every_mode(self):
+        """A candidate's legs no longer precede the gate: it polls beside them."""
+        self.assertEqual(self.needs("require_ci_green"), ["resolve_release"])
+        self.assertIn("!cancelled()", self.condition("require_ci_green"))
+        for mode in ("candidate", "promote", "existing", "assets", "tag"):
+            for resolved in ("success", "failure", "skipped", "cancelled"):
+                context = meta_context(mode, event="push" if mode == "tag" else "workflow_dispatch")
+                context["needs_resolve_release_result"] = resolved
+                with self.subTest(mode=mode, resolved=resolved):
+                    self.assertEqual(
+                        job_runs("require_ci_green", workflow=META_RELEASE_WORKFLOW, jobs=META_JOBS, **context),
+                        resolved == "success")
+
+    def test_a_candidate_collects_only_with_green_ci_and_built_legs(self):
+        for gate, status in itertools.product(("require_ci_green", "build_binaries"),
+                                              ("failure", "cancelled", "skipped")):
+            with self.subTest(gate=gate, status=status):
+                results = meta_results(meta_context("candidate", False, False), {gate: status})
+                other = "build_binaries" if gate == "require_ci_green" else "require_ci_green"
+                self.assertEqual(results[other], "success")
+                self.assertEqual(results["collect_candidate"], "skipped")
+
+    def test_a_failed_ci_gate_publishes_nothing_in_any_mode(self):
+        for mode, publish, dry, status in itertools.product(
+            ("promote", "existing", "assets"), (False, True), (False, True), ("failure", "cancelled", "skipped"),
+        ):
+            with self.subTest(mode=mode, publish=publish, dry=dry, status=status):
+                results = meta_results(meta_context(mode, publish, dry), {"require_ci_green": status})
+                self.assertEqual({job for job in self.TRACKED if results[job] == "success"}, set())
+
+    def test_promotion_stages_through_a_checkout_that_can_fetch_cores_tag(self):
+        """stage fetches Core's tag of the declared version from origin and
+        compares the candidate's bound crates/ tree with it, in both jobs
+        that stage a promotion; their source checkout keeps its credentials
+        and full history for that fetch."""
+        for job, step in (("verify_release_assets", "Verify selected candidate"),
+                          ("publish_github_release", "Reverify original candidate before publication")):
+            with self.subTest(job=job):
+                block = step_block(step, job, META_RELEASE_WORKFLOW)
+                self.assertIn("release-candidate.py stage --output-dir release-assets --proof-dir release-proofs",
+                              block)
+                self.assertIn("if: needs.resolve_release.outputs.mode == 'promote'", block)
+                checkout = step_block("Checkout immutable source", job, META_RELEASE_WORKFLOW)
+                self.assertIn("fetch-depth: 0", checkout)
+                self.assertNotIn("persist-credentials", checkout)
+
+
+# Runs a github-script body as actions/github-script does (an AsyncFunction of
+# require, github, context and core) against a scenario: the ci.yml runs the
+# runs API lists at each poll (the last list stays), Meta CI's runs per event
+# likewise, and each Meta CI run attempt's jobs. A fake clock advances by each
+# poll's sleep, so a gate that never finds what it needs reaches its deadline
+# at once. Usage: node <harness> <script> <scenario.json> <result.json>.
+POLLING_GATE_HARNESS = r"""
+"use strict";
+const fs = require("fs");
+const [scriptPath, scenarioPath, resultPath] = process.argv.slice(2);
+const body = fs.readFileSync(scriptPath, "utf8");
+const scenario = JSON.parse(fs.readFileSync(scenarioPath, "utf8"));
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+const START = 1000000;
+const clock = { now: START, sleeps: 0 };
+Date.now = () => clock.now;
+globalThis.setTimeout = (callback, ms, ...args) => {
+  clock.now += Number(ms) || 0;
+  clock.sleeps += 1;
+  setImmediate(() => callback(...args));
+  return 0;
+};
+const at = (timeline) => timeline[Math.min(clock.sleeps, timeline.length - 1)];
+const result = { outputs: {}, failed: null, warnings: [], calls: [], error: null };
+let count = 0;
+const listJobsForWorkflowRunAttempt = async () => {
+  throw new Error("the gate must read jobs through github.paginate");
+};
+const github = {
+  rest: { actions: {
+    listWorkflowRuns: async (params) => {
+      count += 1;
+      if (count > 100000) throw new Error("no verdict after 100000 API calls");
+      result.calls.push({ poll: clock.sleeps, ...params });
+      const timeline = params.workflow_id === "ci.yml" ? scenario.ci : (scenario.meta[params.event] || [[]]);
+      return { data: { total_count: 0, workflow_runs: at(timeline).map((run) => ({ ...run })) } };
+    },
+    listJobsForWorkflowRunAttempt,
+    // A ci.yml run's artifacts, each a zip (base64 in the scenario).
+    listWorkflowRunArtifacts: async (params) => {
+      result.calls.push({ poll: clock.sleeps, artifacts_of: params.run_id, name: params.name });
+      const artifacts = (scenario.artifacts || [])
+        .filter((artifact) => artifact.run_id === params.run_id && artifact.name === params.name)
+        .map(({ id, name, expired }) => ({ id, name, expired }));
+      return { data: { total_count: artifacts.length, artifacts } };
+    },
+    downloadArtifact: async (params) => {
+      const artifact = (scenario.artifacts || []).find((candidate) => candidate.id === params.artifact_id);
+      if (!artifact) throw new Error(`no artifact ${params.artifact_id}`);
+      return { data: Buffer.from(artifact.zip, "base64") };
+    },
+  } },
+  paginate: async (method, params) => {
+    if (method !== listJobsForWorkflowRunAttempt) throw new Error("unexpected paginated method");
+    result.calls.push({ poll: clock.sleeps, jobs_of: `${params.run_id}/${params.attempt_number}` });
+    return (scenario.jobs[`${params.run_id}/${params.attempt_number}`] || []).map((job) => ({ ...job }));
+  },
+};
+const core = {
+  debug: () => {}, info: () => {}, notice: () => {}, error: () => {},
+  warning: (message) => result.warnings.push(String(message)),
+  setFailed: (message) => { if (result.failed === null) result.failed = String(message); },
+  setOutput: (name, value) => { result.outputs[name] = String(value); },
+};
+process.env.RELEASE_SHA = scenario.sha;
+process.env.CI_BYPASS = scenario.bypass;
+process.env.RUNNER_TEMP = scenario.runner_temp;
+process.env.RELEASE_MODE = scenario.mode;
+(async () => {
+  try {
+    await new AsyncFunction("require", "github", "context", "core", body)(
+      require, github, { repo: { owner: "lukacf", repo: "meerkat" } }, core);
+  } catch (error) {
+    result.error = String((error && error.stack) || error);
+  }
+  result.sleeps = clock.sleeps;
+  result.elapsed_minutes = (clock.now - START) / 60000;
+  fs.writeFileSync(resultPath, JSON.stringify(result));
+})();
+"""
+
+
+def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None, sha="deadbeef", bypass="false",
+                     attestations=(), reader=False, parent_reader="real", changed=(), mode="promote"):
+    """Run the gate in a scratch directory: `reader` gives the job the
+    product-scoped evidence reader, both the checkout's own copy of
+    scripts/ci-product-evidence.mjs (which must never judge: the release
+    commit could edit it) and, as `parent_reader` says, the copy of the
+    commit's first parent that the job writes under RUNNER_TEMP ("real";
+    "refusing", a copy whose rule refuses every run; None, a parent without
+    the reader), with `changed`, the commit's changed paths (None: unknown).
+    `attestations` are the (run id, attempt, record) exact-tree attestations
+    the ci.yml runs left."""
+    artifacts = []
+    for number, (run_id, attempt, record) in enumerate(attestations, start=1):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("attestation.json", json.dumps(record))
+        artifacts.append({"id": number, "run_id": run_id, "name": f"meerkat-ci-attestation-{sha}-{attempt}",
+                          "expired": False, "zip": base64.b64encode(archive.getvalue()).decode("ascii")})
+    with fixture_directory() as tmp:
+        runner_temp = tmp / "runner-temp"
+        scenario = {"sha": sha, "bypass": bypass, "ci": ci,
+                    "meta": {"push": meta_push or [[]], "workflow_dispatch": meta_dispatch or [[]]},
+                    "jobs": jobs or {}, "artifacts": artifacts, "runner_temp": str(runner_temp), "mode": mode}
+        for name, text in (("harness.js", POLLING_GATE_HARNESS), ("gate.js", body),
+                           ("scenario.json", json.dumps(scenario))):
+            (tmp / name).write_text(text)
+        source = ROOT.parent / "scripts" / "ci-product-evidence.mjs"
+        parent = runner_temp / "ci-evidence-parent"
+        parent.mkdir(parents=True)
+        if reader:
+            (tmp / "scripts").mkdir()
+            shutil.copy(source, tmp / "scripts" / "ci-product-evidence.mjs")
+            if parent_reader == "real":
+                shutil.copy(source, parent / "ci-product-evidence.mjs")
+            elif parent_reader == "refusing":
+                shutil.copy(source, parent / "ci-product-evidence-real.mjs")
+                (parent / "ci-product-evidence.mjs").write_text(
+                    'export * from "./ci-product-evidence-real.mjs";\n'
+                    'export function acceptance() { return { accepted: false, reasons: ["this copy refuses"] }; }\n')
+        if changed is not None:
+            # As the parent-reader step lists them (`git diff --name-status
+            # --no-renames`): a bare path here is a modified one.
+            (parent / "changed-paths.txt").write_text(
+                "".join(f"{path}\n" if "\t" in path else f"M\t{path}\n" for path in changed))
+        subprocess.run(["node", str(tmp / "harness.js"), str(tmp / "gate.js"), str(tmp / "scenario.json"),
+                        str(tmp / "result.json")], check=True, capture_output=True, text=True, cwd=tmp)
+        return json.loads((tmp / "result.json").read_text())
+
+
+# The copies of the evidence reader in the parent-reader step's scratch
+# history, and the git identity it commits with.
+PARENT_READER_COPIES = {
+    "first parent's": "// the release commit's first parent's reader\n",
+    "release commit's own": "// the release commit's own reader\n",
+    "second parent's": "// the release commit's second parent's reader\n",
+}
+SCRATCH_GIT_ENV = {"GIT_AUTHOR_NAME": "parent-reader", "GIT_AUTHOR_EMAIL": "parent-reader@example.invalid",
+                   "GIT_COMMITTER_NAME": "parent-reader", "GIT_COMMITTER_EMAIL": "parent-reader@example.invalid",
+                   "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def parent_reader_history(root):
+    """A scratch history for the parent-reader step, by commit name: `base`
+    has no reader and `no-reader` is its child; `parent` adds the reader to
+    `base`; `linear`, a child of `parent`, edits the reader, the planner and
+    a Core file; `rename`, another child, renames ci/products.json; `side`,
+    another child, edits the reader and the planner, and `merge` merges it
+    into `parent` (first parent `parent`)."""
+    reader = "scripts/ci-product-evidence.mjs"
+    env = {"PATH": os.environ["PATH"], "HOME": str(root), **SCRATCH_GIT_ENV}
+    commits = {}
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(name, files, removed=()):
+        for path in removed:
+            (root / path).unlink()
+        for path, text in files.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(text)
+        git("add", "-A")
+        git("commit", "-q", "-m", name)
+        commits[name] = git("rev-parse", "HEAD")
+
+    git("init", "-q", "-b", "main")
+    commit("base", {"crates/core/src/lib.rs": "pub fn f() {}\n", "ci/products.json": "{}\n",
+                    "scripts/ci-cargo-lanes.mjs": "// 1\n"})
+    commit("no-reader", {"crates/core/src/lib.rs": "pub fn g() {}\n"})
+    git("checkout", "-q", "--detach", commits["base"])
+    commit("parent", {reader: PARENT_READER_COPIES["first parent's"]})
+    commit("linear", {reader: PARENT_READER_COPIES["release commit's own"], "scripts/ci-cargo-lanes.mjs": "// 2\n",
+                      "crates/core/src/lib.rs": "pub fn h() {}\n"})
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("rename", {"ci/products-moved.json": "{}\n"}, removed=("ci/products.json",))
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("side", {reader: PARENT_READER_COPIES["second parent's"], "scripts/ci-cargo-lanes.mjs": "// 3\n"})
+    git("checkout", "-q", "--detach", commits["parent"])
+    git("merge", "-q", "--no-ff", "-m", "merge", commits["side"])
+    commits["merge"] = git("rev-parse", "HEAD")
+    return commits
+
+
+def run_parent_reader_step(checkout, release_sha, runner_temp):
+    """Run require_ci_green's parent-reader step, verbatim, in `checkout`
+    for the release commit `release_sha`: its result, the judge it wrote
+    (None: none) and the paths of the changes it listed (None: no list)."""
+    script = step_script("Read the CI evidence reader of the release commit's parent", "require_ci_green",
+                         META_RELEASE_WORKFLOW)
+    runner_temp.mkdir()
+    result = subprocess.run(["bash", "-c", script], cwd=checkout, capture_output=True, text=True,
+                            env={"PATH": os.environ["PATH"], "HOME": str(checkout), **SCRATCH_GIT_ENV,
+                                 "RUNNER_TEMP": str(runner_temp), "RELEASE_SHA": release_sha})
+    parent = runner_temp / "ci-evidence-parent"
+    judge, changes = parent / "ci-product-evidence.mjs", parent / "changed-paths.txt"
+    # One path a line, or a status and a tab before it.
+    listed = ([line.split("\t")[-1] for line in changes.read_text().splitlines() if line.strip()]
+              if changes.exists() else None)
+    return result, judge.read_text() if judge.exists() else None, listed
+
+
+class MetaCiGateTests(unittest.TestCase):
+    """meta-release.yml's CI gate, its real JavaScript under a fake clock: it
+    polls exact-main CI and Meta CI until both are green or 120 minutes
+    elapsed, and a green re-run attempt counts."""
+
+    CI = {"id": 42, "run_attempt": 1, "head_sha": "deadbeef", "head_branch": "main", "event": "push",
+          "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/runs/42"}
+    META = {"id": 77, "run_attempt": 1, "head_sha": "deadbeef", "head_branch": "main", "event": "push",
+            "status": "completed", "conclusion": "success", "html_url": "https://example.invalid/runs/77"}
+    JOBS = {"77/1": [{"name": "warm-cache", "conclusion": "success"}, {"name": "meta-checks", "conclusion": "success"}]}
+
+    def gate(self, ci, *, meta_push=None, **kwargs):
+        body = github_script_body("Wait for green exact-main CI and Meta CI at this commit", "require_ci_green",
+                                  META_RELEASE_WORKFLOW)
+        meta = [[self.META]] if meta_push is None else meta_push
+        result = run_polling_gate(body, ci, meta_push=meta, jobs=kwargs.pop("jobs", self.JOBS), **kwargs)
+        self.assertIsNone(result["error"])
+        return result
+
+    def accepted(self, result, run_id="42", attempt="1"):
+        self.assertIsNone(result["failed"])
+        self.assertEqual(result["outputs"], {"run_id": run_id, "run_attempt": attempt})
+
+    def test_green_ci_and_meta_ci_are_accepted_at_once(self):
+        result = self.gate([[self.CI]])
+        self.accepted(result)
+        self.assertEqual(result["sleeps"], 0)
+        first = result["calls"][0]
+        self.assertEqual({key: first[key] for key in ("workflow_id", "branch", "event", "head_sha")},
+                         {"workflow_id": "ci.yml", "branch": "main", "event": "push", "head_sha": "deadbeef"})
+
+    def test_pending_ci_is_awaited_until_green(self):
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        for queued in ([], [{**self.CI, "status": "queued", "conclusion": None}], [pending]):
+            with self.subTest(first=queued):
+                result = self.gate([queued, [pending], [pending], [self.CI]])
+                self.accepted(result)
+                self.assertEqual(result["sleeps"], 3)
+
+    def test_a_green_re_run_attempt_of_a_red_run_counts(self):
+        red = {**self.CI, "conclusion": "failure"}
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        result = self.gate([[red], [red], [rerun], [{**self.CI, "run_attempt": 2}]])
+        self.accepted(result, attempt="2")
+        self.assertEqual(result["warnings"], [])
+
+    def test_a_cancelled_run_is_reported_once_and_its_green_re_run_counts(self):
+        cancelled = {**self.CI, "conclusion": "cancelled"}
+        result = self.gate([[cancelled], [cancelled], [cancelled], [{**self.CI, "run_attempt": 2}]])
+        self.accepted(result, attempt="2")
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("gh run rerun 42 --repo lukacf/meerkat", result["warnings"][0])
+
+    def test_the_gate_fails_at_its_deadline_without_green_ci(self):
+        for runs in ([], [{**self.CI, "status": "in_progress", "conclusion": None}],
+                     [{**self.CI, "conclusion": "failure"}], [{**self.CI, "conclusion": "cancelled"}]):
+            with self.subTest(runs=runs):
+                result = self.gate([runs])
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertEqual(result["outputs"], {})
+                self.assertEqual((result["elapsed_minutes"], result["sleeps"]), (120, 240))
+
+    def test_meta_ci_is_awaited_and_its_deadline_names_the_dispatch(self):
+        running = {**self.META, "status": "in_progress", "conclusion": None}
+        result = self.gate([[self.CI]], meta_push=[[running], [running], [self.META]])
+        self.accepted(result)
+        self.assertEqual(result["sleeps"], 2)
+        # A green Meta CI run that never ran Meta's lanes is no evidence.
+        skipped = {"77/1": [{"name": "meta-checks", "conclusion": "skipped"}]}
+        for meta, jobs in (([[running]], self.JOBS), ([[self.META]], skipped), ([[]], self.JOBS)):
+            with self.subTest(meta=meta, jobs=jobs):
+                result = self.gate([[self.CI]], meta_push=meta, jobs=jobs)
+                self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+                self.assertIn("Dispatch meta-ci.yml on main at this commit", result["failed"])
+                self.assertEqual(result["outputs"], {})
+
+    def test_a_dispatched_meta_ci_run_on_main_counts(self):
+        dispatched = {**self.META, "event": "workflow_dispatch"}
+        result = self.gate([[self.CI]], meta_push=[[]], meta_dispatch=[[dispatched]])
+        self.accepted(result)
+
+    def test_runs_of_another_commit_branch_or_event_never_count(self):
+        for change in ({"head_sha": "other"}, {"head_branch": "feature"}, {"event": "pull_request"}):
+            with self.subTest(ci=change):
+                result = self.gate([[{**self.CI, **change}]])
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+        # Meta CI runs are listed per event by the API; the gate itself
+        # checks their commit and branch.
+        for change in ({"head_sha": "other"}, {"head_branch": "feature"}):
+            with self.subTest(meta=change):
+                result = self.gate([[self.CI]], meta_push=[[{**self.META, **change}]])
+                self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+
+    def test_only_the_resolvers_bypass_skips_the_gate(self):
+        result = self.gate([[]], bypass="true")
+        self.assertEqual((result["calls"], result["failed"], result["outputs"]), ([], None, {}))
+        for bypass in ("false", "", "TRUE", "1"):
+            with self.subTest(bypass=bypass):
+                self.assertIsNotNone(self.gate([[]], bypass=bypass)["failed"])
+
+    @staticmethod
+    def scoped(failed):
+        """A failed run's attestation whose product evidence shows only the
+        `failed` jobs (name: product) red."""
+        jobs = [{"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
+                *({"name": name, "conclusion": "failure", "product": product, "downstream": False}
+                  for name, product in failed.items())]
+        return {"schema_version": 4, "validation_result": "failure", "plan": {"mode": "workspace"},
+                "product_evidence": {"version": 1, "plan_errors": 0, "failed_lanes": ["Main unit tests"], "jobs": jobs}}
+
+    def test_a_red_run_counts_only_when_its_failures_are_rows_meta_does_not_depend_on(self):
+        red = {**self.CI, "conclusion": "failure"}
+        connect = {"Main unit tests (connect[console])": "connect"}
+        result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True)
+        self.accepted(result)
+        self.assertEqual(result["sleeps"], 0)
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("only in rows Meta does not depend on", result["warnings"][0])
+        self.assertIn("connect[console]", result["warnings"][0])
+        # Meta CI is still required.
+        result = self.gate([[red]], meta_push=[[]], attestations=((42, 1, self.scoped(connect)),), reader=True)
+        self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+        for case, failed, reader in (("a Meta row", {"Main unit tests (meta)": "meta"}, True),
+                                     ("a Core row", {"Clippy (core)": "core"}, True),
+                                     ("no reader in the checkout", connect, False)):
+            with self.subTest(case=case):
+                result = self.gate([[red]], attestations=((42, 1, self.scoped(failed)),), reader=reader)
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertEqual(result["outputs"], {})
+        result = self.gate([[red]], reader=True)
+        self.assertIn("has no green exact-main CI after 120 minutes", result["failed"], "no attestation")
+        # The verdict is per attempt: a re-run whose only failure is a Connect
+        # row counts once it completes.
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        result = self.gate([[red], [rerun], [{**red, "run_attempt": 2}]], reader=True,
+                           attestations=((42, 1, self.scoped({"Clippy (core)": "core"})), (42, 2, self.scoped(connect))))
+        self.accepted(result, attempt="2")
+
+    def test_a_candidate_waits_longer_for_its_release_merges_ci(self):
+        """A candidate starts at the release merge, beside that commit's own
+        cold exact-main CI run, so its gate waits up to 240 minutes; every
+        other mode starts after CI ran and waits up to 120."""
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        result = self.gate([[pending]], mode="candidate")
+        self.assertIn("has no green exact-main CI after 240 minutes", result["failed"])
+        self.assertGreaterEqual(result["elapsed_minutes"], 240)
+        for mode in ("promote", "existing"):
+            with self.subTest(mode=mode):
+                result = self.gate([[pending]], mode=mode)
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertLess(result["elapsed_minutes"], 240)
+
+    def test_the_floor_check_outlasts_its_wait_and_build(self):
+        """floor_check waits up to 60 minutes for Core's crates, then binds a
+        record and builds the floor (28 to 45 minutes measured): its runner
+        timeout leaves room for both, so a late Core publication ends in the
+        wait's own message."""
+        self.assertRegex(job_block("floor_check", META_RELEASE_WORKFLOW), r"\n    timeout-minutes: 120\n")
+
+    def test_a_red_run_is_judged_by_the_release_commits_parent_never_by_the_commit_itself(self):
+        """The release commit's first parent's copy of the reader judges a
+        red run, told what the commit changed: never the checkout's own copy,
+        which the commit could edit, and never a commit that changes what
+        decides the evidence or whose changes are unknown."""
+        red = {**self.CI, "conclusion": "failure"}
+        connect = {"Main unit tests (connect[console])": "connect"}
+        for case, options in (
+                ("the parent's copy refuses", {"parent_reader": "refusing"}),
+                ("the parent has no reader", {"parent_reader": None}),
+                ("the commit changes the reader",
+                 {"changed": ("crates/meerkat-core/src/lib.rs", "scripts/ci-product-evidence.mjs")}),
+                ("the commit changes the planner", {"changed": ("scripts/ci-cargo-lanes.mjs",)}),
+                ("the commit changes a module the planner imports", {"changed": ("scripts/ci-hook-coverage.mjs",)}),
+                ("the commit changes ci.yml", {"changed": (".github/workflows/ci.yml",)}),
+                ("the commit moves a Core package under Meta's root",
+                 {"changed": ("D\tcrates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/Cargo.toml")}),
+                ("the commit's changes are unknown", {"changed": None})):
+            with self.subTest(case=case):
+                result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True, **options)
+                self.assertIsNotNone(result["failed"], f"the gate accepted the red run: {result['outputs']}")
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertEqual(result["outputs"], {})
+        result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True,
+                           changed=("meta/README.md", "connect/README.md"))
+        self.accepted(result)
+
+    def test_the_parent_reader_step_writes_the_first_parents_reader_and_the_commits_changes(self):
+        """The step before the gate, run verbatim in a scratch history: it
+        writes the release commit's FIRST PARENT's copy of the reader (never
+        the commit's own, which it could edit, nor a merge's second
+        parent's) and lists every path the commit changes against that
+        parent, a renamed path under both its names, the inputs that decide
+        the evidence included; for a commit whose parent has no reader it
+        writes no judge, so only a green run counts."""
+        with fixture_directory() as tmp:
+            checkout = tmp / "checkout"
+            checkout.mkdir()
+            commits = parent_reader_history(checkout)
+            reader = "scripts/ci-product-evidence.mjs"
+            for name, judge, changed in (
+                    ("linear", "first parent's", {reader, "scripts/ci-cargo-lanes.mjs", "crates/core/src/lib.rs"}),
+                    ("merge", "first parent's", {reader, "scripts/ci-cargo-lanes.mjs"}),
+                    ("rename", "first parent's", {"ci/products.json", "ci/products-moved.json"}),
+                    ("no-reader", None, None)):
+                with self.subTest(commit=name):
+                    result, written, listed = run_parent_reader_step(checkout, commits[name], tmp / f"runner-{name}")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(written, PARENT_READER_COPIES[judge] if judge else None,
+                                     f"the judge of {name} is not the {judge or 'missing'} copy")
+                    if changed is not None:
+                        self.assertLessEqual(changed, set(listed or []), f"the changes of {name}: {listed}")
+
+
+def run_floor_wait(crates, index, *, version="0.8.31", appear_after=None):
+    """Run floor_check's wait step, verbatim, with stub curl, date and sleep
+    and the real jq. `index` maps a crate name to the versions its sparse
+    index file lists (absent: the file does not exist); `appear_after` maps
+    a crate to the fake second from which `version` joins them. Returns the
+    process result, the index paths read, and the sleeps."""
+    script = step_script("Wait until every Core crate is on crates.io at the declared version", "floor_check",
+                         META_RELEASE_WORKFLOW)
+    with fixture_directory() as root:
+        bin_dir, scripts = root / "bin", root / "scripts"
+        bin_dir.mkdir()
+        scripts.mkdir()
+        state = root / "state.json"
+        state.write_text(json.dumps({"now": 1000, "reads": [], "sleeps": []}))
+        listing = scripts / "release-rust-crates.sh"
+        listing.write_text("#!/usr/bin/env bash\n" + "".join(f"echo {name}\n" for name in crates))
+        listing.chmod(0o755)
+        stub = (
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "state_path = os.environ['FLOOR_STATE']\n"
+            "state = json.load(open(state_path))\n"
+            "tool, args = os.path.basename(sys.argv[0]), sys.argv[1:]\n"
+            "def save():\n"
+            "    json.dump(state, open(state_path, 'w'))\n"
+            "if tool == 'date':\n"
+            "    assert args == ['+%s'], args\n"
+            "    print(state['now'])\n"
+            "elif tool == 'sleep':\n"
+            "    state['now'] += int(args[0]); state['sleeps'].append(int(args[0])); save()\n"
+            "else:\n"
+            "    url = args[-1]\n"
+            "    prefix = 'https://index.crates.io/'\n"
+            "    assert url.startswith(prefix), url\n"
+            "    path = url[len(prefix):]\n"
+            "    state['reads'].append(path); save()\n"
+            "    name = path.rsplit('/', 1)[1]\n"
+            "    index = json.loads(os.environ['FLOOR_INDEX'])\n"
+            "    after = json.loads(os.environ['FLOOR_AFTER'])\n"
+            "    versions = list(index.get(name, []))\n"
+            "    if name in after and state['now'] >= after[name]:\n"
+            "        versions.append(os.environ['CORE_VERSION'])\n"
+            "    if name not in index and not versions:\n"
+            "        print('curl: (22) The requested URL returned error: 404', file=sys.stderr)\n"
+            "        sys.exit(22)\n"
+            "    for version in versions:\n"
+            "        print(json.dumps({'name': name, 'vers': version, 'yanked': False}))\n"
+        )
+        for tool in ("curl", "date", "sleep"):
+            (bin_dir / tool).write_text(stub)
+            (bin_dir / tool).chmod(0o755)
+        result = subprocess.run(
+            ["bash", "-c", script], cwd=root, capture_output=True, text=True,
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "FLOOR_STATE": str(state),
+                 "FLOOR_INDEX": json.dumps(index), "FLOOR_AFTER": json.dumps(appear_after or {}),
+                 "CORE_VERSION": version},
+        )
+        recorded = json.loads(state.read_text())
+        return result, recorded["reads"], recorded["sleeps"]
+
+
+class MetaFloorWaitTests(unittest.TestCase):
+    """floor_check waits for every crate scripts/release-rust-crates.sh lists,
+    at the declared version, before it resolves against crates.io: Core
+    publishes by dependency level, meerkat-core early."""
+
+    CRATES = ["meerkat-sqlite", "meerkat-core", "meerkat-mob", "rkat"]
+
+    def published(self, *, but=()):
+        return {name: (["0.8.30"] if name in but else ["0.8.30", "0.8.31"]) for name in self.CRATES}
+
+    def test_every_crate_at_the_version_ends_the_wait_at_once(self):
+        result, reads, sleeps = run_floor_wait(self.CRATES, self.published())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("every Core crate (4) is on crates.io at 0.8.31", result.stdout)
+        self.assertEqual(reads, ["me/er/meerkat-sqlite", "me/er/meerkat-core", "me/er/meerkat-mob", "rk/at/rkat"])
+        self.assertEqual(sleeps, [])
+
+    def test_a_crate_published_later_is_awaited_and_only_missing_ones_are_read_again(self):
+        result, reads, sleeps = run_floor_wait(self.CRATES, self.published(but={"rkat"}),
+                                               appear_after={"rkat": 1060})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sleeps, [30, 30])
+        self.assertEqual(reads[4:], ["rk/at/rkat", "rk/at/rkat"])
+        self.assertIn("waiting for 1 of 4 Core crates at 0.8.31 in the crates.io index: rkat", result.stdout)
+
+    def test_meerkat_core_alone_is_not_enough(self):
+        """The old wait looked only for meerkat-core, the fifth crate Core publishes."""
+        result, _, sleeps = run_floor_wait(self.CRATES, {"meerkat-core": ["0.8.31"]})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(sleeps), 120)
+        self.assertIn("3 of 4 Core crates are not on crates.io at 0.8.31 after 60 minutes "
+                      "(meerkat-sqlite meerkat-mob rkat)", result.stderr)
+
+    def test_the_wait_is_bounded(self):
+        result, _, sleeps = run_floor_wait(self.CRATES, self.published(but={"meerkat-mob"}))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual((len(sleeps), sum(sleeps)), (120, 3600))
+        self.assertIn("1 of 4 Core crates are not on crates.io at 0.8.31 after 60 minutes (meerkat-mob)",
+                      result.stderr)
+
+    def test_an_empty_crate_list_fails(self):
+        result, reads, _ = run_floor_wait([], {})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("scripts/release-rust-crates.sh lists no crate", result.stderr)
+        self.assertEqual(reads, [])
+
+    def test_short_names_follow_the_sparse_index_layout(self):
+        names = ["a", "ab", "abc", "Abcd"]
+        result, reads, _ = run_floor_wait(names, {name.lower(): ["0.8.31"] for name in names})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(reads, ["1/a", "2/ab", "3/a/abc", "ab/cd/abcd"])
 
 
 if __name__ == "__main__":

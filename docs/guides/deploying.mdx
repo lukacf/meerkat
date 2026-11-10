@@ -562,6 +562,17 @@ gh attestation verify rkat-<version>-x86_64-unknown-linux-gnu.tar.gz --repo luka
 
 Replace `<version>` with the version of the release the archive comes from.
 
+A release can publish the archives prebuilt at an earlier commit whose
+changes since touch none of their inputs. Their attestations then name that
+prebuilt commit, not the tag's, and the release carries
+`prebuild-source-<version>.txt`, which names both commits and the prebuild
+run and lists every path changed between them with the reason it is no
+input. Verify such an archive against the prebuilt commit:
+
+```bash
+gh attestation verify rkat-<version>-x86_64-unknown-linux-gnu.tar.gz --repo lukacf/meerkat --source-digest <prebuilt commit>
+```
+
 ### Linux glibc floor
 
 The Linux GNU binaries are built inside the `buildpack-deps:bullseye` image
@@ -591,9 +602,27 @@ above), or distributions older than glibc 2.31.
 
 ### Other platforms
 
-The macOS binaries carry no notarization and the release workflow asserts no
-minimum macOS version (there is no deployment-target pin or gate); the
-GitHub-hosted lane ad-hoc codesigns them. The Windows binary is x86_64 only.
+The macOS binaries carry no notarization. The Intel macOS binaries
+(`x86_64-apple-darwin`) need macOS 11.0 or later: the BuildBuddy release lane
+builds them for macOS 11.0, and the release refuses an Intel binary that
+declares a newer minimum (`scripts/check-macos-x86-release-binary`, run on
+Apple silicon under Rosetta). No such check covers the arm64 binaries.
+
+The GitHub-hosted lane ad-hoc codesigns the macOS binaries. On the BuildBuddy
+lane, which the project's releases use, the arm64 binaries carry the linker's
+ad-hoc signature and the Intel binaries carry none. That changes nothing a user
+runs into: x86_64 code needs no signature, on an Intel Mac or under Rosetta,
+and the documented install paths (`brew install lukacf/meerkat/rkat`, a
+`curl` download of the archive, the SDKs' `rkat-rpc` download) set no
+quarantine attribute, so Gatekeeper never assesses the binary. A binary
+downloaded with a browser is quarantined, and Gatekeeper then refuses an
+unsigned and an ad-hoc-signed binary alike (neither is Developer ID signed or
+notarized), with the same remedy: remove the attribute
+(`xattr -d com.apple.quarantine rkat`). What differs: `codesign -v` reports no
+signature on an Intel binary, and a policy that allows binaries by their code
+directory hash (CDHash) needs a signature to hash.
+
+The Windows binary is x86_64 only.
 The packaging step checks that every binary embeds the release version, so
 `rkat --version` on an installed binary tells you exactly which release it is.
 

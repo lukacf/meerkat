@@ -2793,3 +2793,45 @@ def test_a_key_conflict_is_a_typed_error():
     assert error.code == -32602
     assert error.run_id == "run-a"
     assert error.flow_id == "review"
+
+
+@pytest.mark.asyncio
+async def test_gating_withdraw_sends_pending_id_and_reason_and_parses_the_result():
+    handle, calls = make_mock_mob_handle({
+        "meta/gating/withdraw": {
+            "pending_id": "gate-pending-000001",
+            "action_id": "gate-action-000001",
+            "actor_id": "identity:developer",
+            "outcome": "safe_draft",
+            "withdrawn_at_ms": 1720000000123,
+            "withdrawn_by": "host",
+            "reason": "obsolete",
+        }
+    })
+
+    result = await handle.gating_withdraw("gate-pending-000001", reason="obsolete")
+
+    assert calls == [
+        ("meta/gating/withdraw", {"pending_id": "gate-pending-000001", "reason": "obsolete"})
+    ]
+    assert result.pending_id == "gate-pending-000001"
+    assert result.actor_id == "identity:developer"
+    assert result.outcome == "safe_draft"
+    assert result.withdrawn_by == "host"
+    assert result.reason == "obsolete"
+
+
+@pytest.mark.asyncio
+async def test_gating_withdraw_omits_an_absent_reason():
+    handle, calls = make_mock_mob_handle({
+        "meta/gating/withdraw": {
+            "pending_id": "gate-pending-000001",
+            "action_id": "gate-action-000001",
+            "actor_id": "identity:developer",
+            "withdrawn_by": "host",
+        }
+    })
+
+    await handle.gating_withdraw("gate-pending-000001")
+
+    assert calls == [("meta/gating/withdraw", {"pending_id": "gate-pending-000001"})]

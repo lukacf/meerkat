@@ -650,7 +650,13 @@ and its CI must be green before a release tag (`require_ci_green`):
 - `closure-check` (push only): `cargo check --all-features` (lib and bin
   targets) over the reverse-dependency closure of the changed packages, one
   job per product's part of it (`closure_check_rows`), the parts in parallel
-  and with the first wave.
+  and with the first wave. When the plan reaches Core, a product's part
+  checks every target (`--all-targets`): a Core change can break a
+  product's test code alone. A second job then checks that part again with
+  the product's default features: `--all-features` never compiles the code
+  a product builds only without one of its features, and that code can
+  call Core too. These are the downstream rows Core's product-scoped
+  evidence depends on (with the products' rustdoc rows).
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings` for each row of the plan's `rustdoc_rows`:
   Core's members (`--workspace` excluding the products' packages) when the
@@ -711,8 +717,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   `deferred_to_push`): the cold wasm build of the runtime's closure alone
   took about 20 minutes. On a push or dispatch `example-web` gets 50 minutes,
   `integration` 70 and `mcp-confinement-positive` 50 (a pull request keeps
-  25, 30 and 40), `feature-check` 60, `closure-check` 90, `clippy` and
-  `closure-tests` 120 (a pull request's Clippy 60) and `main-unit` 150:
+  25, 30 and 40), `feature-check` 60, `closure-check` 90 (120 for a
+  product's all-target part), `clippy` and
+  `closure-tests` 120 (a pull request's Clippy 90) and `main-unit` 150:
   caps sized from cold runs after a meerkat-core change or a release
   version bump, which recompiles every workspace crate.
 - `push: main` only (no budget): `main-unit` over the whole workspace (the
@@ -743,8 +750,22 @@ and its CI must be green before a release tag (`require_ci_green`):
   main push and nightly); the lane table is reported on every non-cancelled
   run, failed runs included; a push or a dispatch is a full validation run
   that only reports the budget (a failure to measure only warns there);
-  schema-4 attestation (backend `github-hosted-cargo`) on successful pushes
-  to `main` and to `release/**` branches. For a `release-projection` plan
+  schema-4 attestation (backend `github-hosted-cargo`) on every push to
+  `main` and to a `release/**` branch that is not cancelled: its
+  `validation_result` is `success` only when the gate succeeded, and its
+  `product_evidence` lists each job of the attempt with its conclusion and
+  product (the planner's `row_products` for matrix rows, a fixed table in
+  `scripts/ci-product-evidence.mjs` for the other jobs, the gate's flagged
+  lanes and plan errors), so a release whose product depends on none of the
+  failed rows can still use a failed run (see `require_ci_green` below). A
+  release gate judges that evidence with the release commit's first parent's
+  copy of the script, told the commit's changes against that parent (`git
+  diff --name-status --no-renames`: a renamed path counts under both names);
+  a commit that changes the script, the planner or a module it imports,
+  `ci/products.json`, the non-Rust reader inventory or `ci.yml`, or that
+  adds or deletes a package manifest (a package's location decides its
+  product), gets no product-scoped acceptance.
+  For a `release-projection` plan
   it re-verifies the reused parent
   attempt with the parent's copies of the scripts (`ci-release-evidence.mjs
   verify`: a completed, successful push run of `ci.yml` on `main` at exactly
@@ -790,7 +811,9 @@ nightly set is:
 `machine-verify` (bounded TLC, including every non-skipped composition
 witness with its completion proof), `machine-verify-deep` (`make
 machine-verify-deep-compositions`: Deep TLC over the compositions that fit
-the 900 s per-run cap; a capped run fails as TLC INCOMPLETE), `sdk-host`,
+the 900 s per-run cap; a capped run fails as TLC INCOMPLETE; then the
+AuthMachine source-credential publication audit with `--whole-domain`, over
+the whole domains of the restore inputs its CI profile samples), `sdk-host`,
 `gcp-buildbuddy`
 (`buildbuddy.yml` in `full-fresh` mode: the whole Bazel graph), plus the
 existing `lint` (clippy `--all-targets`), `lint-feature-matrix`,
@@ -829,12 +852,16 @@ workspace-mode parent run for it). Any other attestation, legacy schemas
 included, keeps Cargo validation on the tag. Cargo validation is also the
 manual-dispatch fallback.
 The owner-selected BuildBuddy release backend (remote.buildbuddy.io) covers
-the critical Linux (x86_64, aarch64) and macOS arm64 binaries. The trailing
-platforms build in their own jobs on either backend: Windows release
-binaries are cross-compiled with cargo-xwin (clang-cl, lld-link, the Windows
-SDK) on a GitHub-hosted Ubuntu runner and then executed for verification on a
-windows-2025-vs2026 runner, and Intel macOS binaries are cross-compiled on an
-Apple silicon runner (macos-15). The critical archives publish as soon as
+the critical Linux (x86_64, aarch64) and macOS arm64 binaries, and in a job of
+its own the Intel macOS ones (`release-build-macos-x86`: cross-compiled on the
+macOS arm64 lane's Apple-silicon executors for macOS 11.0, then run and
+inspected on an Apple silicon runner, macos-15). The trailing platforms build
+in their own jobs: Windows release binaries are cross-compiled with cargo-xwin
+(clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu runner and
+then executed for verification on a windows-2025-vs2026 runner on either
+backend, and on the GitHub-hosted backend Intel macOS binaries are
+cross-compiled on an Apple silicon runner (macos-15). The critical archives
+publish as soon as
 their lane passes; the trailing ones are added afterwards, add-only, with the
 complete manifest and the Homebrew formula.
 
@@ -853,14 +880,14 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 
 | Job | Trigger | What it does |
 |-----|---------|-------------|
-| `require_ci_green` | Always | Requires successful exact-main CI for the release commit (a successful push run of `ci.yml` at exactly that commit on `main`, or on `release/<version>` for a maintenance release, `<version>` being the checked-out workspace version; no other branch, pull-request or dispatched run); tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted; its ref `main` or that release branch) and, for a `release-projection` attestation, re-verify the reused first-parent run and its attestation with the parent's copies of the scripts; a prebuild dispatch instead verifies its request (on main, no publishing or recovery input, tag not yet created) and waits for nothing |
+| `require_ci_green` | Always | Requires successful exact-main CI for the release commit (a successful push run of `ci.yml` at exactly that commit on `main`, or on `release/<version>` for a maintenance release, `<version>` being the checked-out workspace version; no other branch, pull-request or dispatched run), or a failed run of that kind whose attestation's product evidence shows every failure in rows Core does not depend on (Core depends on its own rows and the downstream type-check rows; `scripts/ci-product-evidence.mjs`, the release commit's first parent's copy, which refuses whatever it cannot attribute: no evidence, a plan error, a release projection, a job of unknown product, a commit that changes what decides the evidence); tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted; its ref `main` or that release branch) and, for a `release-projection` attestation, re-verify the reused first-parent run and its attestation with the parent's copies of the scripts; a prebuild dispatch instead verifies its request (on main, no publishing or recovery input, tag not yet created) and waits for nothing |
 | `release_validate_buildbuddy_full` | Tag runs while `MEERKAT_GCP_BUILDBUDDY_ENABLED` is `true` | Runs the whole BuildBuddy/Bazel graph (`buildbuddy.yml`, `full-fresh`) on the release tree |
 | `release_validate_cargo` / `release_validate_buildbuddy` | Eligible manual dispatches; `release_validate_cargo` also on tags whose attestation does not prove its lanes ran, while the self-hosted graph is off | Validate release state through the selected lane; tag runs whose attestation covers those lanes (or with the graph on) reuse exact-tree CI and skip both jobs |
 | `release_validate_gate` | Tags and full/package dispatches | On tags require exact-tree CI plus the full BuildBuddy graph (graph on), or with the graph off pass on a verified attestation that covers the Cargo validation lanes (`release_validate_cargo` otherwise); on manual dispatches accept the selected validation lane; Web-only and asset-only recovery skip it |
 | `release_semver_gate` | Tags and full/package dispatches | After `require_ci_green`, verifies unexpired exact-tree, exact-version push readiness evidence (from `main`, or from the release branch of the tag's version for a maintenance release) on the normal tag/explicit-tag path; narrower manual measurement/recovery exceptions are described in the release guide |
-| `release_prebuild` | Tag runs | Finds a usable pre-tag prebuild of exactly the tag commit (`scripts/release-find-prebuild`: a `release.yml` dispatch on main at that commit whose `Release prebuild gate` passed, so its critical binaries and Web SDK package are ready while its trailing lanes may still run, and whose critical artifacts have not expired; a gate that has not concluded is waited for, unless a job it needs already failed, timed out or was cancelled); when found, the build jobs below are skipped and the publishers use that run's artifacts |
+| `release_prebuild` | Tag runs | Finds a usable pre-tag prebuild for the tag commit (`scripts/release-find-prebuild`: a `release.yml` dispatch on main at that commit or, failing a usable one, at an ancestor whose prebuild serves it, every path changed since being a non-input of Core's release artifacts per `scripts/release-prebuild-equivalent` (another product's root other than its `Cargo.toml` files, a product changelog, or a short list of CI-only files); whose `Release prebuild gate` succeeded, so its critical binaries and Web SDK package are ready while its trailing lanes may still run, and whose critical artifacts have not expired; a gate that has not concluded is waited for, unless a job it needs already failed, timed out or was cancelled; a run of exactly the tag commit still under way is waited for before an earlier commit's is taken, and an earlier commit's run whose trailing lanes or full binary build gate failed is never taken); when found, the build jobs below are skipped and the publishers use that run's artifacts, after checking the commit again |
 | `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_critical_gate` | Tags without a prebuild, manual asset recovery, or a prebuild dispatch | The selected BuildBuddy or GitHub-hosted lane builds the critical platforms (Linux x86_64 and aarch64, macOS arm64); each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the critical gate requires the selected lane (or, when the archives come from a prebuild or `assets_run_id`, that every build job was skipped) |
-| `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_macos_x86_cross` / `build_binaries_gate` | Same | The trailing platforms on either backend: Windows cross-compiled from Linux with cargo-xwin and run on windows-2025-vs2026, Intel macOS cross-compiled on Apple silicon (`macos-15`); the full gate requires the selected critical lane plus every trailing job |
+| `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_buildbuddy_macos_x86` / `verify_macos_x86_binaries` / `build_binaries_macos_x86_cross` / `build_binaries_gate` | Same | The trailing platforms: Windows cross-compiled from Linux with cargo-xwin and run on windows-2025-vs2026 (either backend); Intel macOS on BuildBuddy (`release-build-macos-x86`, macOS 11.0) and then run and inspected on Apple silicon (`macos-15`) on the BuildBuddy backend, or cross-compiled on Apple silicon (`macos-15`) on the GitHub-hosted backend; the full gate requires the selected critical lane plus every trailing job of that backend; the critical gate and publisher wait for none of them |
 | `build_web_sdk_package` | Tags without a prebuild, package/Web recovery without a reused artifact, or a prebuild dispatch | After `require_ci_green`, beside the release validation and the semver gate, builds the `@rkat/web` package artifact, stamps it with its commit, package and tarball digest, and attests it; Cargo runs four jobs while the tree's `scripts/release-web-sdk-rustc-wrapper` keeps the memory-heavy wasm32 crates off the catalog's rustc, or one job for a tree without a matching wrapper |
 | `release_prebuild_gate` | Prebuild dispatches | Passes once the critical binary build gate and the Web SDK package succeeded (the run's trailing lanes continue); the marker `release_prebuild` requires of a prebuild run |
 | `publish_critical_release_assets` | Tags | As soon as the critical gate passes, verifies and publishes exactly the Linux and macOS arm64 archives (add-only, no manifest); waits for no trailing job |
@@ -868,7 +895,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 | `update_homebrew` | After the trailing publisher | Updates the Homebrew tap formula from the complete release's published checksums |
 | `publish_semver_baseline` / `attach_semver_baseline` | Tags or asset recovery, alongside publication | `publish_semver_baseline` generates rustdoc JSON for every publishable library crate on the release tag as soon as `require_ci_green` passes; `attach_semver_baseline` attaches it as `semver-rustdoc-<version>.tar.zst` once the GitHub release is published (add-only: a baseline already attached stays). It is the baseline the next release's semver gate compares against; no job waits for either |
 | `publish_registries` | Tags or manual `publish_release_packages=true` | Publishes 47 Rust crates → crates.io by dependency level (concurrently within a level), Python SDK → PyPI, TypeScript SDK → npm; before the SDK packages build, it waits for the release's complete manifest (`scripts/release-await-binary-manifest`), verifies each `rkat-rpc` archive's build attestation and stamps the archive and binary digests into both (`scripts/release-stamp-sdk-binary-digests`), and each publish step refuses a package that does not pin them for its version |
-| `publish_web_sdk` | Tags or manual package/Web recovery | After `require_ci_green`, `release_validate_gate` and `release_semver_gate` (both skipped only on Web-only recovery), the registry credential preflight and the build (or a found prebuild), checks the artifact's stamp against the release commit (and a reused artifact's source run), verifies a prebuild's package attestation and version, then publishes `@rkat/web` → npm |
+| `publish_web_sdk` | Tags or manual package/Web recovery | After `require_ci_green`, `release_validate_gate` and `release_semver_gate` (both skipped only on Web-only recovery), the registry credential preflight and the build (or a found prebuild), checks the artifact's stamp against the release commit (or a prebuild's commit, bound through `scripts/release-prebuild-equivalent`, and a reused artifact's source run), verifies a prebuild's package attestation and version, then publishes `@rkat/web` → npm |
 
 **Build matrix:**
 
@@ -877,7 +904,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 | Linux x86_64 | `x86_64-unknown-linux-gnu` | critical |
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | critical |
 | macOS ARM64 | `aarch64-apple-darwin` | critical |
-| macOS x86_64 | `x86_64-apple-darwin` | trailing (cross-compiled on Apple silicon) |
+| macOS x86_64 | `x86_64-apple-darwin` | trailing (cross-compiled on Apple silicon: BuildBuddy's executors, or a hosted runner on the GitHub-hosted backend) |
 | Windows x86_64 | `x86_64-pc-windows-msvc` | trailing (cross-compiled on Linux) |
 
 **Manual recovery through the release facade:**
@@ -906,11 +933,25 @@ dispatch `release.yml` with `prebuild_release_artifacts=true` on `main`, on
 the backend its tag run will select (the request refuses another). It
 builds, stamps, attests and uploads every release binary and the Web SDK
 package of that commit while CI and semver readiness run, and publishes
-nothing. The tag run of exactly that commit then skips every build and
+nothing. The tag run of that commit then skips every build and
 publishes those artifacts after the `assets_run_id` verification (each
 archive and its source stamp attested by `release.yml` at that commit on
 `refs/heads/main`, the run's binary build gate green, every binary embedding
-the release version); without a complete prebuild it builds as before.
+the release version); without a complete prebuild it builds as before. So
+does the tag run of a later commit whose changes since the prebuilt one are
+all non-inputs of Core's release artifacts (`scripts/release-prebuild-equivalent`:
+other products' roots except their `Cargo.toml` files, product changelogs, a
+short list of CI-only `scripts/ci-*` files; `make release-doctor` checks that
+no release build job, local action or script names such a path, and that the
+release binaries and the Web SDK runtime compile no product package): an exact-commit
+prebuild is still preferred (one still under way is waited for), an earlier
+commit's whose trailing lanes failed is never taken, and the stamps and
+attestations then name the
+prebuilt commit.
+The same command then dispatches Meta's two candidate tiers of that commit
+(`make -C meta release-candidate`, core then trailing; printed, not
+dispatched, in a dry run): they build before Core's tag exists, and Meta's
+promotion refuses a candidate whose `crates/` tree differs from that tag's.
 
 ### Pre-commit Hooks
 

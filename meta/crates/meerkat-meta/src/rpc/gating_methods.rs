@@ -24,6 +24,7 @@ pub(super) enum GatingParamsError {
     LimitOutOfRange,
     AfterAuditIdMustBeString,
     Decision(GatingDecideError),
+    Withdrawal(GatingWithdrawError),
 }
 
 impl GatingParamsError {
@@ -102,6 +103,12 @@ impl GatingParamsError {
             },
             GatingParamsError::Decision(GatingDecideError::IdsUnavailable(reason)) => {
                 format!("gating decision cannot be recorded: {reason}")
+            }
+            GatingParamsError::Withdrawal(GatingWithdrawError::UnknownPendingId(pending_id)) => {
+                format!("pending_id '{pending_id}' was not found")
+            }
+            GatingParamsError::Withdrawal(GatingWithdrawError::IdsUnavailable(reason)) => {
+                format!("gating withdrawal cannot be recorded: {reason}")
             }
         }
     }
@@ -236,6 +243,48 @@ pub(super) fn parse_gating_evaluate_params(
         approval_timeout_ms,
         entity,
         topic,
+    })
+}
+
+/// JSON-RPC error for a failed `gating/withdraw`, mapped like `gating/decide`.
+pub(super) fn gating_withdraw_rpc_error(err: GatingParamsError) -> JsonRpcError {
+    match err {
+        GatingParamsError::Withdrawal(GatingWithdrawError::IdsUnavailable(reason)) => {
+            gating_ids_unavailable_rpc_error(reason)
+        }
+        err => JsonRpcError {
+            code: -32602,
+            message: format!("Invalid params: {}", err.message()),
+            data: None,
+        },
+    }
+}
+
+/// `meta/gating/withdraw` parameters: `pending_id`, and an optional `reason`.
+pub(super) fn parse_gating_withdraw_params(
+    params: &Value,
+) -> Result<GatingWithdrawRequest, GatingParamsError> {
+    let object = params
+        .as_object()
+        .ok_or(GatingParamsError::ParamsMustBeObject)?;
+    let pending_id = object
+        .get("pending_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(GatingParamsError::PendingIdRequired)?;
+    let reason = match object.get("reason") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or(GatingParamsError::ReasonMustBeString)?
+                .to_string(),
+        ),
+    };
+    Ok(GatingWithdrawRequest {
+        pending_id: pending_id.to_string(),
+        reason,
     })
 }
 

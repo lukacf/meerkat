@@ -51,7 +51,7 @@ scripts/release-rust-crates.sh lists.
       `guard_allow` with its reason.
 
   published_crates_standalone.py floor --product NAME --out DIR
-      [--mode pr|release] [--allow-dirty]
+      [--mode pr|release] [--allow-dirty] [--no-build]
 
       The published-floor check of a product other than Core (ci/products.json:
       meta, connect). In the one workspace a product compiles against the
@@ -77,7 +77,12 @@ scripts/release-rust-crates.sh lists.
           product's packaged tests may read files its package does not ship
           (Meta's lib tests read tests/fixtures, which its package excludes;
           its integration tests read the repository's docs).
-      Writes floor.json to --out. Exit 1 names the first failing stage.
+      Writes floor.json to --out, with the sha256 of the scratch workspace's
+      resolved Cargo.lock (lock_sha256) once resolution succeeded. Exit 1
+      names the first failing stage. --no-build stops after the resolve
+      stage (package, unpack, cargo metadata) and builds nothing: it only
+      verifies that the declared versions resolve, and to which lock; like
+      every stage it publishes nothing and writes its files only under --out.
 
 Exit 0 = proven, 1 = a crate fails, 2 = usage error or unreadable input.
 """
@@ -85,6 +90,7 @@ Exit 0 = proven, 1 = a crate fails, 2 = usage error or unreadable input.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -1107,7 +1113,8 @@ def repository_env(root: pathlib.Path) -> str:
     return "[env]\n" + "".join(f"{json.dumps(key)} = {toml_value(value)}\n" for key, value in env.items())
 
 
-def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, allow_dirty: bool) -> int:
+def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, allow_dirty: bool,
+          resolve_only: bool = False) -> int:
     product = load_product(root, product_name)
     product_root = (root / product["root"]).resolve()
     members = workspace_members(root)
@@ -1128,7 +1135,12 @@ def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, a
         report["stage"] = stage
         report["problems"] = problems
         (out / "floor.json").write_text(json.dumps(report, indent=2) + "\n")
-        verdict = "releasable against published dependencies" if not problems else f"not releasable ({stage})"
+        if problems:
+            verdict = f"not releasable ({stage})"
+        elif stage == "resolve":
+            verdict = "resolves against published dependencies (resolution only, nothing built)"
+        else:
+            verdict = "releasable against published dependencies"
         print(f"{product_name}: {verdict}")
         for problem in problems:
             print(f"  {problem}")
@@ -1185,6 +1197,14 @@ def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, a
     report["registry_dependencies"] = sorted(
         f"{pkg['name']} {pkg['version']}" for pkg in resolved["packages"] if pkg["name"] in in_repo and pkg["name"] not in floor_members
     )
+    # The resolution the build uses (and a later resolution compares with):
+    # cargo metadata rewrote the seeded lock of the scratch workspace.
+    lock = ws / "Cargo.lock"
+    if not lock.is_file():
+        return finish("resolve", ["the scratch workspace has no Cargo.lock after resolution"])
+    report["lock_sha256"] = hashlib.sha256(lock.read_bytes()).hexdigest()
+    if resolve_only:
+        return finish("resolve", [])
 
     command = [cargo(), "check" if mode == "pr" else "build", "--workspace", *surface_flags(resolved, floor_members)]
     rc, output = run(command, ws, env, logs / "build.log")
@@ -1213,10 +1233,12 @@ def main(argv: list[str]) -> int:
     floor_parser.add_argument("--out", required=True, type=pathlib.Path)
     floor_parser.add_argument("--mode", choices=("pr", "release"), default="pr")
     floor_parser.add_argument("--allow-dirty", action="store_true")
+    floor_parser.add_argument("--no-build", action="store_true",
+                              help="stop after resolution: package, unpack and resolve, build nothing")
     args = parser.parse_args(argv)
     try:
         if args.command == "floor":
-            return floor(ROOT, args.product, args.out, args.mode, args.allow_dirty)
+            return floor(ROOT, args.product, args.out, args.mode, args.allow_dirty, resolve_only=args.no_build)
         crates = release_crates(ROOT)
         if args.crate:
             unknown = sorted(set(args.crate) - set(crates))

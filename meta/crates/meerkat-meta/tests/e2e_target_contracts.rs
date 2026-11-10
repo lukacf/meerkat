@@ -1799,6 +1799,7 @@ fn e2e_1101_sdk_parity_flow_target_defined_red() {
         "meta/gating/evaluate",
         "meta/gating/pending",
         "meta/gating/decide",
+        "meta/gating/withdraw",
         "meta/gating/audit",
         "meta/call_tool",
         "meta/models/catalog"

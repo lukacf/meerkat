@@ -35,6 +35,103 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
+  (`claude-fable-5-2`) is a recommended catalog model: a 1M context window,
+  128K output, adaptive thinking that is always on (`enabled` and
+  `disabled` thinking are refused locally), effort `low` to `max`, no
+  sampling parameters, and a forced tool choice refused locally with the
+  typed `ToolChoiceUnsupported` refusal. It checks every replayed thinking
+  block against its prefix on every account, whatever its age, so its
+  requests carry the `drop_block` control and the
+  `thinking-binding-controls-2026-08-01` beta, as Claude Fable 5.1's do,
+  and a session that moves onto Fable 5.2 keeps sending its earlier turns'
+  thinking. Anthropic does not serve it on Amazon Bedrock (see the
+  providers page). Claude Mythos 5.2 (`claude-mythos-5-2`), which
+  Anthropic serves only to organizations it has verified, is not a catalog
+  model, as Claude Mythos 5.1 is not. The Anthropic default model stays
+  `claude-opus-5-5`.
+
+- `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
+  identity applies to the member's running build (a grant's `applies`), and
+  `wire_member_tool_grant_gate`, the member's gate as a grant list answers
+  it (`gate`). `tool_grants/grant` and `tool_grants/list` answer through
+  them, as Meta's `meta/tool_grants/grant` and `meta/tool_grants/list` now
+  do, so every grant surface answers both the same way. Core's answers do
+  not change.
+
+- `meerkat-schedule`: `meerkat_schedule_list` takes two optional filters,
+  `phase` (`active` or `paused`) and `target_id`, an id the schedule's target
+  names (its session, bound session, identity, mob, member, source member,
+  flow or host runnable id), matched exactly after surrounding whitespace is
+  trimmed. Both apply before the page cut, and through
+  `dispatch_schedule_list_where` after the host's own filter, so they never
+  list a schedule the host hides: a page holds only matching schedules and
+  its cursor continues the same filtered listing. A schedule a mob member
+  made for its own session (`current_session`) targets the member's
+  identity, `mob_member:` followed by a JSON key: pass that whole identity,
+  as the schedule's `target.identity` shows it, for example
+  `mob_member:{"schema":"meerkat.schedule.mob_member_identity.v2","mob_id":"team","member":"agent-a"}`;
+  the member id alone does not match it. `phase: "deleted"` and a
+  `target_id` that is empty or only whitespace are refused as invalid
+  arguments.
+
+### Changed
+
+- Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
+  (previously 10.12). They are built on the BuildBuddy release lane for macOS
+  11.0, and the release refuses one that needs a newer macOS.
+
+### Fixed
+
+- `meerkat-core`, `meerkat-contracts`: the Claude effort `xhigh` is now
+  accepted under both spellings, `xhigh` and `x_high`, on every request
+  surface. RPC session and turn requests, MCP `meerkat_run` and
+  `meerkat_resume`, schedule targets, mob definition files and the CLI's
+  provider params (`--param`, `--params-json`) accepted only `x_high`; REST
+  session creation and the profiles that `mob/create` and `mob/spawn` take
+  accepted only `xhigh`, the spelling the model catalog advertises. Requests
+  to Claude send `xhigh` either way. The spellings Meerkat writes and the
+  published schemas are unchanged.
+
+- `meerkat-runtime`: a run whose operation records an authorization audit
+  observation after the run's terminal input rows were written now settles
+  in the same process. The observation waits on the live input row for the
+  row's next update, and the run's terminal completion finalization is that
+  update, but its exact compare-and-swap expected the live row, observation
+  included, which never matched the stored row: the finalization failed with
+  "terminal completion finalization lost the exact durable CAS", every retry
+  in the process failed the same way, unregistering the session (a mob
+  teardown included) failed with it, and the input's receipt stayed pending
+  until a restart settled it. Every exact terminal rewrite of input rows (the
+  terminal completion finalization and payload retirement, the interaction
+  terminal outbox adoption, finalization and publication receipt, and the
+  normalization of the terminal carriers 0.8.31 wrote) now expects each row
+  as it was last written and commits the observations staged before the
+  rewrite with its replacement; any other difference from the stored row
+  still refuses the rewrite. Affects 0.8.52 through 0.9.11.
+
+- `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
+  runtime store and drops it no longer breaks that realm's credential
+  rotation and OAuth sign-ins. Every handle of one database shares the
+  realm's auth authority, and that authority followed only the handle opened
+  last: from the moment that handle was dropped, every auth lease release (a
+  credential rotation's included) failed with "runtime store is no longer
+  available", every OAuth sign-in failed to start, and sign-ins that another
+  process had persisted were not found. The authority now uses the newest
+  handle of the store that is still open. Affects 0.6.0 through 0.9.11.
+
+### Security
+
+- `rkat`: `rkat auth profile <PROFILE_ID>` printed the whole auth profile, so
+  the secret of an `inline_secret` credential source, and the arguments and
+  environment values of a `command` source, reached its output and the
+  transcript of anything that ran it. It now prints the profile's `id`,
+  `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
+  JSON-RPC `auth/profile/get` returns, and never a credential value.
+  Affects 0.6.0 through 0.9.11.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

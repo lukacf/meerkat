@@ -21,6 +21,7 @@ use meerkat::{
 use meerkat_copilot::{
     CopilotModelAccess, CopilotModelCapabilities, CopilotModelSnapshot, CopilotProviderRoute,
     CopilotResolvedAuth, CopilotRuntime, GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID,
+    same_account_model_id,
 };
 use meerkat_core::auth::{PersistedAuthMode, ProviderAuthPersistence, TokenKey};
 use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
@@ -389,6 +390,29 @@ fn operator_token_routes(integration_id: Option<&str>) -> meerkat_core::RealmCon
         .expect("operator-token Copilot routes")
 }
 
+/// The id under which the account serves the registry model `model` to
+/// `provider`'s family: `model` itself when the account lists it, or else
+/// the only id it serves that names the same model. `None` when it serves
+/// none, or more than one and none exactly.
+fn account_id_for<'a>(
+    snapshot: &'a CopilotModelSnapshot,
+    provider: Provider,
+    model: &str,
+) -> Option<&'a str> {
+    if snapshot.model(model).is_some() {
+        return snapshot
+            .available_model_ids(provider)
+            .find(|listed| *listed == model);
+    }
+    let mut same = snapshot
+        .available_model_ids(provider)
+        .filter(|listed| same_account_model_id(listed, model));
+    match (same.next(), same.next()) {
+        (Some(listed), None) => Some(listed),
+        _ => None,
+    }
+}
+
 fn route_models(config: &Config, snapshot: &CopilotModelSnapshot) -> Vec<RouteModel> {
     let registry = config
         .model_registry(meerkat_models::canonical())
@@ -396,8 +420,16 @@ fn route_models(config: &Config, snapshot: &CopilotModelSnapshot) -> Vec<RouteMo
     let mut models = Vec::new();
     for route in CopilotProviderRoute::ALL {
         let provider = route.provider();
-        for model in snapshot.available_model_ids(provider) {
-            let Some(offering) = snapshot.model(model) else {
+        for entry in registry.entries_for_provider(provider) {
+            // The account's entry for the registry model: the one listed
+            // under the registry id, or else the only one whose id names the
+            // same model (the account lists `claude-opus-5.5` for the
+            // catalog's `claude-opus-5-5`). The session runs the registry id.
+            let model = entry.id.as_str();
+            let Some(account_id) = account_id_for(snapshot, provider, model) else {
+                continue;
+            };
+            let Some(offering) = snapshot.model(account_id) else {
                 continue;
             };
             let Some(profile) = registry.profile_witness_for_provider(provider, model) else {
@@ -629,21 +661,35 @@ async fn copilot_live_account_routes_tools_images_and_switches() {
     let registry = config
         .model_registry(meerkat_models::canonical())
         .expect("effective model registry");
+    // A catalog model the account serves under no spelling of its id is
+    // unavailable on its route. One the account lists under another spelling
+    // (a dot where the catalog writes a hyphen) is served under its catalog
+    // id, as every candidate is.
     if let Some((route, unavailable)) = CopilotProviderRoute::ALL.iter().find_map(|route| {
         registry
             .entries_for_provider(route.provider())
             .find(|entry| {
-                snapshot
-                    .model(&entry.id)
-                    .and_then(|model| model.route_for(route.provider()))
-                    .is_none()
+                !snapshot
+                    .available_model_ids(route.provider())
+                    .any(|listed| same_account_model_id(listed, &entry.id))
             })
             .map(|entry| (*route, entry.id.clone()))
     }) {
         assert_eq!(
             resolved.route_for(route.provider(), &unavailable),
             CopilotModelAccess::Unavailable,
-            "account offering must reject a catalog model absent from the discovered route"
+            "account offering must reject a catalog model the account serves under no spelling"
+        );
+    }
+    for candidate in &candidates {
+        assert!(
+            matches!(
+                resolved.route_for(candidate.provider, &candidate.model),
+                CopilotModelAccess::Available { .. }
+            ),
+            "the account serves catalog model {} on its {} route",
+            candidate.model,
+            candidate.provider.as_str()
         );
     }
 

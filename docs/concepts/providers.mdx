@@ -316,6 +316,14 @@ name prefixes.
   is defined for that build by the account's model list: its provider is the
   family of the protocol its listed endpoints name, and its limits are the
   account's. A model the account does not offer is refused, typed.
+- On a route of a GitHub Copilot account, two IDs that are equal once every
+  `.` is read as `-` name the same model: the account lists
+  `claude-opus-5.5`, the catalog `claude-opus-5-5`. A session created or
+  resumed under either spelling runs the registry model under the registry
+  ID, and the request names the account's ID. An ID the account lists
+  exactly wins; an ID that matches two of its entries and none exactly is
+  refused. A live model switch and a fallback target take the registry ID
+  only. Other routes match IDs exactly.
 
 All public session-creation surfaces use the same resolver. Inherited bindings
 retain the realm that owns their config.

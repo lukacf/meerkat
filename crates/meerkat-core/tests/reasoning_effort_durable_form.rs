@@ -29,7 +29,7 @@ where
 /// writing them again gives the same bytes.
 #[test]
 fn stored_forms_without_reasoning_effort_reserialize_byte_identically() {
-    let params = r#"{"temperature":0.2,"max_output_tokens":4096,"provider_tag":{"provider":"openai","reasoning_effort":"high"}}"#;
+    let params = r#"{"temperature":0.2,"max_output_tokens":4096,"provider_tag":{"provider":"open_ai","reasoning_effort":"high"}}"#;
     assert_eq!(reserialize::<ProviderParamsOverride>(params), params);
 
     let identity = r#"{"model":"test-openai-default","provider":"openai","provider_params":{"temperature":0.2,"provider_tag":{"provider":"anthropic","effort":"x_high"}}}"#;

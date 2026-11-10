@@ -2666,6 +2666,15 @@ mod tests {
         client: &C,
         compactor: &Arc<dyn Compactor>,
     ) -> CompactionAttempt {
+        attempt_source_with_params(session, client, compactor, None).await
+    }
+
+    async fn attempt_source_with_params<C: crate::agent::AgentLlmClient>(
+        session: &Session,
+        client: &C,
+        compactor: &Arc<dyn Compactor>,
+        provider_params: Option<crate::ProviderParamsOverride>,
+    ) -> CompactionAttempt {
         let model_messages = session.messages_for_model_boundary().unwrap();
         run_compaction(
             client,
@@ -2684,7 +2693,7 @@ mod tests {
                 request_pressure: None,
                 parent_revision: session.transcript_revision().unwrap(),
                 summarization_budget: None,
-                provider_params: None,
+                provider_params,
                 wait_report: None,
                 scope: CompactionScope::Whole,
                 projection: &model_messages,
@@ -2889,6 +2898,57 @@ mod tests {
         assert!(
             attempt.uncommitted_call.is_none(),
             "the call must not be charged twice"
+        );
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The summary request does not go through the agent's request
+    /// preparation, so it carries the interim reasoning-effort guard itself:
+    /// a summary request whose params carry the provider-neutral level fails
+    /// this compaction with the configuration refusal, the client (a plain
+    /// `AgentLlmClient`, not the provider adapter) is never called, nothing
+    /// is charged, and the history stays as it was.
+    #[tokio::test]
+    async fn core_refuses_an_unresolved_level_before_any_client_call() {
+        let session = session_with_unmeasured_voice();
+        let before = serde_json::to_vec(&session).unwrap();
+        let compactor: Arc<dyn Compactor> = Arc::new(ObservationCompactor);
+        let client = ReturnedSummaryClient::new("A valid summary.", StopReason::EndTurn);
+        let params = |level| crate::ProviderParamsOverride {
+            temperature: Some(0.5),
+            reasoning_effort: level,
+            ..Default::default()
+        };
+
+        let attempt = attempt_source_with_params(
+            &session,
+            &client,
+            &compactor,
+            Some(params(Some(
+                crate::model_profile::capabilities::EffortLevel::High,
+            ))),
+        )
+        .await;
+        assert!(
+            matches!(
+                &attempt.result,
+                Err(CompactionError::LlmFailed(crate::error::AgentError::ConfigError(message)))
+                    if message == "reasoning_effort cannot be resolved by this build"
+            ),
+            "the summary request must be refused: {:?}",
+            attempt.result.as_ref().err()
+        );
+        assert!(attempt.uncommitted_call.is_none());
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+
+        // The same summary request without the level is served.
+        let attempt =
+            attempt_source_with_params(&session, &client, &compactor, Some(params(None))).await;
+        assert!(
+            attempt.result.is_ok(),
+            "a summary request without the level runs: {:?}",
+            attempt.result.as_ref().err()
         );
         assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

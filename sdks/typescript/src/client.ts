@@ -423,6 +423,7 @@ import { DeferredSession, Session } from "./session.js";
 import {
   Mob,
   type MemberDeliveryReceipt,
+  type MemberInputAdmission,
   type MemberSendContinuation,
   type MemberSendContinuationStatus,
   type MemberSendOptions,
@@ -3187,7 +3188,27 @@ export class MeerkatClient {
         "Invalid mob/member_send response: a keyed send answers its continuation",
       );
     }
+    if (result.admission !== undefined && result.admission !== null) {
+      receipt.admission = MeerkatClient.parseMemberInputAdmission(result.admission);
+    }
     return receipt;
+  }
+
+  private static parseMemberInputAdmission(raw: unknown): MemberInputAdmission {
+    const context = "Invalid mob/member_send response: invalid admission";
+    if (typeof raw !== "object" || raw === null) {
+      throw new MeerkatError("INVALID_RESPONSE", context);
+    }
+    const record = raw as Record<string, unknown>;
+    if (
+      typeof record.session_id !== "string"
+      || record.session_id.length === 0
+      || typeof record.input_id !== "string"
+      || record.input_id.length === 0
+    ) {
+      throw new MeerkatError("INVALID_RESPONSE", context);
+    }
+    return { sessionId: record.session_id, inputId: record.input_id };
   }
 
   private static parseMemberSendContinuation(raw: unknown): MemberSendContinuation {

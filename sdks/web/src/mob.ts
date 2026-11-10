@@ -24,6 +24,7 @@ import type {
   RenderMetadata,
   ContentBlock,
   MemberDeliveryReceipt,
+  MemberInputAdmission,
   MobRespawnResult,
   MobMemberCustodyDeferral,
   MobMemberSnapshot,
@@ -1238,7 +1239,7 @@ function parseMemberDeliveryReceipt(
   if (agentIdentity !== expectedAgentIdentity) {
     throw new Error('Invalid mob member delivery response: agent_identity mismatch');
   }
-  return {
+  const parsed: MemberDeliveryReceipt = {
     agent_identity: agentIdentity,
     member_ref: requireStringField(
       receipt,
@@ -1249,6 +1250,19 @@ function parseMemberDeliveryReceipt(
       receipt.handling_mode,
       'Invalid mob member delivery response: missing handling_mode',
     ),
+  };
+  if (receipt.admission !== undefined && receipt.admission !== null) {
+    parsed.admission = parseMemberInputAdmission(receipt.admission);
+  }
+  return parsed;
+}
+
+function parseMemberInputAdmission(raw: unknown): MemberInputAdmission {
+  const context = 'Invalid mob member delivery response: invalid admission';
+  const admission = requireRecord(raw, context);
+  return {
+    session_id: requireStringField(admission, 'session_id', context),
+    input_id: requireStringField(admission, 'input_id', context),
   };
 }
 

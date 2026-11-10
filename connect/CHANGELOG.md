@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-11-10
+
 Meerkat Connect 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12
 and Connect 0.9.12, released together): GitHub release `connect-v0.9.12`, a
 full release that is never the repository's latest.

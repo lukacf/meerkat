@@ -1875,6 +1875,7 @@ mod tests {
     /// anything, on every entry that makes a provider request, and the wire
     /// client sees neither a projection nor a stream.
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn adapter_refuses_an_untranslated_neutral_effort() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 

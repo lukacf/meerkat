@@ -10428,24 +10428,22 @@ pub fn resolve_resumed_session_llm_identity(
         candidate.auth_binding.as_ref(),
         mask.auth_binding,
     );
-    let provider_params = session_provider_params_rule(
-        durable.provider_params.as_ref(),
-        mask.provider_params
-            .then(|| match candidate.provider_params.as_ref() {
-                Some(params) => TurnMetadataOverride::Set(params),
-                None => TurnMetadataOverride::Clear,
-            }),
-        mask.reasoning_effort.then(|| {
-            match candidate
-                .provider_params
-                .as_ref()
-                .and_then(|params| params.reasoning_effort)
-            {
-                Some(level) => TurnMetadataOverride::Set(level),
-                None => TurnMetadataOverride::Clear,
-            }
-        }),
+    // What the build claims, in the rule's terms: its params (or their
+    // removal) when it claims `provider_params`, and the level its params
+    // name (or none) when it claims `reasoning_effort`.
+    let build_params = candidate.provider_params.as_ref();
+    let params_claim = mask.provider_params.then_some(match build_params {
+        Some(params) => TurnMetadataOverride::Set(params),
+        None => TurnMetadataOverride::Clear,
+    });
+    let level_claim = mask.reasoning_effort.then_some(
+        match build_params.and_then(|params| params.reasoning_effort) {
+            Some(level) => TurnMetadataOverride::Set(level),
+            None => TurnMetadataOverride::Clear,
+        },
     );
+    let provider_params =
+        session_provider_params_rule(durable.provider_params.as_ref(), params_claim, level_claim);
     SessionLlmIdentity {
         model: if mask.model {
             candidate.model

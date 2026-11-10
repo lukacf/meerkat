@@ -1058,6 +1058,18 @@ mod tests {
         assert_engine_refusal(&result, "a directory link into .rkat");
         assert!(!root.join(".rkat/planted.bin").exists());
 
+        // A link into an engine directory deeper in the project: the path
+        // names no `.rkat`, the real path does.
+        tokio::fs::create_dir_all(root.join("packages/app/.rkat"))
+            .await
+            .unwrap();
+        symlink("packages/app/.rkat", root.join("nested-alias")).unwrap();
+        let result = tool
+            .call(json!({"blob_id": blob_id.as_str(), "path": "nested-alias/planted.bin"}))
+            .await;
+        assert_engine_refusal(&result, "a directory link into a nested .rkat");
+        assert!(!root.join("packages/app/.rkat/planted.bin").exists());
+
         let result = tool
             .call(json!({"blob_id": blob_id.as_str(), "path": "alias.toml", "overwrite": true}))
             .await;

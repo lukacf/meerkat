@@ -1297,6 +1297,39 @@ mod tests {
         );
     }
 
+    /// A symbolic link into an engine directory deeper in the project does
+    /// not open it: the patch path names no `.rkat`, the real path does.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_into_a_nested_engine_directory_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("packages/app/.rkat")).unwrap();
+        std::fs::write(root.join("packages/app/.rkat/config.toml"), "kept = true\n").unwrap();
+        symlink("packages/app/.rkat", root.join("alias")).unwrap();
+
+        let result = call_patch(&root, "*** Add File: alias/mcp.toml\n+[[servers]]").await;
+        assert_engine_refusal(&result, "add through a link into a nested .rkat");
+        let result = call_patch(
+            &root,
+            "*** Update File: alias/config.toml\n@@\n-kept = true\n+kept = false",
+        )
+        .await;
+        assert_engine_refusal(&result, "update through a link into a nested .rkat");
+        assert_eq!(
+            std::fs::read_dir(root.join("packages/app/.rkat"))
+                .unwrap()
+                .count(),
+            1,
+            "nothing was added"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("packages/app/.rkat/config.toml")).unwrap(),
+            "kept = true\n"
+        );
+    }
+
     /// Update, delete and both ends of a move are refused, and the tree is
     /// unchanged: no engine file is changed, removed, moved out or replaced.
     #[tokio::test]

@@ -518,6 +518,52 @@ mod tests {
         assert!(!same_name(name("statement"), name("state"), true, true));
     }
 
+    /// Every comparison that ignores letter case also folds the spellings a
+    /// case-insensitive filesystem opens the same entry for: LATIN SMALL
+    /// LETTER LONG S for `s`, the KELVIN SIGN for `k`, and the code points
+    /// HFS+ ignores. So a declared name with an `s` or a `k` in it cannot be
+    /// spelled around. A comparison that keeps case folds nothing, and
+    /// unrelated letters stay different.
+    #[test]
+    fn case_ignoring_comparisons_fold_long_s_kelvin_and_ignorable_code_points() {
+        let name = |text: &'static str| OsStr::new(text);
+        for (spelled, declared) in [
+            ("\u{017F}tate", "state"),
+            ("\u{017F}kill\u{017F}", "skills"),
+            ("s\u{212A}ills", "SKILLS"),
+            ("config_\u{017F}tate.j\u{017F}on", "config_state.json"),
+            ("realm_manife\u{017F}t.json", "realm_manifest.json"),
+            ("st\u{200D}ate", "state"),
+            ("\u{FEFF}credentials", "Credentials"),
+            (".r\u{212A}at", ".rkat"),
+        ] {
+            assert!(
+                same_name(name(spelled), name(declared), true, false),
+                "{} opens {declared}",
+                spelled.escape_unicode()
+            );
+            assert!(
+                !same_name(name(spelled), name(declared), false, false),
+                "{} is another name where case is kept",
+                spelled.escape_unicode()
+            );
+        }
+        for (spelled, declared) in [
+            ("ztate", "state"),
+            ("\u{017F}tate", "ftate"),
+            ("\u{212A}eys", "xeys"),
+            ("st\u{00E4}te", "state"),
+            ("\u{0455}tate", "state"),
+            ("st\u{2060}ate", "state"),
+        ] {
+            assert!(
+                !same_name(name(spelled), name(declared), true, false),
+                "{} does not open {declared}",
+                spelled.escape_unicode()
+            );
+        }
+    }
+
     /// A symbolic link into a protected location is judged by where it
     /// leads, for the engine directory and for a host-declared path, also
     /// when the declared path is itself reached through a link.
@@ -567,6 +613,37 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    /// A symbolic link into an engine directory deeper in the project is
+    /// judged by where it leads: the path names no `.rkat`, the real path
+    /// of its deepest existing ancestor does.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_nested_engine_directory_is_refused_on_its_real_path() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("packages/app/.rkat/skills")).unwrap();
+        symlink("packages/app/.rkat", root.join("alias")).unwrap();
+        symlink(root.join("packages/app/.rkat/skills"), root.join("tools")).unwrap();
+        let rule = ProtectedPaths::default();
+        for refused in [
+            "alias",
+            "alias/mcp.toml",
+            "alias/realms/r/config.toml",
+            "tools/planted/SKILL.md",
+        ] {
+            assert_eq!(
+                rule.admit_write(&root, &root.join(refused)),
+                Err(WriteRefusal::Protected),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            rule.admit_write(&root, &root.join("packages/app/src/main.rs")),
+            Ok(())
+        );
     }
 
     /// An engine directory that is itself a symbolic link is protected

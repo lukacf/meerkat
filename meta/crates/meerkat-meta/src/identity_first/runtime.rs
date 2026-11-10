@@ -1229,8 +1229,9 @@ pub enum IdentityRuntimeError {
     /// MobMachine drives its lifecycle (Core answers its identity management
     /// `CreatedEntry`). Meta's lifecycle verbs refuse it before anything
     /// acts, and nothing was changed; a send, a dispatch or a schedule fire
-    /// still reaches its member through its door. Final. JSON-RPC
-    /// internal-error code with `data.kind` `identity_store_owned`.
+    /// still goes through its door, which delivers to its member while Core
+    /// holds one. Final. JSON-RPC internal-error code with `data.kind`
+    /// `identity_store_owned`.
     IdentityStoreOwned {
         identity: AgentIdentity,
     },
@@ -1306,6 +1307,15 @@ pub enum IdentityRuntimeError {
     SessionNotHeldByIdentity {
         identity: AgentIdentity,
         session_id: SessionId,
+    },
+    /// A delivery to an identity created at runtime that Core archived
+    /// (`MobHandle::archive_identity`): Core holds no member of it, keeps its
+    /// name and its record, and delivers nothing to it until its unarchive
+    /// (`MobHandle::unarchive_identity`) seats it again on its archived
+    /// session. Final: nothing was delivered. JSON-RPC internal-error code
+    /// with `data.kind` `identity_archived`.
+    IdentityArchived {
+        identity: AgentIdentity,
     },
 }
 
@@ -1643,6 +1653,11 @@ impl std::fmt::Display for IdentityRuntimeError {
             } => write!(
                 f,
                 "session {session_id} is not a session of identity '{identity}'"
+            ),
+            Self::IdentityArchived { identity } => write!(
+                f,
+                "identity {identity} is archived: Core holds no member of it and delivers \
+                 nothing to it until its unarchive (unarchive_identity) seats it again"
             ),
         }
     }
@@ -2243,6 +2258,12 @@ impl IdentityRuntimeError {
                 "kind": "session_not_held_by_identity", "identity": identity,
                 "session_id": session_id.to_string(),
             })),
+            // An archived identity keeps the internal-error code; the kind
+            // and the remedy name Core's archive and its unarchive.
+            Self::IdentityArchived { identity } => Some(serde_json::json!({
+                "kind": "identity_archived", "identity": identity,
+                "remedy": "unarchive_identity", "retryable": false,
+            })),
             // A governed bind's typed refusal: nothing was submitted.
             Self::GovernedInput(super::bridge::GovernedInputError::Refused(refusal)) => {
                 Some(serde_json::json!({
@@ -2339,8 +2360,9 @@ pub(crate) struct IdentityEntry {
     /// store custody): its spec is its row's in the mob's identity store, not
     /// a roster row, and Core's MobMachine drives its lifecycle. Each roster
     /// pass registers it again from that row while the host's roster does
-    /// not list it, and forgets it once Core no longer holds it; the managed
-    /// topology never unwires an edge of it.
+    /// not list it, and forgets it once Core no longer holds it, and each
+    /// delivery door reads that row again; the managed topology never prunes
+    /// a live edge of it that this runtime's topology did not wire.
     pub created: bool,
 }
 
@@ -4175,7 +4197,9 @@ struct CoreViewFacts {
     generation: Option<meerkat_mob::Generation>,
     /// The runtime mode Core runs the live member in.
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
-    /// Core holds an identity intent row for the identity.
+    /// Core drives the identity itself: it holds an identity intent row for
+    /// it (host-adopted), or its created entry's row (store-owned), or a row
+    /// this build cannot read: any management other than command-driven.
     intent_managed: bool,
     /// Core refused the identity's last declaration for good
     /// ([`IdentityEntry::declaration_refused`]): no member is read for it,
@@ -9980,10 +10004,13 @@ impl IdentityRuntime {
     ///
     /// Returns a broadcast receiver that yields `IdentityEvent` items for
     /// state changes, lease updates, lease loss, and checkpoint completions.
+    /// An identity created at runtime that this runtime has not registered
+    /// yet is registered from its row first ([`Self::ensure_registered`]).
     pub async fn subscribe(
         &self,
         identity: &AgentIdentity,
     ) -> Result<broadcast::Receiver<IdentityEvent>, IdentityRuntimeError> {
+        self.ensure_registered(identity).await?;
         let channels = self.event_channels.read().await;
         let tx = channels
             .get(identity)
@@ -10486,12 +10513,14 @@ impl IdentityRuntime {
 
     /// REQ-03: the send doors refuse an unknown or `InternalOnly` identity.
     /// An identity created at runtime that this runtime has not registered
-    /// yet is registered from its row first ([`Self::ensure_registered`]).
+    /// yet is registered from its row first, and one it registered is read
+    /// again from its row, so its addressability is Core's current one
+    /// ([`Self::ensure_current_registration`]).
     async fn refuse_unless_addressable(
         &self,
         identity: &AgentIdentity,
     ) -> Result<(), IdentityRuntimeError> {
-        self.ensure_registered(identity).await?;
+        self.ensure_current_registration(identity).await?;
         let addressability = self
             .entries
             .read()
@@ -11006,6 +11035,10 @@ impl IdentityRuntime {
             GovernedWaitBudget,
         };
         let budget = binder.wait_budget();
+        // An identity created at runtime that this runtime has not registered
+        // yet is registered from its row, and one it registered is read again
+        // from its row, as at the other delivery doors.
+        self.ensure_current_registration(identity).await?;
         // One deadline and one set of free rebinds for the whole send, armed
         // by its first wait and never re-armed (Core's owner-change churn),
         // taken at the send's first "not now".
@@ -12526,14 +12559,15 @@ impl IdentityRuntime {
     /// Capture `identity`'s current Core incarnation (runtime id, generation,
     /// fence) for a later "did the owner change?" check. Every atom is Core's
     /// live member scope at the read; an identity Core holds no
-    /// session-backed member for captures all-`None`.
+    /// session-backed member for captures all-`None`. An identity created at
+    /// runtime that this runtime has not registered yet is registered from
+    /// its row first ([`Self::ensure_registered`], which takes no lifecycle
+    /// lock: the lifecycle verbs read it under theirs).
     pub(crate) async fn capture_incarnation(
         &self,
         identity: &AgentIdentity,
     ) -> Result<CapturedIncarnation, IdentityRuntimeError> {
-        if !self.entries.read().await.contains_key(identity) {
-            return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
-        }
+        self.ensure_registered(identity).await?;
         Ok(match self.core_live_scope(identity).await? {
             Some(scope) => CapturedIncarnation {
                 runtime_id: Some(meta_runtime_id(scope.runtime_id())?),
@@ -12941,7 +12975,9 @@ impl IdentityRuntime {
     /// changing anything (the scoped path never wakes an identity): Core's
     /// runtime id (as Meta's public alias), Core's generation and Core's
     /// fence in the v1 slots, plus
-    /// Core's native member scope.
+    /// Core's native member scope. An identity created at runtime that this
+    /// runtime has not registered yet is registered from its row first
+    /// ([`Self::ensure_registered`]).
     async fn active_scope_continuity(
         &self,
         identity: &AgentIdentity,
@@ -12954,11 +12990,11 @@ impl IdentityRuntime {
         ),
         ScopedDeliveryError,
     > {
-        if !self.entries.read().await.contains_key(identity) {
-            return Err(ScopedDeliveryError::Rejected {
-                detail: format!("unknown identity: {identity}"),
-            });
-        }
+        self.ensure_registered(identity)
+            .await
+            .map_err(|error| ScopedDeliveryError::Rejected {
+                detail: error.to_string(),
+            })?;
         let scope = self
             .core_live_scope(identity)
             .await
@@ -13209,11 +13245,11 @@ impl IdentityRuntime {
         track_turn: bool,
     ) -> Result<DispatchOutcome, IdentityRuntimeError> {
         // An identity created at runtime that this runtime has not registered
-        // yet is registered from its row; any other name it has not
-        // registered is unknown here.
-        if !matches!(self.admit_unregistered_name(identity).await, Ok(true)) {
-            return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
-        }
+        // yet is registered from its row, and one it registered is read again
+        // from its row; any other name it has not registered is answered with
+        // the door's typed refusal (a read Core could not serve, retryable),
+        // or unknown here.
+        self.ensure_current_registration(identity).await?;
         // A target Core does not hold yet (or whose first-boot row is still
         // to carry out) is seated first; Core's dispatch materializes it. A
         // maintenance dispatch bound to a captured incarnation seats nothing.
@@ -13714,14 +13750,14 @@ impl IdentityRuntime {
     /// that never waits on the mob actor, and one read of whether Core holds
     /// the identity's member for unpublished customizer tools. A fault of
     /// any of them, the held member's included, is typed history
-    /// unavailable, never a guess.
+    /// unavailable, never a guess. An identity created at runtime that this
+    /// runtime has not registered yet is registered from its row first
+    /// ([`Self::ensure_registered`]).
     pub async fn status(
         &self,
         identity: &AgentIdentity,
     ) -> Result<IdentityStatus, IdentityRuntimeError> {
-        if !self.entries.read().await.contains_key(identity) {
-            return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
-        }
+        self.ensure_registered(identity).await?;
         let history = self.core_view_history().await.map_err(|error| {
             IdentityRuntimeError::IdentityHistoryUnavailable {
                 identity: identity.clone(),
@@ -14577,11 +14613,14 @@ impl IdentityRuntime {
     /// Core's entry of the identity's name (published machine state) and
     /// Core's member history (a store read), and the rest is in-process:
     /// this never touches the mob actor, so it answers while the loop is
-    /// stalled, which is exactly when an operator needs it.
+    /// stalled, which is exactly when an operator needs it. An identity
+    /// created at runtime that this runtime has not registered yet is
+    /// registered from its row first ([`Self::ensure_registered`]).
     pub async fn member_health(
         &self,
         identity: &AgentIdentity,
     ) -> Result<MemberHealthReport, IdentityRuntimeError> {
+        self.ensure_registered(identity).await?;
         let (last_delivery_error, last_reload) = {
             let entries = self.entries.read().await;
             let entry = entries
@@ -15622,6 +15661,23 @@ impl IdentityRuntime {
         }
     }
 
+    /// [`Self::ensure_registered`] for a delivery door, which delivers under
+    /// the registered row: the registration of an identity created at
+    /// runtime is read again from its row first
+    /// ([`Self::admit_at_delivery_door`]), so the row the door checks
+    /// (its addressability first) is Core's current one. The caller holds
+    /// no lifecycle lock.
+    async fn ensure_current_registration(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), IdentityRuntimeError> {
+        match self.admit_at_delivery_door(identity).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(IdentityRuntimeError::UnknownIdentity(identity.clone())),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Whether this runtime's first roster pass has not completed yet: a
     /// roster provider is attached, and no pass has started or the first is
     /// in flight. A runtime without a roster provider runs no roster pass,
@@ -15925,14 +15981,21 @@ impl IdentityRuntime {
         }
     }
 
-    /// [`Self::refuse_inactive_delivery`] with the identity's view state.
+    /// [`Self::refuse_inactive_delivery`] with the identity's view state. An
+    /// identity created at runtime is answered from Core's entry first
+    /// ([`Self::unseated_created_refusal`]): archived, final; awaiting its
+    /// host's preparation, its held creation or its seat, retryable.
     async fn inactive_delivery_refusal(
         &self,
         identity: &AgentIdentity,
         operation: &'static str,
     ) -> IdentityRuntimeError {
-        if !self.entries.read().await.contains_key(identity) {
-            return IdentityRuntimeError::UnknownIdentity(identity.clone());
+        let created = match self.entries.read().await.get(identity) {
+            Some(entry) => entry.created,
+            None => return IdentityRuntimeError::UnknownIdentity(identity.clone()),
+        };
+        if created && let Some(refusal) = self.unseated_created_refusal(identity).await {
+            return refusal;
         }
         match self.member_less_view_state(identity).await {
             Ok(state) => self.refuse_inactive_delivery(identity, state, operation),

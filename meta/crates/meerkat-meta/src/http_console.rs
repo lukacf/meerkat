@@ -4558,6 +4558,12 @@ fn identity_runtime_error_to_console_send_error(
         crate::identity_first::IdentityRuntimeError::InvalidState { .. } => {
             ConsoleSendError::Retired(identity.to_string())
         }
+        // An archived identity created at runtime has no member until its
+        // unarchive: the Console answers it as any identity it holds no
+        // member of.
+        crate::identity_first::IdentityRuntimeError::IdentityArchived { .. } => {
+            ConsoleSendError::Retired(identity.to_string())
+        }
         crate::identity_first::IdentityRuntimeError::ActorAdmissionTimeout {
             operation,
             waited,
@@ -18701,6 +18707,11 @@ async fn reset_all_live_console_agents(
     let mut retired_delegate_details = Vec::new();
     let mut reset_details = Vec::new();
     let mut failures = Vec::new();
+    // The store-owned identities (created at runtime, or adopted into store
+    // custody): Core's MobMachine drives them, so Meta's reset refuses each
+    // before anything acts, and none fails the call. Each is reported with
+    // its kind; Core's own changes reset nothing of them.
+    let mut store_owned = Vec::new();
     // Kept in the body for shape stability. Nothing on the reset path warns
     // today: a registered identity resets through Core's rotation, which
     // retires the current incarnation and seats the fresh one in one step,
@@ -18861,6 +18872,7 @@ async fn reset_all_live_console_agents(
             "retired_delegate_details": retired_delegate_details,
             "warnings": warnings,
             "failed": failures,
+            "store_owned": store_owned,
             "startup_history": Value::Null,
         }));
     }
@@ -19112,6 +19124,13 @@ async fn reset_all_live_console_agents(
                             .await;
                     }
                 }
+                Err(
+                    err @ crate::identity_first::IdentityRuntimeError::IdentityStoreOwned { .. },
+                ) => store_owned.push(json!({
+                    "identity": identity,
+                    "kind": "identity_store_owned",
+                    "error": err.to_string(),
+                })),
                 Err(err) => failures.push(json!({
                     "identity": identity,
                     "error": err.to_string(),
@@ -19235,6 +19254,7 @@ async fn reset_all_live_console_agents(
         "retired_delegate_details": retired_delegate_details,
         "warnings": warnings,
         "failed": failures,
+        "store_owned": store_owned,
         "startup_history": startup_history,
     }))
 }

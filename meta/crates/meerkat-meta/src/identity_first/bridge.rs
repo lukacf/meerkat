@@ -4973,7 +4973,8 @@ impl MemberStanding {
 /// What Core's MobMachine records for one identity's name
 /// ([`SessionBridge::identity_entry`], `MobHandle::identity_entry`): how
 /// Core holds the name, the member that holds it, the host preparation its
-/// entry owes and the session its last member's retirement archived. Read
+/// entry owes, the session its last member's retirement archived and why no
+/// member holds the entry. Read
 /// from the machine state the mob's actor last published: no store read, no
 /// actor command, and it never wakes a member. The identity runtime builds
 /// every view of an identity's lifecycle from it. Build one with its
@@ -4997,6 +4998,11 @@ pub struct CoreIdentityEntry {
     /// The session Core archived the entry's last member on, while no member
     /// holds the entry: the entry's next seat revives it.
     pub archived_session: Option<meerkat_core::types::SessionId>,
+    /// Why no member holds the entry, while none does: Core owes it its
+    /// seat, its host creates it on its first use or holds its creation, it
+    /// awaits its host's preparation, or it is archived. `None` for an entry
+    /// a member holds, and for a name that is no entry.
+    pub unseated: Option<meerkat_mob::UnseatedEntryCause>,
 }
 
 impl CoreIdentityEntry {
@@ -5031,6 +5037,7 @@ impl CoreIdentityEntry {
             member: None,
             host_preparation: None,
             archived_session: None,
+            unseated: None,
         }
     }
 
@@ -5060,6 +5067,13 @@ impl CoreIdentityEntry {
     #[must_use]
     pub fn with_archived_session(mut self, session_id: meerkat_core::types::SessionId) -> Self {
         self.archived_session = Some(session_id);
+        self
+    }
+
+    /// The read, with why no member holds the entry.
+    #[must_use]
+    pub fn with_unseated(mut self, cause: meerkat_mob::UnseatedEntryCause) -> Self {
+        self.unseated = Some(cause);
         self
     }
 
@@ -5449,6 +5463,9 @@ fn core_identity_entry_of(
             let mut entry = CoreIdentityEntry::entry().with_origin(view.origin);
             if let Some(member) = member_of(&view.standing, view.broken.as_ref())? {
                 entry = entry.with_member(member);
+            }
+            if let meerkat_mob::EntryStanding::Unseated(cause) = &view.standing {
+                entry = entry.with_unseated(*cause);
             }
             if let Some(cause) = view.host_preparation {
                 entry = entry.with_host_preparation(cause);
@@ -6048,7 +6065,9 @@ pub trait SessionBridge: Send + Sync {
     /// actor last published and of the identity store: no actor command, and
     /// they never wake a member. A created entry whose row records its
     /// removal, carries no spec or cannot be read is left out, and so is one
-    /// whose member id names no identity of this runtime.
+    /// whose member id names no identity of this runtime, or whose name the
+    /// member-id encoding maps to another member id (skipped with a
+    /// warning).
     ///
     /// The identity runtime's roster pass registers each one the host's
     /// roster does not list. The default answers [`BridgeError::Unsupported`]:
@@ -8567,7 +8586,11 @@ impl MobSessionBridge {
     /// mob's identity store ([`SessionBridge::created_identity`]): `None`
     /// when the store holds no row of it this build reads, when the row
     /// records its removal or carries no spec, or when `member` names no
-    /// identity of this runtime.
+    /// identity of this runtime. A name the member-id encoding maps to
+    /// another member id (a name that is no comms name component, or one
+    /// that starts with the reserved `mk--` marker without being an
+    /// encoding) is skipped with a warning: this runtime's doors would act
+    /// on another member than Core's entry.
     async fn created_identity_of_member(
         &self,
         member: &MobAgentIdentity,
@@ -8591,6 +8614,16 @@ impl MobSessionBridge {
             );
             return Ok(None);
         };
+        if member_id_for_identity(&identity) != *member {
+            tracing::warn!(
+                %member,
+                %identity,
+                "the member-id encoding maps a created entry's name to another member id \
+                 (it is no comms name component, or it starts with the reserved mk-- marker \
+                 without being an encoding): the identity runtime does not serve it"
+            );
+            return Ok(None);
+        }
         Ok(Some(durable_spec_of_created(identity, spec)))
     }
 }

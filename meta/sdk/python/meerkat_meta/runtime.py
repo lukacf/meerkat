@@ -2274,7 +2274,10 @@ class MetaRuntime:
         next wake. An identity with no history is left as it is, and an
         unlisted or retired identity is never made live. An identity a host
         intent declaration manages is refused with
-        :class:`~meerkat_meta.errors.IdentityHostAdoptedError` (-32053).
+        :class:`~meerkat_meta.errors.IdentityHostAdoptedError` (-32053), and a
+        store-owned identity (created at runtime, or adopted into store
+        custody) with a plain :class:`~meerkat_meta.errors.RpcError`
+        (-32603, ``data["kind"] == "identity_store_owned"``).
         """
         return await self._rpc("meta/delete_identity", {"identity": identity})
 

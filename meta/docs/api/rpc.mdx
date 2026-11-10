@@ -371,14 +371,22 @@ on its session, or retire it, then try again (see
 [Upgrading to 0.9.4](/guides/upgrading-to-0-9-4)).
 
 An identity created at runtime is store-owned: its record is its row in the
-mob's identity store, and Core's MobMachine drives its lifecycle. Meta serves
-its sends, dispatches and schedule fires through its door, and its lifecycle
-verbs (reload, retire, respawn, reset, delete, materialize) refuse it before
+mob's identity store, and Core's MobMachine drives its lifecycle. So is an
+identity a host adopted into store custody. Meta serves its sends,
+dispatches and schedule fires through its door, and its lifecycle verbs
+(reload, retire, respawn, reset, delete, materialize) refuse it before
 anything acts, final: `-32603` with structured data
 `{kind: "identity_store_owned", identity, retryable: false}`
 (`meta/retire_member` and `meta/respawn_member` answer `-32000` and name the
-refusal in their message). Nothing is changed. Both SDKs surface the data on
-a plain `RpcError`.
+refusal in their message). Nothing is changed. Its status reads
+`intent_managed: true`, as a host-adopted identity's does. A delivery to one
+that Core archived answers `-32603` with
+`{kind: "identity_archived", identity, remedy: "unarchive_identity", retryable: false}`:
+nothing is delivered until Core's `unarchive_identity` seats it again. A
+delivery to one that awaits its host's preparation, its held creation or the
+seat Core owes it answers `-32052` (`identity_wake_retryable`): the same
+delivery, made again once Core seats it, is delivered. Both SDKs surface the
+data on a plain `RpcError`.
 
 The `-32010` constant is exported from both SDKs as
 `MOB_EVENTS_STALE_CURSOR_CODE`. The Python and TypeScript SDKs auto-
@@ -1008,7 +1016,7 @@ manifest cannot be read.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed`, `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
+| `meta/status_identity` | `{identity}` | `IdentityStatus`: `identity`, `state`, `agent_runtime_id` (`null` when not live), `session_id` and `generation` (Core's last binding; `null` when it holds none), `member_id` (Core's mob member id of that binding, live or retired: the identity's roster member id, which is the identity itself when it is already a valid comms name and its `mk--...` encoding otherwise, as for an identity with a `:`; absent when Core holds no binding), `profile`, `runtime_mode` (the runtime mode Core runs the identity's member in; `null` while Core holds no member of it), `addressability`, `display_name`, `labels`, `intent_managed` (`true` when Core drives the identity itself, so Meta's lifecycle verbs refuse it: a host adopted it, or it is store-owned), `customizer_tools_pending` (`null` once the identity's customizer tools are published) and `delivery_scope` (see [Scope-bound dispatch](#scope-bound-dispatch)); `convergence` (host-adopted identities), `wake_refusal` and `replaced_session` only when set |
 | `meta/inspect_identity` | `{identity}` | The execution view: `identity`, `state`, `profile`, `addressability`, `display_name`, `labels`, `generation`, `agent_runtime_id`, `session_id`, `intent_managed`, `output_preview`, `preview_unavailable`, `is_final`, `peer_reachable_count`, `completion_cursor`, and the optional keys of the status |
 | `meta/retire` | `{identity}` | `{identity, cleanup_warning}`. Releases the member's live materialization: the identity stays a member of Core's mob, on the same session at the same generation, and still reads `active`; its next delivery materializes it again, and a delivery scope captured before stays valid. A member that is not materialized is left as it is. No `spawned_by` descendant of the member is retired (earlier releases retired them), and a completion wait on the identity goes on to its next completion. A member that is being woken or has work in flight is refused with `-32052`: nothing is interrupted (earlier releases interrupted its run), and the retire succeeds once it is quiescent. An identity Core holds no member for is refused as invalid state. A retire ends no incarnation: a reset or a delete ends it, with Core's rotation onto a fresh session, and so does a respawn, which wakes the member on its session at a new generation. A member that no identity of the gateway holds and no host adopted (a Console side chat, a member made on the worker plane) is retired instead, by Core's retire: it leaves the roster with its `spawned_by` descendants, work in flight is interrupted rather than refused with `-32052`, and the answer carries no `cleanup_warning`. A member a host adopted is refused (`-32053`) whether or not an identity of the gateway holds it |
 | `meta/respawn` | `{identity}` | `{identity, agent_runtime_id, session_id, generation, live_respawn_warning, cleanup_warning}`. Retires the live member and wakes it on the same session at a new generation, so a delivery scope captured before is refused as stale. Core's retirement ends the member's wiring, so Meta wires the identity's managed edges (the roster's and the topology controller's) again at once, bounded, as a reset does; a re-wire that fails is logged and the next reconcile retries it. The atoms are `null` for a peer-only member. A side chat is refused (`-32602`, `side_chat_restart_refused`; see `meta/fork_member` above) |
@@ -1064,12 +1072,16 @@ An identity created at runtime (Core's created entry, whose record is its
 row in the mob's identity store) is served as a registered identity, though
 no host's roster lists it: each roster pass registers the created entries
 Core holds with the spec each row holds, and forgets one Core no longer
-holds. A send, a dispatch, a member mutation or a schedule fire that names
-one created since the last roster pass registers it from its row first. Its
-sends, dispatches and schedule fires reach its member through its door.
-Core drives its lifecycle, so Meta's lifecycle verbs refuse it
-(`identity_store_owned`, see
-[Meta-specific error codes](#meta-specific-error-codes)).
+holds. A door that names one created since the last roster pass registers it
+from its row first: a send, a dispatch, a governed input, a member mutation,
+a schedule fire, and the reads of its status, health, events and delivery
+scope. A send, a dispatch and a governed input read the row of a registered
+one again, so Core's update of its addressability, labels, profile or context
+is served at once, and a removal at once forgets it. Its sends, dispatches and
+schedule fires reach its member through its door while Core holds one; a
+delivery to one Core holds no member of is answered from Core's entry (see
+[Meta-specific error codes](#meta-specific-error-codes)). Core drives its
+lifecycle, so Meta's lifecycle verbs refuse it (`identity_store_owned`).
 
 ### Reset and work in flight
 
@@ -1827,6 +1839,8 @@ The pass is sequential, one identity at a time:
    live member that carries no registered identity is respawned in place. Only raw delegates without a registered
    identity are retired. Each reset ends its member's work in flight as
    `meta/reset` does (see [Reset and work in flight](#reset-and-work-in-flight)).
+   A store-owned identity is not reset (Core's MobMachine drives it): it is
+   listed under `store_owned`, and the others still reset.
 4. The call waits up to 10 seconds for the reset identities' startup history
    to reach the console timeline, then returns.
 
@@ -1841,6 +1855,7 @@ target set and are neither reset nor retired.
 | `reset_details` / `retired_delegate_details` | Per-row detail, including any `topology_restore_warning` |
 | `warnings` | Always empty; kept for shape stability. A registered identity resets through Core's rotation, which retires the previous incarnation in the same step, so no stale live member is left to warn about |
 | `failed` | `{identity, error, kind?}` rows. When non-empty the response is `-32000` `reset_all failed for one or more identities` with this whole body as `error.data` |
+| `store_owned` | `{identity, kind, error}` per store-owned identity (created at runtime, or adopted into store custody; `kind` is `identity_store_owned`): Core's MobMachine drives it, so the reset refused it before anything acted. It does not fail the call; a host-adopted identity is under `failed` |
 | `startup_history` | `{timeout, ready, pending}` from the 10 s wait; `null` when preflight failed or no console aggregator is attached |
 </Accordion>
 

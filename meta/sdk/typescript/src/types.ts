@@ -3983,8 +3983,11 @@ export interface IdentityStatus {
    */
   readonly customizerToolsPending: Readonly<Record<string, unknown>> | null;
   /**
-   * `true` when a host intent declaration in Core manages the identity;
-   * Meta's lifecycle verbs then refuse it with `IdentityHostAdoptedError`.
+   * `true` when Core drives the identity itself, so Meta's lifecycle verbs
+   * refuse it: a host intent declaration in Core manages it (the verbs throw
+   * `IdentityHostAdoptedError`), or it is store-owned, created at runtime or
+   * adopted into store custody (they throw a plain `RpcError`, `-32603` with
+   * `data.kind` `"identity_store_owned"`).
    */
   readonly intentManaged: boolean;
   /** Core's convergence status, when `intentManaged` is set and Core could read it. */

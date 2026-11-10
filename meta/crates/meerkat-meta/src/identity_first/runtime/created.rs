@@ -183,7 +183,7 @@ impl IdentityRuntime {
                     .map(|entry| (entry.created, entry.spec == spec));
                 // Registered from this very row, or by the host's roster
                 // meanwhile: nothing to change.
-                if matches!(current, Some((true, true)) | Some((false, _))) {
+                if matches!(current, Some((true, true) | (false, _))) {
                     return Ok(true);
                 }
                 let lifecycle_lock = self.lifecycle_lock_for(name).await;

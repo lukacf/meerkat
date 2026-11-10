@@ -1333,6 +1333,22 @@ class InstallerWorkflowTests(unittest.TestCase):
                         for path in str(step["with"]["path"]).splitlines():
                             self.assertRegex(path, r"^(meta/|\$\{\{ runner\.temp \}\})")
 
+    def test_every_job_that_installs_the_installer_installs_this_commits_meta_sdk_first(self):
+        """The installer pins meerkat-meta at Meta's own version, and a release
+        bump moves that pin before the wheel of that version is published. A
+        job that installed the installer alone would then find no such wheel,
+        and until then it would run a published wheel, not this commit's SDK."""
+        workflow = load(INSTALLER_WORKFLOW)
+        installing = []
+        for name, job in workflow["jobs"].items():
+            runs = [str(step.get("run", "")) for step in steps_of(job)]
+            installer = [index for index, run in enumerate(runs) if re.search(r"pip install -e '?\./installer", run)]
+            if installer:
+                installing.append(name)
+                with self.subTest(job=name):
+                    self.assertIn("python -m pip install ./sdk/python", runs[:installer[0]])
+        self.assertEqual(installing, ["agent-team-live", "cli-team-live", "backend-shard"])
+
     def test_the_root_installer_workflows_use_neutral_names_and_workspace_paths(self):
         """Both installer workflows run from the repository root: their file,
         job, artifact and step names never name the installer's product, and

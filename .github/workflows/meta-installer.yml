@@ -116,6 +116,8 @@ jobs:
         with:
           python-version: '3.12'
           check-latest: true
+      # The installer runs this commit's own Meta: its Python SDK, not a published wheel.
+      - run: python -m pip install ./sdk/python
       - run: python -m pip install -e ./installer
       - name: Agent team installed and operated through the command line on the published Meta release
         run: env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY python installer/tests/installer_live_cli_team.py "$RUNNER_TEMP/cli-team-live"

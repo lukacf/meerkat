@@ -35,6 +35,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   host's own wrapper of a session bridge forwards them to the bridge it
   wraps.
 
+### Security
+
+- A console whose visibility policy includes nested members listed the
+  participants of a running temporary council as members and read their
+  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
+  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
+  console, which hides them, was not affected. A participant is a fork of
+  its source member, so its history begins with a copy of the source's
+  earlier turns, and nothing linked it to its source: it was decided on its
+  own name, its council role and the labels it inherits. A caller the access
+  rules deny the source by identity, by role or through the member that
+  spawned it could therefore read the source's earlier turns in the
+  participant's frames, while the council ran and, in a timeline read by the
+  participant's name, after it ended; such a caller could also send to,
+  inspect and retire the participant by name. A rule on a label the
+  participant inherits still applied, so a source private to a person stayed
+  private. A council participant is now a console member on no policy: it is
+  not listed, every member action by its name (send, inspect, retire, blobs,
+  timeline) answers as for an agent that does not exist, the console reads
+  none of its history, and a frame a console stored for one is served to
+  nobody. A council's mob is known from the council's own record; a stored
+  frame whose mob id has a council mob's form (`council--...`) and names no
+  mob the runtime holds is treated the same, so those frames stay unserved
+  on a host that does not keep council records across a restart. Other
+  nested members are listed and served as before. Frames a console stored
+  for participants before this release stay in its console store, unserved.
+  Affected: 0.8.27 through 0.9.11.
+
 ### Upgrade
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built

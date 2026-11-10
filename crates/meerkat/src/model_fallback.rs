@@ -166,6 +166,14 @@ impl AgentLlmClient for ModelFallbackClient {
             .controller_model_selection()
     }
 
+    /// The route of the candidate this client is serving: a fallback moves
+    /// the answer to the target's route with it.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.candidates[self.active_index()]
+            .client
+            .reasoning_route()
+    }
+
     fn pin_controller(self: Arc<Self>) -> Option<meerkat_core::ControllerModelClient> {
         // Read the existing selector exactly once and retain the selected
         // child. Later fallback changes cannot retarget the admitted pin.

@@ -68,7 +68,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 humantime = "2.1"
 humantime-serde = "1.1"
 parking_lot = "0.12"
-rusqlite = { version = "0.37", features = ["bundled"] }
+# `fallible_uint`: the u64/usize ToSql/FromSql impls (range-checked through
+# i64) that rusqlite before 0.38 always had; the stores read and write u64
+# and usize values through them.
+rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 indexmap = { version = "2", features = ["serde"] }
 tokio-util = "0.7"
 notify = "8"

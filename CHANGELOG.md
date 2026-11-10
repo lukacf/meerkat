@@ -43,6 +43,21 @@ them.
   answer. On the wire the field is optional and left out when absent, so a
   client that does not read it is unaffected.
 
+- `meerkat-sqlite`, `meerkat-store`, `meerkat-runtime`, `meerkat-workgraph`:
+  every public signature that names a rusqlite type names rusqlite 0.41's
+  (`Connection`, `Transaction`, `Error`, `FromSql`, `ValueRef`), no longer
+  0.37's. They include `meerkat_sqlite::Connection` (a re-export of
+  `rusqlite::Connection`), `meerkat_sqlite::open`, `open_with` and
+  `begin_immediate`, `meerkat_sqlite::SqliteStoreError` and
+  `meerkat_store::StoreError` (`From<rusqlite::Error>` and their
+  `rusqlite::Error` sources), `meerkat_sqlite::classify_sqlite_error` and
+  `is_busy_or_locked`, the ledger's `Migration::apply`,
+  `SchemaDomain::initialize_current` and `MaintenancePrepareFn`, and the
+  connection and `*_in_txn` functions of `meerkat_store::sqlite_store`.
+  Code that passes these types to or from its own rusqlite moves to
+  rusqlite 0.41 with Meerkat (see Upgrade notes). The semver gate does not
+  measure which version of a dependency's type a signature names.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
@@ -113,6 +128,11 @@ them.
   (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
   answer without it.
 
+- `meerkat-copilot`: `CopilotRouteResolution::wire_model()`, the ID the
+  account lists a route's model under (the ID the route's requests name),
+  and `same_account_model_id(left, right)`, whether two IDs name the same
+  model on a GitHub Copilot account (see Fixed).
+
 ### Changed
 
 - Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
@@ -120,6 +140,31 @@ them.
   11.0, and the release refuses one that needs a newer macOS.
 
 ### Fixed
+
+- `meerkat-copilot`, `meerkat`, `meerkat-anthropic`, `meerkat-openai`,
+  `meerkat-gemini` (GitHub Copilot routes): a Claude model whose ID carries a
+  minor version now runs under its catalog ID. A Copilot account lists these
+  models with a dot (`claude-opus-5.5`, `claude-fable-5.2`), the catalog
+  writes them with a hyphen (`claude-opus-5-5`, `claude-fable-5-2`), and the
+  routes matched the two by exact ID. A request for `claude-opus-5-5` on a
+  Copilot route failed when its client was built (`Copilot account does not
+  expose /v1/messages for anthropic model 'claude-opus-5-5'; available
+  account models: ...`), and so did a request that named no model on
+  `global:copilot_anthropic`, whose default is that model. The account's own
+  spelling ran (from 0.9.10), but as a model only the account defines: no
+  thinking, a 16384-token default output budget and none of the catalog
+  model's request shaping, so a thinking budget the catalog model refuses
+  locally reached Copilot and failed there. On a Copilot route two IDs now
+  name the same model when they are equal once every `.` is read as `-`.
+  A session built under either spelling (created or resumed) runs as the
+  catalog model: its model is the catalog ID, and its requests to Copilot
+  name the account's ID. An ID the account lists exactly always wins. An ID
+  that matches two of the account's entries and none exactly is refused,
+  naming both; a model the account does not list keeps its refusal text. A
+  session that stored the account's spelling resumes and runs as the catalog
+  model from then on, with the output budget it stored. A live model switch
+  and a fallback target still take the catalog ID only. Routes that are not
+  GitHub Copilot still match IDs exactly. Affects 0.8.42 through 0.9.11.
 
 - `meerkat-core`, `meerkat-contracts`: the Claude effort `xhigh` is now
   accepted under both spellings, `xhigh` and `x_high`, on every request
@@ -165,6 +210,18 @@ them.
   end, and writes them. Any other difference from the stored row still
   refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
+- `meerkat-runtime`: every archive of a terminal input row now writes the
+  authorization audit observations recorded on the row since it was last
+  written before the row leaves memory, not only the archive after its
+  completion or publication receipt. The archives that follow an abandon,
+  retire, reset, destroy or stop of inputs, a resumable run's settlement, a
+  queued input's cancel, an admission that supersedes or coalesces a queued
+  input, the end of unstageable queued inputs, a live boundary join's
+  cancel, and a run's terminal dropped such an observation. Once a row is
+  archived, its audit refuses any later observation, so an operation that
+  records after its run's rows were archived is refused as observation
+  unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
+
 - `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
   runtime store and drops it no longer breaks that realm's credential
   rotation and OAuth sign-ins. Every handle of one database shares the
@@ -196,6 +253,51 @@ them.
   `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
   JSON-RPC `auth/profile/get` returns, and never a credential value.
   Affects 0.6.0 through 0.9.11.
+
+- `meerkat-auth-core`: MCP OAuth discovery reads at most 1 MiB of each
+  document a server answers with: the protected resource metadata, the
+  authorization server metadata (RFC 8414 or OpenID Connect discovery, the
+  account preflight's OpenID Connect configuration included) and the dynamic
+  client registration response. These reads had no size bound, so the MCP
+  server being authorized, or the authorization server it names, could
+  stream a document into memory until a time bound ended the read, before
+  any authentication. A larger document is now refused once 1 MiB has
+  arrived and the rest is never read: discovery and registration fail with
+  `upstream_failure`, the account preflight with `verification_unavailable`,
+  and the error names none of the document's content. Affects 0.6.34
+  through 0.9.11.
+
+- `meerkat-mcp`: rmcp's built-in reqwest Streamable HTTP client is no longer
+  built (meerkat-mcp stopped enabling rmcp's unused
+  `transport-streamable-http-client-reqwest` feature), and reqwest 0.13,
+  which only that client used, leaves the dependency graph of every Meerkat
+  binary. RUSTSEC-2026-0462 (unbounded response bodies in that client, rmcp
+  before 3.9.0) does not affect Meerkat, whose own MCP client bounds every
+  response body and SSE event at 64 MiB, so an audit that reports rmcp 1.8
+  by version can ignore it.
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): rusqlite is updated to
+  0.41.1 and libsqlite3-sys to 0.39.1, in Cargo.lock and in the example
+  workspaces' lockfiles, and Meerkat's crates require rusqlite 0.41.1.
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  (`-wal`) of a different page size, so a crafted pair of files placed where
+  a Meerkat process opens its stores (a project-local `.rkat` directory in a
+  checkout, for example) could expose that process's memory. Stored values
+  keep their encoding: Meerkat's crates enable rusqlite's `fallible_uint`
+  feature, which keeps the range-checked u64 and usize conversions that
+  rusqlite 0.37 had. Affects 0.4.7 through 0.9.11.
+
+### Upgrade notes
+
+- An application that depends on rusqlite (or libsqlite3-sys) itself moves
+  to rusqlite 0.41 (libsqlite3-sys 0.39) together with Meerkat:
+  libsqlite3-sys links one SQLite per build (`links = "sqlite3"`), so Cargo
+  refuses a graph that holds rusqlite 0.37 next to Meerkat's rusqlite 0.41.
+  The rusqlite types Meerkat's API names are rusqlite 0.41's, for example
+  `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`) and
+  the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
+  carries.
 
 ## [0.9.11] - 2026-11-09
 

@@ -15729,6 +15729,16 @@ comms = true
             .remove_unrecorded_for_test(&identity)
             .await
             .expect("simulate a concurrent durable delete after resolution");
+        // The status read of a name this runtime does not register answers
+        // from Core's entry of it: while Core still holds the name declared,
+        // the read is retryable until a roster pass registers it again.
+        assert!(matches!(
+            identity_rt.status(&identity).await,
+            Err(crate::identity_first::IdentityRuntimeError::IdentityHistoryUnavailable { .. })
+        ));
+        // The durable delete removed the name in Core too: the read answers
+        // it unknown.
+        core_bridge.hold_removed(&identity);
         assert!(matches!(
             identity_rt.status(&identity).await,
             Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_))
@@ -16055,14 +16065,16 @@ comms = true
     /// `meta/retire_member` by a name this runtime has not registered, which
     /// Core holds for an identity, answers the identity door's typed refusal,
     /// and the mob's raw plane retires nothing, though a raw member holds the
-    /// name there: a created entry and a removed name answer `-32001`, an
-    /// unreadable name `-32014` (`identity_name_unreadable`), and an entry a
-    /// host declared, before this process's roster pass registered it,
-    /// `-32052` (`identity_history_unavailable`, retryable).
+    /// name there: a removed name answers `-32001`, an unreadable name
+    /// `-32014` (`identity_name_unreadable`), and an entry a host declared,
+    /// before this process's roster pass registered it, `-32052`
+    /// (`identity_history_unavailable`, retryable). An identity created at
+    /// runtime is registered from its row and goes through its door, which
+    /// refuses the retire: Core drives a store-owned identity.
     ///
-    /// RED: read `identity_for_member_mutation`'s refusal as "no identity" in
-    /// the RPC member verbs: the raw plane retires the member under the name,
-    /// and the verb answers it accepted.
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
+    /// in the RPC member verbs: the raw plane retires the member under the
+    /// name, and the verb answers it accepted.
     #[tokio::test]
     async fn retire_member_of_a_name_no_roster_pass_registers_is_refused_typed()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -16115,7 +16127,7 @@ comms = true
             )
             .map_err(|err| format!("Core's member of {identity}: {err:?}"))?;
         }
-        core_bridge.hold_created(&created);
+        core_bridge.hold_created(&created, "worker");
         core_bridge.hold_declared(&declared);
         core_bridge.hold_removed(&AgentIdentity::parse("door-removed")?);
         core_bridge.hold_unreadable(&AgentIdentity::parse("door-unreadable")?);
@@ -16144,7 +16156,9 @@ comms = true
         };
 
         for (id, (name, code, data)) in [
-            ("door-created", -32001, Value::Null),
+            // The door of the identity created at runtime refuses the
+            // retire, as the identity verb's failure.
+            ("door-created", -32000, Value::Null),
             ("door-removed", -32001, Value::Null),
             (
                 "door-unreadable",
@@ -16196,6 +16210,14 @@ comms = true
                 (json!(code), data),
                 "{name}: the identity door's typed refusal: {response:#?}"
             );
+            if name == "door-created" {
+                let message = response["error"]["message"].as_str().unwrap_or_default();
+                assert!(
+                    message.contains("retire_member (identity) failed")
+                        && message.contains("store-owned"),
+                    "{name}: the identity's door refused the retire: {response:#?}"
+                );
+            }
         }
 
         let members = runtime.mob_handle().list_members().await;

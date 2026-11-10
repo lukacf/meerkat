@@ -1,7 +1,8 @@
 /**
  * `MetaRuntime` wrappers of the scoped tool grant methods
  * (`meta/tool_grants/*`): each sends its method with exactly the params it
- * names, a grant names exactly one target, and a refusal of the methods
+ * names, a grant names exactly one target, a grant's `applies` and a list's
+ * `gate` resolve as the gateway answers them, and a refusal of the methods
  * rejects with the typed `ToolGrantRequestRefusedError`, whose kinds are a
  * closed vocabulary; another `-32602` answer stays a plain `RpcError`.
  */
@@ -83,6 +84,23 @@ describe("MetaRuntime tool grant wrappers", () => {
       },
       { method: "meta/tool_grants/audit", params: { identity: "agent-a" } },
     ]);
+  });
+
+  it("resolve a grant's applies and the member's gate as the gateway answers them", async () => {
+    const granted = { grant: { grant_id: "g1" }, applies: "at_next_build" };
+    const listed = {
+      grants: [{ grant_id: "g1" }],
+      gate: {
+        running: { gated: { tools: ["datetime"] }, not_mounted: {} },
+        next_build: { gated: { tools: ["datetime"] }, not_mounted: {} },
+      },
+    };
+    const { rt } = await scriptedRuntime([{ result: granted }, { result: listed }]);
+    assert.deepEqual(
+      await rt.grantTool("agent-a", { tool: "datetime", durationMs: 600_000 }),
+      granted,
+    );
+    assert.deepEqual(await rt.listToolGrants("agent-a"), listed);
   });
 
   it("refuses a grant that names no target or two", async () => {

@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[2]
@@ -47,7 +48,8 @@ class RetainedRealmRootTests(unittest.TestCase):
         parent.parent.mkdir(mode=0o700)
         parent.mkdir(mode=0o700)
         # Real private, unprepared attempts are skipped without entering an
-        # owner. The next cursor proves enumeration reached the selected realm.
+        # owner. With a zero scan budget a call reads one position, so the
+        # next cursor proves enumeration reached the selected realm.
         for name in ("setup-first", "setup-second"):
             (parent / name).mkdir(mode=0o700)
         marker = parent / "unrelated-note"
@@ -57,11 +59,17 @@ class RetainedRealmRootTests(unittest.TestCase):
         # This is also the existing initial preparation/direct-readback rule.
         self.assertEqual(host.directory(request["realm_state_root"]), self.state)
         self.assertEqual(product.retained_parent(host, request), parent)
-        self.assertEqual(self.page(request), self.page(self.request(self.state)))
+        with patch.object(product, "RETAINED_SCAN_SECONDS", 0):
+            self.assertEqual(self.page(request), self.page(self.request(self.state)))
+            self.assertEqual(self.page(request), {
+                "kind": "retained_installation_page", "candidates": [],
+                "next_cursor": {"setup": "setup-second", "workspace": "", "after_job": ""},
+                "unconfirmed": False,
+            })
+        # The default scan reads on past both attempts to the end of the listing.
         self.assertEqual(self.page(request), {
             "kind": "retained_installation_page", "candidates": [],
-            "next_cursor": {"setup": "setup-second", "workspace": "", "after_job": ""},
-            "unconfirmed": False,
+            "next_cursor": None, "unconfirmed": False,
         })
         self.assertEqual(request, original)
         self.assertTrue(self.alias.is_symlink())

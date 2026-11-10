@@ -272,9 +272,9 @@ The residual: the pins are only as trustworthy as the release that produced
 them. The attested identity names the workflow and its ref, and `main` names
 no commit: the release version is bound by the attested subject name. The
 GitHub-hosted runner is the job that attested; on a BuildBuddy release the
-Linux (x86_64 and arm64) and macOS arm64 binaries are compiled by BuildBuddy
-remote execution, so BuildBuddy's executors and cache are part of what the
-pins trust. Anyone
+Linux (x86_64 and arm64) and macOS (arm64 and Intel) binaries are compiled by
+BuildBuddy remote execution, so BuildBuddy's executors and cache are part of
+what the pins trust. Anyone
 able to run this repository's release workflow can produce attested
 archives, and a package whose own files were replaced after it was built
 pins whatever digests it then carries.
@@ -314,7 +314,7 @@ pins whatever digests it then carries.
    (or, for a [maintenance release](#maintenance-releases), a push to its
    release branch).
 4. In parallel, verify registry credentials, consume declared-break evidence,
-   and either find the complete prebuild of the tag commit or build the
+   and either find a complete prebuild for the tag commit or build the
    platform binaries and the Web SDK package artifact.
 5. Publish the critical Linux (x86_64, aarch64) and macOS arm64 archives as
    soon as their lane passes (`publish_critical_release_assets`), without
@@ -359,19 +359,48 @@ backend its critical lanes queue behind other runners and miss the tag run's
 wait, as v0.9.3's GitHub-hosted prebuild did. `make release-prebuild` reads that
 backend from the repository variable. It
 does not wait for CI: it builds every release binary (the critical Linux and
-macOS arm64 ones on BuildBuddy or the GitHub-hosted lane, Intel macOS
-cross-compiled on Apple silicon, Windows cross-compiled with cargo-xwin and
-verified on a Windows runner) and the Web SDK package from exactly the
+macOS arm64 ones on BuildBuddy or the GitHub-hosted lane, Intel macOS on the
+same backend: cross-compiled on BuildBuddy's Apple-silicon executors for
+macOS 11.0 and then run and inspected on a hosted Apple silicon runner, or
+cross-compiled on that runner on the GitHub-hosted backend; Windows
+cross-compiled with cargo-xwin and verified on a Windows runner) and the Web
+SDK package from exactly the
 dispatched commit, stamps each archive with that commit, attests and uploads
 everything, and publishes nothing. Its `Release prebuild gate` job passes
 once the critical binaries and the Web SDK package succeeded; the trailing
-Intel macOS and Windows lanes keep running in the same run.
+Intel macOS and Windows lanes keep running in the same run. The command then
+dispatches Meta's two candidate tiers of the same commit
+(`make -C meta release-candidate`, core then trailing; a dry run prints
+them): they build before Core's tag exists, and Meta's promotion refuses a
+candidate whose `crates/` tree differs from the tree of that tag.
 
 The tag run looks the prebuild up after `require_ci_green`
 (`release_prebuild`, `scripts/release-find-prebuild`): a `release.yml`
-dispatch on `main` at exactly the tag commit, in this repository, started
-and triggered by the repository owner, whose `Release prebuild gate` passed
-and whose critical artifacts have not expired; the publishers verify the run
+dispatch on `main`, in this repository, started and triggered by the
+repository owner, whose `Release prebuild gate` succeeded and whose critical
+artifacts have not expired, at the tag commit or, failing a usable one, at an
+ancestor whose prebuild serves it. A prebuild serves a later commit when every
+path changed between the two is a non-input of Core's release artifacts
+(`scripts/release-prebuild-equivalent`): a path under another product's root
+(except a `Cargo.toml` there, which the workspace resolves and
+`MODULE.bazel.lock` records), a product's changelog, or one of a short list of
+files only CI reads (the CI planner and its data, each a `scripts/ci-*` file:
+the helper refuses every prebuild while it lists another). A release fix that touches
+only Connect, Meta, a changelog or the planner therefore reuses the prebuild
+of the release merge instead of rebuilding Core; any other path, an unreadable
+`ci/products.json` or a commit that is not an ancestor means a full build.
+`make release-doctor` checks that no release build job, local action or
+script it runs names such a path (following the scripts named there, the
+local actions, a module's relative imports and the files the npm scripts a
+build script runs execute with node; not a Make recipe or a cargo alias), and
+that the normal and build dependencies of the release binaries and the Web
+SDK runtime reach no package under a product's root. The lookup prefers a run of exactly the tag
+commit: while one is still under way it waits for that run rather than take
+an earlier commit's, and it never takes an earlier commit's run whose
+Windows or Intel macOS lane or full binary build gate already failed, timed
+out or was cancelled (the tag run could not publish the trailing archives).
+The job summary lists every changed path with its reason;
+the publishers verify the run
 attempt the lookup examined and refuse it if the run was re-run since;
 a gate that has not concluded yet is waited for, because the prebuild
 finishes no later than a fresh build would, for up to 140 minutes from the
@@ -384,15 +413,16 @@ skips every build job and publishes that run's artifacts after the same
 verification as an `--assets-run-id` recovery
 (`verify-release-asset-provenance --source-run`: every archive and its stamp
 attested by `release.yml` at that commit on `refs/heads/main`, the stamp
-naming the tag commit, every binary embedding the release version; a
-prebuild run is accepted as a source only by the tag run of exactly its
-commit, never by an asset recovery, because a prebuild does not wait for
+naming that commit, which must be the tag commit or serve it, every binary
+embedding the release version; a prebuild run is accepted as a source only by
+a tag run, never by an asset recovery, because a prebuild does not wait for
 exact-main CI):
 `publish_critical_release_assets` publishes the critical archives at once,
 and `publish_github_release` adds the trailing ones after the prebuild's
 `Release binary build gate` passed (if that run's trailing lanes failed, an
-asset recovery publishes them). `publish_web_sdk` verifies the package's
-attestation and version before publishing. Without a usable prebuild the tag
+asset recovery publishes them). `publish_web_sdk` binds the package to the
+prebuild's commit the same way and verifies its attestation and version
+before publishing. Without a usable prebuild the tag
 builds everything as before. The prebuild never relaxes a publication gate:
 exact-main CI, semver evidence and registry credentials are still required by
 the tag run itself.
@@ -411,8 +441,20 @@ SHA, CI workflow run and attempt, branch, and event to backend
 `github-hosted-cargo`, its aggregate `validation_result`, the selected lane
 `plan`, and every lane's `component_results`. The release gate downloads it
 from the successful exact-main workflow run (for a maintenance release, the
-push run on its release branch) and verifies every required field
-before tag-triggered publication starts. A release-projection run (plan mode
+push run on its release branch), or from a failed run of that kind whose
+attestation's `product_evidence` shows every failure in rows Core does not
+depend on, and verifies every required field
+before tag-triggered publication starts. Its `validation_result` is `success`
+only when every step of the CI gate before the attestation succeeded. The
+failed run is judged by the release commit's first parent's copy of
+`scripts/ci-product-evidence.mjs`, told the commit's changes against that
+parent (a renamed path under both names); a commit that changes that script,
+the planner or a module it imports, `ci/products.json`, the non-Rust reader
+inventory or `ci.yml`, or that adds or deletes a package manifest, needs a
+green run, and so does every release whose product is Connect. Meta's gate
+and its candidate collection, promotion and recovery apply the same reader
+for Meta, each on the CI attempt it bound.
+A release-projection run (plan mode
 `release-projection`) also records `reused_test_evidence`: the first-parent
 commit and tree and the CI run and attempt it reused. The release gate then
 runs the parent's own copies of the classifier and the evidence script to
@@ -423,9 +465,11 @@ workspace, records every lane as successful and is not itself a reuse. The consu
 supported legacy schema-1 Cargo, schema-2 BuildBuddy, and schema-3
 BuildBuddy-plus-dense-Mob attestations; the current producer does not emit
 those formats.
-Manual recovery dispatches still require successful exact-main CI (for a
+Manual recovery dispatches still require exact-main CI (for a
 maintenance release, the push CI on its release branch) for the
-selected release commit. When release validation applies, the dispatch runs
+selected release commit: a successful run, or a failed one the product-scoped
+evidence accepts for Core as above (a dispatch does not verify the retained
+attestation again). When release validation applies, the dispatch runs
 the selected validation lane directly rather than requiring a retained **CI**
 attestation artifact. Narrow `assets`,
 `packages`, `web-sdk`, and `web-sdk-publish` modes repair one publication
@@ -483,6 +527,7 @@ head, which never reaches `main` before the tag.
 - A push to `release/<version>` writes the exact-tree CI attestation and,
   for a `Cargo.toml` or `CHANGELOG.md` change, the readiness push evidence,
   as a push to `main` does. `require_ci_green` accepts a successful push run
+  (or a failed one the product-scoped evidence accepts for Core)
   of `ci.yml` at exactly the release commit on `main` or on
   `release/<version>`, where `<version>` is the checked-out workspace version
   the tag is bound to, and requires the verified attestation's ref to be
@@ -513,7 +558,8 @@ Automatic tag packaging selects BuildBuddy only when `github.actor` is
 literally `lukacf` and the repository variable
 `MEERKAT_RELEASE_BUILDBUDDY` is `true` or `1`. For eligible manual dispatches,
 explicit `release_backend=buildbuddy` selects BuildBuddy validation and
-Linux and macOS arm64 packaging only for that same literal actor; it does not also
+Linux and macOS (arm64 and Intel) packaging only for that same literal actor;
+it does not also
 require the automatic-selection variable. This is a named-actor condition,
 not a general owner/admin permission check.
 
@@ -525,7 +571,16 @@ RELEASE_BACKEND=buildbuddy make release-workflow VERSION=vX.Y.Z
 
 On eligible manual dispatches, other actors use GitHub-hosted Cargo validation
 and Linux and macOS arm64 packaging even when they request
-`release_backend=buildbuddy`. Windows and Intel macOS packaging and every
+`release_backend=buildbuddy`. Intel macOS follows the selected backend: the
+owner's BuildBuddy releases cross-compile it on BuildBuddy
+(`release-build-macos-x86`, for macOS 11.0) and run and inspect it on a hosted
+Apple silicon runner; every other release cross-compiles it on that runner.
+An asset recovery of a tag cut before its launcher pinned that minimum would
+build Intel macOS on BuildBuddy for macOS 13.0, which the inspection refuses,
+so the BuildBuddy job refuses such a tag before it builds: recover its assets
+on the GitHub-hosted backend (`RELEASE_BACKEND=github-hosted VERSION=vX.Y.Z
+make release-assets`).
+Windows packaging and every
 credentialed registry publish still run on GitHub-hosted runners, and the exact-main GitHub Actions CI requirement remains
 in force. This release
 backend selection is separate from per-push CI, which is Cargo-only on

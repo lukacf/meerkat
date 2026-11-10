@@ -579,6 +579,19 @@ describe("Approvals at a glance (v2)", () => {
     expect(view.getByText("No pending approvals.")).toBeTruthy();
   });
 
+  it("shows a withdrawn request as a quiet Withdrawn row, never as a rejection", () => {
+    const audit = [
+      { audit_id: "w0", event_type: "pending_created", action_id: "rotate", risk_tier: "r3", actor_id: "ops", outcome: "pending_approval", timestamp_ms: now - 15 * 60_000, detail: { action: "Rotate the signing key" } },
+      { audit_id: "w1", event_type: "request_withdrawn", action_id: "rotate", risk_tier: "r3", actor_id: "ops", outcome: "safe_draft", timestamp_ms: now - 5 * 60_000, detail: { reason: "no longer needed", withdrawn_by: "host" } },
+    ];
+    const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={vi.fn()} resource={ready([])} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const row = view.getByTestId("gating-audit:w1");
+    expect(row.textContent?.includes("Withdrawn")).toBe(true);
+    expect(row.textContent?.includes("Rejected")).toBe(false);
+    expect((view.getByTestId("gating-glance:decided").textContent ?? "").includes("rejected")).toBe(false);
+  });
+
   it("titles a decision by the request it decided, newest first, by day", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={seededAudit} onDecide={vi.fn()} resource={ready([])} />);
     fireEvent.click(view.getByTestId("gating-tab:audit"));

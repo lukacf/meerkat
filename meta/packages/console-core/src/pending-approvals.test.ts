@@ -409,3 +409,25 @@ test("a request decided elsewhere leaves a tombstone that names who decided it, 
     assert.deepEqual((resource.getSnapshot().departed ?? []).map((item) => item.request.pendingId), ["p1"]);
   } finally { resource.dispose(); }
 });
+
+test("a request its requester withdrew leaves a non-actionable withdrawn tombstone with no decider", async () => {
+  const c = clock();
+  let pending = [row("p1")];
+  const resource = createPendingApprovalResource({ scopeKey: "a", environment: c.environment,
+    load: async () => ({ pending }),
+    decide: async () => accepted("p1"),
+    loadDecisions: async () => ({ entries: [
+      { pending_id: "p1", event_type: "request_withdrawn", outcome: "safe_draft", detail: { reason: "obsolete", withdrawn_by: "host" } },
+    ] }),
+  });
+  try {
+    await tick();
+    pending = [];
+    await resource.refresh();
+    await tick();
+    assert.deepEqual((resource.getSnapshot().departed ?? []).map((item) => [item.request.pendingId, item.decided]), [
+      ["p1", { action: "withdrawn" }],
+    ]);
+    assert.deepEqual(resource.getSnapshot().requests, []);
+  } finally { resource.dispose(); }
+});

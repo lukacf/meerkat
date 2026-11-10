@@ -7,12 +7,22 @@ TIER_TARGETS): every candidate run builds and binds exactly one tier, both
 tiers come from the same source SHA, promotion publishes only a core
 selection, and the trailing tier is added afterwards, add-only, by assets-mode
 recovery bound to the published core receipt. Verification and registry
-retry require the core tier only.
+retry require the core tier only. Schema 3 is schema 2 whose manifest also
+binds core_crates_tree, the tree of crates/ (the in-tree Core the gateways
+embed) at source_sha: a schema 3 candidate may build before Core's tag
+exists, and staging refuses it unless that tree equals the tree of Core's tag
+of the version the workspace declares. Schema 2 candidates built in this
+repository made that comparison in their build legs. Schema 4 is schema 3
+whose manifest also carries floor_record: what the core tier's published-floor
+check proved when Core's crates were already on crates.io (null otherwise, and
+always null for the trailing tier). A promotion reuses it instead of building
+the same crates against the same published Core again, but only while every
+input it binds still holds (floor-reuse); anything else runs the floor build.
 
 Selections are strict JSON objects (all hashes are lowercase SHA-256 hex):
   accepted-candidate: schema_version=1, kind, repository, run_id, run_attempt,
-    manifest_artifact={id, digest, manifest_sha256}; schema_version=2 adds
-    tier ("core" or "trailing").
+    manifest_artifact={id, digest, manifest_sha256}; schema_version=2, 3 and 4
+    add tier ("core" or "trailing"), and match their manifest's schema.
   original-assets: schema_version=1, kind, repository, source_sha, version, tag,
     run_id, run_attempt, metadata={"index.json": hash, "checksums.sha256": hash},
     artifacts=[{id, name, digest, target, archives=[archive_record, ...]}, ...].
@@ -24,6 +34,12 @@ Candidate manifests have schema_version=1, kind="candidate-manifest", repository
 source_sha, version, tag, run_id, run_attempt, workflow={path, sha, ref},
 ci={run_id, run_attempt}, artifacts (the complete matrix), and metadata.
 Schema 2 manifests add tier, and their artifacts and metadata are that tier's.
+Schema 3 manifests add core_crates_tree (40 lowercase hex) to schema 2.
+Schema 4 manifests add floor_record (null, or an object of FLOOR_RECORD_KEYS:
+the declared Core version, each Core crate the floor resolved from crates.io
+with its version and index checksum, the source commit and its crates/ tree,
+the sha256 of the resolved lock, the unpatched .crate sha256 of each Meta
+crate, and the toolchain's `rustc -vV`) to schema 3.
 The external selection identifies the manifest artifact, avoiding a self-hash.
 Neither a selection nor decoded provenance alone authorizes publication:
 original attestations must pass gh's cryptographic verifier and strict policy.
@@ -46,6 +62,8 @@ import sys
 import tarfile
 import time
 import tomllib
+import urllib.error
+import urllib.request
 import uuid
 import zipfile
 
@@ -76,10 +94,30 @@ RELEASE_NOTES = (
     "macOS x86_64 and Windows archives may arrive later, listed in index-trailing.json and "
     "checksums-trailing.sha256."
 )
-SCHEMAS = (1, 2)
-# Every release build leg. A schema 2 candidate run builds one tier's legs;
-# the resolver emits them as the build_binaries matrix. Each leg names its
-# runner image (scripts/test_ci_workflow.py refuses a -latest label).
+SCHEMAS = (1, 2, 3, 4)
+# The newest schema: collection writes it for every tiered candidate.
+TIERED_SCHEMA = 4
+# Meta's gateways build from the one workspace, so they embed the in-tree Core
+# under CORE_CRATES. A schema 3 manifest binds that tree; staging requires it
+# to equal the tree of Core's tag (CORE_TAG_PREFIX + the meerkat-core version
+# the root Cargo.toml pins), so a Meta release never ships unreleased Core.
+CORE_CRATES = "crates"
+CORE_TAG_PREFIX = "v"
+CORE_MANIFEST = "Cargo.toml"
+# The workspace's root build inputs besides crates/: the root manifest
+# (workspace dependencies, the release profile), the lock, the toolchain and
+# Cargo's configuration. A candidate's source commit must carry the same ones
+# as Core's tag, or its gateways embed Core built otherwise than released.
+CORE_ROOT_INPUTS = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo")
+# The published-floor record (schema 4). Core's crates are those of the
+# checkout's CORE_CRATE_LIST, Meta's the meta publish_order of PRODUCTS.
+FLOOR_RECORD_KEYS = "core_version core_crates source_sha crates_tree lock_sha256 meta_crates toolchain"
+CORE_CRATE_LIST = "scripts/release-rust-crates.sh"
+PRODUCTS = "ci/products.json"
+INDEX_URL = "https://index.crates.io/"
+# Every release build leg. A tiered (schema 2 or 3) candidate run builds one
+# tier's legs; the resolver emits them as the build_binaries matrix. Each leg
+# names its runner image (scripts/test_ci_workflow.py refuses a -latest label).
 BUILD_LEGS = (
     {"runs-on": "ubuntu-24.04", "target": "x86_64-unknown-linux-gnu", "archive_ext": "tar.gz"},
     {"runs-on": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "archive_ext": "tar.gz"},
@@ -267,6 +305,335 @@ def version_at(sha):
     return value
 
 
+def declared_core_version(sha):
+    """The Core release the workspace pins at sha: the root Cargo.toml's
+    [workspace.dependencies] meerkat-core = { version = "=X.Y.Z", ... }."""
+    dependencies = tomllib.loads(git("show", f"{sha}:{CORE_MANIFEST}")).get("workspace", {}).get("dependencies", {})
+    spec = dependencies.get("meerkat-core")
+    version = spec.get("version") if isinstance(spec, dict) else None
+    require(isinstance(version, str) and re.fullmatch(r"=[0-9]+\.[0-9]+\.[0-9]+", version),
+            f"{CORE_MANIFEST} [workspace.dependencies] pins no exact meerkat-core version")
+    return version[1:]
+
+
+def core_crates_tree(revision):
+    """The id of the crates/ tree (the in-tree Core) at a revision."""
+    return digest(git("rev-parse", "--verify", f"{revision}:{CORE_CRATES}"), "Core crates tree", 40)
+
+
+def root_input_ids(revision):
+    """Each of CORE_ROOT_INPUTS at a revision: its blob or tree id, or None
+    when the revision has no such path."""
+    ids = {}
+    for path in CORE_ROOT_INPUTS:
+        try:
+            ids[path] = git("rev-parse", "--verify", "--quiet", f"{revision}:{path}") or None
+        except ProtocolError:
+            ids[path] = None
+    return ids
+
+
+def require_released_core(manifest, sha):
+    """A schema 3 candidate embeds only released Core: the crates/ tree its
+    attested manifest binds is its source commit's, and equals the tree of
+    Core's tag of the version the workspace declares, and so does each of
+    the workspace's root build inputs (CORE_ROOT_INPUTS). The tag is fetched
+    from origin first; a missing tag refuses. Earlier schemas bind no tree:
+    their candidates built against published Core, or, in this repository,
+    compared crates/ with that tag in their build legs."""
+    if manifest["schema_version"] < 3:
+        return
+    bound = manifest["core_crates_tree"]
+    require(core_crates_tree(sha) == bound, "candidate Core crates tree does not match its source commit")
+    core = declared_core_version(sha)
+    tag = f"refs/tags/{CORE_TAG_PREFIX}{core}"
+    git("fetch", "--no-tags", "origin", f"+{tag}:{tag}")
+    require(core_crates_tree(f"{tag}^{{commit}}") == bound,
+            f"{CORE_CRATES}/ differs from Core's {CORE_TAG_PREFIX}{core}: this candidate embeds unreleased Core. "
+            "Release Core first, or release in lockstep from one commit.")
+    source, released = root_input_ids(sha), root_input_ids(f"{tag}^{{commit}}")
+    differing = [path for path in CORE_ROOT_INPUTS if source[path] != released[path]]
+    require(not differing,
+            f"{', '.join(differing)} differ from Core's {CORE_TAG_PREFIX}{core}: this candidate built Core with other "
+            "root build inputs than Core's release. Release in lockstep from one commit.")
+
+
+def write_outputs(values):
+    if os.environ.get("GITHUB_OUTPUT"):
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
+            for key, value in values.items():
+                handle.write(f"{key}={value}\n")
+
+
+def write_summary(text):
+    print(text)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
+            handle.write(text + "\n\n")
+
+
+def core_crate_list():
+    """Core's publishable crates, from the source checkout's CORE_CRATE_LIST."""
+    names = [line.strip() for line in run(["bash", CORE_CRATE_LIST]).decode().splitlines() if line.strip()]
+    require(names and all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names),
+            f"{CORE_CRATE_LIST} lists no valid crate")
+    return names
+
+
+def meta_crate_names(sha):
+    """Meta's publishable crates at sha: ci/products.json's meta publish_order."""
+    products = parse_json(git("show", f"{sha}:{PRODUCTS}"))["products"]
+    order = next(product for product in products if product.get("name") == "meta").get("publish_order")
+    require(isinstance(order, list) and order and all(isinstance(name, str) for name in order),
+            f"{PRODUCTS} lists no Meta publish order")
+    return order
+
+
+def rustc_version():
+    """The toolchain the floor builds with: rustc -vV in the source checkout."""
+    return run(["rustc", "-vV"]).decode().strip()
+
+
+def index_path(name):
+    """A crate's file in the crates.io sparse index."""
+    name = name.lower()
+    if len(name) <= 2:
+        return f"{len(name)}/{name}"
+    if len(name) == 3:
+        return f"3/{name[0]}/{name}"
+    return f"{name[:2]}/{name[2:4]}/{name}"
+
+
+def index_entries(name):
+    """Every version line of a crate's sparse index file."""
+    request = urllib.request.Request(INDEX_URL + index_path(name),
+                                     headers={"Cache-Control": "no-cache", "User-Agent": "meerkat-meta-release"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            lines = response.read().decode().splitlines()
+    except (urllib.error.URLError, OSError, UnicodeDecodeError) as error:
+        raise ProtocolError(f"crates.io index read for {name} failed: {error}") from error
+    return [parse_json(line) for line in lines if line.strip()]
+
+
+def index_entry(name, version):
+    """The sparse index line of name at version, or None."""
+    matches = [entry for entry in index_entries(name) if isinstance(entry, dict) and entry.get("vers") == version]
+    require(len(matches) <= 1, f"crates.io index lists {name} {version} twice")
+    return matches[0] if matches else None
+
+
+def validate_floor_record(record, *, source_sha, crates_tree, meta_names):
+    """A complete floor record of FLOOR_RECORD_KEYS for this source commit,
+    its crates/ tree and Meta's crates; anything else refuses."""
+    exact_keys(record, FLOOR_RECORD_KEYS, "floor record")
+    core = record["core_version"]
+    require(isinstance(core, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", core), "invalid floor record Core version")
+    crates = record["core_crates"]
+    require(isinstance(crates, list) and crates, "the floor record binds no Core crate")
+    names = []
+    for item in crates:
+        exact_keys(item, "name version checksum", "floor record Core crate")
+        require(isinstance(item["name"], str) and re.fullmatch(r"[A-Za-z0-9_-]+", item["name"]),
+                "invalid floor record crate name")
+        require(item["version"] == core, f"the floor record binds {item['name']} at another version than Core's {core}")
+        digest(item["checksum"], "floor record crate checksum")
+        names.append(item["name"])
+    require(names == sorted(set(names)), "floor record Core crates must be unique and sorted")
+    require(record["source_sha"] == source_sha, "the floor record names another source commit")
+    require(record["crates_tree"] == crates_tree, "the floor record names another crates/ tree")
+    digest(record["lock_sha256"], "floor record lock digest")
+    exact_keys(record["meta_crates"], " ".join(meta_names), "floor record Meta crates")
+    for value in record["meta_crates"].values():
+        digest(value, "floor record Meta crate checksum")
+    require(isinstance(record["toolchain"], str) and record["toolchain"].strip() == record["toolchain"]
+            and 0 < len(record["toolchain"]) <= 4096, "invalid floor record toolchain")
+    return record
+
+
+def bound_floor_record(floor_dir, sha):
+    """What a successful candidate floor build proved, as a floor record
+    without meta_crates (collection adds verify_crate_packages' checksums)."""
+    report = read_json(floor_dir / "floor.json")
+    require(report.get("product") == "meta" and report.get("mode") == "release", "not Meta's release floor check")
+    require(report.get("stage") == "build" and report.get("problems") == [], "the floor check did not build")
+    lock_sha256 = assets.sha256(floor_dir / "ws" / "Cargo.lock")
+    require(report.get("lock_sha256") == lock_sha256, "floor.json's lock digest is not its workspace lock's")
+    core, core_names = declared_core_version(sha), set(core_crate_list())
+    crates = []
+    for item in report["registry_dependencies"]:
+        name, version = item.split(" ")
+        require(name in core_names and version == core, f"the floor resolved {item}, not a Core crate at {core}")
+        entry = index_entry(name, version)
+        require(entry is not None and entry.get("yanked") is False, f"{item} is not listed unyanked in the index")
+        crates.append({"name": name, "version": version, "checksum": digest(entry.get("cksum"), f"{item} checksum")})
+    require(crates, "the floor check resolved no Core crate from crates.io")
+    return {"core_version": core, "core_crates": sorted(crates, key=lambda crate: crate["name"]),
+            "source_sha": sha, "crates_tree": core_crates_tree(sha), "lock_sha256": lock_sha256,
+            "toolchain": rustc_version()}
+
+
+def candidate_floor_record(args, tier, sha, crates_tree):
+    """The record collection binds: the core tier's floor check's, completed
+    with verify_crate_packages' checksums, or None when it bound none."""
+    if not args.floor_record_json:
+        require(not args.meta_crate_sha256, "Meta crate checksums without a floor record")
+        return None
+    require(tier == "core", "only the core tier binds a floor record")
+    record = parse_json(args.floor_record_json)
+    require(isinstance(record, dict) and "meta_crates" not in record,
+            "the floor check's record is not an object without Meta crate checksums")
+    names, checksums = meta_crate_names(sha), {}
+    for pair in args.meta_crate_sha256:
+        name, _, value = pair.partition("=")
+        require(name in names and name not in checksums, f"unexpected Meta crate checksum {name!r}")
+        checksums[name] = digest(value, f"{name} checksum")
+    return validate_floor_record({**record, "meta_crates": checksums}, source_sha=sha, crates_tree=crates_tree,
+                                 meta_names=names)
+
+
+def floor_index(_args=None):
+    """Candidate mode, no wait: is every Core crate in the sparse index,
+    unyanked, at the version the workspace declares? core_published=true
+    lets the floor check build and bind its record; otherwise the job
+    summary names what is missing and the candidate binds none."""
+    require(os.environ.get("RELEASE_MODE") == "candidate", "floor-index is candidate-only")
+    sha, _, _ = source_context()
+    core = declared_core_version(sha)
+    missing = []
+    for name in core_crate_list():
+        try:
+            entry = index_entry(name, core)
+        except ProtocolError as error:
+            missing.append(f"{name} (index unreadable: {error})")
+            continue
+        if entry is None:
+            missing.append(name)
+        elif entry.get("yanked") is not False:
+            missing.append(f"{name} (yanked)")
+    write_outputs({"core_published": "false" if missing else "true"})
+    if missing:
+        write_summary(f"{len(missing)} Core crate(s) are not on crates.io at {core}, so this candidate binds no "
+                      f"floor record and its promotion runs the floor build: {', '.join(missing)}")
+    else:
+        write_summary(f"Every Core crate is on crates.io at {core}: the floor check builds and binds its record.")
+
+
+def floor_bind(args):
+    """Candidate mode, after the floor build: write its record, compact, as
+    `record` to GITHUB_OUTPUT, or an empty one (no reuse later) when a field
+    cannot be bound."""
+    require(os.environ.get("RELEASE_MODE") == "candidate", "floor-bind is candidate-only")
+    sha, _, _ = source_context()
+    try:
+        record = json.dumps(bound_floor_record(args.floor_dir, sha), separators=(",", ":"), sort_keys=True)
+    except (ProtocolError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        write_outputs({"record": ""})
+        write_summary(f"The floor build succeeded but its record could not be bound ({error}); the promotion "
+                      "runs the floor build.")
+        return
+    write_outputs({"record": record})
+    write_summary("Bound the floor record: the promotion reuses it while everything it binds still holds.")
+
+
+def floor_record(args):
+    """Promotion: the accepted core candidate's floor record, read from its
+    manifest after the same verification stage applies (run, artifact,
+    attestation), written as JSON to --output; `null` when it bound none or
+    cannot be read, which makes the promotion run the floor build."""
+    require(os.environ.get("RELEASE_MODE") == "promote", "floor-record requires promote mode")
+    try:
+        selected = selection_env()
+        require_promotable(selected)
+        with workspace() as work:
+            manifest = verified_manifest(selected, work)["manifest"]
+        record = manifest["floor_record"] if manifest["schema_version"] >= 4 else None
+    except (ProtocolError, assets.ReleaseAssetError, OSError, ValueError, KeyError, TypeError,
+            tarfile.TarError, zipfile.BadZipFile) as error:
+        print(f"no floor record: {error}", file=sys.stderr)
+        record = None
+    args.output.write_text(json.dumps(record, sort_keys=True) + "\n")
+    write_outputs({"present": "false" if record is None else "true"})
+    print("the candidate bound no floor record" if record is None else "read the candidate's floor record")
+
+
+def floor_mismatches(record_path, resolution_dir, meta_checksums):
+    """Why the candidate's floor record cannot stand in for a floor build
+    now: an empty list means every input it binds still holds."""
+    try:
+        record = parse_json(record_path.read_text())
+    except (OSError, ValueError, ProtocolError) as error:
+        return [f"unreadable floor record: {error}"]
+    if record is None:
+        return ["the candidate bound no floor record"]
+    try:
+        sha, _, _ = source_context()
+        validate_floor_record(record, source_sha=sha, crates_tree=core_crates_tree(sha), meta_names=meta_crate_names(sha))
+        core = declared_core_version(sha)
+    except (ProtocolError, AttributeError, TypeError, KeyError, ValueError) as error:
+        return [f"invalid floor record: {error}"]
+    reasons = []
+    if core != record["core_version"]:
+        reasons.append(f"the workspace now declares Core {core}, the record {record['core_version']}")
+    for crate in record["core_crates"]:
+        label = f"{crate['name']} {crate['version']}"
+        try:
+            entry = index_entry(crate["name"], crate["version"])
+        except ProtocolError as error:
+            reasons.append(f"{label}: {error}")
+            continue
+        if entry is None:
+            reasons.append(f"{label} is not in the crates.io index")
+        elif entry.get("yanked") is not False:
+            reasons.append(f"{label} is yanked")
+        elif entry.get("cksum") != crate["checksum"]:
+            reasons.append(f"{label} has another index checksum ({entry.get('cksum')}) than the record's")
+    try:
+        resolved = read_json(resolution_dir / "floor.json")
+    except (OSError, ValueError, ProtocolError) as error:
+        reasons.append(f"no re-resolution report: {error}")
+    else:
+        if resolved.get("stage") != "resolve" or resolved.get("problems") != []:
+            reasons.append(f"the re-resolution failed: {resolved.get('problems')}")
+        elif resolved.get("lock_sha256") != record["lock_sha256"]:
+            reasons.append("the re-resolved lock differs from the record's")
+        if resolved.get("registry_dependencies") != sorted(f"{c['name']} {c['version']}" for c in record["core_crates"]):
+            reasons.append("the re-resolution resolves other Core crates than the record's")
+    for name, value in record["meta_crates"].items():
+        if meta_checksums.get(name) != value:
+            reasons.append(f"{name} now packages to {meta_checksums.get(name) or 'nothing'}, the record has {value}")
+    try:
+        toolchain = rustc_version()
+    except ProtocolError as error:
+        reasons.append(f"cannot read the toolchain: {error}")
+    else:
+        if toolchain != record["toolchain"]:
+            reasons.append("the toolchain differs from the record's")
+    return reasons
+
+
+def floor_reuse(args):
+    """Promotion: reuse=true only when the candidate's floor record still
+    holds in full; otherwise the floor check runs the floor build. Never
+    fails: every refusal here means a floor build."""
+    require(os.environ.get("RELEASE_MODE") == "promote", "floor-reuse requires promote mode")
+    checksums = {}
+    for pair in args.meta_crate_sha256:
+        name, _, value = pair.partition("=")
+        checksums[name] = value
+    try:
+        reasons = floor_mismatches(args.record, args.resolution, checksums)
+    except Exception as error:  # A failed check is a floor build, never a reuse.
+        reasons = [f"the record check failed: {error!r}"]
+    write_outputs({"reuse": "false" if reasons else "true"})
+    if reasons:
+        write_summary("The floor check builds: the candidate's floor record does not hold.\n\n"
+                      + "\n".join(f"- {reason}" for reason in reasons))
+    else:
+        write_summary("Reused the candidate's floor record: the same Core crates (index checksums, none "
+                      "yanked), the same resolved lock, the same Meta crate bytes and the same toolchain.")
+
+
 def valid_tag(tag):
     require(isinstance(tag, str)
             and re.fullmatch(re.escape(TAG_PREFIX) + r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag),
@@ -302,13 +669,14 @@ def tier_targets(tier):
 
 
 def schema_tier(value):
-    """None for schema 1; the validated tier for schema 2."""
+    """None for schema 1; the validated tier for schemas 2 and 3."""
     require(type(value.get("schema_version")) is int and value["schema_version"] in SCHEMAS,
             "unsupported schema version")
     if value["schema_version"] == 1:
         require("tier" not in value, "schema 1 has no tier")
         return None
-    require(value.get("tier") in assets.TIERS, "schema 2 requires tier core or trailing")
+    require(value.get("tier") in assets.TIERS,
+            f"schema {value['schema_version']} requires tier core or trailing")
     return value["tier"]
 
 
@@ -414,9 +782,19 @@ def validate_manifest(value):
     require(isinstance(value, dict), "candidate manifest must be an object")
     tier = schema_tier(value)
     exact_keys(value, "schema_version kind repository source_sha version tag run_id run_attempt workflow ci artifacts metadata"
-               + ("" if tier is None else " tier"), "candidate manifest")
+               + ("" if tier is None else " tier")
+               + (" core_crates_tree" if value["schema_version"] >= 3 else "")
+               + (" floor_record" if value["schema_version"] >= 4 else ""), "candidate manifest")
     validate_identity(value)
     validate_source(value, tier)
+    if value["schema_version"] >= 3:
+        digest(value["core_crates_tree"], "Core crates tree", 40)
+    if value["schema_version"] >= 4:
+        # Only its shape: collection validated the record it bound, and a
+        # promotion that cannot read it (floor-reuse) runs the floor build
+        # instead of refusing the candidate.
+        require(value["floor_record"] is None or isinstance(value["floor_record"], dict), "invalid floor record")
+        require(tier == "core" or value["floor_record"] is None, "only the core tier binds a floor record")
     require(value["kind"] == "candidate-manifest", "invalid manifest kind")
     exact_keys(value["workflow"], "path sha ref", "workflow")
     require(value["workflow"] == {"path": WORKFLOW, "sha": value["source_sha"], "ref": MAIN},
@@ -508,7 +886,12 @@ def source_context():
 
 
 def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=None):
-    value = api(repo_endpoint(f"actions/runs/{integer(run_id, 'run ID')}"))
+    """The record of exactly the bound attempt of a workflow run: the
+    attempt's own endpoint, never the run's, which answers its latest
+    attempt. Re-running the run (as a paired release re-runs a red CI run
+    for Connect) changes nothing a stage bound to an earlier attempt reads;
+    a stage that wants the newer attempt binds it."""
+    value = api(repo_endpoint(f"actions/runs/{integer(run_id, 'run ID')}/attempts/{integer(attempt, 'run attempt')}"))
     expected_path = ".github/workflows/ci.yml" if ci else WORKFLOW
     expected_event = "push" if ci or legacy_tag else "workflow_dispatch"
     expected_branch = legacy_tag if legacy_tag else "main"
@@ -521,10 +904,76 @@ def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=N
     if collecting:
         if value["status"] != "in_progress":
             raise RunNotInProgress("collection requires its in-progress candidate run", value["status"])
+    elif ci and value["status"] == "completed" and value["conclusion"] == "failure":
+        # A red main CI run counts when it counted for meta-release.yml's
+        # gate: the same reader and rule, re-checked wherever the bound run is.
+        require_meta_scoped(value, sha)
     else:
         require(value["status"] == "completed" and value["conclusion"] == "success",
                 "run is not completed-success")
     return value
+
+
+# The root's product-scoped CI evidence reader. A failed exact-main CI run
+# counts for Meta only when the release commit's FIRST PARENT's copy of it,
+# told the commit's changes against that parent, accepts the run's
+# exact-tree attestation for Meta: the rule and job-to-product table that
+# meta-release.yml's gate applied, never the commit's own copy.
+EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
+
+
+def ci_attestation(value, sha):
+    """The exact-tree attestation of the ci.yml run attempt `value`, bound to
+    that attempt, the source commit and its tree on main."""
+    name = f"meerkat-ci-attestation-{sha}-{value['run_attempt']}"
+    pages = api(repo_endpoint(f"actions/runs/{value['id']}/artifacts?name={name}&per_page=100"), pages=True)
+    found = [item for page in pages for item in page["artifacts"] if item["name"] == name and item["expired"] is False]
+    require(len(found) == 1, f"CI run {value['id']} attempt {value['run_attempt']} has no single unexpired "
+                             "exact-tree attestation")
+    item = found[0]
+    require(isinstance(item.get("digest"), str) and item["digest"].startswith("sha256:"),
+            "missing CI attestation ZIP digest")
+    with workspace() as work:
+        packed = download_artifact({"id": item["id"], "name": name, "digest": item["digest"][7:]}, value, work)
+        with zipfile.ZipFile(packed) as archive:
+            zip_members(archive, expected_member="attestation.json")
+            record = parse_json(archive.read("attestation.json"))
+    require(isinstance(record, dict) and record.get("schema_version") == 4
+            and record.get("validation_backend") == "github-hosted-cargo"
+            and record.get("repository") == repository() and record.get("commit_sha") == sha
+            and record.get("tree_sha") == git("rev-parse", "--verify", f"{sha}^{{tree}}")
+            and record.get("workflow") == "CI" and record.get("event") == "push" and record.get("ref") == MAIN
+            and record.get("workflow_run_id") == str(value["id"])
+            and record.get("workflow_run_attempt") == str(value["run_attempt"]),
+            "CI attestation does not bind this run attempt, the source commit and its tree on main")
+    return record
+
+
+def require_meta_scoped(value, sha):
+    """Refuse the failed ci.yml run attempt `value` unless the release
+    commit's first parent's evidence reader accepts it for Meta."""
+    record = ci_attestation(value, sha)
+    parent = git("rev-parse", "--verify", f"{sha}^1")
+    try:
+        reader = git("show", f"{parent}:{EVIDENCE_READER}")
+    except ProtocolError as error:
+        raise ProtocolError(f"the release commit's parent {parent} has no CI evidence reader ({EVIDENCE_READER}): "
+                            f"only a green CI run counts ({error})") from None
+    # The commit's changes as the parent-reader steps list them: a status and
+    # a path a line, a rename as a deletion and an addition.
+    changed = git("diff", "--name-status", "--no-renames", parent, sha)
+    with workspace() as work:
+        (work / "ci-product-evidence.mjs").write_text(reader + "\n")
+        (work / "changed-paths.txt").write_text(changed + "\n" if changed else "")
+        (work / "attestation.json").write_text(json.dumps(record))
+        result = subprocess.run(
+            ["node", str(work / "ci-product-evidence.mjs"), "accepts", "--product", "meta",
+             "--changed-paths", str(work / "changed-paths.txt"), str(work / "attestation.json")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    verdict = " ".join((result.stdout + result.stderr).decode(errors="replace").split())
+    require(result.returncode == 0, f"failed CI run {value['id']} attempt {value['run_attempt']} does not count "
+                                    f"for Meta: {verdict}")
+    print(f"failed CI run {value['id']} attempt {value['run_attempt']} counts for Meta: {verdict}", file=sys.stderr)
 
 
 def reread(label, read):
@@ -729,8 +1178,8 @@ def collect(args):
         prepared = work / "prepared"
         assets.prepare_assets(downloaded, prepared, tag, tier)
         manifest = {
-            "schema_version": 1 if tier is None else 2, "kind": "candidate-manifest", "repository": repository(),
-            "source_sha": sha, "version": version, "tag": tag,
+            "schema_version": 1 if tier is None else TIERED_SCHEMA, "kind": "candidate-manifest",
+            "repository": repository(), "source_sha": sha, "version": version, "tag": tag,
             "workflow": {"path": WORKFLOW, "sha": sha, "ref": MAIN},
             "run_id": run_id, "run_attempt": attempt,
             "ci": {"run_id": args.ci_run_id, "run_attempt": args.ci_run_attempt},
@@ -739,6 +1188,12 @@ def collect(args):
         }
         if tier is not None:
             manifest["tier"] = tier
+            # The legs built exactly this commit, so its crates/ is the Core
+            # they embed; staging compares it with Core's tag.
+            manifest["core_crates_tree"] = core_crates_tree(sha)
+            manifest["floor_record"] = candidate_floor_record(args, tier, sha, manifest["core_crates_tree"])
+        elif args.floor_record_json or args.meta_crate_sha256:
+            raise ProtocolError("a schema 1 candidate binds no floor record")
         validate_manifest(manifest)
         args.output_dir.mkdir()
         write_new(args.output_dir / tier_proof_names(tier)[1], json_bytes(manifest))
@@ -812,11 +1267,15 @@ def manifest_members(tier):
     return {tier_proof_names(tier)[1], PROVENANCE, *assets.metadata_names(tier)}
 
 
-def stage_candidate(selected, output_dir, proof_dir, work):
+def verified_manifest(selected, work):
+    """The selected candidate's manifest, verified: the remote tag names the
+    source, the candidate run completed successfully from it, and the
+    manifest is that run's artifact, of the selected schema and tier, under
+    the run's attestation. Returns the source, the run record, the unpacked
+    manifest artifact folder and the manifest."""
     sha, version, tag = source_context()
     tier = selection_tier(selected)
-    receipt, manifest_name, manifest_bundle = tier_proof_names(tier)
-    require(not output_dir.exists() and not proof_dir.exists(), "staging directories already exist")
+    manifest_name = tier_proof_names(tier)[1]
     verify_remote_tag(tag, sha)
     info = verify_run(selected["run_id"], selected["run_attempt"], sha)
     identity = {**selected["manifest_artifact"],
@@ -830,6 +1289,18 @@ def stage_candidate(selected, output_dir, proof_dir, work):
     manifest = read_json(folder / manifest_name)
     match_manifest_selection(manifest, selected, folder / manifest_name, sha, version, tag)
     verify_provenance(folder / manifest_name, folder / PROVENANCE, sha, selected["run_id"], selected["run_attempt"])
+    return {"sha": sha, "version": version, "tag": tag, "info": info, "folder": folder, "manifest": manifest}
+
+
+def stage_candidate(selected, output_dir, proof_dir, work):
+    tier = selection_tier(selected)
+    receipt, manifest_name, manifest_bundle = tier_proof_names(tier)
+    require(not output_dir.exists() and not proof_dir.exists(), "staging directories already exist")
+    verified = verified_manifest(selected, work)
+    sha, version, tag = verified["sha"], verified["version"], verified["tag"]
+    info, folder, manifest = verified["info"], verified["folder"], verified["manifest"]
+    # Bound by the verified attestation: the Core this candidate embeds.
+    require_released_core(manifest, sha)
     verify_run(manifest["ci"]["run_id"], manifest["ci"]["run_attempt"], sha, ci=True)
     check_metadata(manifest, folder)
     prepared, proofs = work / "verified-assets", work / "verified-proofs"
@@ -993,7 +1464,9 @@ def verify_present_trailing(folder, inventory, sha, version, tag, work):
     it names. The manifest comes from the release when present, otherwise
     from that artifact, the way stage_candidate reads it: it must match the
     receipt and the release's source, version and tag, carry a valid
-    attestation, and name a green CI run. Every present attestation bundle
+    attestation, and name a CI run that counts for Meta (green, or red only
+    in rows Meta does not depend on; see require_meta_scoped). Every present
+    attestation bundle
     must be the one the candidate retained (the manifest's verifies the
     manifest; a target's verifies its archives, or equals the target
     artifact's when none of them is present yet). Every present archive must
@@ -1411,6 +1884,10 @@ def parse_args(argv=None):
     collect_parser.add_argument("--ci-run-attempt", type=int, required=True)
     collect_parser.add_argument("--tier", choices=assets.TIERS,
                                 help="collect one tier (schema 2); omitted only for schema 1 fixtures")
+    collect_parser.add_argument("--floor-record-json", default="",
+                                help="the core tier's floor record from floor_check (floor-bind), if it bound one")
+    collect_parser.add_argument("--meta-crate-sha256", action="append", default=[], metavar="NAME=SHA256",
+                                help="verify_crate_packages' checksum of a Meta crate, with a floor record")
     select_parser = commands.add_parser("selection")
     select_parser.add_argument("--manifest-file", type=Path, required=True)
     select_parser.add_argument("--artifact-id", type=int, required=True)
@@ -1423,6 +1900,15 @@ def parse_args(argv=None):
     publish_parser.add_argument("--proof-dir", type=Path, required=True)
     commands.add_parser("verify-published")
     commands.add_parser("recover")
+    commands.add_parser("floor-index")
+    bind_parser = commands.add_parser("floor-bind")
+    bind_parser.add_argument("--floor-dir", type=Path, required=True)
+    record_parser = commands.add_parser("floor-record")
+    record_parser.add_argument("--output", type=Path, required=True)
+    reuse_parser = commands.add_parser("floor-reuse")
+    reuse_parser.add_argument("--record", type=Path, required=True)
+    reuse_parser.add_argument("--resolution", type=Path, required=True)
+    reuse_parser.add_argument("--meta-crate-sha256", action="append", default=[], metavar="NAME=SHA256")
     dispatch_parser = commands.add_parser("dispatch")
     dispatch_parser.add_argument("--mode", choices=("candidate", "promote", "existing", "assets"), required=True)
     return parser.parse_args(argv)
@@ -1432,7 +1918,8 @@ def main(argv=None):
     args = parse_args(argv)
     handlers = {"resolve": lambda _: resolve(), "collect": collect, "selection": selection,
                 "stage": stage, "publish": publish, "verify-published": verify_published,
-                "recover": recover, "dispatch": dispatch}
+                "recover": recover, "dispatch": dispatch, "floor-index": floor_index, "floor-bind": floor_bind,
+                "floor-record": floor_record, "floor-reuse": floor_reuse}
     try:
         handlers[args.command](args)
     except (ProtocolError, assets.ReleaseAssetError, OSError, ValueError, KeyError, TypeError,

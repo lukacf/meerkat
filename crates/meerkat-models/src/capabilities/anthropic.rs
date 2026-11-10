@@ -53,12 +53,13 @@ const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
 
 /// [`ADAPTIVE_COMPACTION_BETAS`] plus the thinking-binding controls, for the
 /// catalogued models that check replayed thinking blocks against their
-/// request prefix (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5; Mythos 5.1 is
-/// not a catalog row). Each of them thinks by default when `thinking` is
-/// omitted: Fable 5.1 and Opus 5.5 "Always on", Sonnet 5.5 and Haiku 5.5
-/// "On" in the per-model table, and "Omit the `thinking` parameter and the
-/// request runs with adaptive thinking"; the client names that default beside
-/// the control. A model whose default is no thinking never carries this set.
+/// request prefix (Fable 5.2, Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5;
+/// Mythos 5.2 and Mythos 5.1 are not catalog rows). Each of them thinks by
+/// default when `thinking` is omitted: Fable 5.2, Fable 5.1 and Opus 5.5
+/// "Always on", Sonnet 5.5 and Haiku 5.5 "On" in the per-model
+/// table, and "Omit the `thinking` parameter and the request runs with
+/// adaptive thinking"; the client names that default beside the control. A
+/// model whose default is no thinking never carries this set.
 /// Sources:
 ///   https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
 ///   (featureMetadata.supportedModels)
@@ -86,9 +87,9 @@ const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
 
 // ── Effort tiers ──────────────────────────────────────────────────────────
 
-/// Effort tiers accepted by the Claude 5 family (Fable 5.1, Opus 5.5, Opus 5,
-/// Fable 5, Sonnet 5.5, Sonnet 5, Haiku 5.5) and Opus 4.8/4.7; `xhigh` sits
-/// between `high` and `max`.
+/// Effort tiers accepted by the Claude 5 family (Fable 5.2, Fable 5.1, Opus
+/// 5.5, Opus 5, Fable 5, Sonnet 5.5, Sonnet 5, Haiku 5.5) and Opus 4.8/4.7;
+/// `xhigh` sits between `high` and `max`.
 const CLAUDE_5_OPUS_48_47_EFFORT: &[EffortLevel] = &[
     EffortLevel::Low,
     EffortLevel::Medium,
@@ -117,8 +118,8 @@ const OPUS_45_EFFORT: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::Medium, 
 // per-model table "Thinking support, defaults, and rejected configurations by
 // model" (a thinking type a row does not list as rejected is accepted):
 // https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
-//   - Refused: Fable 5.1, Fable 5 and Opus 5.5 (thinking is always on), and
-//     Sonnet 5.5 (`between_tools` replaces `disabled`).
+//   - Refused: Fable 5.2, Fable 5.1, Fable 5 and Opus 5.5 (thinking is
+//     always on), and Sonnet 5.5 (`between_tools` replaces `disabled`).
 //   - AtOrBelowHighEffort: Opus 5 and Haiku 5.5 (`disabled` with effort
 //     `xhigh` or `max` returns 400; their default efforts, `high` and
 //     `medium`, are within that ceiling).
@@ -127,6 +128,101 @@ const OPUS_45_EFFORT: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::Medium, 
 
 /// Capability rows for Anthropic catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
+    // Claude Fable 5.2
+    //
+    // Sources:
+    //   - Model page (API ID claude-fable-5-2, a dateless pinned snapshot
+    //     whose alias is the same id; released November 9, 2026; 1M context
+    //     window, the default and the maximum; 128k max output on the
+    //     synchronous Messages API; text and image input; adaptive thinking
+    //     always on; default effort `high`; omit temperature, top_p and
+    //     top_k; forced tool use returns 400; $8 / $40 per MTok):
+    //     https://platform.claude.com/docs/en/models/fable-5-2/overview
+    //   - Models overview (not listed for the output-300k-2026-03-24 beta):
+    //     https://platform.claude.com/docs/en/models/overview
+    //   - Platforms, each with the id claude-fable-5-2: the Claude API,
+    //     Claude Platform on AWS, Claude Models on Google Cloud (Anthropic
+    //     managed and Google managed) and Microsoft Foundry (on Anthropic
+    //     infrastructure); not Amazon Bedrock. The catalog keeps no
+    //     per-platform list: the client sends the id unchanged on every
+    //     backend.
+    //   - What's new (`{type: "enabled"}` with `budget_tokens` and
+    //     `{type: "disabled"}` both return 400; a `tool_choice` of `any` or
+    //     a named tool returns 400; the five effort levels `low` to `max`;
+    //     the prefix check applies on every account, whatever its age):
+    //     https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2
+    //   - Thinking table (adaptive only, always on, rejects `enabled` and
+    //     `disabled`):
+    //     https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+    //   - Preserved thinking, compaction at a token threshold
+    //     (compact-2026-01-12), structured outputs, web search,
+    //     mid-conversation system messages and data residency
+    //     (`inference_geo`) each list claude-fable-5-2:
+    //     https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+    //     https://platform.claude.com/docs/en/build-with-claude/compaction-threshold
+    //     https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+    //     https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool
+    //     https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
+    //     https://platform.claude.com/docs/en/manage-claude/data-residency
+    //
+    // ASSUMED from the claude-fable-5-1 row:
+    //   - image_tool_results (image input and tool use are documented; image
+    //     blocks inside tool results are not called out separately)
+    //   - call_timeout_secs (Meerkat-owned operational default, Opus-tier 300s)
+    //
+    // Claude Mythos 5.2 (claude-mythos-5-2) has the same capabilities,
+    // specifications and prices, but Anthropic serves it only to
+    // organizations it has verified, on the Claude API, Claude Models on
+    // Google Cloud (Anthropic managed and Google managed) and Microsoft
+    // Foundry (on Anthropic infrastructure); not on Claude Platform on AWS
+    // and not on Amazon Bedrock. Like Claude Mythos 5.1 it is not a catalog
+    // row: it runs as a model id with no catalog row.
+    // https://platform.claude.com/docs/en/models/mythos-5-2/overview
+    ModelCapabilities {
+        id: "claude-fable-5-2",
+        provider: Provider::Anthropic,
+        display_name: "Claude Fable 5.2",
+        tier: ModelTier::Recommended,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "claude-fable-5-2",
+        context_window: Some(1_000_000),
+        max_input_tokens: None,
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::AnthropicAdaptiveOnly,
+        anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
+        supports_reasoning: false,
+        effort_levels: CLAUDE_5_OPUS_48_47_EFFORT,
+        openai_responses_params: None,
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: true,
+        supports_compaction: true,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: PRESERVED_THINKING_BETAS,
+        call_timeout_secs: Some(300),
+        stream_inactivity_timeout_secs: None,
+        // Forced `tool_choice` (`any`/`tool`) returns 400 on Fable 5.2 (see
+        // the what's new source above); refuse it locally, as for
+        // claude-fable-5-1, claude-opus-5-5 and claude-sonnet-5-5.
+        supports_forced_tool_choice: false,
+    },
     // Claude Fable 5.1
     //
     // Sources:

@@ -86,7 +86,10 @@ and it records the one toolchain all shards recorded.
 Evidence and packages are matched to one run attempt. A rerun of only the
 failed jobs leaves the other jobs' records under the earlier attempt, so it
 is not complete evidence, for a `meta-installer.yml` run or for a candidate. Dispatch
-a fresh run, or rerun all jobs, when the run must count.
+a fresh run, or rerun all jobs, when the run must count. Publication checks
+the bound run again on the attempt the candidate bound, so a later rerun of
+that run changes nothing it reads; a candidate that should use the newer
+attempt is a new candidate.
 
 If no run qualifies, the candidate refuses and names the members that changed.
 Dispatch `meta-installer.yml` on main for the commit

@@ -32,7 +32,11 @@ lookup), so the doctor and its contract test run wherever both do.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import re
@@ -1321,6 +1325,9 @@ function served(scenario, params) {
 
 async function judge(scenario) {
   process.chdir(scenario.dir);
+  // Each scenario's job has a RUNNER_TEMP of its own (the parent's evidence
+  // reader and the release commit's changed paths live there).
+  if (scenario.runner_temp) process.env.RUNNER_TEMP = scenario.runner_temp;
   clock.now = START;
   clock.sleeps = 0;
   let calls = 0;
@@ -1347,7 +1354,23 @@ async function judge(scenario) {
     const runs = served(scenario, params).map((run) => ({ ...run }));
     return { data: { total_count: runs.length, workflow_runs: runs } };
   };
-  const github = { rest: { actions: { listWorkflowRuns } } };
+  // The run's artifacts (the run id is a path parameter, always applied;
+  // the name filter only when the API applies its filters), each a zip.
+  const listWorkflowRunArtifacts = async (params) => {
+    calls += 1;
+    const artifacts = (scenario.artifacts ?? [])
+      .filter((artifact) => artifact.run_id === params.run_id)
+      .filter((artifact) => !scenario.filtered || params.name === undefined || artifact.name === params.name)
+      .map(({ id, name, expired }) => ({ id, name, expired }));
+    return { data: { total_count: artifacts.length, artifacts } };
+  };
+  const downloadArtifact = async (params) => {
+    calls += 1;
+    const artifact = (scenario.artifacts ?? []).find((candidate) => candidate.id === params.artifact_id);
+    if (!artifact) throw new Error(`no artifact ${params.artifact_id}`);
+    return { data: Buffer.from(artifact.zip, "base64") };
+  };
+  const github = { rest: { actions: { listWorkflowRuns, listWorkflowRunArtifacts, downloadArtifact } } };
   const context = { repo: { owner: "example", repo: "meerkat" } };
   try {
     await new AsyncFunction("require", "github", "context", "core", body)(wrapRequire, github, context, core);
@@ -1381,6 +1404,41 @@ class _LookupScenario:
     cargo: str = f'[workspace.package]\nversion = "{BINDING_VERSION}"\n'
     # The run is cancelled first: the lookup must say how to re-run it.
     warns: bool = False
+    # The exact-tree attestations the runs left: (run id, attempt, record).
+    attestations: tuple[tuple[int, int, dict], ...] = ()
+    # Whether the checkout holds its own copy of the product-scoped evidence
+    # reader, which must never judge (the release commit could edit it).
+    reader: bool = True
+    # The copy that judges: the release commit's first parent's, which the
+    # job writes under RUNNER_TEMP ("real": this tree's reader; "refusing": a
+    # copy whose rule refuses every run; None: the parent has no reader).
+    parent_reader: str | None = "real"
+    # The release commit's changes against that parent, written next to it
+    # as `git diff --name-status --no-renames` lines (a bare path is a
+    # modified one); None when the job could not list them.
+    changed: tuple[str, ...] | None = ()
+
+
+# A failed push run's attestation with product evidence: every job but those
+# named in `failed` succeeded; `failed` maps a job to its product.
+def _scoped_attestation(failed: dict[str, str], *, evidence: bool = True, mode: str = "workspace") -> dict:
+    jobs = [
+        {"name": "Change classification", "conclusion": "success", "product": "core", "downstream": False},
+        {"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
+        *(
+            {"name": name, "conclusion": "failure", "product": product, "downstream": False}
+            for name, product in failed.items()
+        ),
+    ]
+    record = {
+        "schema_version": 4,
+        "validation_backend": "github-hosted-cargo",
+        "validation_result": "failure",
+        "plan": {"mode": mode},
+    }
+    if evidence:
+        record["product_evidence"] = {"version": 1, "plan_errors": 0, "failed_lanes": ["Main unit tests"], "jobs": jobs}
+    return record
 
 
 def _ci_run(run_id: int, branch: str, **overrides: object) -> dict:
@@ -1487,6 +1545,117 @@ def _lookup_scenarios() -> list[_LookupScenario]:
             cargo='[package]\nname = "binding"\nversion = "9.9.9"\n',
         ),
     ]
+    # A failed run counts for Core only through its attestation's product
+    # evidence, judged by the release commit's first parent's copy of
+    # scripts/ci-product-evidence.mjs (never the checkout's own): every
+    # failure must sit in a row Core does not depend on, and the commit must
+    # change nothing that decides the evidence.
+    failed = {"conclusion": "failure"}
+    connect_red = {"Main unit tests (connect[console])": "connect"}
+    scenarios += [
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row",
+            ((_ci_run(30, "main", **failed),),),
+            ("30", "1"),
+            warns=True,
+            attestations=((30, 1, _scoped_attestation(connect_red)),),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, judged by the parent's reader, "
+            "which refuses it while the checkout's own would accept it",
+            ((_ci_run(39, "main", **failed),),),
+            None,
+            attestations=((39, 1, _scoped_attestation(connect_red)),),
+            parent_reader="refusing",
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit that changes "
+            "scripts/ci-product-evidence.mjs",
+            ((_ci_run(40, "main", **failed),),),
+            None,
+            attestations=((40, 1, _scoped_attestation(connect_red)),),
+            changed=("crates/meerkat-core/src/lib.rs", "scripts/ci-product-evidence.mjs"),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit whose changes "
+            "against its parent are unknown",
+            ((_ci_run(41, "main", **failed),),),
+            None,
+            attestations=((41, 1, _scoped_attestation(connect_red)),),
+            changed=None,
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit that moves a Core "
+            "package under Meta's root",
+            ((_ci_run(43, "main", **failed),),),
+            None,
+            attestations=((43, 1, _scoped_attestation(connect_red)),),
+            changed=("D\tcrates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/Cargo.toml"),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose attestation says every lane succeeded",
+            ((_ci_run(42, "main", **failed),),),
+            None,
+            attestations=((42, 1, {**_scoped_attestation(connect_red), "validation_result": "success"}),),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose failures include a Core row",
+            ((_ci_run(31, "main", **failed),),),
+            None,
+            attestations=((31, 1, _scoped_attestation({**connect_red, "Clippy (core)": "core"})),),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose attestation has no product evidence",
+            ((_ci_run(32, "main", **failed),),),
+            None,
+            attestations=((32, 1, _scoped_attestation(connect_red, evidence=False)),),
+        ),
+        _LookupScenario(
+            "a failed push run on main that left no attestation",
+            ((_ci_run(33, "main", **failed),),),
+            None,
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, of a release commit whose parent "
+            "has no evidence reader",
+            ((_ci_run(34, "main", **failed),),),
+            None,
+            attestations=((34, 1, _scoped_attestation(connect_red)),),
+            parent_reader=None,
+        ),
+        _LookupScenario(
+            "a failed release-projection push run on main whose only failure is a Connect row",
+            ((_ci_run(35, "main", **failed),),),
+            None,
+            attestations=((35, 1, _scoped_attestation(connect_red, mode="release-projection")),),
+        ),
+        _LookupScenario(
+            "a failed push run on main with a Core row red, whose re-run fails only in a Connect row",
+            (
+                (_ci_run(36, "main", **failed),),
+                (_ci_run(36, "main", run_attempt=2, **pending),),
+                (_ci_run(36, "main", run_attempt=2, **failed),),
+            ),
+            ("36", "2"),
+            warns=True,
+            attestations=(
+                (36, 1, _scoped_attestation({"Clippy (core)": "core"})),
+                (36, 2, _scoped_attestation(connect_red)),
+            ),
+        ),
+        _LookupScenario(
+            "a cancelled push run on main whose attestation shows only a Connect row red",
+            ((_ci_run(37, "main", conclusion="cancelled"),),),
+            None,
+            attestations=((37, 1, _scoped_attestation(connect_red)),),
+        ),
+        _LookupScenario(
+            f"a failed push run on {release_branch} at another commit whose only failure is a Connect row",
+            ((_ci_run(38, release_branch, head_sha="2" * 40, **failed),),),
+            None,
+            attestations=((38, 1, _scoped_attestation(connect_red)),),
+        ),
+    ]
     return scenarios
 
 
@@ -1517,7 +1686,55 @@ def _run_github_script(step: Step, scenarios: list[dict]) -> list[dict]:
             checkout = Path(root, f"checkout-{index}")
             checkout.mkdir()
             Path(checkout, "Cargo.toml").write_text(scenario["cargo"], encoding="utf-8")
-            plan.append({"dir": str(checkout), "filtered": scenario["filtered"], "timeline": scenario["timeline"]})
+            if scenario.get("reader", True):
+                Path(checkout, "scripts").mkdir()
+                shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, Path(checkout, PRODUCT_EVIDENCE_READER))
+            runner_temp = Path(checkout, "runner-temp")
+            parent = Path(runner_temp, PARENT_EVIDENCE_DIR)
+            parent.mkdir(parents=True)
+            judge = Path(parent, Path(PRODUCT_EVIDENCE_READER).name)
+            if scenario.get("parent_reader", "real") == "real":
+                shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, judge)
+            elif scenario.get("parent_reader") == "refusing":
+                shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, Path(parent, "ci-product-evidence-real.mjs"))
+                judge.write_text(
+                    'export * from "./ci-product-evidence-real.mjs";\n'
+                    "export function acceptance() {\n"
+                    '  return { accepted: false, reasons: ["this copy refuses every run"] };\n'
+                    "}\n",
+                    encoding="utf-8",
+                )
+            if scenario.get("changed", ()) is not None:
+                # As the parent-reader step lists them: `git diff
+                # --name-status --no-renames`, a status and a path a line (a
+                # bare path here is a modified one).
+                Path(parent, PARENT_EVIDENCE_CHANGES).write_text(
+                    "".join(f"{path}\n" if "\t" in path else f"M\t{path}\n" for path in scenario.get("changed", ())),
+                    encoding="utf-8",
+                )
+            artifacts = []
+            for number, (run_id, attempt, record) in enumerate(scenario.get("attestations", ()), start=1):
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+                    bundle.writestr("attestation.json", json.dumps(record))
+                artifacts.append(
+                    {
+                        "id": 1000 * index + number,
+                        "run_id": run_id,
+                        "name": f"meerkat-ci-attestation-{LOOKUP_RELEASE_SHA}-{attempt}",
+                        "expired": False,
+                        "zip": base64.b64encode(archive.getvalue()).decode("ascii"),
+                    }
+                )
+            plan.append(
+                {
+                    "dir": str(checkout),
+                    "runner_temp": str(runner_temp),
+                    "filtered": scenario["filtered"],
+                    "timeline": scenario["timeline"],
+                    "artifacts": artifacts,
+                }
+            )
         Path(root, "scenarios.json").write_text(json.dumps(plan), encoding="utf-8")
         results = Path(root, "results.json")
         try:
@@ -1547,10 +1764,17 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
     the release commit on main or on release/<version>, the version read
     from the checked-out Cargo.toml, and fail on every other run: another
     version's release branch or a near miss of this one, another commit, a
-    pull request, a dispatch or a failed run. The step runs under node as
-    actions/github-script v7 runs it, against a stub of the runs API and a
-    fake clock: once with the API applying its own filters, and once with an
-    API that ignores them, where the script's own filter alone must bind.
+    pull request, a dispatch or a failed run. A failed run counts only when
+    its exact-tree attestation's product evidence shows every failure in rows
+    Core does not depend on, judged by the release commit's first parent's
+    copy of scripts/ci-product-evidence.mjs with the commit's changed paths
+    (never the checkout's own copy, a cancelled run, a release projection, a
+    run without that evidence, a parent without the reader, or a commit that
+    changes what decides the evidence or whose changes are unknown).
+    The step runs under node as actions/github-script v7 runs it, against a
+    stub of the runs and artifacts APIs and a fake clock: once with the API
+    applying its own filters, and once with an API that ignores them, where
+    the script's own filter alone must bind.
     """
     steps = [step for step in job_steps(ci_block) if step.fields.get("id") == CI_RUN_STEP_ID]
     if len(steps) != 1:
@@ -1566,7 +1790,15 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
     results = _run_github_script(
         step,
         [
-            {"cargo": scenario.cargo, "timeline": scenario.timeline, "filtered": filtered}
+            {
+                "cargo": scenario.cargo,
+                "timeline": scenario.timeline,
+                "filtered": filtered,
+                "attestations": scenario.attestations,
+                "reader": scenario.reader,
+                "parent_reader": scenario.parent_reader,
+                "changed": scenario.changed,
+            }
             for scenario, filtered in cases
         ],
     )
@@ -1595,6 +1827,183 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
             violations.append(
                 f"step `{step.name}` gives no warning on {where}, where re-running the cancelled run recovers"
             )
+    return violations
+
+
+# The require_ci_green step that writes the judge of a failed CI run, and the
+# copies of the evidence reader its scratch history holds, by commit.
+PARENT_READER_STEP = "Read the CI evidence reader of the release commit's parent"
+PARENT_READER_COPIES = {
+    "first parent's": "// the release commit's first parent's reader\n",
+    "release commit's own": "// the release commit's own reader\n",
+    "second parent's": "// the release commit's second parent's reader\n",
+}
+_SCRATCH_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "parent-reader",
+    "GIT_AUTHOR_EMAIL": "parent-reader@example.invalid",
+    "GIT_COMMITTER_NAME": "parent-reader",
+    "GIT_COMMITTER_EMAIL": "parent-reader@example.invalid",
+    "GIT_CONFIG_NOSYSTEM": "1",
+}
+
+
+def _parent_reader_history(root: Path) -> dict[str, str]:
+    """A scratch history for the parent-reader step, as the job's checkout
+    has it; returns each commit by name. `base` has no reader and
+    `no-reader` is its child; `parent` adds the reader to `base`; `linear`
+    is a child of `parent` that edits the reader, the planner and a Core
+    file; `rename`, another child, renames ci/products.json; `side`, another
+    child, edits the reader and the planner, and `merge` merges it into
+    `parent` (first parent `parent`)."""
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(root), **_SCRATCH_GIT_ENV}
+    commits: dict[str, str] = {}
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def commit(name: str, files: dict[str, str], removed: tuple[str, ...] = ()) -> None:
+        for path in removed:
+            Path(root, path).unlink()
+        for path, text in files.items():
+            Path(root, path).parent.mkdir(parents=True, exist_ok=True)
+            Path(root, path).write_text(text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", name)
+        commits[name] = git("rev-parse", "HEAD")
+
+    git("init", "-q", "-b", "main")
+    commit(
+        "base",
+        {"crates/core/src/lib.rs": "pub fn f() {}\n", "ci/products.json": "{}\n", "scripts/ci-cargo-lanes.mjs": "// 1\n"},
+    )
+    commit("no-reader", {"crates/core/src/lib.rs": "pub fn g() {}\n"})
+    git("checkout", "-q", "--detach", commits["base"])
+    commit("parent", {PRODUCT_EVIDENCE_READER: PARENT_READER_COPIES["first parent's"]})
+    commit(
+        "linear",
+        {
+            PRODUCT_EVIDENCE_READER: PARENT_READER_COPIES["release commit's own"],
+            "scripts/ci-cargo-lanes.mjs": "// 2\n",
+            "crates/core/src/lib.rs": "pub fn h() {}\n",
+        },
+    )
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("rename", {"ci/products-moved.json": "{}\n"}, removed=("ci/products.json",))
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit(
+        "side",
+        {PRODUCT_EVIDENCE_READER: PARENT_READER_COPIES["second parent's"], "scripts/ci-cargo-lanes.mjs": "// 3\n"},
+    )
+    git("checkout", "-q", "--detach", commits["parent"])
+    git("merge", "-q", "--no-ff", "-m", "merge", commits["side"])
+    commits["merge"] = git("rev-parse", "HEAD")
+    return commits
+
+
+def _run_parent_reader_step(
+    step: Step, checkout: Path, release_sha: str, runner_temp: Path
+) -> tuple[int, str, str | None, list[str] | None]:
+    """Run the parent-reader step in `checkout` for the release commit
+    `release_sha`. Returns its exit, its log, the judge it wrote (None:
+    none) and the paths of the changes it listed (None: no list)."""
+    context = replace(TAG_PUSH, step_outputs={"release_ref.sha": release_sha})
+    env = {key: render_strict(value, context) for key, value in step.env.items()}
+    runner_temp.mkdir()
+    result = subprocess.run(
+        ["bash", "-c", render_strict(step.raw_run, context)],
+        cwd=checkout,
+        env={
+            **_runner_env(context),
+            **_SCRATCH_GIT_ENV,
+            "HOME": str(checkout),
+            "RUNNER_TEMP": str(runner_temp),
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    parent = Path(runner_temp, PARENT_EVIDENCE_DIR)
+    judge = Path(parent, Path(PRODUCT_EVIDENCE_READER).name)
+    changes = Path(parent, PARENT_EVIDENCE_CHANGES)
+    listed = None
+    if changes.exists():
+        # One path a line, or a status and a tab before it.
+        listed = [line.split("\t")[-1] for line in changes.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return (
+        result.returncode,
+        result.stdout + result.stderr,
+        judge.read_text(encoding="utf-8") if judge.exists() else None,
+        listed,
+    )
+
+
+def _check_parent_reader_step(ci_block: list[str]) -> list[str]:
+    """require_ci_green writes the judge of a failed CI run.
+
+    Its parent-reader step, run in a scratch history, must write the release
+    commit's FIRST PARENT's copy of scripts/ci-product-evidence.mjs (never
+    the commit's own copy, which it could edit, nor a merge's second
+    parent's) and list every path the commit changes against that parent,
+    a renamed path under both its names, the inputs that decide the evidence
+    included, so the copy can refuse a commit that changes them; for a
+    commit whose parent has no reader it writes no judge, which leaves only
+    a green run counting.
+    """
+    steps = [step for step in job_steps(ci_block) if step.name == PARENT_READER_STEP]
+    if len(steps) != 1:
+        return [f"job `{CI_GREEN_JOB}` has {len(steps)} steps named `{PARENT_READER_STEP}`"]
+    step = steps[0]
+    violations: list[str] = []
+    if not step_runs(step, TAG_PUSH):
+        violations.append(f"step `{step.name}` does not run on {TAG_PUSH.label}")
+    copies = {text: name for name, text in PARENT_READER_COPIES.items()}
+    cases = (
+        (
+            "a release commit that edits the reader, the planner and a Core file",
+            "linear",
+            "first parent's",
+            {PRODUCT_EVIDENCE_READER, "scripts/ci-cargo-lanes.mjs", "crates/core/src/lib.rs"},
+        ),
+        (
+            "a merge commit whose second parent edits the reader and the planner",
+            "merge",
+            "first parent's",
+            {PRODUCT_EVIDENCE_READER, "scripts/ci-cargo-lanes.mjs"},
+        ),
+        # A rename lists both names: the reader refuses a commit that
+        # renames an input away as well as one that renames a file into it.
+        ("a release commit that renames ci/products.json", "rename", "first parent's", {"ci/products.json", "ci/products-moved.json"}),
+        ("a release commit whose first parent has no reader", "no-reader", None, None),
+    )
+    with tempfile.TemporaryDirectory(prefix="release-parent-reader-") as scratch:
+        checkout = Path(scratch, "checkout")
+        checkout.mkdir()
+        try:
+            commits = _parent_reader_history(checkout)
+        except subprocess.CalledProcessError as error:
+            raise ContractError(f"cannot build the parent-reader history: {error.stderr}") from None
+        for label, name, judge, changed in cases:
+            status, log, written, listed = _run_parent_reader_step(
+                step, checkout, commits[name], Path(scratch, f"runner-temp-{name}")
+            )
+            if status != 0:
+                violations.append(
+                    f"step `{step.name}` fails on {label}: "
+                    + " | ".join(line for line in log.splitlines() if line.strip())[:300]
+                )
+                continue
+            wrote = "no judge" if written is None else f"the {copies.get(written, 'unknown')} copy"
+            expected = "no judge" if judge is None else f"the {judge} copy"
+            if wrote != expected:
+                violations.append(f"step `{step.name}` writes {wrote} of the reader for {label}; expected {expected}")
+            if changed is not None and (listed is None or not changed <= set(listed)):
+                violations.append(
+                    f"step `{step.name}` lists {sorted(listed or [])} as the changes of {label}; "
+                    f"they must include {sorted(changed)}"
+                )
     return violations
 
 
@@ -1893,6 +2302,10 @@ def check_tag_validation(text: str) -> list[str]:
     #     successful push run of ci.yml at exactly the release commit.
     violations.extend(_check_ci_run_lookup(ci_block))
 
+    # 1d. A failed run is judged by the release commit's first parent's
+    #     reader, told what the commit changed: the step that writes both.
+    violations.extend(_check_parent_reader_step(ci_block))
+
     # 2. The Cargo validation job is skipped exactly where the attestation
     #    stands in for it.
     cargo_if = parse_mapping(job_block(text, CARGO_VALIDATION_JOB), 4).get("if")
@@ -1983,6 +2396,18 @@ PREBUILD_INPUT = "prebuild_release_artifacts"
 PREBUILD_LOOKUP_JOB = "release_prebuild"
 PREBUILD_GATE_JOB = "release_prebuild_gate"
 PREBUILD_LOOKUP_SCRIPT = "scripts/release-find-prebuild"
+# Decides whether the prebuild of an earlier commit serves a tag commit; its
+# non-input rules are the ones check_prebuild_non_inputs applies.
+PREBUILD_EQUIVALENCE = "scripts/release-prebuild-equivalent"
+PRODUCTS_FILE = "ci/products.json"
+# Judges a failed CI run's product evidence; require_ci_green's lookup reads
+# it from the release checkout.
+PRODUCT_EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
+# Where a release job writes the release commit's first parent's copy of that
+# reader, which judges a failed CI run, and the commit's changed paths
+# against that parent (under RUNNER_TEMP).
+PARENT_EVIDENCE_DIR = "ci-evidence-parent"
+PARENT_EVIDENCE_CHANGES = "changed-paths.txt"
 PREBUILD_BACKEND_REFUSAL = "A release prebuild builds with the backend its tag run selects"
 PROVENANCE_VERIFIER = "scripts/verify-release-asset-provenance"
 BINARY_BUILD_JOBS = (
@@ -1990,6 +2415,7 @@ BINARY_BUILD_JOBS = (
     "build_binaries_buildbuddy",
     "build_binaries_windows_cross",
     "build_binaries_macos_x86_cross",
+    "build_binaries_buildbuddy_macos_x86",
 )
 CRITICAL_PUBLISH_JOB = "publish_critical_release_assets"
 WEB_SDK_BUILD_JOB = "build_web_sdk_package"
@@ -2079,11 +2505,14 @@ def check_prebuild(text: str) -> list[str]:
     A `prebuild_release_artifacts` dispatch on main builds every release
     binary and the Web SDK package of the exact dispatched commit, runs no
     release validation or semver measurement, and publishes nothing. A tag
-    push looks the prebuild of its own commit up (`release_prebuild`); when
-    one is found it builds nothing, publishes that run's archives only after
+    push looks up the prebuild of its own commit, or of an ancestor whose
+    prebuild serves it (`release_prebuild`, with the history and
+    `scripts/release-prebuild-equivalent` in its checkout); when one is found
+    it builds nothing, publishes that run's archives only after
     `verify-release-asset-provenance --source-run` (the assets_run_id trust
-    path) and the Web SDK package only after its attestation is verified;
-    when none is found it builds as before.
+    path) and the Web SDK package only after binding it to the prebuild's
+    commit and verifying its attestation; when none is found it builds as
+    before.
     """
     violations: list[str] = []
     names = _job_names(text)
@@ -2338,6 +2767,32 @@ def check_prebuild(text: str) -> list[str]:
             f"job `{WEB_SDK_PUBLISH_JOB}` must verify the prebuilt package's attestation "
             f"(`gh attestation verify ... --source-ref refs/heads/main`) before publishing on {reused.label}"
         )
+    # The prebuilt package names the prebuild's commit, which is the tag's or
+    # an ancestor whose prebuild serves it: the job binds the package to that
+    # commit through the equivalence helper before verifying its attestation.
+    bind_index = next((index for index, step in web_steps if PREBUILD_EQUIVALENCE in step.run), None)
+    if bind_index is None or verify_index is None or bind_index > verify_index:
+        violations.append(
+            f"job `{WEB_SDK_PUBLISH_JOB}` must bind the prebuilt package to the prebuild's commit with "
+            f"`{PREBUILD_EQUIVALENCE}` before verifying its attestation on {reused.label}"
+        )
+    # The lookup compares the prebuilds of earlier commits with the tag
+    # commit: its checkout holds the history, the helper and the products.
+    checkouts = [
+        step
+        for step in job_steps(job_block(text, PREBUILD_LOOKUP_JOB))
+        if CHECKOUT_ACTION in step.fields.get("uses", "")
+    ]
+    sparse = checkouts[0].raw_with("sparse-checkout") if len(checkouts) == 1 else ""
+    if (
+        len(checkouts) != 1
+        or checkouts[0].nested("with").get("fetch-depth") != "0"
+        or not all(path in sparse.split() for path in (PREBUILD_LOOKUP_SCRIPT, PREBUILD_EQUIVALENCE, PRODUCTS_FILE))
+    ):
+        violations.append(
+            f"job `{PREBUILD_LOOKUP_JOB}` must check out the whole history (fetch-depth: 0) with "
+            f"`{PREBUILD_LOOKUP_SCRIPT}`, `{PREBUILD_EQUIVALENCE}` and `{PRODUCTS_FILE}`"
+        )
 
     # 7. A prebuild builds with the backend its tag run selects: on the other
     #    one its critical lanes queue behind other runners and miss the tag's
@@ -2374,8 +2829,250 @@ def check_prebuild(text: str) -> list[str]:
                         )
     return violations
 
+
+# The jobs that build or gate the artifacts a prebuild provides. Their text,
+# the local actions and reusable workflows they use, and the repository
+# scripts named there (transitively) are what a reused prebuild's commit and
+# the tag commit must agree on.
+PREBUILD_BUILD_JOBS = (
+    *BINARY_BUILD_JOBS,
+    "verify_windows_binaries",
+    "verify_macos_x86_binaries",
+    WEB_SDK_BUILD_JOB,
+    "build_binaries_critical_gate",
+    "build_binaries_gate",
+    PREBUILD_GATE_JOB,
+)
+SCRIPT_REFERENCE = re.compile(r"(?<![A-Za-z0-9_.-])((?:scripts|tools)/[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*)")
+USES_REFERENCE = re.compile(r"\buses:\s*\S*?(\.github/(?:actions|workflows)/[A-Za-z0-9_.+-]+)")
+# A JavaScript or Python module's relative imports (`from "./x.mjs"`,
+# `import("./x.mjs")`, `require("./x")`), resolved against its directory.
+RELATIVE_IMPORT = re.compile(r"""(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["'](\.{1,2}/[^"'\s]+)["']""")
+# `npm run <script>` (or run-script) in a file that changes into a package's
+# directory (`cd <dir>`, `cd "${root}/<dir>"`); `node <file>` in the scripts
+# that package.json runs, resolved against that directory.
+NPM_RUN = re.compile(r"\bnpm\s+run(?:-script)?\s+([A-Za-z0-9:_.-]+)")
+CD_DIRECTORY = re.compile(r"""\bcd\s+["']?(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/)?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)""")
+NODE_SCRIPT = re.compile(r"\bnode\s+((?:\./)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:mjs|cjs|js))\b")
+
+
+def _code(text: str) -> str:
+    """The text without its comment lines (`#` first in YAML, shell and Python)."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _prebuild_equivalence():
+    """scripts/release-prebuild-equivalent as a module: its non-input rules."""
+    path = REPO_ROOT / PREBUILD_EQUIVALENCE
+    if not path.is_file():
+        raise ContractError(f"{PREBUILD_EQUIVALENCE} does not exist")
+    loader = importlib.machinery.SourceFileLoader("release_prebuild_equivalent", str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def _repository_file(path: Path) -> str | None:
+    """`path` relative to REPO_ROOT when it is a file there (an action
+    directory's action.yml for a directory), else None."""
+    if path.is_dir():
+        path = next((path / name for name in ("action.yml", "action.yaml") if (path / name).is_file()), path)
+    try:
+        resolved = path.resolve()
+        label = str(resolved.relative_to(REPO_ROOT.resolve()))
+    except (OSError, ValueError):
+        return None
+    return label if resolved.is_file() else None
+
+
+def _npm_scripts(directory: str, names: list[str]) -> tuple[list[str], list[str]]:
+    """The files the npm scripts `names` of the package in `directory` run
+    with node (following `npm run` inside them), and the package.json."""
+    manifest = REPO_ROOT / directory / "package.json"
+    try:
+        scripts = json.loads(manifest.read_text(encoding="utf-8")).get("scripts", {})
+    except (OSError, ValueError, AttributeError):
+        return [], []
+    files: list[str] = []
+    seen: set[str] = set()
+    pending = list(names)
+    while pending:
+        name = pending.pop()
+        if name in seen or not isinstance(scripts.get(name), str):
+            continue
+        seen.add(name)
+        command = scripts[name]
+        pending.extend(match.group(1) for match in NPM_RUN.finditer(command))
+        files.extend(f"{directory}/{match.group(1).removeprefix('./')}" for match in NODE_SCRIPT.finditer(command))
+    return files, [f"{directory}/package.json"]
+
+
+def _prebuild_build_closure(text: str) -> dict[str, str]:
+    """Label -> code of each prebuild build job and of every local action,
+    reusable workflow and repository file it reaches: the scripts and
+    actions named there, a module's relative imports, and the files the npm
+    scripts a script runs (`cd <package dir>` then `npm run <name>`) run with
+    node, with that package.json; transitively. A Make recipe, a cargo alias
+    or a script reached any other way is not followed."""
+    texts = {f"{job} job": _code("\n".join(job_block(text, job))) for job in PREBUILD_BUILD_JOBS}
+    pending = list(texts)
+    while pending:
+        label = pending.pop()
+        code = texts[label]
+        references = [REPO_ROOT / match.group(1) for match in SCRIPT_REFERENCE.finditer(code)]
+        references += [REPO_ROOT / match.group(1) for match in USES_REFERENCE.finditer(code)]
+        if not label.endswith(" job"):
+            here = (REPO_ROOT / label).parent
+            references += [here / match.group(1) for match in RELATIVE_IMPORT.finditer(code)]
+        npm_runs = [match.group(1) for match in NPM_RUN.finditer(code)]
+        if npm_runs:
+            for match in CD_DIRECTORY.finditer(code):
+                files, manifests = _npm_scripts(match.group(1), npm_runs)
+                references += [REPO_ROOT / path for path in (*files, *manifests)]
+        for reference in references:
+            found = _repository_file(reference)
+            if found is None:
+                # A relative import may leave out the extension.
+                found = next(
+                    (hit for suffix in (".mjs", ".js", ".cjs") if (hit := _repository_file(Path(f"{reference}{suffix}")))),
+                    None,
+                )
+            if found is None or found in texts:
+                continue
+            try:
+                texts[found] = _code((REPO_ROOT / found).read_text(encoding="utf-8"))
+            except UnicodeDecodeError:
+                texts[found] = ""
+            pending.append(found)
+    return texts
+
+
+def check_prebuild_non_inputs(text: str) -> list[str]:
+    """No release build job, local action or script names a prebuild non-input.
+
+    A tag publishes the prebuild of an earlier commit when every path changed
+    since is a non-input of Core's release artifacts
+    (scripts/release-prebuild-equivalent): under another product's root, a
+    product's changelog, or a CI-only file. That holds only while nothing that
+    builds those artifacts reads such a path: the jobs that build or gate
+    them, the local actions and reusable workflows they use, and the
+    repository scripts named there, transitively (comment lines aside). Every
+    CI-only file the helper lists must also exist.
+    """
+    helper = _prebuild_equivalence()
+    try:
+        roots, changelogs = helper.product_rules((REPO_ROOT / PRODUCTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, helper.Refusal) as error:
+        return [f"{PRODUCTS_FILE}: {error}"]
+    names = {path: f"CI-only ({reason})" for path, reason in helper.CI_ONLY_PATHS.items()}
+    names.update({path: f"{product}'s changelog" for path, product in changelogs.items()})
+    patterns = [
+        (re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?![A-Za-z0-9_.-])"), name, why)
+        for name, why in names.items()
+    ]
+    patterns += [
+        (re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(root)}"), root, f"{product}'s root")
+        for root, product in roots.items()
+    ]
+    violations = [
+        f"{PREBUILD_EQUIVALENCE} lists the CI-only file {path}, which does not exist"
+        for path in helper.CI_ONLY_PATHS
+        if not (REPO_ROOT / path).is_file()
+    ]
+    # The helper comes from the release commit: a CI-only file outside
+    # scripts/ci-* could be one of its own inputs, so the helper refuses
+    # every prebuild while it lists one.
+    shape = getattr(helper, "CI_ONLY_SHAPE", None)
+    violations += [
+        f"{PREBUILD_EQUIVALENCE} lists the CI-only file {path}, outside scripts/ci-*, so it refuses every prebuild"
+        for path in helper.CI_ONLY_PATHS
+        if shape is None or not shape.fullmatch(path)
+    ]
+    for label, code in sorted(_prebuild_build_closure(text).items()):
+        for line in code.splitlines():
+            for pattern, name, why in patterns:
+                if pattern.search(line):
+                    violations.append(f"{label} names {name} ({why}): {line.strip()[:120]}")
+    return violations
+
 SEMVER_BASELINE_JOB = "publish_semver_baseline"
 SEMVER_BASELINE_ATTACH_JOB = "attach_semver_baseline"
+
+# The packages whose builds are Core's release artifacts: the four release
+# binaries' packages and the Web SDK's runtime.
+CORE_RELEASE_PACKAGES = ("rkat", "meerkat-rpc", "meerkat-rest", "meerkat-mcp-server", "meerkat-web-runtime")
+# A test's stand-in for `cargo metadata --no-deps --format-version 1` (a file).
+CARGO_METADATA_FIXTURE = "RELEASE_CONTRACT_CARGO_METADATA"
+
+
+def _workspace_packages() -> list[dict]:
+    """The workspace's packages, as `cargo metadata --no-deps` lists them."""
+    fixture = os.environ.get(CARGO_METADATA_FIXTURE)
+    if fixture:
+        return json.loads(Path(fixture).read_text(encoding="utf-8"))["packages"]
+    result = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ContractError(f"cargo metadata failed: {' '.join(result.stderr.split())[:200]}")
+    return json.loads(result.stdout)["packages"]
+
+
+def check_release_closures(text: str) -> list[str]:
+    """No Core release artifact compiles a product's package.
+
+    A tag publishes an earlier commit's prebuild when every path changed
+    since is a non-input of Core's release artifacts, and everything under
+    another product's root but its Cargo.toml files counts as one
+    (scripts/release-prebuild-equivalent). That holds only while the normal
+    and build dependency closures of CORE_RELEASE_PACKAGES, through the
+    workspace's path dependencies (optional and target-specific ones
+    included), hold no package under a product root.
+    """
+    helper = _prebuild_equivalence()
+    try:
+        roots, _ = helper.product_rules((REPO_ROOT / PRODUCTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, helper.Refusal) as error:
+        return [f"{PRODUCTS_FILE}: {error}"]
+    packages = {package["name"]: package for package in _workspace_packages()}
+    workspace = REPO_ROOT.resolve()
+
+    def place(package: dict) -> str:
+        directory = Path(package["manifest_path"]).resolve().parent
+        try:
+            return f"{directory.relative_to(workspace)}/"
+        except ValueError:
+            return f"{directory}/"
+
+    violations = [f"no workspace package {name}, a Core release artifact" for name in CORE_RELEASE_PACKAGES
+                  if name not in packages]
+    for release in CORE_RELEASE_PACKAGES:
+        if release not in packages:
+            continue
+        reached: dict[str, str] = {release: release}
+        frontier = [release]
+        while frontier:
+            name = frontier.pop()
+            for dependency in packages[name].get("dependencies", []):
+                if dependency.get("kind") not in (None, "normal", "build") or not dependency.get("path"):
+                    continue
+                target = dependency["name"]
+                if target in packages and target not in reached:
+                    reached[target] = name
+                    frontier.append(target)
+        for name, via in sorted(reached.items()):
+            location = place(packages[name])
+            for root, product in roots.items():
+                if location.startswith(root):
+                    violations.append(
+                        f"{release}'s normal or build dependencies reach {name} ({location}, under {product}'s root "
+                        f"{root}) through {via}"
+                    )
+    return violations
 
 
 def _job_needs(text: str, job: str) -> list[str]:
@@ -2466,7 +3163,13 @@ def check_semver_baseline(text: str) -> list[str]:
 GH_UPLOAD_CLOBBER = re.compile(r"gh release upload(?:[^\n]|\\\n)*--clobber")
 CRITICAL_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin")
 TRAILING_TARGETS = ("x86_64-apple-darwin", "x86_64-pc-windows-msvc")
-TRAILING_BUILD_JOBS = ("build_binaries_windows_cross", "verify_windows_binaries", "build_binaries_macos_x86_cross")
+TRAILING_BUILD_JOBS = (
+    "build_binaries_windows_cross",
+    "verify_windows_binaries",
+    "build_binaries_macos_x86_cross",
+    "build_binaries_buildbuddy_macos_x86",
+    "verify_macos_x86_binaries",
+)
 RELEASE_BINARIES = ("rkat", "rkat-rpc", "rkat-rest", "rkat-mcp")
 GH_RELEASE_ACTION = "softprops/action-gh-release"
 
@@ -3663,12 +4366,348 @@ def check_readiness_attestation(text: str) -> list[str]:
     return violations
 
 
+# The BuildBuddy command that builds the Intel macOS release binaries, the
+# hosted job that builds them on the GitHub-hosted backend, and the script
+# that runs and inspects them on Apple silicon.
+BUILDBUDDY_MACOS_X86_COMMAND = "release-build-macos-x86"
+HOSTED_MACOS_X86_JOB = "build_binaries_macos_x86_cross"
+MACOS_X86_CHECK_SCRIPT = "scripts/check-macos-x86-release-binary"
+BUILDBUDDY_RELEASE_SCRIPT = "scripts/buildbuddy-bazel-poc"
+FULL_BUILD_GATE_JOB = "build_binaries_gate"
+
+
+def _release_backend_contexts() -> dict[str, list[EventContext]]:
+    """Tag pushes and prebuild dispatches on each release backend: BuildBuddy
+    for the owner while MEERKAT_RELEASE_BUILDBUDDY is true or 1 (a prebuild
+    names it as its release_backend), GitHub-hosted otherwise."""
+    outputs = {
+        f"{PREBUILD_LOOKUP_JOB}.run_id": "",
+        f"{PREBUILD_LOOKUP_JOB}.run_attempt": "",
+        f"{CI_GREEN_JOB}.{ATTESTATION_SCHEMA_OUTPUT}": "4",
+        f"{CI_GREEN_JOB}.{COVERS_OUTPUT}": "true",
+        f"{CI_GREEN_JOB}.prebuild_tag": "v0.0.0",
+    }
+    skipped = {"release_validate_gate": "skipped", SEMVER_GATE_JOB: "skipped", PREBUILD_LOOKUP_JOB: "skipped"}
+
+    def tag(label: str, actor: str, flag: str) -> EventContext:
+        return EventContext(
+            label=label,
+            event_name="push",
+            actor=actor,
+            variables={"MEERKAT_RELEASE_BUILDBUDDY": flag} if flag else {},
+            job_outputs=outputs,
+        )
+
+    def prebuild(label: str, actor: str, backend: str) -> EventContext:
+        return EventContext(
+            label=label,
+            event_name="workflow_dispatch",
+            ref="refs/heads/main",
+            actor=actor,
+            inputs={PREBUILD_INPUT: "true", "release_backend": backend},
+            job_results=skipped,
+            job_outputs=outputs,
+        )
+
+    return {
+        "buildbuddy": [
+            tag("the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY true", "lukacf", "true"),
+            tag("the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY 1", "lukacf", "1"),
+            prebuild("the owner's prebuild dispatch on BuildBuddy", "lukacf", "buildbuddy"),
+        ],
+        "github-hosted": [
+            tag("a tag push by another actor", "release-bot", "true"),
+            tag("the owner's tag push with MEERKAT_RELEASE_BUILDBUDDY unset", "lukacf", ""),
+            prebuild("the owner's prebuild dispatch on the GitHub-hosted backend", "lukacf", "github-hosted"),
+        ],
+    }
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+def check_buildbuddy_macos_x86(text: str) -> list[str]:
+    """Intel macOS release binaries build on BuildBuddy when it is selected.
+
+    On the BuildBuddy release backend (the owner's tag push while
+    MEERKAT_RELEASE_BUILDBUDDY is true or 1, the owner's prebuild dispatch
+    with release_backend=buildbuddy) the x86_64-apple-darwin archives come
+    from one job running scripts/buildbuddy-bazel-poc's
+    `release-build-macos-x86` command, which cross-compiles them on the
+    Apple-silicon executors for a minimum macOS version no newer than
+    scripts/check-macos-x86-release-binary accepts. The job names, stamps and
+    attests its archives as every release build job does, a macOS runner job
+    runs and inspects them with that script, the binary build gate requires
+    both, and no hosted Intel macOS build job runs. Neither the critical
+    gate, the critical publisher nor the prebuild gate waits for them: the
+    critical Linux and macOS arm64 archives publish first, and Intel macOS
+    trails with Windows. On the GitHub-hosted backend the hosted cross-build
+    builds them and the BuildBuddy job does not run.
+    """
+    violations: list[str] = []
+    names = _job_names(text)
+    for job in (HOSTED_MACOS_X86_JOB, FULL_BUILD_GATE_JOB, "build_binaries_critical_gate", CRITICAL_PUBLISH_JOB):
+        if job not in names:
+            return [f"job `{job}` is not defined in the workflow"]
+    builders = [
+        job
+        for job in names
+        if f"BUILDBUDDY_BAZEL_COMMAND: {BUILDBUDDY_MACOS_X86_COMMAND}" in "\n".join(job_block(text, job))
+    ]
+    if len(builders) != 1:
+        return [
+            f"{len(builders)} jobs build the Intel macOS release binaries with BuildBuddy "
+            f"(`BUILDBUDDY_BAZEL_COMMAND: {BUILDBUDDY_MACOS_X86_COMMAND}`); expected exactly one"
+        ]
+    builder = builders[0]
+    builder_text = "\n".join(job_block(text, builder))
+    builder_steps = job_steps(job_block(text, builder))
+    if not any(BUILDBUDDY_RELEASE_SCRIPT in step.run for step in builder_steps):
+        violations.append(f"job `{builder}` does not run `{BUILDBUDDY_RELEASE_SCRIPT}`")
+    if "x86_64-apple-darwin" not in builder_text or 'artifact_name="${bin}-${VERSION}-${TARGET}.' not in builder_text:
+        violations.append(
+            f"job `{builder}` must package `<binary>-<version>-x86_64-apple-darwin.tar.gz`, "
+            "the names the Intel macOS assets have"
+        )
+    if not any(".source-commit" in step.run for step in builder_steps) or not any(
+        "actions/attest-build-provenance" in step.fields.get("uses", "") for step in builder_steps
+    ):
+        violations.append(f"job `{builder}` must stamp and attest its archives as every release build job does")
+    uploads = [step for step in builder_steps if "actions/upload-artifact" in step.fields.get("uses", "")]
+    if len(uploads) != 1 or not uploads[0].nested("with").get("name", "").startswith("meerkat-x86_64-apple-darwin"):
+        violations.append(
+            f"job `{builder}` must upload one `meerkat-x86_64-apple-darwin*` artifact, which the publishers download"
+        )
+
+    verifiers = [
+        job
+        for job in names
+        if builder in _job_needs(text, job)
+        and parse_mapping(job_block(text, job), 4).get("runs-on", "").strip().startswith("macos-")
+        and any(MACOS_X86_CHECK_SCRIPT.split("/")[-1] in step.run for step in job_steps(job_block(text, job)))
+    ]
+    if len(verifiers) != 1:
+        violations.append(
+            f"{len(verifiers)} macOS runner jobs run `{MACOS_X86_CHECK_SCRIPT}` on job `{builder}`'s archives; "
+            "expected exactly one"
+        )
+        return violations
+    verifier = verifiers[0]
+
+    contexts = _release_backend_contexts()
+    for context in contexts["buildbuddy"]:
+        for job in (builder, verifier):
+            if not _job_runs(text, job, context):
+                violations.append(f"job `{job}` does not run on {context.label}")
+        if _job_runs(text, HOSTED_MACOS_X86_JOB, context):
+            violations.append(
+                f"job `{HOSTED_MACOS_X86_JOB}` runs on {context.label}; "
+                "Intel macOS builds on the BuildBuddy lane there"
+            )
+        for job in names:
+            if job in (builder, HOSTED_MACOS_X86_JOB):
+                continue
+            block = "\n".join(job_block(text, job))
+            if "--target x86_64-apple-darwin" in block and _job_runs(text, job, context):
+                violations.append(f"job `{job}` builds Intel macOS binaries on {context.label}")
+    for context in contexts["github-hosted"]:
+        if not _job_runs(text, HOSTED_MACOS_X86_JOB, context):
+            violations.append(f"job `{HOSTED_MACOS_X86_JOB}` does not run on {context.label}")
+        if _job_runs(text, builder, context):
+            violations.append(f"job `{builder}` runs on {context.label}, which builds on GitHub-hosted runners")
+
+    # The binary build gate requires the lane of the selected backend.
+    gate_needs = _job_needs(text, FULL_BUILD_GATE_JOB)
+    for job in (builder, verifier, HOSTED_MACOS_X86_JOB):
+        if job not in gate_needs:
+            violations.append(f"job `{FULL_BUILD_GATE_JOB}` does not need `{job}`")
+    gate_steps = [step for step in job_steps(job_block(text, FULL_BUILD_GATE_JOB)) if "bb_selected" in step.run]
+    if len(gate_steps) != 1:
+        violations.append(f"job `{FULL_BUILD_GATE_JOB}` has no single step that checks the selected backend")
+    else:
+        common = {
+            "build_binaries_windows_cross": "success",
+            "verify_windows_binaries": "success",
+            PREBUILD_LOOKUP_JOB: "success",
+        }
+        buildbuddy_ok = {
+            **common,
+            "build_binaries": "skipped",
+            "build_binaries_buildbuddy": "success",
+            HOSTED_MACOS_X86_JOB: "skipped",
+            builder: "success",
+            verifier: "success",
+        }
+        hosted_ok = {
+            **common,
+            "build_binaries": "success",
+            "build_binaries_buildbuddy": "skipped",
+            HOSTED_MACOS_X86_JOB: "success",
+            builder: "skipped",
+            verifier: "skipped",
+        }
+        bb_tag, hosted_tag = contexts["buildbuddy"][0], contexts["github-hosted"][0]
+        cases = [
+            (bb_tag, buildbuddy_ok, True, "the BuildBuddy Intel macOS lane built and verified"),
+            (bb_tag, {**buildbuddy_ok, verifier: "failure"}, False, "the Intel macOS verification failed"),
+            (bb_tag, {**buildbuddy_ok, builder: "failure"}, False, "the BuildBuddy Intel macOS build failed"),
+            (
+                bb_tag,
+                {**buildbuddy_ok, builder: "skipped", verifier: "skipped", HOSTED_MACOS_X86_JOB: "success"},
+                False,
+                "only the hosted Intel macOS build ran",
+            ),
+            (hosted_tag, hosted_ok, True, "the hosted Intel macOS build ran"),
+            (hosted_tag, {**hosted_ok, HOSTED_MACOS_X86_JOB: "failure"}, False, "the hosted Intel macOS build failed"),
+        ]
+        for context, results, accepted, label in cases:
+            run = EventContext(**{**context.__dict__, "label": f"{context.label} where {label}", "job_results": results})
+            status, output = _run_gate_script(gate_steps[0], run)
+            if (status == 0) != accepted:
+                violations.append(
+                    f"step `{gate_steps[0].name}` {'refuses' if accepted else 'accepts'} {run.label}: "
+                    + " | ".join(line for line in output.splitlines() if line.strip())[:300]
+                )
+
+    # The critical archives publish without waiting for Intel macOS.
+    needs = {job: _job_needs(text, job) for job in names}
+
+    def closure(job: str) -> set[str]:
+        seen: set[str] = set()
+        frontier = list(needs.get(job, []))
+        while frontier:
+            upstream = frontier.pop()
+            if upstream in seen or upstream not in needs:
+                continue
+            seen.add(upstream)
+            frontier.extend(needs[upstream])
+        return seen
+
+    for job in ("build_binaries_critical_gate", CRITICAL_PUBLISH_JOB, PREBUILD_GATE_JOB):
+        waits = sorted({builder, verifier} & closure(job))
+        if waits:
+            violations.append(
+                f"job `{job}` waits for {', '.join(f'`{upstream}`' for upstream in waits)}; "
+                "Intel macOS trails the critical archives"
+            )
+
+    # The BuildBuddy command targets a macOS version every supported Intel
+    # Mac runs, as the inspection script requires.
+    try:
+        lane = (REPO_ROOT / BUILDBUDDY_RELEASE_SCRIPT).read_text(encoding="utf-8")
+        check = (REPO_ROOT / MACOS_X86_CHECK_SCRIPT).read_text(encoding="utf-8")
+    except OSError as error:
+        violations.append(f"cannot read the Intel macOS lane's scripts: {error}")
+        return violations
+    case = re.search(rf"(?ms)^  {re.escape(BUILDBUDDY_MACOS_X86_COMMAND)}\)\n(.*?)^    ;;", lane)
+    bound = re.search(r'MEERKAT_MACOS_X86_MAX_MINOS:-([0-9.]+)\}', check)
+    minimum = re.search(r"--macos_minimum_os=([0-9.]+)", case.group(1)) if case else None
+    if case is None or bound is None or minimum is None:
+        violations.append(
+            f"`{BUILDBUDDY_RELEASE_SCRIPT}` {BUILDBUDDY_MACOS_X86_COMMAND} must set `--macos_minimum_os` "
+            f"(otherwise the launcher's shared macOS minimum applies), no newer than `{MACOS_X86_CHECK_SCRIPT}` accepts"
+        )
+    elif _version_tuple(minimum.group(1)) > _version_tuple(bound.group(1)):
+        violations.append(
+            f"`{BUILDBUDDY_RELEASE_SCRIPT}` {BUILDBUDDY_MACOS_X86_COMMAND} targets macOS {minimum.group(1)}, "
+            f"newer than the {bound.group(1)} `{MACOS_X86_CHECK_SCRIPT}` accepts"
+        )
+    if case is not None:
+        violations.extend(_check_macos_x86_tree_refusal(text, builder, builder_steps, lane, check, case))
+    return violations
+
+
+# The step of the BuildBuddy Intel macOS job that refuses, before anything
+# builds, a release tree whose launcher would target a newer macOS than the
+# inspection accepts (an older tag that an asset recovery checks out).
+MACOS_X86_TREE_STEP = "Refuse a release tree that builds Intel macOS for a newer macOS than the release accepts"
+
+
+def _check_macos_x86_tree_refusal(
+    text: str, builder: str, steps: list[Step], lane: str, check: str, case: re.Match[str]
+) -> list[str]:
+    """An asset recovery runs main's workflow on an existing tag's tree, so
+    the BuildBuddy Intel macOS job runs that tag's launcher: one cut before
+    the launcher pinned the Intel minimum builds for its shared minimum
+    (13.0), which the inspection after the build refuses. The job must refuse
+    such a tree before it builds, naming the GitHub-hosted backend that
+    recovers the tag, and build the release tree's own launcher. The step
+    runs, verbatim, against this tree's launcher and three older shapes: no
+    minimum in the Intel command, a minimum newer than the inspection
+    accepts, and no Intel command at all."""
+    names = [step.name for step in steps]
+    if MACOS_X86_TREE_STEP not in names:
+        return [
+            f"job `{builder}` has no step `{MACOS_X86_TREE_STEP}`: an asset recovery of a tag whose launcher builds "
+            "Intel macOS for macOS 13.0 fails only after the build, in the inspection, without naming the "
+            "GitHub-hosted backend that recovers it"
+        ]
+    index = names.index(MACOS_X86_TREE_STEP)
+    step = steps[index]
+    violations: list[str] = []
+    builds = [position for position, candidate in enumerate(steps) if BUILDBUDDY_RELEASE_SCRIPT in candidate.run]
+    if builds and index > builds[0]:
+        violations.append(f"job `{builder}` runs `{MACOS_X86_TREE_STEP}` after it builds")
+    tooling = [candidate for candidate in steps if candidate.nested("with").get("path") == ".release-tooling"]
+    if not tooling or MACOS_X86_CHECK_SCRIPT not in "\n".join(tooling[0].lines):
+        violations.append(
+            f"job `{builder}` must check out `{MACOS_X86_CHECK_SCRIPT}` with its release tooling, whose minimum "
+            f"`{MACOS_X86_TREE_STEP}` reads"
+        )
+    body = case.group(1)
+    without_minimum = re.sub(r" --macos_minimum_os=[0-9.]+", "", body)
+    newer = re.sub(r"--macos_minimum_os=[0-9.]+", "--macos_minimum_os=12.0", body)
+    start, end = case.span(1)
+    launchers = (
+        ("this tree's launcher", lane, True),
+        ("an older tag's launcher, whose Intel command sets no minimum", lane[:start] + without_minimum + lane[end:], False),
+        ("a launcher whose Intel minimum is newer than the inspection accepts", lane[:start] + newer + lane[end:], False),
+        ("a launcher without the Intel command", lane[: case.start()] + lane[case.end() :].split("\n", 1)[1], False),
+    )
+    recovery = EventContext(
+        label="the owner's BuildBuddy asset recovery of an existing tag",
+        event_name="workflow_dispatch",
+        ref="refs/heads/main",
+        actor="lukacf",
+        inputs={"release_tag": "v0.0.0", "publish_release_assets_only": "true", "release_backend": "buildbuddy"},
+        job_outputs={f"{CI_GREEN_JOB}.prebuild_tag": ""},
+    )
+    env = {key: render_strict(value, recovery) for key, value in step.env.items()}
+    for label, launcher, builds_it in launchers:
+        with tempfile.TemporaryDirectory(prefix="release-macos-x86-tree-") as scratch:
+            Path(scratch, "scripts").mkdir()
+            Path(scratch, BUILDBUDDY_RELEASE_SCRIPT).write_text(launcher, encoding="utf-8")
+            Path(scratch, ".release-tooling", "scripts").mkdir(parents=True)
+            Path(scratch, ".release-tooling", MACOS_X86_CHECK_SCRIPT).write_text(check, encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", render_strict(step.raw_run, recovery)],
+                cwd=scratch,
+                env={**_runner_env(recovery), **env},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        output = " | ".join(line for line in (result.stdout + result.stderr).splitlines() if line.strip())
+        if builds_it and result.returncode != 0:
+            violations.append(f"step `{step.name}` refuses {label}: {output[:300]}")
+        if not builds_it and (result.returncode == 0 or "github-hosted" not in output):
+            violations.append(
+                f"step `{step.name}` does not refuse {label} with the GitHub-hosted backend's name "
+                f"(exit {result.returncode}): {output[:300]}"
+            )
+    return violations
+
+
 CHECKS: dict[str, Callable[[str], list[str]]] = {
     "semver-evidence": check_semver_evidence,
     "registry-slo": check_registry_slo,
     "dispatch-binding": check_dispatch_binding,
     "tag-validation": check_tag_validation,
     "prebuild": check_prebuild,
+    "prebuild-non-inputs": check_prebuild_non_inputs,
+    "buildbuddy-macos-x86": check_buildbuddy_macos_x86,
+    "release-closures": check_release_closures,
     "semver-baseline": check_semver_baseline,
     "trailing-platforms": check_trailing_platforms,
     "token-permissions": check_token_permissions,

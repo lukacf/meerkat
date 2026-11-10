@@ -9,6 +9,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { LANE_JOBS, acceptance, recordEvidence } from "./ci-product-evidence.mjs";
 import {
   CI_ROW_STEPS,
   rowStepBindings,
@@ -1175,6 +1177,36 @@ for (const path of [
   assertLanes(plan, path);
 }
 
+// The other setup inputs of the Rust lanes are build configuration like the
+// Rust setup action: the sccache, mold and cargo tool setup actions, and the
+// release download script the mold and cargo tool actions run. A change to
+// any one of them alone escalates to the workspace and plans what a change
+// to setup-rust-ci plans, on a pull request and on a push: the Rust lanes a
+// ci.yml change plans, without the lanes ci.yml also selects as their
+// definition (isLaneDefinitionPath, scripts/machine-authority-changed).
+{
+  const reference = ".github/actions/setup-rust-ci/action.yml";
+  const unlike = [];
+  for (const event of ["pull_request", "push"]) {
+    const expected = planFor([reference], ["--event", event]);
+    for (const path of [
+      ".github/actions/setup-sccache-ci/action.yml",
+      ".github/actions/setup-mold-ci/action.yml",
+      ".github/actions/setup-cargo-tool-ci/action.yml",
+      "scripts/ci-release-asset-download",
+    ]) {
+      const plan = planFor([path], ["--event", event]);
+      const differing = Object.keys({ ...expected, ...plan }).filter(
+        (key) => key !== "changed_paths" && key !== "reason" && !isDeepStrictEqual(expected[key], plan[key]),
+      );
+      if (plan.mode !== "workspace" || plan.reason !== `global build configuration changed: ${path}` || differing.length > 0) {
+        unlike.push(`${path} (${event}): mode ${plan.mode}, reason "${plan.reason}", ${differing.length} other plan fields differ`);
+      }
+    }
+  }
+  assert.deepEqual(unlike, [], `every setup input of the Rust lanes plans what ${reference} plans`);
+}
+
 // Pull request versus push (--event): one change, two plans. The pull
 // request runs a subset of the push's lanes, names every lane it leaves to
 // the push, and is checked against the push's closure rows.
@@ -1283,7 +1315,7 @@ for (const path of [
   assert.equal(shardOf("meerkat").targets, "--all-targets", "the facade is not in the chain");
   assert.equal(shardOf("surface-build-fixtures").targets, "--all-targets", "a mixed head group splits");
   assert.ok(!shardOf("surface-build-fixtures").packages.includes("meerkat-integration-tests"));
-  assert.deepEqual(pr.deferred_to_push.integration_suites.sort(), ["gpt-live-replay", "machine-codegen", "rpc-configured-turn-limit"]);
+  assert.deepEqual(pr.deferred_to_push.integration_suites.sort(), ["connect-console-composition", "gpt-live-replay", "machine-codegen", "rpc-configured-turn-limit"]);
   assert.deepEqual(pr.deferred_to_push.unit_feature_suites.sort(), ["meerkat[experimental-gpt-live]", "meerkat[openai-live]"]);
   assert.equal(pr.wasm, true, "a workspace pull request runs wasm-check: the web runtime is one of its packages");
   assert.equal(pr.example_web, false, "and the example web suites only for their own inputs");
@@ -1783,18 +1815,30 @@ for (const path of [
   assert.deepEqual(bothWaves(lines, "shard_matrix", "shard_rest_matrix"), [{ name: "core", packages: "-p meerkat-core", targets: "--all-targets" }]);
   assert.match(lines.closure_flags, /-p meerkat-core/);
   // The closure check runs one job per product's part of the closure, Core's
-  // first: each row checks exactly one part of closure_flags.
+  // first: each row checks exactly one part of closure_flags with every
+  // feature. After a Core change each product's part gets a second job that
+  // checks it with its default features: --all-features never compiles the
+  // code a product builds only without one of its features.
   const closureParts = JSON.parse(lines.closure_check_matrix).include;
-  assert.deepEqual(closureParts.map((row) => row.packages), lines.closure_flags.split(" ; "), "one closure-check job per product's part");
+  const allFeatureParts = closureParts.filter((row) => row.features === "all");
+  assert.deepEqual(allFeatureParts.map((row) => row.packages), lines.closure_flags.split(" ; "), "one closure-check job per product's part");
   assert.equal(closureParts[0].product, CORE, "Core's part comes first");
-  assert.equal(new Set(closureParts.map((row) => row.product)).size, closureParts.length, "a product's part is one job");
+  assert.equal(new Set(allFeatureParts.map((row) => row.product)).size, allFeatureParts.length, "a product's part is one job");
   for (const row of closureParts) {
     const count = row.packages.split(" ").filter((word) => word === "-p").length;
-    assert.equal(row.name, `${row.product}, ${count} crates`, `${row.name} names its product and its crate count`);
+    const features = row.features === "default" ? ", default features" : "";
+    assert.equal(row.name, `${row.product}, ${count} crates${features}`, `${row.name} names its product, its crate count and its features`);
+    // A Core change checks every target of the products' parts.
+    assert.equal(row.targets, row.product === CORE ? "lib" : "all", `${row.name} checks the targets its part needs`);
   }
+  assert.deepEqual(
+    closureParts.filter((row) => row.features === "default").map((row) => [row.product, row.packages]),
+    allFeatureParts.filter((row) => row.product !== CORE).map((row) => [row.product, row.packages]),
+    "after a Core change each product's part is checked with its default features too",
+  );
   assert.equal(Number(lines.closure_check_count), closureParts.length);
   assert.equal(
-    closureParts.reduce((sum, row) => sum + row.packages.split(" ").filter((word) => word === "-p").length, 0),
+    allFeatureParts.reduce((sum, row) => sum + row.packages.split(" ").filter((word) => word === "-p").length, 0),
     Number(lines.closure_count),
     "the parts together check the whole closure",
   );
@@ -2320,6 +2364,68 @@ for (const path of [
     "the closure check runs the plan's parts",
   );
   assert.ok(closureCheck.includes("          CLOSURE: ${{ matrix.packages }}"), "each closure-check job checks its own part");
+  // A row that asks for all targets gets --all-targets, and time for them.
+  assert.ok(closureCheck.includes("          ROW_TARGETS: ${{ matrix.targets }}"), "each closure-check job checks its row's targets");
+  assert.ok(
+    closureCheck.some((line) => line.includes('"${ROW_TARGETS}" == "all"')) &&
+      closureCheck.some((line) => line.includes("targets+=(--all-targets)")),
+    "a row whose targets are all checks every target",
+  );
+  assert.ok(closureCheck.includes("          ROW_FEATURES: ${{ matrix.features }}"), "each closure-check job checks its row's features");
+  // Each closure-check job uploads its sccache log under a name of its own:
+  // after a Core change a product's two parts (every feature, default
+  // features) share the product, and a second upload under one name fails.
+  {
+    const upload = closureCheck.find((line) => line.startsWith("          name: sccache-log-closure-check-"));
+    assert.ok(upload, "the closure-check job uploads its sccache log");
+    const template = upload.trim().slice("name: ".length);
+    const planned = run(["--format", "github", "--", "crates/meerkat-core/src/lib.rs"]);
+    assert.equal(planned.status, 0, planned.stderr);
+    const outputs = Object.fromEntries(
+      planned.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+    );
+    const rows = JSON.parse(outputs.closure_check_matrix).include;
+    assert.ok(rows.some((row) => row.features === "default"), "a Core change plans default-feature closure-check rows");
+    const names = rows.map((row) =>
+      template.replace(/\$\{\{ matrix\.([a-z_]+) \}\}/g, (_, key) => {
+        assert.ok(Object.hasOwn(row, key), `the closure-check matrix carries ${key}, which the upload name reads`);
+        return String(row[key]);
+      }),
+    );
+    assert.equal(new Set(names).size, names.length, `each closure-check job uploads its sccache log under a name of its own: ${names.join(", ")}`);
+  }
+  // The check step itself, run with a stub scripts/repo-cargo that prints
+  // its arguments: each row checks its part's targets with its features.
+  {
+    const step = closureCheck.indexOf("      - name: Check the reverse-dependency closure");
+    assert.ok(step >= 0, "the closure-check job has its check step");
+    const run = closureCheck.indexOf("        run: |", step);
+    assert.ok(run > step, "the check step runs a script");
+    const body = [];
+    for (const line of closureCheck.slice(run + 1)) {
+      if (!line.startsWith("          ")) break;
+      body.push(line.slice(10));
+    }
+    const scratch = mkdtempSync(join(tmpdir(), "closure-check-step-"));
+    try {
+      mkdirSync(join(scratch, "scripts"));
+      writeFileSync(join(scratch, "scripts", "repo-cargo"), '#!/usr/bin/env bash\necho "$*"\n', { mode: 0o755 });
+      const command = (targets, features) => {
+        const result = spawnSync("bash", ["-c", body.join("\n")], {
+          cwd: scratch,
+          encoding: "utf8",
+          env: { ...process.env, CLOSURE: "-p a -p b", ROW_TARGETS: targets, ROW_FEATURES: features, CLOSURE_CHECK_TARGETS: "lib" },
+        });
+        assert.equal(result.status, 0, `the check step failed: ${result.stderr}`);
+        return result.stdout.trim();
+      };
+      assert.equal(command("lib", "all"), "check -p a -p b --all-features", "Core's part: lib and bin targets, every feature");
+      assert.equal(command("all", "all"), "check -p a -p b --all-targets --all-features", "a product's part after a Core change: every target, every feature");
+      assert.equal(command("all", "default"), "check -p a -p b --all-targets", "and every target with the product's default features");
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
   assert.ok(
     workflow.includes("      closure_check_matrix: ${{ steps.plan.outputs.closure_check_matrix }}\n"),
     "the classification job exports closure_check_matrix",
@@ -2576,9 +2682,27 @@ for (const path of [
   assert.match(store.integration_suites[0].test_flags, /--test compaction_context_window\b/);
   assert.deepEqual(names(planFor(["crates/meerkat-tools/src/lib.rs"])), ["meerkat-authorization"]);
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
+  // meerkat-connect's console composition target needs `console`, which the
+  // closure-tests rows never enable: its own suite runs it on the push, for
+  // a change to Connect or to the Console it drives, and a pull request
+  // leaves it to the push (it compiles meerkat-mob).
+  for (const path of [
+    "connect/crates/meerkat-connect/tests/mobkit_setup_member.rs",
+    "meta/crates/meerkat-meta/src/lib.rs",
+  ]) {
+    const console = planFor([path], ["--event", "push"]).integration_suites.find(
+      (suite) => suite.name === "connect-console-composition",
+    );
+    assert.ok(console, `${path} runs the Connect console composition suite`);
+    assert.equal(console.package_flags, "-p meerkat-connect --features console");
+    assert.equal(console.test_flags, "--test mobkit_setup_member");
+  }
+  const consolePr = planFor(["connect/crates/meerkat-connect/tests/mobkit_setup_member.rs"], ["--event", "pull_request"]);
+  assert.ok(!names(consolePr).includes("meerkat-connect"), "a pull request runs no suite that compiles meerkat-mob");
+  assert.ok(consolePr.deferred_to_push.integration_suites.includes("connect-console-composition"));
   assert.deepEqual(
     names(planFor(["Cargo.toml"])),
-    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat", "meerkat", "meerkat-rpc", "meerkat-integration-tests", "meerkat-authorization"],
+    ["meerkat-runtime", "meerkat-machine-codegen", "xtask", "meerkat-machine-kernels", "meerkat", "meerkat", "meerkat", "meerkat-rpc", "meerkat-integration-tests", "meerkat-authorization", "meerkat-connect"],
     "workspace mode runs every suite",
   );
   // Config layering, core construction and facade changes must execute both
@@ -4031,6 +4155,151 @@ for (const path of [
     assert.ok(enables(facadeRow, feature), `the facade's pull-request unit row enables ${feature}: ${facadeRow.package_flags}`);
     assert.ok(enables(mainRow, feature), `main-unit's facade row enables ${feature}: ${mainRow.package_flags}`);
   }
+}
+
+// Every planned row names its product in row_products, the gate's product
+// evidence (scripts/ci-product-evidence.mjs): a Core change, each product's
+// own change and the whole workspace, on a push. A row without one would
+// keep every release on the whole-run requirement; the lists hold every row.
+{
+  for (const paths of [
+    ["crates/meerkat-core/src/lib.rs"],
+    ["meta/crates/meerkat-meta/src/lib.rs"],
+    ["connect/crates/meerkat-connect/src/lib.rs"],
+    ["Cargo.lock", "Makefile"],
+  ]) {
+    const plan = planFor(paths, ["--event", "push"]);
+    const lanes = plan.row_products;
+    assert.ok(lanes && typeof lanes === "object", `${paths}: the plan carries row_products`);
+    for (const [lane, rows] of Object.entries(lanes)) {
+      for (const row of rows) {
+        assert.ok(["core", "meta", "connect"].includes(row.product), `${paths}: ${lane} row ${row.name} has product ${row.product}`);
+      }
+    }
+    const sizes = {
+      clippy: plan.shards.length,
+      main_unit: plan.main_unit_shards.length + plan.main_feature_unit_shards.length,
+      integration: plan.integration_suites.length + plan.reader_rows.length,
+      closure_tests: plan.closure_test_rows.length,
+      feature_check: plan.feature_check_jobs.length,
+      main_archive_build: plan.main_archive_builds.length,
+      main_archive_run: plan.main_archive_runs.length,
+    };
+    for (const [lane, size] of Object.entries(sizes)) {
+      assert.equal(lanes[lane].length, size, `${paths}: row_products.${lane} lists every row`);
+    }
+    // The CI gate's record joins each job to its row by the job's name, so
+    // no two rows of the plan may render the same name (main_unit and
+    // main_archive_run share the "Main unit tests (...)" template).
+    const rendered = Object.entries(lanes).flatMap(([lane, rows]) => rows.map((row) => LANE_JOBS[lane].name(row)));
+    const repeated = rendered.filter((name, index) => rendered.indexOf(name) !== index);
+    assert.deepEqual(repeated, [], `${paths}: rows of the plan share a job name`);
+  }
+  // A push runs no downstream Clippy row: the products' closure-check rows
+  // type-check them against a changed Core, so those are the downstream
+  // rows; without a Core change a product's own rows are just its own.
+  const core = planFor(["crates/meerkat-core/src/lib.rs"], ["--event", "push"]);
+  assert.deepEqual(core.row_products.clippy.filter((row) => row.downstream), [], "a push has no downstream Clippy row");
+  assert.deepEqual(
+    core.row_products.closure_check.filter((row) => row.downstream).map((row) => row.product).sort(),
+    ["connect", "connect", "meta", "meta"],
+    "a Core change's downstream type-check rows are the products' closure-check rows, every feature and default features",
+  );
+  assert.ok(
+    core.row_products.closure_check.some((row) => row.product === "core" && !row.downstream),
+    "Core's own closure-check row is no downstream row",
+  );
+  const meta = planFor(["meta/crates/meerkat-meta/src/lib.rs"], ["--event", "push"]);
+  assert.deepEqual(meta.row_products.closure_check.filter((row) => row.downstream), [], "without a Core change no row is downstream");
+  // A Core change can break a product's test targets, which no pull request
+  // row checks when it invalidates meerkat-mob's build: the products'
+  // closure-check rows, which Core depends on, then check every target of
+  // their part (Core's own part keeps its lib and bin targets), and a
+  // product's own change checks lib and bin targets only.
+  assert.deepEqual(
+    core.closure_check_rows.map((row) => [row.product, row.targets]),
+    core.closure_check_rows.map((row) => [row.product, row.product === "core" ? "lib" : "all"]),
+    "after a Core change the products' closure-check rows check all targets",
+  );
+  assert.deepEqual(
+    meta.closure_check_rows.map((row) => row.targets),
+    meta.closure_check_rows.map(() => "lib"),
+    "without a Core change a closure-check row checks lib and bin targets",
+  );
+  // A Core change can also break code a product compiles only without one of
+  // its features: meerkat-meta's default build calls Core's precheck_identity
+  // in handle_live_open, which its --all-features build (openai-live) never
+  // compiles. Each product's part is then also checked, every target, with
+  // its default features, in a downstream row of its own: such a break is a
+  // red row Core depends on, even when every --all-features row succeeded.
+  {
+    const probe = planFor(
+      ["crates/meerkat/src/session_runtime/live_orchestration.rs", "crates/meerkat-rpc/src/session_runtime.rs"],
+      ["--event", "push"],
+    );
+    const parts = (features) => probe.closure_check_rows.filter((row) => row.features === features && row.product !== CORE);
+    assert.deepEqual(parts("all").map((row) => row.product).sort(), ["connect", "meta"], "the change reaches both products");
+    assert.deepEqual(
+      parts("default").map((row) => [row.product, row.package_flags, row.targets]),
+      parts("all").map((row) => [row.product, row.package_flags, "all"]),
+      "after a Core change each product's part is checked with its default features too, every target",
+    );
+    assert.deepEqual(
+      probe.closure_check_rows.filter((row) => row.product === CORE).map((row) => row.features),
+      ["all"],
+      "Core's own part is checked once, with every feature",
+    );
+    assert.deepEqual(
+      probe.row_products.closure_check.filter((row) => row.downstream).map((row) => row.name).sort(),
+      [...parts("all"), ...parts("default")].map((row) => row.name).sort(),
+      "the products' default-feature parts are downstream rows",
+    );
+    // The CI gate's record of a run of this plan in which Meta's default
+    // build failed: its default-feature part and Meta's own rows are red,
+    // every --all-features row green. Core's acceptance refuses the run for
+    // the default-feature part; without that row it would accept it.
+    const metaDefault = parts("default").find((row) => row.product === "meta");
+    const metaOwn = (lane, row) => row.product === "meta" && !row.downstream && lane !== "rustdoc";
+    const record = (defaultConclusion) => {
+      const jobs = Object.entries(probe.row_products).flatMap(([lane, rows]) =>
+        rows.map((row) => {
+          const name = LANE_JOBS[lane].name(row);
+          if (lane === "closure_check" && row.name === metaDefault.name) return { name, conclusion: defaultConclusion };
+          return { name, conclusion: metaOwn(lane, row) ? "failure" : "success" };
+        }),
+      );
+      const failedLanes = [...(defaultConclusion === "failure" ? ["Closure check"] : []), "Main unit tests", "Closure tests"];
+      return recordEvidence({ rowProducts: probe.row_products, jobs, failedLanes, planErrors: 0 });
+    };
+    const judged = (evidence) =>
+      acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core", {
+        changedPaths: ["M\tcrates/meerkat/src/session_runtime/live_orchestration.rs", "M\tcrates/meerkat-rpc/src/session_runtime.rs"],
+      });
+    assert.ok(
+      Object.entries(probe.row_products).some(([lane, rows]) => rows.some((row) => metaOwn(lane, row) && lane !== "closure_check")),
+      "Meta's own rows test it",
+    );
+    const refused = judged(record("failure"));
+    assert.equal(refused.accepted, false, "Core's acceptance refuses a run whose product default-feature part failed");
+    assert.match(refused.reasons.join(" "), new RegExp(`core depends on job Closure check \\(${metaDefault.name}\\)`));
+    assert.equal(
+      judged(record("success")).accepted,
+      true,
+      "with that part green, only Meta's own rows failed: rows Core does not depend on",
+    );
+  }
+  // The products' rustdoc rows document their links into Core items, so
+  // after a Core change they are downstream rows too.
+  assert.deepEqual(
+    [...new Set(core.row_products.rustdoc.filter((row) => row.downstream).map((row) => row.product))].sort(),
+    ["connect", "meta"],
+    "a Core change's product rustdoc rows are downstream rows",
+  );
+  assert.ok(
+    core.row_products.rustdoc.some((row) => row.product === "core" && !row.downstream),
+    "Core's own rustdoc rows are no downstream rows",
+  );
+  assert.deepEqual(meta.row_products.rustdoc.filter((row) => row.downstream), [], "without a Core change no rustdoc row is downstream");
 }
 
 // Bad arguments fail loudly.

@@ -801,7 +801,9 @@ impl From<meerkat_core::event::CompactionPreservedHistoryFit> for CompactionPres
 /// - `LifecycleEffectFailed` - `identity_first/runtime/lifecycle_projection.rs`:
 ///   a lifecycle side effect other than the retirement hook (`after_create`,
 ///   an exit interview's write, a distillation) failed every attempt it was
-///   allowed; it is recorded and not run again
+///   allowed, or (cause `budget_busy`) the realm's agent memory background
+///   budget did not admit its run within its wait; it is recorded and not
+///   run again
 /// - `LifecycleProjectionOff` - the same projection, once: the session
 ///   bridge cannot read what it reads, so no lifecycle side effect runs
 #[non_exhaustive]
@@ -979,6 +981,9 @@ pub enum ErrorEvent {
     /// runs after it, and removes the record once it harvested the
     /// discards), and it delayed later ones by at most its bound. A
     /// retirement hook's failure is a [`Self::RetiredMemberReleaseFailed`].
+    /// `cause` `budget_busy` says the side effect did not run: the realm's
+    /// agent memory background budget did not admit its run within its
+    /// wait, and `attempts` counts only those that ran and failed before.
     LifecycleEffectFailed {
         identity: String,
         /// The incarnation the side effect was owed for.
@@ -988,6 +993,13 @@ pub enum ErrorEvent {
         effect: String,
         attempts: u32,
         error: String,
+        /// Why it ended; left out while it is `failed`, so an event
+        /// written before the field existed reads as failed.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::runtime::LifecycleEffectFailureCause::is_failed"
+        )]
+        cause: crate::runtime::LifecycleEffectFailureCause,
     },
     /// The identity runtime's lifecycle projection is off: the session
     /// bridge cannot read Core's member lifecycle journal, an identity's
@@ -1144,11 +1156,27 @@ impl Display for ErrorEvent {
                 effect,
                 attempts,
                 error,
+                cause,
             } => {
                 let session = match session_id {
                     Some(session_id) => format!(" on session {session_id}"),
                     None => String::new(),
                 };
+                if *cause == crate::runtime::LifecycleEffectFailureCause::BudgetBusy {
+                    // The budget kept it from running: no attempt of it
+                    // failed for that, and the attempts that did fail before
+                    // are named.
+                    let after = if *attempts == 0 {
+                        String::new()
+                    } else {
+                        format!(" after {attempts} failed attempts")
+                    };
+                    return write!(
+                        f,
+                        "lifecycle_effect_failed: the {effect} of {identity} ({agent_runtime_id}\
+                         {session}) did not run{after}: {error}"
+                    );
+                }
                 // A compaction harvest's error says itself whether a
                 // fallback harvest follows; any other side effect is not run
                 // again.
@@ -1388,5 +1416,48 @@ mod tests {
         let mut report = completed_shutdown_report();
         report.module_shutdown.orphan_processes = 1;
         assert!(!report.cleanup_completed());
+    }
+
+    /// A side effect the realm's background budget kept from running reads
+    /// so, naming the attempts that failed before it when there were any; a
+    /// failed one reads failed. The cause is left off the wire while it is
+    /// `failed`.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_lifecycle_effect_the_budget_kept_from_running_reads_did_not_run() {
+        let event = |attempts: u32, cause: crate::runtime::LifecycleEffectFailureCause| {
+            ErrorEvent::LifecycleEffectFailed {
+                identity: "keeper".to_string(),
+                agent_runtime_id: "rt:keeper:2".to_string(),
+                session_id: None,
+                effect: "compaction_harvest".to_string(),
+                attempts,
+                error: "the budget did not admit it".to_string(),
+                cause,
+            }
+        };
+        let busy = crate::runtime::LifecycleEffectFailureCause::BudgetBusy;
+        assert_eq!(
+            event(0, busy).to_string(),
+            "lifecycle_effect_failed: the compaction_harvest of keeper (rt:keeper:2) did not \
+             run: the budget did not admit it"
+        );
+        assert_eq!(
+            event(1, busy).to_string(),
+            "lifecycle_effect_failed: the compaction_harvest of keeper (rt:keeper:2) did not \
+             run after 1 failed attempts: the budget did not admit it"
+        );
+        let failed = event(3, crate::runtime::LifecycleEffectFailureCause::Failed);
+        assert_eq!(
+            failed.to_string(),
+            "lifecycle_effect_failed: the compaction_harvest of keeper (rt:keeper:2) failed \
+             after 3 attempts: the budget did not admit it"
+        );
+        let wire = serde_json::to_value(&failed).expect("the event serializes");
+        assert!(wire.get("cause").is_none(), "{wire}");
+        assert_eq!(
+            serde_json::to_value(event(0, busy)).expect("the event serializes")["cause"],
+            "budget_busy"
+        );
     }
 }

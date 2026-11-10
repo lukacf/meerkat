@@ -4,12 +4,13 @@
 //! process confinement stands between a model's call and the file. Two kinds
 //! of location inside the project root are the host's, not the project's:
 //!
-//! - the engine's own directory, `<project root>/.rkat`, and everything
-//!   under it: the project's MCP servers, hooks and skills, and by default
-//!   the realm's state and config documents. A host reads these at its next
-//!   start and runs what they name, so a session that can write them decides
-//!   what the host launches. This part of the rule needs nothing from the
-//!   host and is always on;
+//! - the engine's own directory, `.rkat`, at the project root and in any
+//!   directory under it, with everything it holds: the project's MCP
+//!   servers, hooks and skills, and by default the realm's state and config
+//!   documents. A host reads the `.rkat` of the directory it is started in
+//!   at its next start and runs what it names, so a session that can write
+//!   one decides what a host started there launches. This part of the rule
+//!   needs nothing from the host and is always on;
 //! - every path the host declares as its own state or input
 //!   ([`ProtectedPaths::with_host_paths`]) that lies strictly inside the
 //!   project root: a realm state root, a config document, a convention file
@@ -23,9 +24,12 @@
 //! lies in such a location, judged twice: on the path's own components (a
 //! `.rkat` that does not exist yet would be created by the write) and on
 //! the real path of its deepest existing ancestor (a symbolic link into the
-//! location). A path with a symbolic link that leads nowhere is refused
-//! too: the write would create the link's target, wherever it points.
-//! Reads are not judged here.
+//! location). Where the project root's `.rkat` or a declared path is itself
+//! a symbolic link, the directory it leads to is the same location and is
+//! refused under its own name; a link deeper inside such a location is not
+//! followed. A path with a symbolic link that leads nowhere is refused too:
+//! the write would create the link's target, wherever it points. Reads are
+//! not judged here.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -54,7 +58,7 @@ impl WriteRefusal {
     pub(crate) fn reason(self, given: &Path) -> String {
         match self {
             Self::Protected => format!(
-                "path '{}' is in the engine's own directory ({ENGINE_DIRECTORY}) or another location the host keeps its state and configuration in; the file tools do not write there. Engine configuration is changed with the rkat CLI or the host's config commands",
+                "path '{}' is in the engine's own directory (a {ENGINE_DIRECTORY} directory anywhere under the project root) or in another location the host keeps its state and configuration in; the file tools do not write there. Engine configuration is changed with the rkat CLI or the host's config commands",
                 given.display()
             ),
             Self::DanglingLink => format!(
@@ -107,6 +111,14 @@ impl ProtectedPaths {
         if in_engine_directory(&real_root, &real_target) {
             return Err(WriteRefusal::Protected);
         }
+        // The project root's engine directory may itself be a symbolic
+        // link: the host reads it where the link leads, so that directory
+        // is the engine's too, under its own name.
+        if real_path(&project_root.join(ENGINE_DIRECTORY))
+            .is_ok_and(|real_engine| strip_prefix(&real_target, &real_engine).is_some())
+        {
+            return Err(WriteRefusal::Protected);
+        }
         for declared in self.host.iter() {
             // The declared path as the host named it and where it really
             // lies: the host may name its state through a symbolic link.
@@ -128,14 +140,18 @@ impl ProtectedPaths {
     }
 }
 
-/// Whether `target` is the engine directory of `root` or lies under it, by
-/// components.
+/// Whether `target` is an engine directory under `root` or lies in one, by
+/// components: a component with the engine directory's name at any depth
+/// below the root. A host started in a subdirectory reads that directory's
+/// `.rkat`, so each one is an engine directory.
 fn in_engine_directory(root: &Path, target: &Path) -> bool {
     strip_prefix(target, root).is_some_and(|below| {
-        matches!(
-            below.components().next(),
-            Some(Component::Normal(first)) if is_engine_directory_name(first, cfg!(windows))
-        )
+        below.components().any(|component| {
+            matches!(
+                component,
+                Component::Normal(name) if is_engine_directory_name(name, cfg!(windows))
+            )
+        })
     })
 }
 
@@ -144,12 +160,41 @@ fn strictly_inside(path: &Path, base: &Path) -> bool {
     strip_prefix(path, base).is_some_and(|below| below.components().next().is_some())
 }
 
-/// Whether `name`, a component directly under a project root, opens the
-/// engine directory. Letter case is ignored on every platform: a
-/// case-insensitive filesystem (the default on macOS and Windows) opens
-/// `.rkat` for `.RKAT`.
+/// Whether `name`, a path component, opens an engine directory. Letter
+/// case is ignored on every platform: a case-insensitive filesystem (the
+/// default on macOS and Windows) opens `.rkat` for `.RKAT`. Two more
+/// spellings such a filesystem opens `.rkat` for are folded first: the
+/// KELVIN SIGN (U+212A), which case folding maps to `k`, and the code
+/// points HFS+ ignores in a name. No other Unicode equivalence is applied.
 fn is_engine_directory_name(name: &OsStr, windows_names: bool) -> bool {
-    same_name(name, OsStr::new(ENGINE_DIRECTORY), true, windows_names)
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let folded: String = name
+        .chars()
+        .filter(|character| !is_hfs_ignorable(*character))
+        .map(|character| {
+            if character == '\u{212A}' {
+                'k'
+            } else {
+                character
+            }
+        })
+        .collect();
+    same_name(
+        OsStr::new(&folded),
+        OsStr::new(ENGINE_DIRECTORY),
+        true,
+        windows_names,
+    )
+}
+
+/// The code points HFS+ ignores when it compares names.
+const fn is_hfs_ignorable(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200C}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{206A}'..='\u{206F}' | '\u{FEFF}'
+    )
 }
 
 /// Whether two path component names open the same directory entry. With

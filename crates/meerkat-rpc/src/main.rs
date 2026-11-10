@@ -576,13 +576,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // The agents' in-process file tools never write the host's inputs, the
     // realm's own documents or the convention sources, in any confinement
     // mode. Without --context-root the tools are rooted in the realm
-    // directory: the realm documents are kept there too.
+    // directory: the realm documents are kept there too, and the factory
+    // reads its hooks and skills from that root, so its convention sources
+    // are the ones declared.
     factory = factory
         .with_host_confinement(&host_confinement)
         .with_protected_host_inputs(
             &host_inputs,
             &meerkat::HostConfinement::realm_documents(&realm_paths.root),
-            &convention_sources,
+            &meerkat::HostConfinement::convention_sources(
+                Some(cli.context_root.as_deref().unwrap_or(&realm_paths.root)),
+                cli.user_config_root.as_deref(),
+            ),
         );
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;

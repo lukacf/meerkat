@@ -178,15 +178,18 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
 - All of that concerns launched processes. The in-process file tools
   (`apply_patch`, `blob_save_file`) are bound by a rule of their own in every
   mode, confined or not: they never create, change, delete or move a path in
-  `<project root>/.rkat/`, a path the host declares as its own state or input
+  a `.rkat` directory at or below the project root, a path the host declares
+  as its own state or input
   inside the project root (the stock hosts declare the realm state root, the
   realm's documents, the user config document, the convention sources and
   the file credential store; a Rust host uses
   `AgentFactory::with_protected_host_inputs`), or a path through a symbolic
-  link whose target does not exist. The refusal is `invalid_arguments`. A
-  server started without `--context-root` roots those tools in its realm
-  directory, where the realm's documents are refused and its stores are not:
-  give it a context root.
+  link whose target does not exist. The refusal is `invalid_arguments`.
+  `rkat-rpc` and `rkat-mcp` started without `--context-root` root those tools
+  in the realm directory, where the realm's documents are refused and its
+  stores are not: give them a context root. An existing hard link to a
+  protected file is written through, and a symbolic link deeper inside a
+  protected directory is not followed.
 - At startup each host reports each launch kind's requested and effective
   confinement, what keeps its own inputs from its confined processes, and
   each untrusted convention source (`rkat` on stderr, the servers in their

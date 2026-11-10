@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   host's own wrapper of a session bridge forwards them to the bridge it
   wraps.
 
+### Security
+
+- A member's file tools (`apply_patch`, `blob_save_file`) can no longer
+  write `<workspace>/.rkat/`, which holds the gateway's Meerkat host config
+  (`meerkat_config_path` defaults to `<workspace>/.rkat/config.toml`) and the
+  comms identity keys: Meerkat's in-process file tools now refuse a `.rkat`
+  directory at the project root and in any directory under it, so a member's
+  patch cannot rewrite the config every agent of its gateway starts from.
+  The call returns an invalid-arguments tool error and writes nothing. Every
+  other workspace file is written as before, the gateway's state directory
+  included, and a member that has the shell tool is not restricted by this.
+  The gateway declares no further paths, so a symbolic link inside `.rkat`
+  that leads elsewhere is not covered. Change the gateway's config yourself,
+  not through a member.
+
 ### Upgrade
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built

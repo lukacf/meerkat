@@ -5985,8 +5985,10 @@ impl AgentFactory {
     /// whose tools are rooted in its realm directory keeps the realm
     /// documents and still lets other files be written there. A relative
     /// path is taken from the process working directory, as the host
-    /// itself opens it. `<project root>/.rkat` is refused without this
-    /// call. Each call replaces the declared paths.
+    /// itself opens it. A `.rkat` directory at or below the project root is
+    /// refused without this call. A declared path that is a symbolic link is
+    /// refused where it leads as well; a link deeper inside a declared
+    /// directory is not followed. Each call replaces the declared paths.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_protected_host_inputs(
         mut self,

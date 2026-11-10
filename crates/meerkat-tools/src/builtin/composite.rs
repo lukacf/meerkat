@@ -631,8 +631,9 @@ impl CompositeDispatcher {
     /// declared path that lies strictly inside the project root is refused
     /// with everything under it; one that contains or equals the project
     /// root is not applied, and a path that is not absolute is ignored.
-    /// The engine's own directory, `<project root>/.rkat`, is refused
-    /// without any declaration. Each call replaces the declared paths.
+    /// The engine's own directory, `.rkat` at the project root or in any
+    /// directory under it, is refused without any declaration. Each call
+    /// replaces the declared paths.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn protect_host_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
         self.set_protected_paths(ProtectedPaths::with_host_paths(paths));

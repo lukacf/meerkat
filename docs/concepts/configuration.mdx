@@ -808,8 +808,9 @@ whole process, with no such guarantee.
 All of the above is about the processes an agent launches. The in-process
 file tools (`apply_patch`, `blob_save_file`) are not processes and are bound
 by a rule of their own, in every confinement mode and without confinement:
-they never write `<project root>/.rkat/` or any of the inputs and convention
-sources listed above that lie inside the project root. See
+they never write a `.rkat` directory at or below the project root, or any
+of the inputs and convention sources listed above that lie inside the project
+root. See
 [paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
 
 ### Administration

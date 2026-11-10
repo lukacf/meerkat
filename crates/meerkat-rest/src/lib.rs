@@ -872,13 +872,17 @@ impl AppState {
         // The agents' in-process file tools never write the host's inputs,
         // the realm's own documents or the convention sources, in any
         // confinement mode. Without --context-root the tools are rooted in
-        // the instance root: the realm documents are kept there too.
+        // the instance root and the factory reads its hooks and skills from
+        // that root, so its convention sources are the ones declared.
         factory = factory
             .with_host_confinement(&host_confinement)
             .with_protected_host_inputs(
                 &host_inputs,
                 &meerkat::HostConfinement::realm_documents(&realm_paths.root),
-                &convention_sources,
+                &meerkat::HostConfinement::convention_sources(
+                    Some(&task_project_root),
+                    bootstrap.context.user_config_root.as_deref(),
+                ),
             );
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);

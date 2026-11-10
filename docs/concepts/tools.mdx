@@ -440,7 +440,7 @@ The built-in `generate_image` tool is session-owned runtime dispatch. It lets a 
 
 The blob file bridge tools are registered only when the session has a blob store. `blob_save_file` writes decoded blob bytes to a file inside the project root, `blob_load_file` reads a project file into the blob store, and `blob_inspect` returns blob metadata without raw payload bytes. They do not expose blob listing or deletion.
 
-`apply_patch` and `blob_save_file` run in the host process and never write the engine's own directory (`<project root>/.rkat/`) or a path the host declares as its own state or input; see [paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
+`apply_patch` and `blob_save_file` run in the host process and never write the engine's own directory (a `.rkat` directory at or below the project root) or a path the host declares as its own state or input; see [paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
 
 Custom tools can return text, image, or structured content through
 `ToolResult::with_blocks(...)`. Video tool results are rejected, and

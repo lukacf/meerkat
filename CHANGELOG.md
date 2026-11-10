@@ -246,34 +246,45 @@ them.
   command or a credential command that the host then runs as the user among
   them. `--confinement workspace` on macOS did not prevent it: its `.rkat`
   protection covers confined processes, and these tools run in the host. The
-  file tools now refuse to create, change, delete or move a path in
-  `<project root>/.rkat/` (in any letter case, through `..`, an absolute path
-  or a symbolic link, and when the directory does not exist yet), and a path
-  the host declares as its own state or input wherever it lies inside the
-  project root: the realm state root (`--state-root` included), the realm's
-  config document, the user config document, the MCP, hook and skill sources
-  and a file credential store. The call fails with an invalid-arguments tool
-  error, nothing is written, and a patch that names one such path applies
-  none of its operations. A directory named `.rkat` deeper in the project is
-  not affected. To change engine configuration, use the CLI (`rkat mcp add`,
-  `rkat config`, `rkat auth`, `rkat skill add`) or edit the files yourself.
-  `apply_patch` is affected from 0.4.6 and `blob_save_file` from 0.6.2, both
-  through 0.9.11.
+  file tools now refuse to create, change, delete or move a path in a `.rkat`
+  directory, at the project root and in any directory under it (in any
+  letter case, through `..`, an absolute path or a symbolic link, and when
+  the directory does not exist yet), and a path the host declares as its own
+  state or input wherever it lies inside the project root: the realm state
+  root (`--state-root` included), the realm's config document, the user
+  config document, the MCP, hook and skill sources and a file credential
+  store. A `.rkat` directory deeper in the project is refused like the one
+  at the root, because a host started from that directory reads it as its
+  own. The call fails with an invalid-arguments tool error, nothing is
+  written, and a patch that names one such path applies none of its
+  operations. Two limits remain. A hard link that already exists in the
+  project to such a file is written through. And where a protected
+  directory holds a symbolic link to another place, that place is not
+  refused: the rule follows a link at `<project root>/.rkat` and at each
+  declared path, not links deeper inside them. To change engine
+  configuration, use the CLI (`rkat mcp add`, `rkat config`, `rkat auth`,
+  `rkat skill add`) or edit the files yourself. `apply_patch` is affected
+  from 0.4.6 and `blob_save_file` from 0.6.2, both through 0.9.11.
 
-- `meerkat-rpc`, `meerkat-mcp-server`, `meerkat-rest`: a server started
-  without `--context-root` roots the file tools in its realm directory (the
-  REST server in its instance directory), so `apply_patch` could rewrite the
-  realm's own `config.toml` there as an ordinary project file. The realm's
-  documents (`config.toml`, `config_state.json`, `realm_manifest.json` and
-  the `authorization` directory) are now refused in that layout as well.
-  Other files there are still written as before, and that includes the
-  realm's stores (sessions, runtime, jobs, tasks, blobs and the rest): in
-  this layout the file tools can still write them. Start the server with
+- `meerkat-rpc`, `meerkat-mcp-server`: `rkat-rpc` and `rkat-mcp` started
+  without `--context-root` root the file tools in the realm directory
+  itself, so `apply_patch` could rewrite the realm's own `config.toml` there
+  as an ordinary project file. The realm's documents (`config.toml`,
+  `config_state.json`, `realm_manifest.json` and the `authorization`
+  directory) are now refused in that layout as well, and so are the hooks
+  and skills these servers read from that directory's `.rkat`. Other files
+  there are still written as before, and that includes the realm's stores
+  (sessions, runtime, jobs, tasks, blobs and the rest): in this layout the
+  file tools can still write them. Start the server with
   `--context-root <dir>` (the SDK option `context_root` / `contextRoot`) to
   give agents a project directory of their own and keep the whole realm out
   of the file tools' reach. `rkat-rpc` and `rkat-mcp` sessions have the shell
   tool on unless a request turns it off, so this matters for sessions and
-  hosts that run without it or confine it. Affects 0.4.6 through 0.9.11.
+  hosts that run without it or confine it. `rkat-rest` without a context
+  root roots the tools in its own instance directory, which does not hold
+  the realm, and mounts no built-in tools unless its configuration turns
+  them on; what it declares is refused there in the same way. Affects 0.4.6
+  through 0.9.11.
 
 - `meerkat-tools`: `apply_patch` and `blob_save_file` wrote through a
   symbolic link whose target does not exist, which a repository can contain:
@@ -290,13 +301,16 @@ them.
   `.rkat/config.toml` or a file under `.rkat/skills/`, make the change with
   `rkat mcp add`, `rkat config set` or `rkat config patch`, `rkat skill add`,
   or edit the file yourself.
-- If you run `rkat-rpc`, `rkat-mcp` or `rkat-rest` (directly or through the
-  Python or TypeScript SDK) and let agents write files, start the server with
-  a context root: `--context-root <dir>`, or the SDK option `context_root` /
+- If you run `rkat-rpc` or `rkat-mcp` (directly or through the Python or
+  TypeScript SDK) and let agents write files, start the server with a
+  context root: `--context-root <dir>`, or the SDK option `context_root` /
   `contextRoot`. Agents then work in that directory and the realm's state
   lies outside it. Without one, files still land in the realm directory as
   before, the realm's documents are refused, and the realm's stores remain
   writable by the file tools.
+- An agent can no longer write a `.rkat` directory anywhere under its
+  project root, not only the one at the root: a nested project's
+  `.rkat/mcp.toml`, hooks, skills or realm is changed by its operator.
 - A Rust host that keeps its realm state, config documents or credential
   store inside the project root it gives its tools, outside `.rkat`, should
   declare them with `AgentFactory::with_protected_host_inputs`.

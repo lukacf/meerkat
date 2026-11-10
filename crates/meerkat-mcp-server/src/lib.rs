@@ -1656,6 +1656,13 @@ impl MeerkatMcpState {
             bootstrap.context.user_config_root.as_deref(),
         );
         host_confinement.log_startup(&host_inputs, &convention_sources);
+        // The factory reads its hooks and skills from the context root, or
+        // from its project root when there is none: those are the convention
+        // sources its file tools must not write.
+        let tool_convention_sources = meerkat::HostConfinement::convention_sources(
+            Some(&project_root),
+            bootstrap.context.user_config_root.as_deref(),
+        );
         let mcp_stdio_launch_profile = host_mcp_stdio_launch_profile(&host_confinement);
 
         // Create factory with max-permissive flags; per-request overrides
@@ -1680,7 +1687,7 @@ impl MeerkatMcpState {
             .with_protected_host_inputs(
                 &host_inputs,
                 &meerkat::HostConfinement::realm_documents(&realm_paths.root),
-                &convention_sources,
+                &tool_convention_sources,
             );
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);

@@ -15,12 +15,12 @@ turn. They are not a durable planning system by themselves.
   need grounding.
 - Use `apply_patch` for intentional source edits and keep patches scoped.
 - `apply_patch` and `blob_save_file` never write the engine's own directory
-  (`.rkat/` at the project root) or the other files the host keeps its state
-  and configuration in: such a call returns `invalid_arguments`, and a patch
-  that names one such path applies none of its operations. Do not retry it
-  through another path. Engine configuration (MCP servers, hooks, skills,
-  auth profiles) is changed by the operator with the `rkat` CLI or by
-  editing the files, not by an agent's file tools.
+  (`.rkat/` at the project root or in any directory under it) or the other
+  files the host keeps its state and configuration in: such a call returns
+  `invalid_arguments`, and a patch that names one such path applies none of
+  its operations. Do not retry it through another path. Engine configuration
+  (MCP servers, hooks, skills, auth profiles) is changed by the operator
+  with the `rkat` CLI or by editing the files, not by an agent's file tools.
 - Use `view_image` when the user references a local image or when visual
   verification matters.
 - Use `generate_image` only when the runtime exposes image generation and the

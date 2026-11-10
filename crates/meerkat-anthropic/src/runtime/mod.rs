@@ -1003,6 +1003,7 @@ fn copilot_messages_route_client(
     wire_model: &str,
 ) -> Result<crate::AnthropicClient, ProviderClientError> {
     crate::AnthropicClient::builder(String::new())
+        .backend(AnthropicBackendKind::Copilot)
         .authorizer(authorizer)
         .base_url(api_base)
         .default_cache_control(default_cache_control_for_backend(
@@ -1075,6 +1076,7 @@ fn build_anthropic_client(
             }
         };
         let client = crate::AnthropicClient::builder(String::new())
+            .backend(backend_kind)
             .authorizer(authorizer)
             .base_url(base_url)
             .default_cache_control(default_cache_control_for_backend(backend_kind))
@@ -1105,6 +1107,7 @@ fn build_anthropic_client(
         // rather than from the builder's own constant.
         AnthropicBackendKind::AnthropicApi | AnthropicBackendKind::Foundry => {
             let mut builder = crate::AnthropicClient::builder(secret)
+                .backend(backend_kind)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
                     backend_kind,
@@ -1139,6 +1142,7 @@ fn build_anthropic_client(
                     "bedrock-bearer",
                 ));
             let client = crate::AnthropicClient::builder(String::new())
+                .backend(backend_kind)
                 .authorizer(authorizer)
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
@@ -1178,6 +1182,7 @@ fn build_anthropic_client(
                     "vertex-bearer",
                 ));
             let client = crate::AnthropicClient::builder(String::new())
+                .backend(backend_kind)
                 .authorizer(authorizer)
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))

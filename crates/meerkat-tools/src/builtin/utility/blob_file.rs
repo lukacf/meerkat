@@ -1088,8 +1088,10 @@ mod tests {
     }
 
     /// Reading is not restricted: `blob_load_file` still loads a file the
-    /// engine keeps under `.rkat`, and a save beside `.rkat` (a deeper
-    /// directory of that name included) is still written.
+    /// engine keeps under `.rkat`, and a save beside `.rkat` is still
+    /// written. A `.rkat` directory deeper in the project is an engine
+    /// directory too (a host started from that subdirectory reads it), so a
+    /// save into one is refused.
     #[tokio::test]
     async fn reads_and_ordinary_saves_are_unchanged() {
         let temp = tempfile::tempdir().unwrap();
@@ -1109,12 +1111,23 @@ mod tests {
         assert_eq!(loaded["bytes_read"], 8);
 
         let save = BlobSaveFileTool::new(root.clone(), store);
-        for path in ["out.png", ".rkat.png", "assets/.rkat/out.png"] {
+        for path in ["out.png", ".rkat.png", "assets/rkat/out.png"] {
             save.call(json!({"blob_id": blob_id.as_str(), "path": path}))
                 .await
                 .unwrap_or_else(|error| panic!("{path}: {error}"));
             assert_eq!(tokio::fs::read(root.join(path)).await.unwrap(), png_bytes());
         }
+        for path in [
+            "assets/.rkat/out.png",
+            "packages/app/.rkat/realms/r/runtime.sqlite3",
+            "packages/app/.Rkat/mcp.toml",
+        ] {
+            let result = save
+                .call(json!({"blob_id": blob_id.as_str(), "path": path, "overwrite": true}))
+                .await;
+            assert_engine_refusal(&result, path);
+        }
+        assert!(!root.join("assets/.rkat").exists() && !root.join("packages").exists());
     }
 
     /// The paths a host declared as its own are refused like the engine

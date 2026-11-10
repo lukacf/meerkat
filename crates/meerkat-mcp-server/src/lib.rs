@@ -12824,4 +12824,106 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             "{refused}"
         );
     }
+
+    /// The server's own construction declares its inputs to its agents'
+    /// in-process file tools. Started without a context root, the tools are
+    /// rooted in the realm directory: the realm's documents are refused
+    /// there, and so is the skills directory the factory reads from that
+    /// root (`.rkat/skills`), also where it is a link to a directory beside
+    /// it. An ordinary file is still written in the realm directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_tools_never_write_the_servers_own_documents() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical tempdir");
+        let realms = base.join("realms");
+        let realm_paths = meerkat_store::realm_paths_in(&realms, "file-tools");
+        let realm_dir = realm_paths.root.clone();
+        let document_text = "[realm.file-tools]\n";
+        std::fs::create_dir_all(realm_dir.join(".rkat")).expect("realm dir");
+        std::fs::create_dir_all(realm_dir.join("shared-skills")).expect("skills dir");
+        std::os::unix::fs::symlink("../shared-skills", realm_dir.join(".rkat/skills"))
+            .expect("link the skills directory");
+        std::fs::write(&realm_paths.config_path, document_text).expect("realm document");
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "file-tools".into(),
+        };
+        bootstrap.realm.state_root = Some(realms.clone());
+        bootstrap.context.user_config_root = Some(base.join("user"));
+        let llm = Arc::new(ToolCallScriptLlmClient::default());
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::clone(&llm) as Arc<dyn meerkat::LlmClient>),
+            None,
+        )
+        .await
+        .expect("the server starts");
+
+        let add = |path: &str| {
+            format!("*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch")
+        };
+        let patches = [
+            (
+                "the realm config document",
+                "config.toml",
+                "*** Begin Patch\n*** Update File: config.toml\n@@\n+# appended by the model\n*** End Patch"
+                    .to_string(),
+                false,
+            ),
+            (
+                "the grant owner store",
+                "authorization/grant-owner.jsonl",
+                add("authorization/grant-owner.jsonl"),
+                false,
+            ),
+            (
+                "the hooks the factory reads from the tool root",
+                ".rkat/config.toml",
+                add(".rkat/config.toml"),
+                false,
+            ),
+            (
+                "the skills directory behind the link",
+                "shared-skills/planted/SKILL.md",
+                add("shared-skills/planted/SKILL.md"),
+                false,
+            ),
+            ("an ordinary file", "out.txt", add("out.txt"), true),
+        ];
+        for (case, path, patch, written) in patches {
+            llm.arm_call("apply_patch", json!({ "patch": patch }));
+            let run_input: MeerkatRunInput = serde_json::from_value(json!({
+                "prompt": "Apply the patch.",
+                "model": "claude-sonnet-4-5",
+                "provider": "anthropic",
+                "enable_workgraph": false,
+            }))
+            .expect("run input");
+            Box::pin(handle_meerkat_run(&state, run_input, None, None))
+                .await
+                .expect("meerkat_run succeeds");
+            assert!(
+                llm.armed_call.lock().expect("armed call lock").is_none(),
+                "{case}: the model's apply_patch call was made"
+            );
+            let target = realm_dir.join(path);
+            if written {
+                assert_eq!(
+                    std::fs::read_to_string(&target).expect("the ordinary file"),
+                    "written by the model\n",
+                    "{case}"
+                );
+            } else if path == "config.toml" {
+                assert_eq!(
+                    std::fs::read_to_string(&target).expect("realm document"),
+                    document_text,
+                    "{case} was changed by the file tool"
+                );
+            } else {
+                assert!(!target.exists(), "{case}: {path} was written");
+            }
+        }
+    }
 }

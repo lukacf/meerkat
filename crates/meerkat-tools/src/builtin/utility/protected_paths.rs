@@ -275,6 +275,43 @@ mod tests {
         }
     }
 
+    /// Names a filesystem opens `.rkat` for although they are spelled with
+    /// other code points: the KELVIN SIGN, which case folding maps to `k`,
+    /// and the code points HFS+ ignores in a name. Any other code point
+    /// makes a different name.
+    #[test]
+    fn engine_directory_name_folds_kelvin_and_ignorable_code_points() {
+        for name in [
+            ".r\u{212A}at",
+            ".R\u{212A}AT",
+            ".rk\u{200C}at",
+            "\u{FEFF}.rkat",
+            ".rkat\u{200D}",
+            ".\u{200E}r\u{200F}kat",
+            ".r\u{202A}k\u{202E}at",
+            ".rka\u{206A}t\u{206F}",
+        ] {
+            assert!(
+                is_engine_directory_name(OsStr::new(name), false),
+                "{}",
+                name.escape_unicode()
+            );
+        }
+        for name in [
+            ".rk\u{0301}at",
+            ".rkat\u{00A0}",
+            ".r\u{212B}at",
+            ".rk\u{2060}at",
+            ".rkatt",
+        ] {
+            assert!(
+                !is_engine_directory_name(OsStr::new(name), false),
+                "{}",
+                name.escape_unicode()
+            );
+        }
+    }
+
     /// The names Windows opens `.rkat` for: trailing dots and spaces, and an
     /// alternate data stream of the directory.
     #[test]
@@ -297,11 +334,12 @@ mod tests {
         }
     }
 
-    /// `.rkat` is the engine's directory only directly under the project
-    /// root: a directory of that name deeper in the project is the
-    /// project's own, and so is a file whose name only starts with it.
+    /// `.rkat` is an engine directory at every depth under the project
+    /// root: a host started from a subdirectory reads that directory's
+    /// `.rkat` as its own (its MCP servers, hooks, skills and realms). A
+    /// file or directory whose name only resembles it is the project's own.
     #[test]
-    fn engine_directory_is_protected_only_at_the_project_root() {
+    fn engine_directory_is_protected_at_every_depth() {
         let (_dir, root) = project();
         let rule = ProtectedPaths::default();
         for refused in [
@@ -309,6 +347,11 @@ mod tests {
             ".rkat/mcp.toml",
             ".rkat/realms/r/config.toml",
             ".RKAT/x",
+            "packages/app/.rkat",
+            "packages/app/.rkat/mcp.toml",
+            "packages/app/.rkat/realms/r/config.toml",
+            "vendor/tool/.Rkat/notes.txt",
+            "docs/.rkat",
         ] {
             assert_eq!(
                 rule.admit_write(&root, &root.join(refused)),
@@ -319,9 +362,9 @@ mod tests {
         for admitted in [
             ".rkatignore",
             "src/.rkat.rs",
-            "vendor/tool/.rkat/notes.txt",
-            "docs/.rkat",
             "rkat/config.toml",
+            "packages/app/rkat/.rkatrc",
+            "packages/.rkat-backup/mcp.toml",
         ] {
             assert_eq!(
                 rule.admit_write(&root, &root.join(admitted)),
@@ -348,6 +391,7 @@ mod tests {
             "state/realm/config.toml",
             "state/new-realm/runtime.sqlite3",
             "user/.rkat/config.toml",
+            "user/.rkat/mcp.toml",
             "not-yet/credentials/token.json",
         ] {
             assert_eq!(
@@ -359,7 +403,6 @@ mod tests {
         for admitted in [
             "state.md",
             "statement/notes.txt",
-            "user/.rkat/mcp.toml",
             "user/notes.txt",
             "not-yet/other.txt",
             "relative/ignored/file.txt",
@@ -459,6 +502,59 @@ mod tests {
             );
         }
         assert_eq!(rule.admit_write(&root, &root.join("src/main.rs")), Ok(()));
+    }
+
+    /// The judgement on the path's own components stands by itself: with
+    /// `.rkat` a symbolic link whose target does not exist, a path under it
+    /// is refused as the engine's directory, before the link is looked at.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_under_the_engine_name_is_refused_on_its_components_alone() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        symlink(root.join("not-there"), root.join(".rkat")).unwrap();
+        let rule = ProtectedPaths::default();
+        for refused in [".rkat", ".rkat/mcp.toml", ".rkat/realms/r/config.toml"] {
+            assert_eq!(
+                rule.admit_write(&root, &root.join(refused)),
+                Err(WriteRefusal::Protected),
+                "{refused}"
+            );
+        }
+    }
+
+    /// An engine directory that is itself a symbolic link is protected
+    /// where it leads: the host reads `.rkat` through the link, so a write
+    /// to the directory behind it under its own name is refused too.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_engine_directory_is_protected_where_it_leads() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("config/engine")).unwrap();
+        symlink("config/engine", root.join(".rkat")).unwrap();
+        let rule = ProtectedPaths::default();
+        for refused in [
+            ".rkat/mcp.toml",
+            "config/engine",
+            "config/engine/mcp.toml",
+            "config/engine/realms/r/config.toml",
+        ] {
+            assert_eq!(
+                rule.admit_write(&root, &root.join(refused)),
+                Err(WriteRefusal::Protected),
+                "{refused}"
+            );
+        }
+        for admitted in ["config/notes.txt", "config/engine.md"] {
+            assert_eq!(
+                rule.admit_write(&root, &root.join(admitted)),
+                Ok(()),
+                "{admitted}"
+            );
+        }
     }
 
     /// A link that leads nowhere is refused wherever it stands in the path;

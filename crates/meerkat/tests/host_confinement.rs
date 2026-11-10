@@ -1186,10 +1186,11 @@ fn assert_engine_file_refusal(result: &(bool, String), case: &str) {
     );
 }
 
-/// A host that declares nothing still keeps `<project root>/.rkat` from the
-/// file tools: a session with the built-in tools and no shell cannot write
-/// the project's MCP servers, hooks, skills or a realm kept there, and an
-/// ordinary project file is still written.
+/// A host that declares nothing still keeps `.rkat` from the file tools,
+/// at the project root and in any directory under it (a host started from
+/// that directory reads its `.rkat`): a session with the built-in tools and
+/// no shell cannot write the MCP servers, hooks, skills or a realm kept
+/// there, and an ordinary project file is still written.
 #[tokio::test]
 async fn file_tools_refuse_the_engine_directory_without_host_cooperation() {
     let temp = tempfile::tempdir().unwrap();
@@ -1199,10 +1200,16 @@ async fn file_tools_refuse_the_engine_directory_without_host_cooperation() {
         ".rkat/config.toml",
         ".rkat/skills/planted/SKILL.md",
         ".rkat/realms/ws-0000000000000000/config.toml",
+        "packages/app/.rkat/mcp.toml",
+        "packages/app/.rkat/realms/ws-0000000000000000/config.toml",
     ] {
         let result = apply_patch_through(file_tool_factory(&root), add_file_patch(path)).await;
         assert_engine_file_refusal(&result, path);
         assert!(!root.join(".rkat").exists(), "{path}: .rkat was created");
+        assert!(
+            !root.join("packages").exists(),
+            "{path}: a nested .rkat was created"
+        );
     }
     let result = apply_patch_through(file_tool_factory(&root), add_file_patch("src/lib.rs")).await;
     assert!(!result.0, "an ordinary project file is written: {result:?}");
@@ -1238,7 +1245,10 @@ fn declared_in_project(root: &Path) -> AgentFactory {
 
 /// Every path a host declares as its own state or input inside the project
 /// root is refused by the file tools, with everything under it, existing or
-/// not; a file beside each of them is still written.
+/// not; a file beside each of them is still written. A declared convention
+/// source that is a symbolic link is refused where it leads: the host reads
+/// the project skills through `service/.rkat/skills`, so the directory
+/// behind that link is not writable under its own name either.
 #[tokio::test]
 async fn file_tools_refuse_every_declared_host_input_inside_the_project() {
     let temp = tempfile::tempdir().unwrap();
@@ -1255,6 +1265,10 @@ async fn file_tools_refuse_every_declared_host_input_inside_the_project() {
         ("a store under the state root", "state/realm-1/tasks.db"),
         ("the user config document", "home/.rkat/config.toml"),
         ("the user MCP file", "home/.rkat/mcp.toml"),
+        (
+            "another file of the user root's engine directory",
+            "home/.rkat/notes.txt",
+        ),
         (
             "the MCP file of a context root below the project root",
             "service/.rkat/mcp.toml",
@@ -1277,10 +1291,19 @@ async fn file_tools_refuse_every_declared_host_input_inside_the_project() {
         assert_engine_file_refusal(&result, case);
         assert!(!root.join(path).exists(), "{case}: {path} was written");
     }
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(root.join("service/.rkat")).unwrap();
+        std::fs::create_dir_all(root.join("service/shared-skills")).unwrap();
+        std::os::unix::fs::symlink("../shared-skills", root.join("service/.rkat/skills")).unwrap();
+        let path = "service/shared-skills/planted/SKILL.md";
+        let result = apply_patch_through(declared_in_project(&root), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, "the skills directory behind a linked source");
+        assert!(!root.join(path).exists(), "{path} was written");
+    }
     for path in [
         "state.md",
         "home/notes.txt",
-        "home/.rkat/notes.txt",
         "service/src/main.rs",
         "credentials.example",
     ] {

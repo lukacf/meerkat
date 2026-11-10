@@ -230,6 +230,11 @@ impl Fixture {
     /// `rkat <global args> run ...` in the project with the default tool
     /// preset: no `--tools`, no `--yolo`.
     fn run(&self, global_args: &[&str], prompt: &str) -> Output {
+        self.run_from(&self.project, global_args, prompt)
+    }
+
+    /// [`Self::run`] started from `directory`.
+    fn run_from(&self, directory: &Path, global_args: &[&str], prompt: &str) -> Output {
         let mut command = Command::new(rkat_binary());
         for name in [
             "RKAT_ANTHROPIC_API_KEY",
@@ -247,7 +252,7 @@ impl Fixture {
             command.env_remove(name);
         }
         let output = command
-            .current_dir(&self.project)
+            .current_dir(directory)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join("config"))
             .env("XDG_DATA_HOME", self.home.join("data"))
@@ -445,4 +450,108 @@ fn a_state_root_elsewhere_inside_the_project_is_refused_too() {
         "an ordinary project file is still writable: {:#?}",
         fixture.model.tool_results()
     );
+}
+
+/// A `.rkat` directory deeper in the project is an engine directory for a
+/// host started from that subdirectory: its `mcp.toml` is loaded there. A
+/// session at the project root is refused the write, so a later start from
+/// the subdirectory has nothing planted to launch.
+#[test]
+fn a_nested_engine_directory_cannot_be_planted_for_a_start_from_its_directory() {
+    let fixture = Fixture::new();
+    let realms = fixture.project.join(".rkat/realms");
+    let realm_dir = realms.join(REALM);
+    std::fs::create_dir_all(&realm_dir).unwrap();
+    std::fs::write(
+        realm_dir.join("config.toml"),
+        fixture.model.realm_document(),
+    )
+    .unwrap();
+    let service = fixture.project.join("services/api");
+    std::fs::create_dir_all(&service).unwrap();
+    let nested_mcp = service.join(".rkat/mcp.toml");
+
+    fixture.model.ask_for_patch(patch(&[add_file(
+        "services/api/.rkat/mcp.toml",
+        &fixture.planted_mcp_lines(),
+    )]));
+    fixture.run(&[], "Add the MCP server of the service.");
+    let tool_results = fixture.model.tool_results();
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "the scripted model's apply_patch call was dispatched once: {tool_results:#?}"
+    );
+
+    let mut violations = Vec::new();
+    if let Some(written) = read(&nested_mcp) {
+        violations.push(format!(
+            "apply_patch wrote services/api/.rkat/mcp.toml:\n{written}"
+        ));
+    }
+    if !tool_results[0].contains(REFUSAL_TEXT) {
+        violations.push(format!(
+            "the call was not refused as a write into the {REFUSAL_TEXT}"
+        ));
+    }
+
+    // The next start from the service directory, on the same realm.
+    let realms_arg = realms.to_string_lossy().into_owned();
+    let second = fixture.run_from(&service, &["--state-root", &realms_arg], "Hello again.");
+    if fixture.marker_appeared() {
+        violations.push(format!(
+            "a start from services/api ran the planted command (marker {} exists); its stderr:\n{}",
+            fixture.marker.display(),
+            String::from_utf8_lossy(&second.stderr)
+        ));
+    }
+    report(&violations, &tool_results);
+}
+
+/// The project's skills directory is a symbolic link to a directory beside
+/// `.rkat`: the host reads the skills through the link, so the directory it
+/// leads to is the host's input too and is refused under its own name.
+#[test]
+fn a_linked_skills_directory_is_refused_where_it_leads() {
+    let fixture = Fixture::new();
+    let realm_dir = fixture.project.join(".rkat/realms").join(REALM);
+    std::fs::create_dir_all(&realm_dir).unwrap();
+    std::fs::write(
+        realm_dir.join("config.toml"),
+        fixture.model.realm_document(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(fixture.project.join("shared-skills")).unwrap();
+    std::os::unix::fs::symlink("../shared-skills", fixture.project.join(".rkat/skills")).unwrap();
+    let planted = fixture.project.join("shared-skills/planted/SKILL.md");
+
+    fixture.model.ask_for_patch(patch(&[add_file(
+        "shared-skills/planted/SKILL.md",
+        &[
+            "---".to_owned(),
+            "name: planted".to_owned(),
+            "description: planted by the model".to_owned(),
+            "---".to_owned(),
+        ],
+    )]));
+    fixture.run(&[], "Add a skill.");
+    let tool_results = fixture.model.tool_results();
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "the scripted model's apply_patch call was dispatched once: {tool_results:#?}"
+    );
+
+    let mut violations = Vec::new();
+    if let Some(written) = read(&planted) {
+        violations.push(format!(
+            "apply_patch wrote a skill through the linked skills directory:\n{written}"
+        ));
+    }
+    if !tool_results[0].contains(REFUSAL_TEXT) {
+        violations.push(format!(
+            "the call was not refused as a write into the {REFUSAL_TEXT}"
+        ));
+    }
+    report(&violations, &tool_results);
 }

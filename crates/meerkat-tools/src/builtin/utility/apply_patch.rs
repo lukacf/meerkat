@@ -1419,10 +1419,9 @@ mod tests {
         assert!(!outside.join("missing-dir").exists());
     }
 
-    /// `.rkat` is the engine's only at the project root: a file whose name
-    /// merely starts with it, and a directory of that name deeper in the
-    /// project, are the project's own and stay writable. Updating an
-    /// ordinary file still reads it.
+    /// A file or directory whose name only resembles `.rkat` is the
+    /// project's own and stays writable. Updating and moving an ordinary
+    /// file still works.
     #[tokio::test]
     async fn files_beside_the_engine_directory_stay_writable() {
         let (_dir, root) = project();
@@ -1430,8 +1429,8 @@ mod tests {
         for path in [
             ".rkatignore",
             "src/.rkat.rs",
-            "vendor/tool/.rkat/notes.txt",
             "rkat/config.toml",
+            "packages/app/rkat/notes.txt",
         ] {
             let result = call_patch(&root, &format!("*** Add File: {path}\n+project file")).await;
             assert!(result.is_ok(), "{path}: {result:?}");
@@ -1442,13 +1441,113 @@ mod tests {
         }
         let result = call_patch(
             &root,
-            "*** Update File: vendor/tool/.rkat/notes.txt\n*** Move to: vendor/tool/.rkat/moved.txt\n@@\n-project file\n+moved",
+            "*** Update File: packages/app/rkat/notes.txt\n*** Move to: packages/app/rkat/moved.txt\n@@\n-project file\n+moved",
         )
         .await;
-        assert!(result.is_ok(), "move inside a deeper .rkat: {result:?}");
+        assert!(result.is_ok(), "move of an ordinary file: {result:?}");
         assert_eq!(
-            std::fs::read_to_string(root.join("vendor/tool/.rkat/moved.txt")).unwrap(),
+            std::fs::read_to_string(root.join("packages/app/rkat/moved.txt")).unwrap(),
             "moved\n"
+        );
+    }
+
+    /// A `.rkat` directory deeper in the project is an engine directory
+    /// too: a host started from that subdirectory reads its MCP servers,
+    /// hooks, skills and realms from it. Every operation on it is refused,
+    /// whether or not it exists yet.
+    #[tokio::test]
+    async fn an_engine_directory_deeper_in_the_project_is_refused() {
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("services/api/.rkat")).unwrap();
+        std::fs::write(root.join("services/api/.rkat/config.toml"), "kept = true\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "note\n").unwrap();
+        let cases = [
+            (
+                "add under a nested .rkat that does not exist yet",
+                "*** Add File: packages/app/.rkat/mcp.toml\n+[[servers]]",
+            ),
+            (
+                "add a realm document under a nested .rkat",
+                "*** Add File: packages/app/.rkat/realms/r/config.toml\n+planted",
+            ),
+            (
+                "add under an existing nested .rkat in another case",
+                "*** Add File: services/api/.RKAT/mcp.toml\n+[[servers]]",
+            ),
+            (
+                "update in a nested .rkat",
+                "*** Update File: services/api/.rkat/config.toml\n@@\n-kept = true\n+kept = false",
+            ),
+            (
+                "delete in a nested .rkat",
+                "*** Delete File: services/api/.rkat/config.toml",
+            ),
+            (
+                "move out of a nested .rkat",
+                "*** Update File: services/api/.rkat/config.toml\n*** Move to: taken.toml\n@@\n-kept = true\n+kept = false",
+            ),
+            (
+                "move into a nested .rkat",
+                "*** Update File: notes.txt\n*** Move to: services/api/.rkat/hooks.toml\n@@\n-note\n+hook",
+            ),
+        ];
+        for (case, body) in cases {
+            let result = call_patch(&root, body).await;
+            assert_engine_refusal(&result, case);
+        }
+        assert!(!root.join("packages").exists(), "nothing was created");
+        assert_eq!(
+            std::fs::read_to_string(root.join("services/api/.rkat/config.toml")).unwrap(),
+            "kept = true\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("services/api/.rkat"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "note\n"
+        );
+        assert!(!root.join("taken.toml").exists());
+    }
+
+    /// The check before the first change covers the destination of a move
+    /// too: a patch whose LAST operation moves a file into `.rkat` applies
+    /// nothing, and every file is byte for byte what it was.
+    #[tokio::test]
+    async fn a_patch_whose_last_operation_moves_into_the_engine_directory_applies_nothing() {
+        let (_dir, root) = project();
+        std::fs::write(root.join("old.txt"), "old\n").unwrap();
+        std::fs::write(root.join("edit.txt"), "before\n").unwrap();
+        std::fs::write(root.join("source.txt"), "source\n").unwrap();
+
+        let result = call_patch(
+            &root,
+            "*** Add File: first.txt\n+first\n*** Update File: edit.txt\n@@\n-before\n+after\n*** Delete File: old.txt\n*** Update File: source.txt\n*** Move to: .rkat/hooks.toml\n@@\n-source\n+hook",
+        )
+        .await;
+        assert_engine_refusal(&result, "a move into .rkat as the last operation");
+        let mut entries: Vec<(String, String)> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(entry.path()).unwrap(),
+                )
+            })
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            [
+                ("edit.txt".to_owned(), "before\n".to_owned()),
+                ("old.txt".to_owned(), "old\n".to_owned()),
+                ("source.txt".to_owned(), "source\n".to_owned()),
+            ],
+            "the tree is unchanged"
         );
     }
 

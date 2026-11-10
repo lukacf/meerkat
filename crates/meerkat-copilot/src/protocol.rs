@@ -1433,4 +1433,249 @@ mod tests {
             );
         }
     }
+
+    /// The reasoning effort levels an account's model list states per model,
+    /// in `capabilities.supports.reasoning_effort`. The sample list is
+    /// hand-written in the shape of the service's list: it names no real
+    /// model and no account, and carries only the fields Meerkat reads.
+    mod listed_effort_levels {
+        use super::*;
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use std::collections::BTreeSet;
+
+        const SAMPLE_LIST: &str = include_str!("fixtures/copilot_models_sample.json");
+
+        fn sample_list() -> Vec<CopilotModel> {
+            serde_json::from_str::<CopilotModelsEnvelope>(SAMPLE_LIST)
+                .expect("the sample list parses")
+                .data
+        }
+
+        /// What a one-model list states for its model when the entry's
+        /// `reasoning_effort` is `statement`.
+        fn stated_by(statement: serde_json::Value) -> Option<Vec<EffortLevel>> {
+            let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+                "data": [{
+                    "id": "account-model-1",
+                    "capabilities": {"supports": {"reasoning_effort": statement}}
+                }]
+            }))
+            .expect("the model list parses");
+            listed.data[0].capabilities.supports.stated_effort_levels()
+        }
+
+        #[test]
+        fn the_sample_list_states_levels_for_8_of_13_models() {
+            use EffortLevel as Level;
+            let models = sample_list();
+            assert_eq!(models.len(), 13);
+            let stated: Vec<Vec<EffortLevel>> = models
+                .iter()
+                .filter_map(|model| model.capabilities.supports.stated_effort_levels())
+                .collect();
+            assert_eq!(stated.len(), 8, "models that state levels");
+            assert_eq!(models.len() - stated.len(), 5, "models that state none");
+            let distinct: BTreeSet<Vec<EffortLevel>> = stated.into_iter().collect();
+            assert_eq!(
+                distinct,
+                BTreeSet::from([
+                    vec![
+                        Level::None,
+                        Level::Low,
+                        Level::Medium,
+                        Level::High,
+                        Level::Xhigh,
+                        Level::Max
+                    ],
+                    vec![
+                        Level::None,
+                        Level::Low,
+                        Level::Medium,
+                        Level::High,
+                        Level::Xhigh
+                    ],
+                    vec![
+                        Level::Low,
+                        Level::Medium,
+                        Level::High,
+                        Level::Xhigh,
+                        Level::Max
+                    ],
+                    vec![Level::Low, Level::Medium, Level::High, Level::Xhigh],
+                    vec![Level::Low, Level::Medium, Level::High],
+                ])
+            );
+        }
+
+        /// A `reasoning_effort` that is not an array of strings states no
+        /// levels, and never fails the list: a failed entry would lose the
+        /// whole account's models. The entries around it keep everything
+        /// else they state.
+        #[test]
+        fn a_malformed_statement_never_fails_the_list() {
+            let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+                "data": [
+                    {"id": "a-word", "capabilities": {"supports": {"reasoning_effort": "high"}}},
+                    {"id": "an-object", "capabilities": {"supports": {"reasoning_effort": {"a": 1}}}},
+                    {"id": "a-number", "capabilities": {"supports": {"reasoning_effort": 7}}},
+                    {"id": "a-null", "capabilities": {"supports": {"reasoning_effort": null}}},
+                    {
+                        "id": "a-mixed-array",
+                        "supported_endpoints": ["/responses"],
+                        "capabilities": {
+                            "limits": {"max_output_tokens": 16},
+                            "supports": {
+                                "streaming": true,
+                                "reasoning_effort": [1, "low", null],
+                                "tool_calls": true
+                            }
+                        }
+                    },
+                    {
+                        "id": "a-nested-array",
+                        "capabilities": {"supports": {
+                            "reasoning_effort": [["high"], {"level": "max"}, true, 2.5, "medium"]
+                        }}
+                    }
+                ]
+            }))
+            .expect("a malformed statement never fails the list");
+            let statements: Vec<_> = listed
+                .data
+                .iter()
+                .map(|model| model.capabilities.supports.stated_effort_levels())
+                .collect();
+            assert_eq!(
+                statements,
+                [
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(vec![EffortLevel::Low]),
+                    Some(vec![EffortLevel::Medium]),
+                ]
+            );
+            let mixed = &listed.data[4];
+            assert_eq!(
+                mixed.supported_endpoints,
+                Some(vec![CopilotEndpoint::Responses])
+            );
+            assert_eq!(mixed.capabilities.limits.max_output_tokens, Some(16));
+            assert_eq!(mixed.capabilities.supports.streaming, Some(true));
+            assert_eq!(mixed.capabilities.supports.tool_calls, Some(true));
+        }
+
+        /// A word that names no level is left out, a repeated level counts
+        /// once, and the levels come in the order of [`EffortLevel`],
+        /// whatever order the list states them in.
+        #[test]
+        fn words_that_are_not_levels_are_left_out() {
+            assert_eq!(
+                stated_by(serde_json::json!(["low", "ultra", "x_high", "high", "low"])),
+                Some(vec![EffortLevel::Low, EffortLevel::High])
+            );
+            assert_eq!(
+                stated_by(serde_json::json!([
+                    "max", "HIGH", "none", " low", "minimal"
+                ])),
+                Some(vec![
+                    EffortLevel::None,
+                    EffortLevel::Minimal,
+                    EffortLevel::Max
+                ])
+            );
+            assert_eq!(stated_by(serde_json::json!(["ultra"])), Some(Vec::new()));
+        }
+
+        /// An empty statement is a statement: the model takes no level. An
+        /// entry without the field states nothing.
+        #[test]
+        fn an_empty_statement_is_stated_and_empty() {
+            assert_eq!(stated_by(serde_json::json!([])), Some(Vec::new()));
+            let silent: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+                "data": [
+                    {"id": "account-model-1", "capabilities": {"supports": {"streaming": true}}},
+                    {"id": "account-model-2"}
+                ]
+            }))
+            .expect("the model list parses");
+            for model in &silent.data {
+                assert_eq!(
+                    model.capabilities.supports.stated_effort_levels(),
+                    None,
+                    "{}",
+                    model.id
+                );
+            }
+            assert_ne!(stated_by(serde_json::json!([])), None);
+        }
+
+        /// The statement is kept as the list words it, so it serializes as
+        /// it was read: words that name no level and repeated words stay.
+        #[test]
+        fn a_supports_block_round_trips_its_statement() {
+            let stated: CopilotModelSupports = serde_json::from_value(serde_json::json!({
+                "streaming": true,
+                "reasoning_effort": ["low", "ultra", 3, "low", "max"]
+            }))
+            .expect("a supports block");
+            assert_eq!(
+                stated.reasoning_effort,
+                Some(vec![
+                    "low".to_string(),
+                    "ultra".to_string(),
+                    "low".to_string(),
+                    "max".to_string()
+                ])
+            );
+            let wire = serde_json::to_value(&stated).expect("serializes");
+            assert_eq!(
+                wire["reasoning_effort"],
+                serde_json::json!(["low", "ultra", "low", "max"])
+            );
+            let read_back: CopilotModelSupports =
+                serde_json::from_value(wire).expect("reads its own form");
+            assert_eq!(read_back, stated);
+
+            let silent = CopilotModelSupports {
+                streaming: Some(true),
+                ..Default::default()
+            };
+            assert_eq!(silent.reasoning_effort, None);
+            let read_back: CopilotModelSupports =
+                serde_json::from_value(serde_json::to_value(&silent).expect("serializes"))
+                    .expect("reads its own form");
+            assert_eq!(read_back, silent);
+        }
+
+        /// In the sample list every model the OpenAI family reaches on
+        /// Responses states at least one level, and every model whose entry
+        /// states no endpoint list states none.
+        #[test]
+        fn every_model_served_on_responses_in_the_sample_list_states_levels() {
+            let models = sample_list();
+            let snapshot =
+                CopilotModelSnapshot::from_models(models.clone()).expect("unique model ids");
+            let mut on_responses = 0;
+            let mut without_endpoints = 0;
+            for model in &models {
+                let offering = snapshot.model(&model.id).expect("listed model");
+                let stated = offering.capabilities.supports.stated_effort_levels();
+                if offering.route_for(Provider::OpenAI) == Some(CopilotEndpoint::Responses) {
+                    on_responses += 1;
+                    assert!(
+                        stated.as_ref().is_some_and(|levels| !levels.is_empty()),
+                        "{} is served on Responses and states {stated:?}",
+                        model.id
+                    );
+                }
+                if offering.supported_endpoints.is_none() {
+                    without_endpoints += 1;
+                    assert_eq!(stated, None, "{} states no endpoint list", model.id);
+                }
+            }
+            assert_eq!((on_responses, without_endpoints), (5, 3));
+        }
+    }
 }

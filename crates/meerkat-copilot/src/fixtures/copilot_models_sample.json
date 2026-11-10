@@ -1,0 +1,295 @@
+{
+  "data": [
+    {
+      "id": "sample-responses-a",
+      "vendor": "ExampleVendor A",
+      "name": "Sample Responses A",
+      "version": "sample-responses-a",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 300000,
+          "max_output_tokens": 60000,
+          "max_prompt_tokens": 240000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "structured_outputs": true,
+          "reasoning_effort": ["none", "low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "sample-responses-b",
+      "vendor": "ExampleVendor A",
+      "name": "Sample Responses B",
+      "version": "sample-responses-b",
+      "model_picker_enabled": false,
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 220000,
+          "max_output_tokens": 44000,
+          "max_prompt_tokens": 176000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "structured_outputs": true,
+          "reasoning_effort": ["none", "low", "medium", "high", "xhigh"]
+        }
+      }
+    },
+    {
+      "id": "sample-responses-c",
+      "vendor": "ExampleVendor A",
+      "name": "Sample Responses C",
+      "version": "sample-responses-c",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 300000,
+          "max_output_tokens": 60000,
+          "max_prompt_tokens": 240000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "structured_outputs": true,
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "sample-responses-d",
+      "vendor": "ExampleVendor B",
+      "name": "Sample Responses D",
+      "version": "sample-responses-d",
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 220000,
+          "max_output_tokens": 44000,
+          "max_prompt_tokens": 176000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true,
+          "structured_outputs": true,
+          "reasoning_effort": ["low", "medium", "high", "xhigh"]
+        }
+      }
+    },
+    {
+      "id": "sample-responses-e",
+      "vendor": "ExampleVendor B",
+      "name": "Sample Responses E",
+      "version": "sample-responses-e",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/responses"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 100000,
+          "max_output_tokens": 20000,
+          "max_prompt_tokens": 80000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "reasoning_effort": ["low", "medium", "high"]
+        }
+      }
+    },
+    {
+      "id": "sample-messages-a",
+      "vendor": "ExampleVendor C",
+      "name": "Sample Messages A",
+      "version": "sample-messages-a",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/v1/messages", "/chat/completions"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 300000,
+          "max_output_tokens": 60000,
+          "max_prompt_tokens": 240000,
+          "max_non_streaming_output_tokens": 10000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "adaptive_thinking": true,
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "sample-messages-b",
+      "vendor": "ExampleVendor C",
+      "name": "Sample Messages B",
+      "version": "sample-messages-b",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/v1/messages", "/chat/completions"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 220000,
+          "max_output_tokens": 44000,
+          "max_prompt_tokens": 176000,
+          "max_non_streaming_output_tokens": 10000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "adaptive_thinking": true,
+          "max_thinking_budget": 20000,
+          "min_thinking_budget": 1000,
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"]
+        }
+      }
+    },
+    {
+      "id": "sample-messages-budget-only",
+      "vendor": "ExampleVendor C",
+      "name": "Sample Messages Budget Only",
+      "version": "sample-messages-budget-only",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/chat/completions", "/v1/messages"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 100000,
+          "max_output_tokens": 20000,
+          "max_prompt_tokens": 80000,
+          "max_non_streaming_output_tokens": 10000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "max_thinking_budget": 20000,
+          "min_thinking_budget": 1000
+        }
+      }
+    },
+    {
+      "id": "sample-chat-a",
+      "vendor": "ExampleVendor D",
+      "name": "Sample Chat A",
+      "version": "sample-chat-a",
+      "model_picker_enabled": true,
+      "policy": { "state": "enabled" },
+      "supported_endpoints": ["/chat/completions"],
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 220000,
+          "max_output_tokens": 44000,
+          "max_prompt_tokens": 176000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "reasoning_effort": ["low", "medium", "high"]
+        }
+      }
+    },
+    {
+      "id": "sample-legacy-chat-a",
+      "vendor": "ExampleVendor A",
+      "name": "Sample Legacy Chat A",
+      "version": "sample-legacy-chat-a",
+      "model_picker_enabled": false,
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 50000,
+          "max_output_tokens": 5000,
+          "max_prompt_tokens": 45000
+        },
+        "supports": {
+          "tool_calls": true,
+          "streaming": true
+        }
+      }
+    },
+    {
+      "id": "sample-legacy-chat-b",
+      "vendor": "ExampleVendor A",
+      "name": "Sample Legacy Chat B",
+      "version": "sample-legacy-chat-b",
+      "model_picker_enabled": false,
+      "policy": { "state": "enabled" },
+      "capabilities": {
+        "type": "chat",
+        "limits": {
+          "max_context_window_tokens": 100000,
+          "max_output_tokens": 10000,
+          "max_prompt_tokens": 90000
+        },
+        "supports": {
+          "tool_calls": true,
+          "vision": true,
+          "streaming": true,
+          "parallel_tool_calls": true,
+          "structured_outputs": true
+        }
+      }
+    },
+    {
+      "id": "sample-embeddings-a",
+      "vendor": "ExampleVendor A",
+      "name": "Sample Embeddings A",
+      "version": "sample-embeddings-a",
+      "model_picker_enabled": false,
+      "capabilities": {
+        "type": "embeddings",
+        "limits": {},
+        "supports": {}
+      }
+    },
+    {
+      "id": "sample-other-endpoint-a",
+      "vendor": "ExampleVendor E",
+      "name": "Sample Other Endpoint A",
+      "version": "sample-other-endpoint-a",
+      "model_picker_enabled": false,
+      "supported_endpoints": ["/v1/sample-other"],
+      "capabilities": {
+        "type": "other",
+        "limits": {
+          "max_prompt_tokens": 20000
+        },
+        "supports": {}
+      }
+    }
+  ]
+}

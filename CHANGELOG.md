@@ -112,6 +112,10 @@ them.
   `WireMemberInputAdmission`. The SDKs keep it on the member-send receipt
   (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
   answer without it.
+- `meerkat-copilot`: `CopilotRouteResolution::wire_model()`, the ID the
+  account lists a route's model under (the ID the route's requests name),
+  and `same_account_model_id(left, right)`, whether two IDs name the same
+  model on a GitHub Copilot account (see Fixed).
 
 ### Changed
 
@@ -121,6 +125,29 @@ them.
 
 ### Fixed
 
+- `meerkat-copilot`, `meerkat`, `meerkat-anthropic`, `meerkat-openai`,
+  `meerkat-gemini` (GitHub Copilot routes): a Claude model whose ID carries a
+  minor version now runs under its catalog ID. A Copilot account lists these
+  models with a dot (`claude-opus-5.5`, `claude-fable-5.2`), the catalog
+  writes them with a hyphen (`claude-opus-5-5`, `claude-fable-5-2`), and the
+  routes matched the two by exact ID. A request for `claude-opus-5-5` on a
+  Copilot route failed when its client was built (`Copilot account does not
+  expose /v1/messages for anthropic model 'claude-opus-5-5'; available
+  account models: ...`), and so did a request that named no model on
+  `global:copilot_anthropic`, whose default is that model. The account's own
+  spelling ran (from 0.9.10), but as a model only the account defines: no
+  thinking, a 16384-token default output budget and none of the catalog
+  model's request shaping, so a thinking budget the catalog model refuses
+  locally reached Copilot and failed there. On a Copilot route two IDs now
+  name the same model when they are equal once every `.` is read as `-`.
+  Either spelling runs as the catalog model: the session's model is the
+  catalog ID, and the request to Copilot names the account's ID. An ID the
+  account lists exactly always wins. An ID that matches two of the account's
+  entries and none exactly is refused, naming both; a model the account does
+  not list keeps its refusal text. A session that stored the account's
+  spelling resumes and runs as the catalog model from then on. Routes that
+  are not GitHub Copilot still match IDs exactly. Affects 0.8.42 through
+  0.9.11.
 - `meerkat-core`, `meerkat-contracts`: the Claude effort `xhigh` is now
   accepted under both spellings, `xhigh` and `x_high`, on every request
   surface. RPC session and turn requests, MCP `meerkat_run` and

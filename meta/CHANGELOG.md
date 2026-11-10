@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   LifecycleEffectFailureCause::Failed`, and one that destructures it without
   `..` names the field.
 
+### Security
+
+- RUSTSEC-2026-0462 (rmcp before 3.9.0, unbounded response bodies in rmcp's
+  built-in Streamable HTTP clients) does not affect Meta: Meta reaches rmcp
+  only through Meerkat Core's MCP client, which no longer builds rmcp's
+  reqwest client and bounds every response body and SSE event at 64 MiB
+  itself. cargo-deny matches rmcp 1.8 by version alone, so `meta/deny.toml`
+  ignores the advisory until Core moves to rmcp 3.9 or later.
+
 ### Added
 
 - `meta/gating/withdraw {pending_id, reason?}`: the embedding host
@@ -126,15 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
   keeps both in memory, as before.
-
-### Security
-
-- RUSTSEC-2026-0462 (rmcp before 3.9.0, unbounded response bodies in rmcp's
-  built-in Streamable HTTP clients) does not affect Meta: Meta reaches rmcp
-  only through Meerkat Core's MCP client, which no longer builds rmcp's
-  reqwest client and bounds every response body and SSE event at 64 MiB
-  itself. cargo-deny matches rmcp 1.8 by version alone, so `meta/deny.toml`
-  ignores the advisory until Core moves to rmcp 3.9 or later.
 
 ## [0.9.11] - 2026-11-09
 

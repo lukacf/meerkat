@@ -1104,6 +1104,16 @@ class AuthBindingRef(TypedDict, total=False):
     realm: Required[RealmId]
 
 
+# Reasoning/effort control level, the shared typed vocabulary behind both
+# Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
+#
+# The two providers expose effort in different request shapes but draw from
+# the same level vocabulary; modeling it as a typed enum keeps the catalog
+# value-domain compiler-checked instead of relying on raw string literals.
+# Each catalog row declares its accepted subset via `effort_levels`.
+EffortLevel = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+
 # Typed shape of Anthropic's prompt-cache breakpoint policy.
 AnthropicCacheControlPolicy = Literal['disabled', 'automatic', 'system_prefix', 'system_and_conversation']
 
@@ -1386,6 +1396,7 @@ class ProviderParamsOverride(TypedDict, total=False):
     max_output_tokens: NotRequired[Optional[int]]
     provider_tag: NotRequired[Optional[ProviderTag]]
     reasoning: NotRequired[Optional[ReasoningMode]]
+    reasoning_effort: NotRequired[Optional[EffortLevel]]
     temperature: NotRequired[Optional[float]]
     thinking_budget_tokens: NotRequired[Optional[int]]
     top_p: NotRequired[Optional[float]]
@@ -1461,16 +1472,6 @@ class PendingCallbackToolCall(TypedDict, total=False):
     settlement_failures: NotRequired[list[ToolDispatchSettlementFailure]]
     tool_name: Required[str]
     tool_use_id: Required[str]
-
-
-# Reasoning/effort control level, the shared typed vocabulary behind both
-# Anthropic `output_config.effort` and OpenAI `reasoning.effort`.
-#
-# The two providers expose effort in different request shapes but draw from
-# the same level vocabulary; modeling it as a typed enum keeps the catalog
-# value-domain compiler-checked instead of relying on raw string literals.
-# Each catalog row declares its accepted subset via `effort_levels`.
-EffortLevel = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 
 class ReasoningBatchDispositionApply(TypedDict, total=False):

@@ -975,6 +975,7 @@ mod tests {
                     self_hosted_server_id: None,
                     provider_params: None,
                     auth_binding: None,
+                    reasoning_effort: None,
                 },
             )
             .await

@@ -4,7 +4,7 @@
 //! Until a request's level is resolved for the route that serves it, a
 //! request whose params carry the level must not reach any client: the turn
 //! fails with a configuration error before the client is asked to prepare or
-//! stream anything, and so does a compaction summary request. The client
+//! stream anything, a turn that would compact first included. The client
 //! here is a plain `AgentLlmClient`, not the provider adapter, so nothing
 //! but the agent's own guard stands between the level and the client.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -200,10 +200,15 @@ fn session_with_history() -> Session {
         .set_build_state(meerkat_core::SessionBuildState::default())
         .expect("test session build state should serialize");
     session.push(Message::User(UserMessage::text("an earlier question")));
-    session.append_external_assistant_blocks(vec![AssistantBlock::Text {
-        text: "an earlier answer".to_string(),
-        meta: None,
-    }]);
+    session.push(Message::BlockAssistant(
+        meerkat_core::types::BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "an earlier answer".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ),
+    ));
     session
 }
 
@@ -272,16 +277,17 @@ async fn core_refuses_an_unresolved_level_before_any_client_call() {
     outcome.result.expect("a turn without the level runs");
     assert_eq!((outcome.turn_requests, outcome.summary_requests), (1, 0));
 
-    // A compaction summary request with the level: the summary is refused
-    // (the compaction fails and the history stays), then the turn's own
-    // request is refused; the client served neither.
+    // A turn that would compact first: the agent prepares the turn's request
+    // before it considers a compaction, so the turn is refused there and no
+    // summary request is made at all. (The summary request's own guard is
+    // covered where the compaction is driven directly, in the compaction
+    // tests' row of the same name.)
     let outcome = run_one_turn(Some(EffortLevel::High), true).await;
     assert_refused(&outcome.result);
     assert_eq!((outcome.turn_requests, outcome.summary_requests), (0, 0));
-    assert_eq!(
-        outcome.compaction_failures.len(),
-        1,
-        "the summary request is refused once: {:?}",
+    assert!(
+        outcome.compaction_failures.is_empty(),
+        "no compaction is attempted for a refused turn: {:?}",
         outcome.compaction_failures
     );
 

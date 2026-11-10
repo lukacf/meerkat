@@ -48,10 +48,11 @@ use crate::traits::{
 
 /// Per-turn LLM hot-swap reconfigure request.
 ///
-/// `provider_params` and `auth_binding` carry the canonical Inherit/Set/Clear
-/// tri-state via [`TurnMetadataOverride`]: `None` preserves the durable value,
-/// `Some(Set)` overrides it, and `Some(Clear)` removes it. The illegal
-/// "set and clear" fourth state is structurally unrepresentable.
+/// `provider_params`, `reasoning_effort` and `auth_binding` carry the
+/// canonical Inherit/Set/Clear tri-state via [`TurnMetadataOverride`]: `None`
+/// preserves the durable value, `Some(Set)` overrides it, and `Some(Clear)`
+/// removes it. The illegal "set and clear" fourth state is structurally
+/// unrepresentable.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmReconfigureRequest {
@@ -67,6 +68,12 @@ pub struct SessionLlmReconfigureRequest {
     pub provider_params: Option<
         TurnMetadataOverride<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
     >,
+    /// The session's provider-neutral reasoning effort level, decided on its
+    /// own beside `provider_params`: `Some(Set)` sets it, `Some(Clear)`
+    /// removes it, `None` keeps it, across a `provider_params` change too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     /// Optional realm-scoped connection override resolved through the tri-state:
     /// `Some(Set)` swaps the binding, `Some(Clear)` removes it, `None` preserves
     /// the session's existing `SessionLlmIdentity.auth_binding`.

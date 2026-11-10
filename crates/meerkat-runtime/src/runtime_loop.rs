@@ -309,7 +309,8 @@ pub(crate) fn merge_batch_turn_metadata(
 
 /// Order-independent fold of a batch's reasoning preferences: which levels
 /// were preferred, whether any contributor set reasoning explicitly (its own
-/// params, cleared or touching a reasoning knob), and whether any
+/// params, cleared or touching a reasoning knob, or its own turn-level
+/// reasoning effort, set or cleared), and whether any
 /// contributor went without a preference. A sticky value from an earlier
 /// turn is session baseline, not a contributor's explicit setting.
 #[derive(Debug, Clone, Default)]
@@ -321,9 +322,10 @@ struct ReasoningPreferenceConsensus {
 
 impl ReasoningPreferenceConsensus {
     fn observe(&mut self, meta: &meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata) {
-        let explicit = meta.provider_params.as_ref().is_some_and(
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::decides_reasoning,
-        );
+        let explicit = meta.reasoning_effort.is_some()
+            || meta.provider_params.as_ref().is_some_and(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::decides_reasoning,
+            );
         let preference = meta.request_reasoning.map(|preference| preference.level());
         self.explicit |= explicit;
         match preference {

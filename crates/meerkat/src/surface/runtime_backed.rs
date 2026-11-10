@@ -4017,6 +4017,227 @@ mod tests {
         expect_unregister_completion(&adapter, &result.session_id).await;
     }
 
+    /// This executor hands a turn's metadata to the session service and
+    /// applies no per-turn LLM reconfigure. A turn whose metadata names a
+    /// reasoning effort level the session is not at is refused there, not
+    /// run without the level: the caller is answered with the refusal,
+    /// nothing is sent to the provider, and the session keeps serving.
+    ///
+    /// The durable terminal reason of the refused input is the retry cap
+    /// today, not the refusal. The refusal comes before the run starts, and
+    /// the machine replays a refused start like any failed start: the input
+    /// is refused again on each replay and ends `Abandoned` with
+    /// `MaxAttemptsExhausted`. It is terminal within a bounded wait, never
+    /// left queued. `assert_refused_start_terminal` holds that expectation
+    /// alone: it is the one assertion to change once a refused start ends on
+    /// its first attempt with the refusal as its durable reason.
+    ///
+    /// A turn that names the state the session is already at goes on, and
+    /// with a level on the session it fails inside the run with the
+    /// unresolved-level refusal, its input consumed.
+    #[tokio::test]
+    async fn turn_reasoning_effort_not_applied_is_refused_and_ends_at_the_retry_cap_today() {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
+        };
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+
+        const NOT_APPLIED: &str =
+            "the turn's reasoning_effort was not applied to the session before the turn";
+        const UNRESOLVED: &str = "reasoning_effort cannot be resolved by this build";
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let provider_requests = Arc::new(AtomicUsize::new(0));
+        let (service, adapter) = build_test_service_with_llm(
+            &temp,
+            Arc::new(ControllerSetupClient {
+                inner: TestClient::for_provider(meerkat_core::Provider::OpenAI),
+                selection: None,
+                calls: Arc::clone(&provider_requests),
+            }),
+        )
+        .await;
+        let materialize = |build: SessionBuildOptions| {
+            let service = Arc::clone(&service);
+            let adapter = Arc::clone(&adapter);
+            async move {
+                Box::pin(materialize_session(
+                    &service,
+                    &adapter,
+                    Session::new(),
+                    make_request(build),
+                    {
+                        let service = Arc::clone(&service);
+                        let adapter = Arc::clone(&adapter);
+                        move |session_id| default_persistent_executor(service, adapter, session_id)
+                    },
+                ))
+                .await
+                .expect("materialize session")
+                .session_id
+            }
+        };
+        let turn = |session_id: SessionId, level: Option<TurnMetadataOverride<EffortLevel>>| {
+            let adapter = Arc::clone(&adapter);
+            async move {
+                let metadata = level.map(|level| RuntimeTurnMetadata {
+                    reasoning_effort: Some(level),
+                    ..Default::default()
+                });
+                let (accepted, handle) = adapter
+                    .accept_input_with_completion(
+                        &session_id,
+                        Input::Prompt(PromptInput::new("hello", metadata)),
+                    )
+                    .await
+                    .expect("accept prompt input");
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    handle.expect("completion handle").wait(),
+                )
+                .await
+                .expect("the input settles")
+                .expect("completion waiter should resolve");
+                // The caller is answered on the first attempt; the machine
+                // may still be replaying a refused start. Wait (bounded) for
+                // the input to leave the active set, then read its terminal.
+                let mut active = Vec::new();
+                for _ in 0..400 {
+                    active = meerkat_runtime::SessionServiceRuntimeExt::list_active_inputs(
+                        adapter.as_ref(),
+                        &session_id,
+                    )
+                    .await
+                    .expect("list active inputs");
+                    if active.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                assert!(
+                    active.is_empty(),
+                    "the input is terminal, not left pending: {active:?}"
+                );
+                let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = accepted else {
+                    panic!("the prompt input is accepted: {accepted:?}");
+                };
+                let terminal = meerkat_runtime::SessionServiceRuntimeExt::input_state(
+                    adapter.as_ref(),
+                    &session_id,
+                    &input_id,
+                )
+                .await
+                .expect("read the input's state")
+                .expect("the input's state is kept")
+                .seed
+                .terminal_outcome
+                .expect("the input has a terminal outcome");
+                (outcome, terminal)
+            }
+        };
+        type Settled = (CompletionOutcome, meerkat_runtime::InputTerminalOutcome);
+        // The durable terminal of an input whose start was refused. Today:
+        // replayed, then abandoned at the retry cap.
+        let assert_refused_start_terminal = |terminal: &meerkat_runtime::InputTerminalOutcome| {
+            assert!(
+                matches!(
+                    terminal,
+                    meerkat_runtime::InputTerminalOutcome::Abandoned {
+                        reason: meerkat_runtime::InputAbandonReason::MaxAttemptsExhausted { .. }
+                    }
+                ),
+                "a refused start ends abandoned at the retry cap today: {terminal:?}"
+            );
+        };
+        // Refused by the session service before the run: the caller is
+        // answered with the refusal.
+        let refused_before_the_run = |(outcome, terminal): &Settled| {
+            assert!(
+                matches!(
+                    outcome,
+                    CompletionOutcome::AbandonedWithError { reason, error }
+                        if reason.contains(NOT_APPLIED)
+                            && error.terminal
+                            && error.outcome == Some(meerkat_core::TurnTerminalOutcome::Failed)
+                ),
+                "expected the not-applied refusal: {outcome:?}"
+            );
+            assert_refused_start_terminal(terminal);
+        };
+        // Refused inside the run by the unresolved-level guard: the run
+        // failed through the turn authority and consumed its input.
+        let refused_inside_the_run = |(outcome, terminal): &Settled| {
+            assert!(
+                matches!(
+                    outcome,
+                    CompletionOutcome::AbandonedWithError { reason, error }
+                        if reason.contains(UNRESOLVED) && error.terminal
+                ),
+                "expected the unresolved-level refusal: {outcome:?}"
+            );
+            assert_eq!(terminal, &meerkat_runtime::InputTerminalOutcome::Consumed);
+        };
+        let completed = |(outcome, terminal): &Settled| {
+            assert!(
+                matches!(outcome, CompletionOutcome::Completed(run) if run.text == "ok"),
+                "unexpected completion outcome: {outcome:?}"
+            );
+            assert_eq!(terminal, &meerkat_runtime::InputTerminalOutcome::Consumed);
+        };
+
+        // A session with no level.
+        let plain = materialize(SessionBuildOptions::default()).await;
+        let settled = turn(
+            plain.clone(),
+            Some(TurnMetadataOverride::Set(EffortLevel::High)),
+        )
+        .await;
+        refused_before_the_run(&settled);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 0);
+        // The session keeps serving, and no level was stored on it.
+        completed(&turn(plain.clone(), None).await);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 1);
+        // Clearing a level the session does not have names the state it is
+        // at: the turn runs.
+        completed(&turn(plain.clone(), Some(TurnMetadataOverride::Clear)).await);
+        assert_eq!(provider_requests.load(Ordering::SeqCst), 2);
+
+        // A session created at `high`.
+        let at_high = materialize(SessionBuildOptions {
+            provider_params: Some(ProviderParamsOverride {
+                reasoning_effort: Some(EffortLevel::High),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+        // The turn names the state the session is at: it goes on, to the
+        // refusal of a level nothing resolves yet.
+        let settled = turn(
+            at_high.clone(),
+            Some(TurnMetadataOverride::Set(EffortLevel::High)),
+        )
+        .await;
+        refused_inside_the_run(&settled);
+        // Another level, or a clear, was not applied: refused here.
+        let settled = turn(
+            at_high.clone(),
+            Some(TurnMetadataOverride::Set(EffortLevel::Low)),
+        )
+        .await;
+        refused_before_the_run(&settled);
+        let settled = turn(at_high.clone(), Some(TurnMetadataOverride::Clear)).await;
+        refused_before_the_run(&settled);
+        assert_eq!(
+            provider_requests.load(Ordering::SeqCst),
+            2,
+            "no refused turn reached the provider"
+        );
+
+        expect_unregister_completion(&adapter, &plain).await;
+        expect_unregister_completion(&adapter, &at_high).await;
+    }
+
     #[tokio::test]
     async fn persistent_cleanup_capability_discards_live_actor_without_terminalizing_runtime() {
         let temp = tempfile::tempdir().expect("tempdir");

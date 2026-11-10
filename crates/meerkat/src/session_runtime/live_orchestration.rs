@@ -3086,6 +3086,7 @@ mod orchestrator {
                         self_hosted_server_id: None,
                         provider_params: None,
                         auth_binding: None,
+                        reasoning_effort: None,
                     };
                     if let Err(err) = self
                         .runtime_adapter

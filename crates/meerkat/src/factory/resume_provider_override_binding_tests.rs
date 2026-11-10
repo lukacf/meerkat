@@ -1239,6 +1239,7 @@ async fn self_hosted_server_change_under_the_mask_refuses_typed_like_the_turn_se
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         },
     )
     .expect("the turn seam admits the server change");

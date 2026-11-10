@@ -43,6 +43,39 @@ them.
   answer. On the wire the field is optional and left out when absent, so a
   client that does not read it is unaffected.
 
+- `meerkat-core`: `ProviderParamsOverride` gains the field
+  `reasoning_effort: Option<EffortLevel>`; `RuntimeTurnMetadata`,
+  `SessionLlmIdentityOverride` and
+  `session_recovery::SurfaceSessionRecoveryOverrides` gain the field
+  `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>`;
+  `service::ResumeOverrideMask` gains the field `reasoning_effort: bool`;
+  and `SessionLlmIdentityOverrideError` gains the variant
+  `ReasoningEffortSpellingsDisagree` (see Added). Code that builds one of
+  these structs with a struct literal sets the new field: `None`, or `false`
+  for the mask, keeps the earlier behaviour. A match over the error enum
+  without a wildcard arm handles the new variant. The mask needs its own
+  bit because a resumed build holds the level inside its params: without
+  the bit, a build whose params name no level could mean either "keep the
+  stored level" or "clear it", and a turn that clears the level on a session
+  that is not live would have it restored by the resume merge.
+
+- `meerkat-runtime`: `SessionLlmReconfigureRequest` gains the field
+  `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>` (see Added).
+  Code that builds it with a struct literal sets the new field; `None` keeps
+  the earlier behaviour.
+
+- `meerkat-contracts`: `WireProviderParamsOverride` gains the field
+  `reasoning_effort: Option<EffortLevel>` and `WireRuntimeTurnMetadata` gains
+  the field `reasoning_effort: Option<WireTurnMetadataOverride<EffortLevel>>`
+  (see Added). Code that builds one with a struct literal sets the new
+  field; `None` keeps the earlier behaviour. On the wire each is optional
+  and left out when absent, so a client that does not send it is unaffected.
+
+- `meerkat-rpc`: `handlers::turn::TurnOverrides` gains the field
+  `reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>` (see Added).
+  Code that builds it with a struct literal sets the new field; `None` keeps
+  the earlier behaviour.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
@@ -112,6 +145,75 @@ them.
   `WireMemberInputAdmission`. The SDKs keep it on the member-send receipt
   (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
   answer without it.
+
+- `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
+  `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a
+  provider-neutral reasoning effort level, `reasoning_effort`, and a turn
+  can set or clear it. It is stored and carried here; nothing resolves it
+  for a provider route yet, so a request that carries it is refused, never
+  sent (see the last paragraph).
+
+  The level is one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`
+  and `max` (`EffortLevel`), with one spelling each: `x_high` is refused
+  with the list of levels. It lives in the provider params, as
+  `provider_params.reasoning_effort` (`ProviderParamsOverride`,
+  `WireProviderParamsOverride`), so it is part of the session's LLM identity
+  and of every stored form of it. Wherever provider params are accepted as
+  an object (RPC `session/create` and `turn/start`, REST session requests,
+  MCP `meerkat_run` and `meerkat_resume`, mob profiles, the CLI's `--param`
+  and `--provider-params-json`), the nested key is accepted too. No request
+  has a top-level `reasoning_effort` parameter yet.
+
+  A turn carries the level as a field of its own beside `provider_params`,
+  with the same three states: a level sets it, `{"action":"clear"}` removes
+  it, and an absent field keeps it (`RuntimeTurnMetadata.reasoning_effort`,
+  `WireRuntimeTurnMetadata.reasoning_effort`,
+  `SessionLlmReconfigureRequest.reasoning_effort`,
+  `SessionLlmIdentityOverride.reasoning_effort`). The setting is sticky and
+  independent of the other params: a turn that replaces or clears
+  `provider_params` keeps the session's level, unless it also sets or clears
+  `reasoning_effort` or its new params name the nested key. A turn that
+  gives both spellings with different levels is refused
+  (`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`). One
+  function decides this, `resolve_session_provider_params`, for all three
+  ways a session's identity changes: a live session's turn override, the
+  recovered build of a session that is not live
+  (`SurfaceSessionRecoveryOverrides.reasoning_effort`), and a resumed
+  build's merge, where a build that claims `provider_params` keeps the
+  stored level unless its params name one and a build that claims the level
+  (`ResumeOverrideMask.reasoning_effort`) seats the level its params name,
+  or none. Two different turn levels in one batch are a merge conflict, an
+  input that carries the level takes its own turn instead of joining a
+  running one, and a batch contributor that carries it counts as an explicit
+  reasoning setting. A mob member turn whose delivery path carries no turn
+  metadata (a remotely hosted or peer-only member, an autonomous inbox)
+  refuses the field by name, and a running Steer refuses it like any other
+  per-turn model setting.
+
+  The level is applied by the executor that runs the turn, through an LLM
+  reconfigure before the turn: the JSON-RPC session runtime and the mob
+  member executor do that. The session service checks it. A turn whose
+  metadata names a level starts only on a session that is already there
+  (the session's level is that level, or it has none for a clear);
+  otherwise the caller is answered with the configuration error `the turn's
+  reasoning_effort was not applied to the session before the turn` and
+  nothing is sent to a provider. So an executor that applies no per-turn
+  reconfigure refuses such a turn instead of running it without the level.
+  The refusal comes before the run starts, so the runtime replays the input
+  as it replays any start that failed, refuses it again each time, and ends
+  it abandoned at its retry cap: the stored input's reason is
+  `max_attempts_exhausted`, not the refusal.
+
+  Until the level can be resolved for the route that serves a request, a
+  request whose params carry it reaches no provider. The turn fails with the
+  configuration error `reasoning_effort cannot be resolved by this build`
+  before any client is called, a compaction summary request included, and
+  the provider adapter independently refuses a request that still carries
+  the level (`reasoning_effort reached the provider adapter unresolved`).
+  The level stays on the session, so its later turns are refused too until a
+  turn clears it. Provider-specific effort settings (`provider_tag`) are
+  unchanged. The LayerDecision schema that adaptive mob packs bundle does
+  not carry the level, so the schema stays the released one.
 
 ### Changed
 
@@ -196,6 +298,26 @@ them.
   `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
   JSON-RPC `auth/profile/get` returns, and never a credential value.
   Affects 0.6.0 through 0.9.11.
+
+### Upgrade notes
+
+- Before rolling back to 0.9.12 or earlier, clear the reasoning effort level
+  from every session that set it, and let accepted turns that carry it
+  finish. Two kinds of stored record carry `reasoning_effort`, and a release
+  without the field refuses both, because those records refuse unknown
+  fields. The first is a session whose stored provider params hold the
+  level: any session that set `reasoning_effort` (or
+  `provider_params.reasoning_effort`) and has not cleared it since. An
+  older release fails to read it with ``unknown field `reasoning_effort`,
+  expected one of `temperature`, `top_p`, `max_output_tokens`, `reasoning`,
+  `thinking_budget_tokens`, `provider_tag` ``, and the session cannot be
+  loaded or resumed there. The second is an accepted
+  input that has not run yet and whose turn carries the field: an older
+  release refuses the stored input the same way. A turn with
+  `reasoning_effort` `{"action":"clear"}` removes the level from a session;
+  replacing or clearing `provider_params` does not. Sessions and inputs
+  that never carried the level are written exactly as before and read on
+  either release.
 
 ## [0.9.11] - 2026-11-09
 

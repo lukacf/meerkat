@@ -5207,6 +5207,7 @@ class WireProviderParamsOverride:
     max_output_tokens: Optional[int] = None
     provider_tag: Optional[WireProviderTag] = None
     reasoning: Optional[WireReasoningMode] = None
+    reasoning_effort: Optional[Any] = None
     temperature: Optional[float] = None
     thinking_budget_tokens: Optional[int] = None
     top_p: Optional[float] = None

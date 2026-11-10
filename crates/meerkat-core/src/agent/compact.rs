@@ -1941,6 +1941,19 @@ where
         // same operation; any other refusal fails this compaction as before.
         let mut owner_change_churn = crate::authorization::OwnerChangeChurn::reporting(wait_report);
         let llm_result = loop {
+            // Interim reasoning-effort guard, as at the agent's request
+            // preparation (this request does not go through it): a summary
+            // request whose params carry the provider-neutral level reaches
+            // no client. The per-request `resolve_reasoning_effort` call
+            // replaces this guard.
+            if provider_params
+                .as_ref()
+                .is_some_and(|params| params.reasoning_effort.is_some())
+            {
+                break Err(crate::error::AgentError::ConfigError(
+                    "reasoning_effort cannot be resolved by this build".to_string(),
+                ));
+            }
             let result = client
                 .stream_response_authorized(
                     &compaction_messages,

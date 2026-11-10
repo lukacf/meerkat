@@ -5472,6 +5472,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -15419,6 +15430,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "ForkInstructionPolicy": {
         "description": "Host policy for the activation rows a durable fork child inherits.\n\nA fork child holds its source's activation rows as historical context and\nruns no model turn until each inherited key has an origin-local activation\nin the child. The policy says who appends that activation. It belongs to\nthe host (a mob builder, or an RPC fork request) and is never a tool\nargument.",
         "oneOf": [
@@ -17501,6 +17552,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -24575,6 +24637,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "InstructionKey": {
         "description": "Application-owned instruction key within one namespace.",
         "type": "string"
@@ -25997,6 +26099,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -32276,6 +32389,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -50101,6 +50225,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -71666,6 +71801,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -77028,6 +77174,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -81590,6 +81747,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "ForkInstructionPolicy": {
         "description": "Host policy for the activation rows a durable fork child inherits.\n\nA fork child holds its source's activation rows as historical context and\nruns no model turn until each inherited key has an origin-local activation\nin the child. The policy says who appends that activation. It belongs to\nthe host (a mob builder, or an RPC fork request) and is never a tool\nargument.",
         "oneOf": [
@@ -83672,6 +83869,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -93135,6 +93343,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -99704,6 +99923,46 @@
         },
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "ExecutionConfinement": {
         "additionalProperties": false,
         "description": "Validated immutable requirements. Final host-path and backend validation\nbelongs to the adapter at preparation, not this platform-neutral contract.",
@@ -100314,6 +100573,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -108744,6 +109014,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -127363,6 +127644,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "McpHttpTransport": {
         "description": "HTTP transport selection for URL-based servers",
         "enum": [
@@ -128618,6 +128939,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -130468,6 +130800,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "MeerkatSchema": {
         "description": "A Meerkat-native JSON schema."
       },
@@ -132233,6 +132605,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -141086,6 +141469,46 @@
           }
         ]
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "MeerkatSchema": {
         "description": "A Meerkat-native JSON schema."
       },
@@ -141895,6 +142318,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -142359,6 +142793,46 @@
           {
             "const": "synthetic_env_default",
             "description": "The synthetic env-var fallback binding (ephemeral, not durable).",
+            "type": "string"
+          }
+        ]
+      },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
             "type": "string"
           }
         ]
@@ -143125,6 +143599,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -147356,6 +147841,46 @@
         ],
         "type": "object"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "McpHttpTransport": {
         "description": "HTTP transport selection for URL-based servers",
         "enum": [
@@ -148625,6 +149150,17 @@
               }
             ]
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
+          },
           "temperature": {
             "format": "float",
             "type": [
@@ -149278,6 +149814,46 @@
           {
             "const": "synthetic_env_default",
             "description": "The synthetic env-var fallback binding (ephemeral, not durable).",
+            "type": "string"
+          }
+        ]
+      },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
             "type": "string"
           }
         ]
@@ -150044,6 +150620,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",
@@ -155626,6 +156213,46 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "FlowParams": {
         "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
       },
@@ -156298,6 +156925,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -158147,6 +158785,46 @@
         ],
         "description": "Input content that can be either a plain text string or multimodal content blocks.\n\nDeserializes from either `\"text\"` or `[{type: \"text\", text: \"...\"}, ...]`.\nProvides `From<String>` and `From<&str>` for ergonomic construction."
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "FlowParams": {
         "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
       },
@@ -158819,6 +159497,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -160770,6 +161459,46 @@
         ],
         "type": "string"
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "FlowParams": {
         "description": "Wire-opaque flow parameters for a mob flow target, held as canonical JSON\ntext.\n\nSame canonicalization rationale as [`HostRunnableParams`]: serde's\ninternally-tagged enum buffering cannot preserve arbitrary raw text\nbyte-exact, so every ingress (constructor and serde) re-emits the payload\nthrough `serde_json::Value` into one canonical text form. Unlike\nhost-runnable params, JSON `null` is preserved — the Flow contract has\nalways allowed it as an explicit \"no parameters\" payload."
       },
@@ -161515,6 +162244,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -181430,6 +182170,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). It is not a provider setting itself: a request that\nstill carries it when it reaches a provider client is refused, so the\nlevel is never sent as it is and never dropped. A session keeps it\nacross a replacement of its other provider params."
           },
           "temperature": {
             "format": "float",
@@ -201501,6 +202252,46 @@
           }
         ]
       },
+      "EffortLevel": {
+        "description": "Reasoning/effort control level, the shared typed vocabulary behind both\nAnthropic `output_config.effort` and OpenAI `reasoning.effort`.\n\nThe two providers expose effort in different request shapes but draw from\nthe same level vocabulary; modeling it as a typed enum keeps the catalog\nvalue-domain compiler-checked instead of relying on raw string literals.\nEach catalog row declares its accepted subset via `effort_levels`.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "OpenAI `reasoning.effort: \"none\"` - reasoning disabled.",
+            "type": "string"
+          },
+          {
+            "const": "minimal",
+            "description": "OpenAI realtime `reasoning.effort: \"minimal\"`.",
+            "type": "string"
+          },
+          {
+            "const": "low",
+            "description": "Lowest active reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "medium",
+            "description": "Medium reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "high",
+            "description": "High reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "xhigh",
+            "description": "Extended-high reasoning effort.",
+            "type": "string"
+          },
+          {
+            "const": "max",
+            "description": "Maximum reasoning effort (Anthropic and GPT-5.6 top tier).",
+            "type": "string"
+          }
+        ]
+      },
       "MeerkatSchema": {
         "description": "A Meerkat-native JSON schema."
       },
@@ -202130,6 +202921,17 @@
                 "type": "null"
               }
             ]
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/EffortLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider-neutral reasoning effort level for the session's requests:\n`none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one\nspelling each). A session keeps it across a replacement of its other\nprovider params."
           },
           "temperature": {
             "format": "float",

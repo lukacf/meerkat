@@ -131,6 +131,7 @@ fn resolve_reconfigure_target_llm_identity(
                 .provider_params
                 .as_ref()
                 .map(TurnMetadataOverride::as_ref),
+            reasoning_effort: request.reasoning_effort.clone(),
             auth_binding: request
                 .auth_binding
                 .as_ref()
@@ -189,6 +190,7 @@ pub(crate) fn resolve_model_only_reconfigure_target_identity(
         self_hosted_server_id: None,
         provider_params: None,
         auth_binding: None,
+        reasoning_effort: None,
     };
     let mut target = resolve_reconfigure_target_llm_identity(registry, current, &request)?;
     preserve_credential_account_affinity(config, current, &request, &mut target)?;
@@ -1373,6 +1375,7 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
         let target = self
             .resolve_target_llm_identity(&hydrated.current_identity, &request)
@@ -1741,6 +1744,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding,
+            reasoning_effort: None,
         }
     }
 

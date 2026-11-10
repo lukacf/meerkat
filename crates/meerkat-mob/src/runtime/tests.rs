@@ -71679,13 +71679,19 @@ impl meerkat_runtime::SessionLlmReconfigureHost for RecordingSessionLlmReconfigu
             })
             .transpose()?
             .unwrap_or(current_identity.provider);
-        let provider_params = match request.provider_params.as_ref() {
-            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(value)) => {
-                Some(value.clone())
-            }
-            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => None,
-            None => current_identity.provider_params.clone(),
-        };
+        let provider_params = meerkat_core::resolve_session_provider_params(
+            current_identity.provider_params.as_ref(),
+            request
+                .provider_params
+                .as_ref()
+                .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_ref),
+            request.reasoning_effort.clone(),
+        )
+        .map_err(
+            |error| meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                reason: error.to_string(),
+            },
+        )?;
         let auth_binding = match request.auth_binding.as_ref() {
             Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(value)) => {
                 Some(value.clone())

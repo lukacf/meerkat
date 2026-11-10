@@ -367,6 +367,15 @@ impl LlmClientAdapter {
         temperature: Option<f32>,
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<PreparedLlmRequest, AgentError> {
+        // A request that still carries the provider-neutral reasoning effort
+        // level was never resolved for the route this client serves. Every
+        // provider request is built here, so a path that forgets to resolve
+        // the level fails loudly instead of sending a request without it.
+        if provider_params.is_some_and(|params| params.reasoning_effort.is_some()) {
+            return Err(AgentError::InternalError(
+                "reasoning_effort reached the provider adapter unresolved".to_string(),
+            ));
+        }
         let effective_params = provider_params
             .and_then(|params| params.provider_tag.clone())
             .or_else(|| self.provider_params.clone());

@@ -661,6 +661,7 @@ export type ProviderParamsOverride = {
   max_output_tokens?: number | null;
   provider_tag?: ProviderTag | null;
   reasoning?: ReasoningMode | null;
+  reasoning_effort?: EffortLevel | null;
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;

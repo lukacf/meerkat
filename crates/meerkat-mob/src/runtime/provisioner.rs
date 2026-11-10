@@ -13867,6 +13867,7 @@ fn runtime_llm_reconfigure_request_from_primitive(
         && metadata.provider.is_none()
         && metadata.self_hosted_server_id.is_none()
         && metadata.provider_params.is_none()
+        && metadata.reasoning_effort.is_none()
         && metadata.auth_binding.is_none()
     {
         return None;
@@ -13882,6 +13883,7 @@ fn runtime_llm_reconfigure_request_from_primitive(
             .map(|provider| provider.as_str().to_string()),
         self_hosted_server_id: metadata.self_hosted_server_id.clone(),
         provider_params: metadata.provider_params.clone(),
+        reasoning_effort: metadata.reasoning_effort.clone(),
         auth_binding: metadata.auth_binding.clone(),
     })
 }

@@ -8850,6 +8850,7 @@ fn merge_provider_params_missing_from(
     fill(&mut target.top_p, &defaults.top_p);
     fill(&mut target.max_output_tokens, &defaults.max_output_tokens);
     fill(&mut target.reasoning, &defaults.reasoning);
+    fill(&mut target.reasoning_effort, &defaults.reasoning_effort);
     fill(
         &mut target.thinking_budget_tokens,
         &defaults.thinking_budget_tokens,

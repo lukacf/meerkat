@@ -61,6 +61,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity runtime's records in its runtime's metadata store, as both stock
   gateways and `UnifiedRuntimeBuilder` keep them.
 
+- A spawn whose draft sets one provider param keeps the
+  `reasoning_effort` level its profile declares in `provider_params`, as it
+  keeps the profile's other declared params, and a draft's own level wins.
+  The level is Meerkat's new provider-neutral setting
+  (`ProviderParamsOverride.reasoning_effort`; see Meerkat's changelog):
+  Meerkat stores it but cannot resolve it for a provider route yet, so a
+  member whose params carry it has its turns refused before any provider
+  request.
+
 ### Changed
 
 - A `GatingResolutionObserver` now also receives cause `withdrawn` with

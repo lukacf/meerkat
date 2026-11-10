@@ -2173,6 +2173,7 @@ impl MeerkatMachine {
                                 self_hosted_server_id: None,
                                 provider_params: None,
                                 auth_binding: None,
+                                reasoning_effort: None,
                             },
                         )
                         .await
@@ -2731,6 +2732,7 @@ impl MeerkatMachine {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
         let resolved = match host
             .resolve_target_session_llm_identity(&resolve_request, &hydrated.current_identity)

@@ -1209,6 +1209,19 @@ where
         provider_params: Option<ProviderParamsOverride>,
         authorization: Option<crate::LlmRequestAuthorization>,
     ) -> Result<Arc<dyn crate::AgentLlmRequestAttempt>, AgentError> {
+        // Interim reasoning-effort guard: nothing resolves the
+        // provider-neutral level for a route yet, so a request whose params
+        // carry it reaches no client, the provider adapter's or any other.
+        // The per-request `resolve_reasoning_effort` call replaces this
+        // guard: it translates the level for the route here, or refuses.
+        if provider_params
+            .as_ref()
+            .is_some_and(|params| params.reasoning_effort.is_some())
+        {
+            return Err(AgentError::ConfigError(
+                "reasoning_effort cannot be resolved by this build".to_string(),
+            ));
+        }
         let provider_params = self.provider_params_under_native_tool_policy(provider_params);
         if authorization.as_ref().is_some_and(|authorization| {
             authorization.usage()

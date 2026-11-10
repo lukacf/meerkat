@@ -1365,6 +1365,12 @@ pub struct WireProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<WireProviderTag>,
+    /// Provider-neutral reasoning effort level for the session's requests:
+    /// `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one
+    /// spelling each). A session keeps it across a replacement of its other
+    /// provider params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<meerkat_core::model_profile::capabilities::EffortLevel>,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>
@@ -1378,6 +1384,7 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>
             reasoning: value.reasoning.map(Into::into),
             thinking_budget_tokens: value.thinking_budget_tokens,
             provider_tag: value.provider_tag.map(Into::into),
+            reasoning_effort: value.reasoning_effort,
         }
     }
 }
@@ -1393,6 +1400,7 @@ impl From<WireProviderParamsOverride>
             reasoning: value.reasoning.map(Into::into),
             thinking_budget_tokens: value.thinking_budget_tokens,
             provider_tag: value.provider_tag.map(Into::into),
+            reasoning_effort: value.reasoning_effort,
             // Tool choice is request-local (set by the agent loop from the
             // turn overlay's plan); a params override never carries one.
             tool_choice: None,
@@ -1517,8 +1525,9 @@ impl From<WireTurnInputOptions> for meerkat_core::lifecycle::run_primitive::Runt
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
 ///
 /// The per-turn seam between control plane and core is fully typed —
-/// `serde_json::Value` does not appear here. `provider_params` and
-/// `auth_binding` carry the canonical Inherit/Set/Clear tri-state via
+/// `serde_json::Value` does not appear here. `provider_params`,
+/// `reasoning_effort` and `auth_binding` carry the canonical
+/// Inherit/Set/Clear tri-state via
 /// [`WireTurnMetadataOverride`]; unknown fields (including the retired
 /// `clear_*` split wire form) fail closed at the serde boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -1545,6 +1554,14 @@ pub struct WireRuntimeTurnMetadata {
     pub self_hosted_server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
+    /// Set, clear, or preserve the session's provider-neutral reasoning
+    /// effort level, for this turn and the turns after it. It is its own
+    /// field: a turn that replaces or clears `provider_params` keeps the
+    /// level unless it also names this field, or its new params name the
+    /// nested `reasoning_effort` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort:
+        Option<WireTurnMetadataOverride<meerkat_core::model_profile::capabilities::EffortLevel>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<WireTurnMetadataOverride<crate::wire::connection::WireAuthBindingRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1641,6 +1658,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,
             provider_params: value.provider_params.map(Into::into),
+            reasoning_effort: value.reasoning_effort.map(Into::into),
             auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
@@ -1674,6 +1692,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             provider: value.provider,
             self_hosted_server_id: value.self_hosted_server_id,
             provider_params: value.provider_params.map(Into::into),
+            reasoning_effort: value.reasoning_effort.map(Into::into),
             auth_binding: value.auth_binding.map(Into::into),
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),

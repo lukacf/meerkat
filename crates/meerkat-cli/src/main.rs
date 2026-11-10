@@ -17686,6 +17686,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             transcript_identity: Default::default(),
             request_reasoning: None,
             request_reasoning_disposition: None,
+            reasoning_effort: None,
         };
         // The attention overlay is deliberately NOT composed here: a queued
         // prompt can sit behind a running turn that mutates the work item,

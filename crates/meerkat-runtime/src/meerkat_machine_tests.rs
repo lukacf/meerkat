@@ -47138,6 +47138,7 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         },
     )
     .await
@@ -47209,6 +47210,7 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         },
     )
     .await
@@ -47452,6 +47454,7 @@ async fn reconfigure_session_llm_identity_succeeds_on_idle_session() {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -51907,6 +51910,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
                     },
                 )),
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -52066,6 +52070,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -52194,6 +52199,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -52397,6 +52403,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await
@@ -56359,6 +56366,7 @@ async fn execute_runtime_parity_probe(
                 self_hosted_server_id: None,
                 provider_params: None,
                 auth_binding: None,
+                reasoning_effort: None,
             },
         )
         .await

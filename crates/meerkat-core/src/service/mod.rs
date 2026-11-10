@@ -2339,6 +2339,11 @@ pub struct ResumeOverrideMask {
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
+    /// The build decides the session's provider-neutral reasoning effort
+    /// level: the level its params name, or none when they name none. Without
+    /// it the stored level stays, across a `provider_params` claim too,
+    /// unless the build's params name a level.
+    pub reasoning_effort: bool,
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,

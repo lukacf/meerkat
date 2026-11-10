@@ -28,6 +28,11 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub self_hosted_server_id: Option<String>,
     pub provider_params:
         Option<TurnMetadataOverride<crate::lifecycle::run_primitive::ProviderParamsOverride>>,
+    /// The session's provider-neutral reasoning effort level, decided on its
+    /// own beside `provider_params`
+    /// (see [`crate::session::resolve_session_provider_params`]).
+    pub reasoning_effort:
+        Option<TurnMetadataOverride<crate::model_profile::capabilities::EffortLevel>>,
     pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
     pub output_schema: Option<OutputSchema>,
@@ -286,6 +291,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.provider.is_some()
         || overrides.self_hosted_server_id.is_some()
         || overrides.provider_params.is_some()
+        || overrides.reasoning_effort.is_some()
         || overrides.auth_binding.is_some()
         || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
@@ -482,6 +488,7 @@ pub fn resolve_effective_turn_config(
         structured_output_retries: overrides.structured_output_retries.is_some(),
         // `Some(_)` is the explicit intent (Set or Clear); `None` inherits.
         provider_params: overrides.provider_params.is_some(),
+        reasoning_effort: overrides.reasoning_effort.is_some(),
         auth_binding: overrides.auth_binding.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
@@ -501,6 +508,18 @@ pub fn resolve_effective_turn_config(
         tool_access_policy: false,
         application_tool_policy: false,
     };
+
+    // The params this build seats follow the one rule every identity change
+    // uses, the persisted reasoning effort level included.
+    let provider_params = crate::session::resolve_session_provider_params(
+        metadata.provider_params.as_ref(),
+        overrides
+            .provider_params
+            .as_ref()
+            .map(TurnMetadataOverride::as_ref),
+        overrides.reasoning_effort.clone(),
+    )
+    .map_err(|error| SurfaceSessionRecoveryError::InvalidOverride(error.to_string()))?;
 
     let model = overrides
         .model
@@ -559,11 +578,7 @@ pub fn resolve_effective_turn_config(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params: match &overrides.provider_params {
-            Some(TurnMetadataOverride::Clear) => None,
-            Some(TurnMetadataOverride::Set(value)) => Some(value.clone()),
-            None => metadata.provider_params.clone(),
-        },
+        provider_params,
         external_tools: context.external_tools,
         // The owning service decides hosting when it creates the actor.
         hosting: crate::session_hosting::SessionHostingIntent::default(),

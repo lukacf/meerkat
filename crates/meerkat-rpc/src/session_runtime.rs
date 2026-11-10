@@ -3888,6 +3888,7 @@ impl SessionRuntime {
         // K2: `TurnOverrides` carries the typed `ProviderParamsOverride`
         // tri-state end-to-end — no legacy JSON round-trip at this seam.
         let provider_params = overrides.and_then(|ov| ov.provider_params.clone());
+        let reasoning_effort = overrides.and_then(|ov| ov.reasoning_effort.clone());
         let auth_binding = overrides.and_then(|ov| ov.auth_binding.clone());
         let provider = overrides.and_then(|ov| {
             ov.provider
@@ -3916,6 +3917,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params,
+            reasoning_effort,
             render_metadata: None,
             auth_binding,
             execution_kind: None,
@@ -3969,6 +3971,7 @@ impl SessionRuntime {
         // K2: the surface seam carries the typed `ProviderParamsOverride`
         // tri-state; pass it through unchanged.
         let provider_params = metadata.provider_params.clone();
+        let reasoning_effort = metadata.reasoning_effort.clone();
         let auth_binding = metadata.auth_binding.clone();
         // Rehydrate the full tri-state from the typed directive carrier:
         // Enable -> Some(true), Disable -> Some(false), absent -> None
@@ -3987,6 +3990,7 @@ impl SessionRuntime {
                 .map(|provider| provider.as_str().to_string()),
             self_hosted_server_id: metadata.self_hosted_server_id.clone(),
             provider_params,
+            reasoning_effort,
             auth_binding,
             transient_turn_context: metadata.transient_turn_context.clone(),
             ..Default::default()
@@ -6667,6 +6671,7 @@ impl SessionRuntime {
                 })?,
             self_hosted_server_id: overrides.and_then(|ov| ov.self_hosted_server_id.clone()),
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
+            reasoning_effort: overrides.and_then(|ov| ov.reasoning_effort.clone()),
             auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             output_schema,
@@ -7454,6 +7459,7 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
+            reasoning_effort: ov.reasoning_effort.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
         self.llm_reconfigure_host()
@@ -7590,6 +7596,7 @@ impl SessionRuntime {
             provider: ov.provider.clone(),
             self_hosted_server_id: ov.self_hosted_server_id.clone(),
             provider_params: ov.provider_params.clone(),
+            reasoning_effort: ov.reasoning_effort.clone(),
             auth_binding: ov.auth_binding.clone(),
         };
 
@@ -10671,6 +10678,7 @@ impl SessionRuntime {
                     || ov.provider.is_some()
                     || ov.self_hosted_server_id.is_some()
                     || ov.provider_params.is_some()
+                    || ov.reasoning_effort.is_some()
                     || ov.auth_binding.is_some())
             {
                 match llm_reconfigure_boundary {
@@ -12119,6 +12127,7 @@ impl SessionRuntime {
                 || ov.provider.is_some()
                 || ov.self_hosted_server_id.is_some()
                 || ov.provider_params.is_some()
+                || ov.reasoning_effort.is_some()
                 || ov.auth_binding.is_some())
         {
             self.hot_swap_llm_client(session_id, ov).await?;
@@ -27127,6 +27136,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
 
         let err = host
@@ -27157,6 +27167,7 @@ mod tests {
             self_hosted_server_id: None,
             provider_params: None,
             auth_binding: None,
+            reasoning_effort: None,
         };
 
         let err = host
@@ -36048,6 +36059,7 @@ mod tests {
             provider_params: None,
             auth_binding: None,
             transient_turn_context: None,
+            reasoning_effort: None,
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
         let rejected = runtime
@@ -43428,6 +43440,7 @@ mod tests {
                             self_hosted_server_id: None,
                             provider_params: None,
                             auth_binding: None,
+                            reasoning_effort: None,
                         },
                     )
                     .await

@@ -1090,6 +1090,14 @@ pub struct ProviderParamsOverride {
     pub thinking_budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tag: Option<ProviderTag>,
+    /// Provider-neutral reasoning effort level for the session's requests:
+    /// `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` (one
+    /// spelling each). It is not a provider setting itself: a request that
+    /// still carries it when it reaches a provider client is refused, so the
+    /// level is never sent as it is and never dropped. A session keeps it
+    /// across a replacement of its other provider params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<EffortLevel>,
     /// Request-local tool choice for one provider call. The agent loop sets
     /// it on each request's own copy from the turn's tool-choice plan
     /// (`TurnToolOverlay::tool_choice_plan`) and replaces any value that
@@ -1102,13 +1110,17 @@ pub struct ProviderParamsOverride {
 
 impl ProviderParamsOverride {
     /// Whether these params set a reasoning knob explicitly: the generic
-    /// reasoning mode or thinking budget, or any provider tag's effort,
-    /// thinking or reasoning field (nested or flat). Unrelated knobs
+    /// reasoning mode or thinking budget, the provider-neutral reasoning
+    /// effort level, or any provider tag's effort, thinking or reasoning
+    /// field (nested or flat). Unrelated knobs
     /// (temperature, sampling, limits, caching, search) do not count; an
     /// untyped tag bag counts, since it may carry one.
     #[must_use]
     pub fn sets_reasoning(&self) -> bool {
-        if self.reasoning.is_some() || self.thinking_budget_tokens.is_some() {
+        if self.reasoning.is_some()
+            || self.thinking_budget_tokens.is_some()
+            || self.reasoning_effort.is_some()
+        {
             return true;
         }
         match &self.provider_tag {
@@ -1140,6 +1152,7 @@ impl ProviderParamsOverride {
             && self.reasoning.is_none()
             && self.thinking_budget_tokens.is_none()
             && self.provider_tag.is_none()
+            && self.reasoning_effort.is_none()
             && self.tool_choice.is_none()
     }
 
@@ -1922,6 +1935,13 @@ pub struct RuntimeTurnMetadata {
     /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    /// Set, clear, or preserve the session's provider-neutral reasoning
+    /// effort level, for this turn and the turns after it. It is its own
+    /// field: a turn that replaces or clears `provider_params` keeps the
+    /// level unless it also names this field, or its new params name the
+    /// nested `reasoning_effort` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<TurnMetadataOverride<EffortLevel>>,
     /// Override, clear, or preserve the auth binding reference this turn must
     /// resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1990,6 +2010,7 @@ impl RuntimeTurnMetadata {
             && self.provider.is_none()
             && self.self_hosted_server_id.is_none()
             && self.provider_params.is_none()
+            && self.reasoning_effort.is_none()
             && self.auth_binding.is_none()
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
@@ -2040,6 +2061,9 @@ impl RuntimeTurnMetadata {
             provider,
             self_hosted_server_id,
             provider_params,
+            // The reasoning effort level is model routing, like
+            // `provider_params`: only a fresh turn applies it.
+            reasoning_effort,
             auth_binding,
             keep_alive,
             render_metadata,
@@ -2061,6 +2085,7 @@ impl RuntimeTurnMetadata {
             && provider.is_none()
             && self_hosted_server_id.is_none()
             && provider_params.is_none()
+            && reasoning_effort.is_none()
             && auth_binding.is_none()
             && keep_alive.is_none()
             && render_metadata.is_none()
@@ -2119,6 +2144,11 @@ impl RuntimeTurnMetadata {
             &mut self.provider_params,
             other.provider_params,
             "provider_params",
+        )?;
+        merge_override(
+            &mut self.reasoning_effort,
+            other.reasoning_effort,
+            "reasoning_effort",
         )?;
         merge_override(&mut self.auth_binding, other.auth_binding, "auth_binding")?;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;

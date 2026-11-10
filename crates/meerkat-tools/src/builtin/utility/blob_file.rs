@@ -1124,9 +1124,10 @@ mod tests {
 
         let save = BlobSaveFileTool::new(root.clone(), store);
         for path in ["out.png", ".rkat.png", "assets/rkat/out.png"] {
-            save.call(json!({"blob_id": blob_id.as_str(), "path": path}))
-                .await
-                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            let saved = save
+                .call(json!({"blob_id": blob_id.as_str(), "path": path}))
+                .await;
+            assert!(saved.is_ok(), "{path}: {saved:?}");
             assert_eq!(tokio::fs::read(root.join(path)).await.unwrap(), png_bytes());
         }
         for path in [
@@ -1198,9 +1199,10 @@ mod tests {
         );
         assert!(!realm.join("authorization").exists());
         for path in ["out.png", "runtime.sqlite3"] {
-            tool.call(json!({"blob_id": blob_id.as_str(), "path": path}))
-                .await
-                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            let saved = tool
+                .call(json!({"blob_id": blob_id.as_str(), "path": path}))
+                .await;
+            assert!(saved.is_ok(), "{path}: {saved:?}");
             assert_eq!(
                 tokio::fs::read(realm.join(path)).await.unwrap(),
                 png_bytes()

@@ -869,6 +869,13 @@ impl PersistentRuntimeDriver {
             .await
     }
 
+    /// The exact CAS of every terminal rewrite of input rows. Each row is
+    /// expected as it was last written (`committed_input_row_images`). A
+    /// stale outcome gets one more compare, from the replacements as a store
+    /// that committed them already holds them after operations staged more
+    /// observations (`committed_replacement_images`): such a stored row is
+    /// the committed rewrite, so the CAS writes the replacement over it,
+    /// which commits those observations. Any other difference stays stale.
     pub(crate) async fn compare_and_swap_interaction_terminal_outbox_replacements(
         &self,
         expected: &[StoredInputState],
@@ -876,7 +883,28 @@ impl PersistentRuntimeDriver {
     ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
         let expected = self.committed_input_row_images(expected).await?;
-        let expected = expected.as_slice();
+        let outcome = self
+            .compare_and_swap_input_state_batch(&expected, replacements)
+            .await?;
+        if outcome != InputStateBatchCasOutcome::Stale {
+            return Ok(outcome);
+        }
+        match self.committed_replacement_images(replacements).await? {
+            Some(committed) => {
+                self.compare_and_swap_input_state_batch(&committed, replacements)
+                    .await
+            }
+            None => Ok(outcome),
+        }
+    }
+
+    /// One exact compare-and-swap of input-state rows through the store's
+    /// realization profile.
+    async fn compare_and_swap_input_state_batch(
+        &self,
+        expected: &[StoredInputState],
+        replacements: &[crate::input_state::InputStatePersistenceRecord],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
         match self.store.input_state_batch_cas_implementation_profile() {
             InputStateBatchCasImplementationProfile::MultiWriter => self
                 .store
@@ -969,16 +997,8 @@ impl PersistentRuntimeDriver {
                 })?;
             if !image.state.authorization_audit.is_empty() {
                 let stored = self
-                    .store
-                    .load_input_state(&self.runtime_id, &live.state.input_id)
-                    .await
-                    .map_err(|error| RuntimeDriverError::RecoveryBackoff {
-                        reason: format!(
-                            "terminal input compare-and-swap could not read the stored row of \
-                             input {}: {error}",
-                            live.state.input_id
-                        ),
-                    })?;
+                    .stored_input_row_for_terminal_cas(&live.state.input_id)
+                    .await?;
                 if let Some(stored) = stored {
                     image.state.authorization_audit = image
                         .state
@@ -994,11 +1014,76 @@ impl PersistentRuntimeDriver {
         Ok(images)
     }
 
+    /// The replacements of a terminal input-state CAS as a store that
+    /// already committed them holds them once operations staged more
+    /// observations: each with its audit cut to the stored strict prefix
+    /// (the same `InputAuthorizationAudit::committed_image` rule). A caller
+    /// dropped after the store committed its CAS leaves the stored rows at
+    /// the replacement and the shell at the rows it replaced. The retry
+    /// rebuilds the replacement from the shell, so it also carries every
+    /// observation staged on the live rows since; the stored row is then
+    /// neither the retry's pre-image nor its replacement, only this image of
+    /// it. `None` when no stored audit cuts a replacement: the store has
+    /// compared each row with its replacement already.
+    async fn committed_replacement_images(
+        &self,
+        replacements: &[crate::input_state::InputStatePersistenceRecord],
+    ) -> Result<Option<Vec<StoredInputState>>, RuntimeDriverError> {
+        let mut images = Vec::with_capacity(replacements.len());
+        let mut cut = false;
+        for replacement in replacements {
+            let mut image = replacement.clone_stored();
+            if !image.state.authorization_audit.is_empty()
+                && let Some(stored) = self
+                    .stored_input_row_for_terminal_cas(&image.state.input_id)
+                    .await?
+            {
+                let committed = image
+                    .state
+                    .authorization_audit
+                    .committed_image(&stored.state.authorization_audit)
+                    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    })?;
+                if !committed
+                    .has_same_records(&image.state.authorization_audit)
+                    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    })?
+                {
+                    cut = true;
+                    image.state.authorization_audit = committed;
+                }
+            }
+            images.push(image);
+        }
+        Ok(cut.then_some(images))
+    }
+
+    /// The stored row of `input_id`, read to choose a terminal input-state
+    /// CAS's expected bytes. A failed read changes nothing durable.
+    async fn stored_input_row_for_terminal_cas(
+        &self,
+        input_id: &InputId,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        self.store
+            .load_input_state(&self.runtime_id, input_id)
+            .await
+            .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                reason: format!(
+                    "terminal input compare-and-swap could not read the stored row of input \
+                     {input_id}: {error}"
+                ),
+            })
+    }
+
     /// Release terminal live state after its exact completion/publication CAS
     /// has committed. The ephemeral helper rechecks that every named row is
     /// terminal and carries no open durable obligation; any archive mismatch
     /// degrades the shared shell rather than continuing with split authority.
-    pub(crate) fn archive_terminal_inputs_after_durable_obligations(
+    /// The audit records operations staged on the rows since their last
+    /// write are committed first (`commit_staged_audit_before_archive`).
+    pub(crate) async fn archive_terminal_inputs_after_durable_obligations(
         &mut self,
         input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
@@ -1024,6 +1109,7 @@ impl PersistentRuntimeDriver {
                 ));
             }
         };
+        self.commit_staged_audit_before_archive(&archivable).await?;
         if let Err(error) = self
             .inner
             .archive_archivable_terminal_inputs_after_durable_commit(&archivable)
@@ -1035,6 +1121,100 @@ impl PersistentRuntimeDriver {
             ));
         }
         Ok(())
+    }
+
+    /// Commit every authorization audit record an operation staged on one of
+    /// `input_ids` since the row's last durable write. Such a record waits on
+    /// the live row for the row's next write, and an archived row has none.
+    /// Each row whose live records differ from its stored ones is rewritten
+    /// through the terminal input CAS with its live records, every other
+    /// byte as stored (the exact compare refuses any other difference); then
+    /// the rows are checked again, until no row differs. That last check
+    /// compares with the records read or written here, kept in memory, so no
+    /// await separates it from the archive that follows: every record staged
+    /// before it is durable when the row is archived.
+    async fn commit_staged_audit_before_archive(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let audit_corruption = |error: meerkat_core::authorization::OperationObservationError| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: error.to_string(),
+            }
+        };
+        let live_row = |input_id: &InputId| {
+            self.inner.stored_input_state(input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "terminal input archive references missing live input {input_id}"
+                ))
+            })
+        };
+        let mut committed = Vec::with_capacity(input_ids.len());
+        for input_id in input_ids {
+            let live = live_row(input_id)?
+                .state
+                .authorization_audit
+                .freeze_for_persistence()
+                .map_err(audit_corruption)?;
+            // A row whose snapshot holds no record cannot be ahead of its
+            // stored row and needs no read.
+            let stored = if live.is_empty() {
+                live
+            } else {
+                self.stored_input_row_for_terminal_cas(input_id)
+                    .await?
+                    .map(|stored| stored.state.authorization_audit)
+                    .unwrap_or_default()
+                    .freeze_for_persistence()
+                    .map_err(audit_corruption)?
+            };
+            committed.push((input_id, stored));
+        }
+        loop {
+            let mut expected = Vec::new();
+            let mut replacements = Vec::new();
+            for (input_id, stored) in &committed {
+                let live = live_row(input_id)?;
+                if live
+                    .state
+                    .authorization_audit
+                    .has_same_records(stored)
+                    .map_err(audit_corruption)?
+                {
+                    continue;
+                }
+                replacements.push(
+                    crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(
+                        live.clone(),
+                    )
+                    .map_err(RuntimeDriverError::Internal)?,
+                );
+                expected.push(live);
+            }
+            if expected.is_empty() {
+                return Ok(());
+            }
+            if self
+                .compare_and_swap_interaction_terminal_outbox_replacements(&expected, &replacements)
+                .await?
+                == InputStateBatchCasOutcome::Stale
+            {
+                return Err(RuntimeDriverError::StaleAuthority {
+                    reason: "terminal input archive lost the exact durable CAS of its staged \
+                             audit records"
+                        .to_string(),
+                });
+            }
+            for replacement in &replacements {
+                let written = &replacement.as_stored().state;
+                if let Some((_, stored)) = committed
+                    .iter_mut()
+                    .find(|(input_id, _)| **input_id == written.input_id)
+                {
+                    stored.clone_from(&written.authorization_audit);
+                }
+            }
+        }
     }
 
     pub(crate) async fn committed_session_snapshot_for_terminal_recovery(

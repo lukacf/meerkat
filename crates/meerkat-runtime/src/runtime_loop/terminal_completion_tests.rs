@@ -1740,6 +1740,98 @@ async fn teardown_archive_commits_an_audit_observation_staged_after_the_finaliza
     fixture.assert_cancelled_finalized(&records).await;
 }
 
+/// An observation staged while the archive's own audit commit is held after
+/// its commit is checked for again: the archive commits it too before the
+/// rows go.
+#[tokio::test]
+async fn teardown_archive_commits_audit_observations_staged_during_its_own_audit_commit() {
+    let (fixture, mut records) = MemoryFixture::cancelled_run_recording(1).await;
+    let live = fixture.first_live_audit().await;
+    let (finalization_entered, finalization_release) = fixture.hold_next_cas_after_commit();
+    let stage = async {
+        crate::tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            finalization_entered.notified(),
+        )
+        .await
+        .expect("the finalization CAS commits");
+        let first = fixture.stage_refusal(&live);
+        let (archive_entered, archive_release) = fixture.hold_next_cas_after_commit();
+        finalization_release.notify_one();
+        crate::tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            archive_entered.notified(),
+        )
+        .await
+        .expect("the archive commits the first observation");
+        assert_eq!(
+            crate::input_audit::tests::audit_operation_ids(
+                &fixture
+                    .stored_row(&fixture.inputs[0])
+                    .await
+                    .state
+                    .authorization_audit
+            )
+            .last(),
+            Some(&first),
+            "the held CAS is the archive's audit commit"
+        );
+        let second = fixture.stage_refusal(&live);
+        archive_release.notify_one();
+        [first, second]
+    };
+    let (settled, observed) = crate::tokio::join!(fixture.teardown(), stage);
+    settled.expect("teardown settles the cancelled run's terminal");
+    records.extend(observed);
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    fixture.assert_cancelled_finalized(&records).await;
+}
+
+/// The archive's audit commit expects every other byte of the row as it was
+/// written: a stored row another writer changed after the finalization stays
+/// a difference, the archive refuses, and the rows stay live and as the
+/// writers left them.
+#[tokio::test]
+async fn teardown_archive_does_not_excuse_a_changed_stored_row() {
+    let (fixture, _) = MemoryFixture::cancelled_run_recording(1).await;
+    let live = fixture.first_live_audit().await;
+    let (entered, release) = fixture.hold_next_cas_after_commit();
+    let stage = async {
+        crate::tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the finalization CAS commits");
+        fixture.stage_refusal(&live);
+        let mut changed = fixture.stored_row(&fixture.inputs[0]).await;
+        changed.state.updated_at += chrono::Duration::seconds(1);
+        fixture.replace_first_stored_row(changed).await;
+        let written = [
+            fixture.stored_bytes(&fixture.inputs[0]).await,
+            fixture.stored_bytes(&fixture.inputs[1]).await,
+        ];
+        release.notify_one();
+        written
+    };
+    let (settled, written) = crate::tokio::join!(fixture.teardown(), stage);
+    let error = settled.expect_err("a changed stored row is no committed audit prefix");
+    assert!(
+        error
+            .to_string()
+            .contains("terminal input archive lost the exact durable CAS"),
+        "{error}"
+    );
+    assert_eq!(written[0], fixture.stored_bytes(&fixture.inputs[0]).await);
+    assert_eq!(written[1], fixture.stored_bytes(&fixture.inputs[1]).await);
+    let entry = fixture.driver.lock().await;
+    for input_id in &fixture.inputs {
+        assert!(
+            entry.shell_driver().ledger().get(input_id).is_some(),
+            "the refused rows are not archived"
+        );
+    }
+    drop(entry);
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_some());
+}
+
 /// A finalization dropped right after the store committed its CAS leaves the
 /// stored rows finalized and the live rows as they were; an operation of the
 /// run then stages an observation on the live row. The retry rebuilds the

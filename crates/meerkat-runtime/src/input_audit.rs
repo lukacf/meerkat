@@ -198,6 +198,17 @@ impl InputAuthorizationAudit {
         Ok(live)
     }
 
+    /// Whether this payload and `other` hold the same records in the same
+    /// order. Pure: it neither drains nor acknowledges either side.
+    pub(crate) fn has_same_records(&self, other: &Self) -> Result<bool, OperationObservationError> {
+        let left = self.freeze_for_persistence()?;
+        let right = other.freeze_for_persistence()?;
+        let (AuditPayload::Frozen(left), AuditPayload::Frozen(right)) = (&left.0, &right.0) else {
+            return Err(OperationObservationError);
+        };
+        Ok(left == right)
+    }
+
     /// Derive a sink from this actual admitted row, never from an input-id map
     /// supplied by the operation. The caller must obtain scope/run/originals
     /// from the current native owner while it holds that row's custody.

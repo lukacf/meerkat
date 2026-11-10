@@ -1145,6 +1145,75 @@ impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
     }
 }
 
+/// What a prepared Copilot route of `provider`'s family states for the
+/// provider-neutral `reasoning_effort` option: the Copilot backend of the
+/// family, the API of the endpoint the route serves, and the effort levels
+/// the account's model list states for the route's model. It reads only the
+/// route the client already prepared: the capabilities are those of the
+/// entry the route resolved for the session's model, and nothing is looked
+/// up or fetched.
+///
+/// - A route the account's list does not serve (the model is absent, more
+///   than one entry matches it, its policy is not enabled, or the family has
+///   no endpoint on it) has no observation.
+/// - A route resolved while the account holds no list is on the family's
+///   optimistic endpoint, and the account's statement is unavailable.
+/// - An entry states its levels in `capabilities.supports.reasoning_effort`
+///   ([`crate::CopilotModelSupports::stated_effort_levels`]); an entry
+///   without the statement states none.
+/// - On the Messages endpoint a level is sent only as the pair adaptive
+///   thinking with effort. An entry there that states levels and states
+///   `adaptive_thinking: false` cannot take that pair, so its levels are not
+///   usable and it is reported as stating none. An entry that does not state
+///   `adaptive_thinking` keeps its levels.
+fn reasoning_route_observation(
+    provider: Provider,
+    route: &CopilotRouteFingerprint,
+) -> Option<meerkat_core::ReasoningRouteObservation> {
+    use meerkat_core::provider_matrix::{
+        AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind,
+    };
+    use meerkat_core::{AccountLevelStatement, ModelApi, ReasoningBackend};
+
+    let backend = match provider {
+        Provider::OpenAI => ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+        Provider::Anthropic => ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot),
+        Provider::Gemini => ReasoningBackend::Google(GoogleBackendKind::Copilot),
+        Provider::SelfHosted | Provider::Other => return None,
+    };
+    let (endpoint, list_loaded) = match route.access {
+        CopilotModelAccess::Available { endpoint } => (endpoint, true),
+        CopilotModelAccess::Unknown => (CopilotEndpoint::optimistic_for_provider(provider)?, false),
+        CopilotModelAccess::Unavailable => return None,
+    };
+    let api = match endpoint {
+        CopilotEndpoint::Responses => ModelApi::Responses,
+        CopilotEndpoint::ChatCompletions => ModelApi::ChatCompletions,
+        CopilotEndpoint::Messages => ModelApi::Messages,
+        CopilotEndpoint::Unknown => return None,
+    };
+    let account = if list_loaded {
+        let supports = route
+            .capabilities
+            .as_ref()
+            .map(|capabilities| &capabilities.supports);
+        let refuses_the_messages_pair = api == ModelApi::Messages
+            && supports.is_some_and(|supports| supports.adaptive_thinking == Some(false));
+        match supports.and_then(crate::CopilotModelSupports::stated_effort_levels) {
+            Some(levels) if !refuses_the_messages_pair => AccountLevelStatement::Stated(levels),
+            Some(_) | None => AccountLevelStatement::NotStated,
+        }
+    } else {
+        AccountLevelStatement::ListUnavailable
+    };
+    Some(meerkat_core::ReasoningRouteObservation {
+        backend,
+        api,
+        account,
+        operator_levels: None,
+    })
+}
+
 #[derive(Clone)]
 struct PreparedCopilotRoute {
     fingerprint: CopilotRouteFingerprint,
@@ -1342,6 +1411,14 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
     /// The current route's account prompt limit for `output_budget`.
     fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
         self.sync_client().prompt_token_limit(output_budget)
+    }
+
+    /// What the prepared route states ([`reasoning_route_observation`]).
+    /// This client answers for the route: the adapter it wraps knows the
+    /// backend and the API but not the account's list. No I/O, and no lock
+    /// is held past the read of the prepared route.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        reasoning_route_observation(self.provider, &self.prepared_route.read().fingerprint)
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1647,6 +1724,11 @@ fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) 
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
         self.inner.prepare_controller_credential().await
+    }
+
+    /// The route of the adapter this gate stands in front of.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     /// The account model's own output limit, the one the gate enforces.
@@ -14478,12 +14560,16 @@ mod tests {
         }
 
         /// One Copilot account over a transport that answers `script`: its
-        /// token exchange, then its model listings.
+        /// token exchange, then its model listings. The account keeps every
+        /// session it built: the runtime holds an account's token and list
+        /// only while a session holds them, and these rows read several
+        /// sessions of one account.
         struct ObservedAccount {
             runtime: Arc<CopilotRuntime>,
             binding: ValidatedBinding,
             env: ResolverEnvironment,
             transport: Arc<ScriptedTransport>,
+            sessions: Mutex<Vec<Arc<dyn meerkat_llm_core::LlmClient>>>,
         }
 
         impl ObservedAccount {
@@ -14500,6 +14586,7 @@ mod tests {
                     binding,
                     env,
                     transport,
+                    sessions: Mutex::new(Vec::new()),
                 }
             }
 
@@ -14532,14 +14619,16 @@ mod tests {
                 };
                 let factory: CopilotRouteClientFactory =
                     Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
-                routed_client(
+                let client = routed_client(
                     Arc::clone(&self.runtime),
                     connection,
                     provider,
                     model.to_string(),
                     factory,
                 )
-                .expect("the routed client builds once its auth resolved")
+                .expect("the routed client builds once its auth resolved");
+                self.sessions.lock().push(Arc::clone(&client));
+                client
             }
 
             /// What the session's routed client for `model` observes.

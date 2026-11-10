@@ -1084,6 +1084,8 @@ fn compaction_admission_is_uncertain(error: &crate::identity_first::IdentityRunt
             | IdentityRuntimeError::IdentityHistoryUnavailable { .. }
             | IdentityRuntimeError::IdentityWakeRetryable { .. }
             | IdentityRuntimeError::IdentityHostAdopted { .. }
+            | IdentityRuntimeError::IdentityStoreOwned { .. }
+            | IdentityRuntimeError::IdentityArchived { .. }
             | IdentityRuntimeError::WakeHeld { .. }
             | IdentityRuntimeError::InvalidState { .. }
             | IdentityRuntimeError::StaleRuntimeAlias { .. }

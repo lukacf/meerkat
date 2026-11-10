@@ -29421,6 +29421,46 @@ default_model = "gemma"
         }
     }
 
+    /// `--comms-binding-out` writes a file that carries the comms runtime's
+    /// bootstrap token, so the file is 0600 on Unix: over a binding file an
+    /// earlier run left readable by group and others, and when it is new.
+    /// RED before: the file was written with the umask's mode, and an
+    /// existing file kept its own (the 0644 here under any umask).
+    #[cfg(all(unix, feature = "comms"))]
+    #[tokio::test]
+    async fn comms_binding_out_writes_an_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .expect("the binding file")
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = TestCommsRuntime::new("binding-out");
+
+        let existing = temp.path().join("existing.binding.json");
+        std::fs::write(&existing, "{}").expect("an earlier binding file");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644))
+            .expect("readable by group and others");
+        write_comms_binding_out(&existing, &runtime)
+            .await
+            .expect("write the binding");
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&existing).expect("read the binding"))
+                .expect("binding JSON");
+        assert_eq!(binding["kind"], "external");
+        assert_eq!(binding["address"], "inproc://binding-out");
+        assert_eq!(mode(&existing), 0o600, "over an earlier binding file");
+
+        let new = temp.path().join("created").join("new.binding.json");
+        write_comms_binding_out(&new, &runtime)
+            .await
+            .expect("write the binding");
+        assert_eq!(mode(&new), 0o600, "a new binding file");
+    }
+
     struct TestMobSessionActor {
         witness: meerkat_session::LiveSessionActorWitness,
         comms: Arc<TestCommsRuntime>,

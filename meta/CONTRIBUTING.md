@@ -197,13 +197,15 @@ green.
 The five targets form two tiers, each built and bound by its own candidate run
 from the same commit. The core tier (Linux x86_64 and aarch64, macOS arm64) is
 what the release waits for; the trailing tier (macOS x86_64 and Windows, the
-slowest legs) is added to the published release afterwards:
-
-```bash
-# Dispatch from main; refuse if GitHub's dispatch SHA differs from SOURCE_SHA.
-make release-candidate SOURCE_SHA=<full-merged-commit-sha> TIER=core
-make release-candidate SOURCE_SHA=<full-merged-commit-sha> TIER=trailing
-```
+slowest legs) is added to the published release afterwards. A release
+dispatches no candidate by hand: the root's `make release-prebuild
+VERSION=vX.Y.Z` (Core's release tag) dispatches both tiers of the release
+commit, core then trailing, right after Core's prebuild, and refuses unless
+`main`'s head carries that version. Dispatch a tier again only for a
+candidate that failed or whose wait ran out, while `main`'s head is still the
+release commit: from `meta/`, `make release-candidate
+SOURCE_SHA=<full-merged-commit-sha> TIER=core` (or `TIER=trailing`), which
+refuses when GitHub's dispatch SHA differs from `SOURCE_SHA`.
 
 Each candidate run builds its tier's targets and all three executables, checks
 Linux portability, checks every macOS binary's architecture, signs macOS
@@ -255,7 +257,7 @@ with its selection; this is add-only, bound to the published core receipt and
 the same tag and source, and refuses any existing file with different bytes:
 
 ```bash
-make release-assets-recover RELEASE_TAG=vX.Y.Z ARTIFACT_SELECTION=accepted-trailing.json
+make release-assets-recover RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=accepted-trailing.json
 ```
 
 It adds the trailing archives, `index-trailing.json`,
@@ -269,21 +271,21 @@ external to this workflow; the workflow does not claim to have performed consume
 tests. If the source, run, attempt, archives, or signed executable bytes change,
 obtain a new candidate selection and repeat acceptance.
 
-After acceptance, the release owner creates `vX.Y.Z` on the **same merged source
+After acceptance, the release owner creates `meta-vX.Y.Z` on the **same merged source
 SHA**. Its automatic workflow validates the tag and exact-main CI only. The owner
 then explicitly promotes the accepted selection:
 
 ```bash
-make release-promote RELEASE_TAG=vX.Y.Z \
+make release-promote RELEASE_TAG=meta-vX.Y.Z \
   ARTIFACT_SELECTION=/absolute/path/accepted-candidate.json
 
 # Asset-only promotion (no registries):
-make release-promote RELEASE_TAG=vX.Y.Z \
+make release-promote RELEASE_TAG=meta-vX.Y.Z \
   ARTIFACT_SELECTION=/absolute/path/accepted-candidate.json \
   PUBLISH_RELEASE_PACKAGES=false
 
 # Verify the selected candidate and exercise package dry-runs; publish nothing:
-make release-promote RELEASE_TAG=vX.Y.Z \
+make release-promote RELEASE_TAG=meta-vX.Y.Z \
   ARTIFACT_SELECTION=/absolute/path/accepted-candidate.json \
   REGISTRY_DRY_RUN=true
 ```
@@ -337,13 +339,13 @@ without it.
 
 ```bash
 # Registry-only retry against an explicit existing tag:
-make release-registry-retry RELEASE_TAG=vX.Y.Z
+make release-registry-retry RELEASE_TAG=meta-vX.Y.Z
 
 # Registry-only dry-run; no GitHub asset mutation:
-make release-registry-retry RELEASE_TAG=vX.Y.Z REGISTRY_DRY_RUN=true
+make release-registry-retry RELEASE_TAG=meta-vX.Y.Z REGISTRY_DRY_RUN=true
 
 # Add explicitly selected missing ORIGINAL assets to an existing release:
-make release-assets-recover RELEASE_TAG=vX.Y.Z \
+make release-assets-recover RELEASE_TAG=meta-vX.Y.Z \
   ARTIFACT_SELECTION=/absolute/path/original-artifacts.json
 ```
 

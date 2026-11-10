@@ -22739,6 +22739,90 @@ mod tests {
         }
     }
 
+    /// R2.3: the reasoning effort levels an operator declares for a
+    /// self-hosted model reach the route the session's client reports,
+    /// through the selected-target wrapper and the agent's adapter: the
+    /// self-hosted backend of the resolved connection, the API of the
+    /// server's style, and the declared levels. A model that declares none
+    /// reports none.
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn operator_levels_reach_the_self_hosted_clients_route() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        for (api_style, api) in [
+            (
+                SelfHostedApiStyle::ChatCompletions,
+                ModelApi::ChatCompletions,
+            ),
+            (SelfHostedApiStyle::Responses, ModelApi::Responses),
+        ] {
+            for declared in [
+                None,
+                Some(vec![EffortLevel::High, EffortLevel::Low, EffortLevel::High]),
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+                let _calls = install_recording_self_hosted_runtime(&mut factory);
+                let mut config = config_with_self_hosted_server(SelfHostedServerConfig {
+                    transport: SelfHostedTransport::OpenAiCompatible,
+                    base_url: "http://127.0.0.1:11434".to_string(),
+                    api_style,
+                });
+                config
+                    .self_hosted
+                    .models
+                    .get_mut("gemma-4-e2b")
+                    .unwrap()
+                    .reasoning_effort_levels = declared.clone();
+                insert_self_hosted_realm_binding(
+                    &mut config,
+                    "dev",
+                    "dev_local",
+                    "http://realm.example/v1",
+                    CredentialSourceSpec::InlineSecret {
+                        secret: "realm-token".to_string(),
+                    },
+                );
+
+                let session = Session::new();
+                let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+                let bindings = runtime
+                    .prepare_bindings(session.id().clone())
+                    .await
+                    .unwrap();
+                let mut build = AgentBuildConfig::new("gemma-4-e2b");
+                build.provider = Some(Provider::SelfHosted);
+                build.realm_id = Some(RealmId::parse("dev").unwrap());
+                build.resume_session = Some(session);
+                build.runtime_build_mode =
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+                build.override_builtins = ToolCategoryOverride::Disable;
+
+                let (_agent, controller) = factory
+                    .build_agent_with_controller(build, &config)
+                    .await
+                    .unwrap_or_else(|error| panic!("{api} {declared:?}: {error}"));
+                assert_eq!(
+                    controller.client().reasoning_route(),
+                    Some(ReasoningRouteObservation {
+                        backend: ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+                        api,
+                        account: AccountLevelStatement::NotApplicable,
+                        operator_levels: declared
+                            .as_ref()
+                            .map(|_| vec![EffortLevel::Low, EffortLevel::High]),
+                    }),
+                    "{api} {declared:?}"
+                );
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn factory_accepts_local_machine_bindings_for_pre_authoritative_mob_resources() {

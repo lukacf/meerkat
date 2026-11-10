@@ -9,6 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_core::lifecycle::run_primitive::ReasoningEffort;
+use meerkat_core::model_profile::capabilities::EffortLevel;
 use meerkat_core::provider_matrix::OpenAiBackendKind;
 use meerkat_core::{
     AccountLevelStatement, Message, ModelApi, ReasoningBackend, ReasoningRouteObservation,
@@ -134,6 +135,102 @@ fn a_compatible_client_without_a_declared_backend_reports_no_route() {
         OpenAiCompatibleMode::Responses,
     ] {
         assert_eq!(compatible_client(mode).reasoning_route(), None, "{mode:?}");
+    }
+    // Operator levels alone name no backend.
+    assert_eq!(
+        compatible_client(OpenAiCompatibleMode::ChatCompletions)
+            .with_operator_reasoning_effort_levels(Some(vec![EffortLevel::Low]))
+            .reasoning_route(),
+        None
+    );
+}
+
+/// R2.1 and R2.3, self-hosted servers: the compatible client reports the
+/// self-hosted backend kind it was built for, the API of its mode, and the
+/// effort levels the operator declared for the model, as it was given them.
+#[test]
+fn a_self_hosted_client_reports_its_backend_and_the_operators_levels() {
+    use meerkat_core::provider_matrix::SelfHostedBackendKind;
+
+    for kind in SelfHostedBackendKind::ALL.iter().copied() {
+        for (mode, api) in [
+            (
+                OpenAiCompatibleMode::ChatCompletions,
+                ModelApi::ChatCompletions,
+            ),
+            (OpenAiCompatibleMode::Responses, ModelApi::Responses),
+        ] {
+            let undeclared = compatible_client(mode).with_self_hosted_backend(kind);
+            assert_eq!(
+                undeclared.reasoning_route(),
+                Some(ReasoningRouteObservation {
+                    backend: ReasoningBackend::SelfHosted(kind),
+                    api,
+                    account: AccountLevelStatement::NotApplicable,
+                    operator_levels: None,
+                }),
+                "{} {api}: no levels declared",
+                kind.as_str()
+            );
+            for levels in [
+                vec![EffortLevel::Low, EffortLevel::Medium, EffortLevel::High],
+                Vec::new(),
+            ] {
+                assert_eq!(
+                    compatible_client(mode)
+                        .with_self_hosted_backend(kind)
+                        .with_operator_reasoning_effort_levels(Some(levels.clone()))
+                        .reasoning_route(),
+                    Some(ReasoningRouteObservation {
+                        backend: ReasoningBackend::SelfHosted(kind),
+                        api,
+                        account: AccountLevelStatement::NotApplicable,
+                        operator_levels: Some(levels),
+                    }),
+                    "{} {api}",
+                    kind.as_str()
+                );
+            }
+        }
+    }
+
+    // A client declared for an OpenAI backend speaks to that backend, not
+    // to a self-hosted server.
+    assert_eq!(
+        compatible_client(OpenAiCompatibleMode::ChatCompletions)
+            .with_self_hosted_backend(SelfHostedBackendKind::SelfHosted)
+            .with_openai_backend(OpenAiBackendKind::Copilot)
+            .reasoning_route(),
+        Some(observation(
+            OpenAiBackendKind::Copilot,
+            ModelApi::ChatCompletions
+        )),
+    );
+}
+
+/// The backend and the operator's levels are observations only: a
+/// self-hosted client that declares them builds the bodies it built before.
+#[test]
+fn declaring_a_backend_and_operator_levels_changes_no_body() {
+    use meerkat_core::provider_matrix::SelfHostedBackendKind;
+
+    for candidate in [
+        request(UNCATALOGUED_MODEL),
+        raw(UNCATALOGUED_MODEL, ReasoningEffort::High),
+        marked(UNCATALOGUED_MODEL, ReasoningEffort::High),
+    ] {
+        let plain = compatible_client(OpenAiCompatibleMode::ChatCompletions);
+        let declared = compatible_client(OpenAiCompatibleMode::ChatCompletions)
+            .with_self_hosted_backend(SelfHostedBackendKind::SelfHosted)
+            .with_operator_reasoning_effort_levels(Some(vec![EffortLevel::Low]));
+        assert_eq!(
+            declared
+                .build_chat_completions_body(&candidate)
+                .expect("the request builds"),
+            plain
+                .build_chat_completions_body(&candidate)
+                .expect("the request builds"),
+        );
     }
 }
 

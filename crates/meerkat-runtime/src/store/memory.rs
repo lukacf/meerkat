@@ -820,6 +820,8 @@ pub struct InMemoryRuntimeStore {
     #[cfg(test)]
     input_state_batch_cas_after_commit: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
+    machine_lifecycle_commit_after_commit: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
+    #[cfg(test)]
     machine_lifecycle_load_before: Arc<StdMutex<Option<InputStateBatchCasTestBlock>>>,
     #[cfg(test)]
     machine_lifecycle_load_calls: Arc<AtomicUsize>,
@@ -1202,6 +1204,8 @@ impl InMemoryRuntimeStore {
             #[cfg(test)]
             input_state_batch_cas_after_commit: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
+            machine_lifecycle_commit_after_commit: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
             machine_lifecycle_load_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             machine_lifecycle_load_calls: Arc::new(AtomicUsize::new(0)),
@@ -1272,6 +1276,20 @@ impl InMemoryRuntimeStore {
     ) {
         *self
             .input_state_batch_cas_after_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
+    }
+
+    /// Hold the next machine lifecycle commit right after it committed,
+    /// before it returns, until `release` is notified.
+    #[cfg(test)]
+    pub(crate) fn block_next_machine_lifecycle_commit_after_commit(
+        &self,
+        entered: Arc<crate::tokio::sync::Notify>,
+        release: Arc<crate::tokio::sync::Notify>,
+    ) {
+        *self
+            .machine_lifecycle_commit_after_commit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered, release));
     }
@@ -4883,6 +4901,22 @@ impl RuntimeStore for InMemoryRuntimeStore {
         inner.runtime_lifecycle.insert(rid.clone(), record);
         sync_runtime_session_catalog_lifecycle(&mut inner, &rid, runtime_state);
         apply_prepared_memory_input_state_mutations(&mut inner, &rid, prepared_input_mutations);
+        drop(inner);
+
+        #[cfg(test)]
+        {
+            let after_commit_block = self
+                .machine_lifecycle_commit_after_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, release)) = after_commit_block {
+                // Register before signalling: a test may release with notify_waiters().
+                let released = release.notified();
+                entered.notify_one();
+                released.await;
+            }
+        }
 
         #[cfg(test)]
         if self

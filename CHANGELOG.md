@@ -180,6 +180,18 @@ them.
   end, and writes them. Any other difference from the stored row still
   refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
+- `meerkat-runtime`: every archive of a terminal input row now writes the
+  authorization audit observations recorded on the row since it was last
+  written before the row leaves memory, not only the archive after its
+  completion or publication receipt. The archives that follow an abandon,
+  retire, reset, destroy or stop of inputs, a resumable run's settlement, a
+  queued input's cancel, an admission that supersedes or coalesces a queued
+  input, the end of unstageable queued inputs, a live boundary join's
+  cancel, and a run's terminal dropped such an observation. Once a row is
+  archived, its audit refuses any later observation, so an operation that
+  records after its run's rows were archived is refused as observation
+  unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
+
 - `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
   runtime store and drops it no longer breaks that realm's credential
   rotation and OAuth sign-ins. Every handle of one database shares the

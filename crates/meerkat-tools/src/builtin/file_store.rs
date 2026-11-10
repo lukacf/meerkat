@@ -119,20 +119,36 @@ impl FileTaskStore {
             .await
             .map_err(|e| TaskError::StorageError(format!("Failed to create temp file: {e}")))?;
 
-        file.write_all(content.as_bytes())
-            .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to write: {e}")))?;
+        let published = async {
+            file.write_all(content.as_bytes())
+                .await
+                .map_err(|e| TaskError::StorageError(format!("Failed to write: {e}")))?;
 
-        file.sync_all()
-            .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to sync: {e}")))?;
+            // tokio's `sync_all` waits for the write but keeps its error for
+            // the next write or flush: the flush is what reports a write the
+            // operating system refused (a file size limit, a quota, a full
+            // filesystem, an I/O error). Without it the sync of the empty
+            // file succeeds and the rename replaces the task file with it.
+            file.flush()
+                .await
+                .map_err(|e| TaskError::StorageError(format!("Failed to write: {e}")))?;
 
-        // Atomic rename
-        fs::rename(&temp_path, &self.path)
-            .await
-            .map_err(|e| TaskError::StorageError(format!("Failed to rename: {e}")))?;
+            file.sync_all()
+                .await
+                .map_err(|e| TaskError::StorageError(format!("Failed to sync: {e}")))?;
+            drop(file);
 
-        Ok(())
+            // Atomic rename
+            fs::rename(&temp_path, &self.path)
+                .await
+                .map_err(|e| TaskError::StorageError(format!("Failed to rename: {e}")))
+        }
+        .await;
+        if published.is_err() {
+            // Nothing was published: the task file is as it was.
+            let _ = fs::remove_file(&temp_path).await;
+        }
+        published
     }
 
     fn enforce_retention(tasks: &mut Vec<Task>) -> usize {

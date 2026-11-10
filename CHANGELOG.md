@@ -199,6 +199,52 @@ them.
   `delivery_id` or `input_id`), not by its caller key. Affects 0.9.5 through
   0.9.11.
 
+- `meerkat-auth-core`, `meerkat-store`, `meerkat-tools`, `rkat`: a file write
+  that the operating system refuses no longer replaces the file with an empty
+  one while the operation reports success. These writers write a temporary
+  file, sync it and rename it onto the target. They wrote through tokio's
+  `File`, whose `sync_all` waits for the write but does not return the
+  write's error, so a write refused by a file size limit (`RLIMIT_FSIZE`), a
+  quota, a full filesystem that allocates at write time, or an I/O error
+  went unreported: the sync of the empty temporary file succeeded and the
+  rename published it. A payload above 2 MiB could instead end short. The
+  files, through 0.9.11:
+  - a credential file of the file credential store
+    (`<credentials>/<realm>/<slot>.json`, since 0.6.0): a login, a token
+    refresh or a secret save returned success, and the stored credential was
+    replaced by an empty file that no longer loads;
+  - `realm_manifest.json` (since 0.3.3): the first open of a realm, or
+    selecting governance for one, returned success and left an empty
+    manifest; every later open of that realm failed to parse it, and so did
+    `rkat realm list` and `rkat realm prune` for the whole state root;
+  - a realm lease record (`leases/<instance>.json`, since 0.3.3), at a
+    surface's start and at each heartbeat: an empty record is counted as
+    unreadable, so the instance was not listed as active and `rkat realm
+    delete` refused without `--force`;
+  - a blob object (since 0.7.27): the put itself failed at its read-back,
+    but the empty or short object stayed at the content address, where reads
+    report it as corrupt, until an identical put rewrote it;
+  - the builtin task tools' task file (`.rkat/tasks.json`, since 0.3.0):
+    creating, updating or deleting a task returned success, and every stored
+    task was lost;
+  - an ATIF trajectory export (`rkat session export-atif`, `rkat run
+    --export-atif`, since 0.8.22): reported as written, and empty or short.
+
+  Each of these writes now fails with the error the operation already
+  returns for a failed open or rename, publishes nothing and removes its
+  temporary file: the file it would have replaced stays as it was, and a
+  file that did not exist is not created. A realm whose first open fails
+  this way opens normally once writes work again. A refused lease write no
+  longer leaves an unreadable record, which blocked `rkat realm delete` and
+  `rkat realm prune` by accident: the last good record stays, and a holder
+  whose heartbeat writes keep failing is counted stale 30 seconds after its
+  last good heartbeat, as it already was when the heartbeat failed to create
+  or rename its temporary file, so delete and prune no longer refuse on its
+  lease. The realm manifest lock and the first-start marker (since 0.8.4),
+  which such a write left empty without effect, now fail the same way and are
+  removed, so neither stays behind to be waited on. A file an earlier release
+  already emptied is not restored.
+
 ### Security
 
 - `rkat`: `rkat auth profile <PROFILE_ID>` printed the whole auth profile, so

@@ -519,9 +519,7 @@ const GOOGLE_FAMILY: [(ModelApi, Golden); 5] = [
 fn golden_table(backend: ReasoningBackend) -> [(ModelApi, Golden); 5] {
     match backend {
         ReasoningBackend::OpenAi(_) | ReasoningBackend::SelfHosted(_) => OPENAI_FAMILY,
-        ReasoningBackend::Anthropic(kind) if kind == AnthropicBackendKind::Copilot => {
-            ANTHROPIC_ON_COPILOT
-        }
+        ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot) => ANTHROPIC_ON_COPILOT,
         ReasoningBackend::Anthropic(_) => ANTHROPIC_DIRECT,
         ReasoningBackend::Google(_) => GOOGLE_FAMILY,
     }
@@ -1082,6 +1080,25 @@ fn operator_levels_drive_self_hosted_routes() {
 /// reorders levels states the same set.
 #[test]
 fn supported_levels_are_in_ladder_order_without_repeats() {
+    // The resolver's ladder is every level, lowest first. The match has no
+    // wildcard arm: a new level fails here until the ladder lists it.
+    fn position(level: EffortLevel) -> usize {
+        match level {
+            EffortLevel::None => 0,
+            Minimal => 1,
+            Low => 2,
+            Medium => 3,
+            High => 4,
+            Xhigh => 5,
+            Max => 6,
+        }
+    }
+    assert_eq!(LEVEL_LADDER, LADDER);
+    for (index, level) in LEVEL_LADDER.into_iter().enumerate() {
+        assert_eq!(position(level), index);
+    }
+    assert!(LEVEL_LADDER.is_sorted());
+
     let shuffled = account(
         OPENAI_COPILOT,
         ModelApi::Responses,
@@ -1261,7 +1278,13 @@ fn a_refusal_without_an_observation_names_the_direct_route() {
         .expect_err("no observation, no source");
         assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
         assert_eq!((refusal.supported, refusal.facts), (None, None));
-        assert_eq!(refusal.route.api, ModelApi::ChatCompletions);
+        assert_eq!(
+            refusal.route,
+            ReasoningRoute::new(
+                ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
+                ModelApi::ChatCompletions
+            )
+        );
     }
 }
 
@@ -1938,6 +1961,7 @@ fn a_strict_conflict_is_reported_before_the_facts() {
     assert_eq!(refusal.reason, Reason::ConflictingProviderEffort);
     assert_eq!(refusal.supported, Some(vec![Low, Medium]));
     assert_eq!(refusal.facts, Some(ReasoningFactsSource::Account));
+    assert_eq!(params, baseline);
 }
 
 /// The preference keeps the outcomes of the lowering it replaces where a

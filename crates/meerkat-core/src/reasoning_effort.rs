@@ -1,11 +1,15 @@
-//! Vocabulary of the provider-neutral `reasoning_effort` option.
+//! The provider-neutral `reasoning_effort` option: its vocabulary and its
+//! resolver.
 //!
-//! Types only. A request names one level in the [`EffortLevel`] vocabulary;
-//! whether a provider request can carry it depends on the model and on the
-//! route that serves the request: the backend (a provider-matrix backend
-//! kind) and the provider API the request is sent on. This module names the
-//! route, what a client observes about it, the typed refusal of a level, and
-//! the reports of the level a request was sent with. It decides nothing.
+//! A request names one level in the [`EffortLevel`] vocabulary; whether a
+//! provider request can carry it depends on the model and on the route that
+//! serves the request: the backend (a provider-matrix backend kind) and the
+//! provider API the request is sent on. This module names the route, what a
+//! client observes about it, the typed refusal of a level, and the reports
+//! of the level a request was sent with. Its resolver
+//! ([`resolve_reasoning_effort`]) decides, for a requested level, a model
+//! and a route observation, what to write on a provider request or the
+//! typed refusal; [`supported_reasoning_levels`] is its facts step alone.
 
 mod resolve;
 
@@ -17,6 +21,12 @@ use crate::Provider;
 use crate::model_profile::capabilities::EffortLevel;
 use crate::provider_matrix::{
     AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
+};
+
+pub(crate) use resolve::explicit_provider_effort;
+pub use resolve::{
+    ReasoningLevelFacts, ReasoningResolveInput, ReasoningResolveMode, direct_route_observation,
+    resolve_reasoning_effort, supported_reasoning_levels,
 };
 
 /// The provider API a request is sent on.
@@ -87,6 +97,44 @@ impl ReasoningBackend {
             Self::Anthropic(kind) => kind == AnthropicBackendKind::Copilot,
             Self::Google(kind) => kind == GoogleBackendKind::Copilot,
             Self::SelfHosted(_) => false,
+        }
+    }
+
+    /// The source that states the effort levels this backend's routes
+    /// accept: the kind's own `reasoning_levels_source()`.
+    pub fn levels_source(self) -> ReasoningLevelsSource {
+        match self {
+            Self::OpenAi(kind) => kind.reasoning_levels_source(),
+            Self::Anthropic(kind) => kind.reasoning_levels_source(),
+            Self::Google(kind) => kind.reasoning_levels_source(),
+            Self::SelfHosted(kind) => kind.reasoning_levels_source(),
+        }
+    }
+}
+
+/// Which source states the effort levels a backend kind's routes accept:
+/// the facts policy of the provider matrix, decided per kind.
+///
+/// Typed and never serialized. The reported form is
+/// [`ReasoningFactsSource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReasoningLevelsSource {
+    /// The model's catalog row: the backend forwards the provider's own API
+    /// to the provider's own validation.
+    Catalog,
+    /// The account's model list entry for the model: the backend answers
+    /// for itself, and the catalog row is never a source of its levels.
+    Account,
+    /// The levels the operator declared for the model.
+    Operator,
+}
+
+impl From<ReasoningLevelsSource> for ReasoningFactsSource {
+    fn from(source: ReasoningLevelsSource) -> Self {
+        match source {
+            ReasoningLevelsSource::Catalog => Self::Catalog,
+            ReasoningLevelsSource::Account => Self::Account,
+            ReasoningLevelsSource::Operator => Self::Operator,
         }
     }
 }

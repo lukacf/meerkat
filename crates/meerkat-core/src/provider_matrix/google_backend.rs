@@ -1,6 +1,7 @@
 //! Google backend kinds (typed, provider-owned).
 
 use super::google_auth::GoogleAuthMethod;
+use crate::reasoning_effort::ReasoningLevelsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GoogleBackendKind {
@@ -72,6 +73,21 @@ impl GoogleBackendKind {
             Self::VertexAi => "",
             Self::GoogleCodeAssist => GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL,
             Self::Copilot => "",
+        }
+    }
+
+    /// Which source states the reasoning effort levels this backend accepts
+    /// for a model. The Gemini API, Vertex AI and Code Assist forward the
+    /// provider's own API, so the catalog row states their levels. Copilot
+    /// answers for itself: the account's model list states its levels, and
+    /// the catalog row never does. The one owner of that decision; a new
+    /// kind must decide (no wildcard arm).
+    pub fn reasoning_levels_source(self) -> ReasoningLevelsSource {
+        match self {
+            Self::GoogleGenAi | Self::VertexAi | Self::GoogleCodeAssist => {
+                ReasoningLevelsSource::Catalog
+            }
+            Self::Copilot => ReasoningLevelsSource::Account,
         }
     }
 }

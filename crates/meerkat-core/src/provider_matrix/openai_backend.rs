@@ -1,6 +1,7 @@
 //! OpenAI backend kinds (typed, provider-owned).
 
 use super::openai_auth::OpenAiAuthMethod;
+use crate::reasoning_effort::ReasoningLevelsSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpenAiBackendKind {
@@ -95,6 +96,23 @@ impl OpenAiBackendKind {
     /// prompt's row lowers no entry.
     pub fn admits_additional_leading_system_messages(self) -> bool {
         !matches!(self, Self::ChatGptBackend)
+    }
+
+    /// Which source states the reasoning effort levels this backend accepts
+    /// for a model. The public API, the ChatGPT backend and Azure OpenAI
+    /// forward the provider's own API to the provider's own validation, so
+    /// the catalog row states their levels. Copilot is an intermediary that
+    /// answers for itself: the account's model list states its levels, and
+    /// the catalog row never does. The one owner of that decision; the
+    /// resolver of the provider-neutral `reasoning_effort` option reads it
+    /// from here. A new kind must decide: the match has no wildcard arm.
+    pub fn reasoning_levels_source(self) -> ReasoningLevelsSource {
+        match self {
+            Self::OpenAiApi | Self::ChatGptBackend | Self::AzureOpenAi => {
+                ReasoningLevelsSource::Catalog
+            }
+            Self::Copilot => ReasoningLevelsSource::Account,
+        }
     }
 
     pub fn default_base_url(self) -> &'static str {

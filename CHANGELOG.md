@@ -138,6 +138,41 @@ them.
   are a request-free accessor with a `None` default, so existing clients
   compile unchanged; `LlmClientAdapter` forwards its client's answer.
 
+- `meerkat-core`: the resolver of the provider-neutral `reasoning_effort`
+  option. No request, wire form or schema names the option yet, so no
+  request changes. `resolve_reasoning_effort` decides, for a requested
+  level, a model and a `ReasoningRouteObservation`, what one provider
+  request is sent with: it writes the route's typed effort field on the
+  request's own params and returns a `ReasoningEffortResolution`, or
+  returns the typed `ReasoningEffortRefusal` and leaves the params
+  untouched. The level sent is always the level requested.
+  - Which source states a route's levels is decided per backend kind
+    (`reasoning_levels_source()` on the four provider-matrix backend kinds,
+    `ReasoningBackend::levels_source()`, answering the new
+    `ReasoningLevelsSource`): the catalog row on the direct OpenAI,
+    Anthropic and Gemini backends, the account's model list on the Copilot
+    backends (the catalog row is never a source of levels there), the
+    operator's declared levels on self-hosted and OpenAI-compatible
+    backends. `supported_reasoning_levels` is that step alone and answers
+    `ReasoningLevelFacts`: the stated levels the route can also express,
+    unknown, or unavailable.
+  - Each provider API takes the level in its own typed field: the OpenAI
+    effort on Responses and Chat Completions (every level but `minimal`),
+    the Anthropic effort on Messages (`low` to `max`), the Gemini thinking
+    level on generateContent (`minimal` to `high`) and on Chat Completions
+    (`low` to `high`). On the Copilot Messages route the level is written
+    together with adaptive thinking, never alone, and a request that sets
+    another thinking type is refused there at every level. The realtime API
+    takes no level.
+  - `ReasoningResolveMode::Strict` refuses a level that conflicts with
+    another reasoning setting of the request (a different provider effort,
+    a thinking budget, a thinking type the model caps, a raw reasoning
+    body, reasoning turned off). `ReasoningResolveMode::Preference` is the
+    existing owner-only reasoning preference, whose per-request lowering
+    now runs through the same resolver with its outcomes unchanged.
+  - `direct_route_observation` gives the observation of a provider
+    family's direct route, for a client that reports none.
+
 ### Changed
 
 - Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later

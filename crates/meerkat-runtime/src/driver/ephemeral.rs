@@ -415,6 +415,17 @@ impl Drop for DurableSteerWork {
 /// custom impl below.
 pub(crate) type SharedIngressDslAuthority = Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>;
 
+/// What a terminal archive's last audit check found
+/// ([`EphemeralRuntimeDriver::archive_terminal_inputs_with_committed_audit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommittedAuditArchive {
+    /// Every row's stored row held all its records: the archive ran.
+    Archived,
+    /// A row's live records ran ahead of its stored ones: nothing was
+    /// archived.
+    AuditAhead,
+}
+
 struct DslAuthority(SharedIngressDslAuthority);
 
 impl Clone for DslAuthority {
@@ -4216,13 +4227,74 @@ impl EphemeralRuntimeDriver {
     /// Archive only terminal rows whose durable completion/publication sagas
     /// are already closed. A terminal lifecycle row with a pending completion
     /// or unpublished interaction outbox remains active authority even though
-    /// its terminal phase itself is durable.
+    /// its terminal phase itself is durable. The persistent driver archives
+    /// through [`Self::archive_terminal_inputs_with_committed_audit`] instead,
+    /// once the rows' staged audit records are durable.
+    #[cfg(test)]
     pub(crate) fn archive_archivable_terminal_inputs_after_durable_commit(
         &mut self,
         input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
         let archivable = self.archivable_terminal_input_ids_in(input_ids)?;
         self.archive_terminal_inputs_after_durable_commit(&archivable)
+    }
+
+    /// Archive the terminal rows of `committed`, which the caller classified
+    /// as archivable, once their stored rows hold every authorization audit
+    /// record. `committed` names each row with the records its stored row
+    /// holds (frozen). In one synchronous
+    /// step, every row's live audit buffer is held under its lock, its
+    /// records are compared with the committed ones, the generated archive
+    /// runs, and the buffer of each row it removed is closed: no record can be
+    /// appended between that last check and the archive, and none after it.
+    /// When a row's live records ran ahead of the committed ones nothing is
+    /// archived, and the caller commits them first. A row the generated
+    /// archive defers keeps its buffer open.
+    pub(crate) fn archive_terminal_inputs_with_committed_audit(
+        &mut self,
+        committed: &[(InputId, crate::input_audit::InputAuthorizationAudit)],
+    ) -> Result<CommittedAuditArchive, RuntimeDriverError> {
+        let audit_corruption = |error: meerkat_core::authorization::OperationObservationError| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: error.to_string(),
+            }
+        };
+        let live = committed
+            .iter()
+            .map(|(input_id, _)| {
+                self.ledger
+                    .get(input_id)
+                    .map(|state| state.authorization_audit.clone())
+                    .ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "terminal input archive references missing live input {input_id}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut held = live
+            .iter()
+            .map(crate::input_audit::InputAuthorizationAudit::hold_for_archive)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(audit_corruption)?;
+        for (held, (_, committed)) in held.iter().zip(committed) {
+            if !held.holds_only(committed).map_err(audit_corruption)? {
+                return Ok(CommittedAuditArchive::AuditAhead);
+            }
+        }
+        let input_ids = committed
+            .iter()
+            .map(|(input_id, _)| input_id.clone())
+            .collect::<Vec<_>>();
+        let archived = self.archive_terminal_inputs_after_durable_commit(&input_ids);
+        // Close exactly the rows the generated archive removed, failure or
+        // not: a deferred row, or one after a failing row, stays live.
+        for (held, input_id) in held.iter_mut().zip(&input_ids) {
+            if self.ledger.get(input_id).is_none() {
+                held.close();
+            }
+        }
+        archived.map(|()| CommittedAuditArchive::Archived)
     }
 
     pub(crate) fn archivable_terminal_input_ids_in(

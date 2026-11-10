@@ -263,6 +263,43 @@ fn same_records_compares_every_record_in_order() {
 }
 
 #[test]
+fn an_archive_hold_checks_the_committed_records_and_closes_the_buffer() {
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let committed = live.freeze_for_persistence().unwrap();
+    // Records that ran ahead of the committed ones fail the last check,
+    // which leaves the buffer open.
+    sink.append(event(&sink)).unwrap();
+    assert!(
+        !live
+            .hold_for_archive()
+            .unwrap()
+            .holds_only(&committed)
+            .unwrap()
+    );
+    let committed = live.freeze_for_persistence().unwrap();
+    {
+        let mut held = live.hold_for_archive().unwrap();
+        assert!(held.holds_only(&committed).unwrap());
+        // A live payload is refused as the committed side: it could be this
+        // very buffer, already held.
+        assert!(held.holds_only(&live).is_err());
+        held.close();
+    }
+    // A closed buffer refuses every later append and keeps its records.
+    assert_eq!(sink.append(event(&sink)), Err(OperationObservationError));
+    assert_eq!(count(&live), 2);
+    assert_eq!(
+        serde_json::to_vec(&live).unwrap(),
+        serde_json::to_vec(&committed).unwrap()
+    );
+    // A frozen payload holds no buffer: nothing to close.
+    let mut frozen = committed.hold_for_archive().unwrap();
+    assert!(frozen.holds_only(&committed).unwrap());
+    frozen.close();
+}
+
+#[test]
 fn restored_payload_is_data_and_frozen_store_candidates_cannot_gain_live_sink() {
     let (audit, sink) = fixture();
     sink.append(event(&sink)).unwrap();
@@ -274,6 +311,7 @@ fn restored_payload_is_data_and_frozen_store_candidates_cannot_gain_live_sink() 
     records
         .lock()
         .unwrap()
+        .records
         .push(StoredAuthorizationAuditObservation {
             contributors: Arc::clone(&sink.contributors),
             observation: event(&sink),
@@ -571,7 +609,7 @@ fn observation_infrastructure_native_poison_after_entry_preserves_frozen_prefix(
         .lock()
         .expect_err("the same pending mutex remains poisoned");
     assert_eq!(
-        serde_json::to_vec(&**poisoned.get_ref()).unwrap(),
+        serde_json::to_vec(&poisoned.get_ref().records).unwrap(),
         prefix,
         "the failed outcome cannot append an Outcome, Refused, or replacement Entry"
     );

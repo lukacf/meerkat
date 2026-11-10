@@ -1785,6 +1785,8 @@ mod tests {
         backend: AnthropicBackendKind,
         base_url: Option<&str>,
     ) -> ResolvedConnection {
+        const LABEL: &str = "test-authorizer";
+
         struct BearerAuthorizer;
 
         #[async_trait::async_trait]
@@ -1800,7 +1802,7 @@ mod tests {
             }
 
             fn label(&self) -> &str {
-                "test-authorizer"
+                LABEL
             }
         }
 
@@ -1809,7 +1811,7 @@ mod tests {
             meerkat_llm_core::provider_runtime::binding::DynamicLease::from_authorizer(
                 Arc::new(BearerAuthorizer),
                 meerkat_core::AuthMetadata::default(),
-                "test-authorizer",
+                LABEL,
             ),
         );
         connection

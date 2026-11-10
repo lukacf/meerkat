@@ -162,15 +162,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   stays private to that person after a restart, so every member spawned into
   it after the restart is private to that person too, as the members spawned
   before it are. The restart reads who each such mob is private to from the
-  mob's creation record, and it read the creating member only from the record
-  of a create a host makes for a member's session (`MobProvenance::Member`):
+  mob's creation record, and in 0.9.11, the first release with members
+  private to a person and the only one affected, it read the creating member
+  only from the record of a create a host makes for a member's session
+  (`MobProvenance::Member`):
   a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
   private to no one, so a member spawned into that mob after the restart
   carried no private owner, the label that hides it from other people. Both
   records now name the creating member, and the mob is private to whoever
   that member is private to. A mob whose record names no member (a host's
   create, a session that is no member's) stays private to no one, as does a
-  mob a shared member creates.
+  mob a shared member creates. A mob whose record says that several rosters
+  named the session that created it, and picks none
+  (`MobProvenance::Ambiguous`), no longer comes back private to no one: the
+  restart cannot read who it is private to, so a spawn into it is refused
+  from then on, and the members already seated in it keep the owner their
+  own spawn gave them.
 
 ## [0.9.11] - 2026-11-09
 

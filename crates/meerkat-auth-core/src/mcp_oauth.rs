@@ -88,6 +88,15 @@ pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_mins(1);
 /// a stalled refresh lands once that refresh has failed.
 pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_mins(1);
 
+/// Largest document an MCP OAuth flow reads from the servers it discovers,
+/// before any credential exists: the protected resource metadata, the
+/// authorization server metadata (RFC 8414 or OpenID Connect discovery, the
+/// account strategy's preflight included) and the dynamic client
+/// registration response. Real ones are a few KiB. The bytes are counted as
+/// they arrive: a larger answer is refused once this many have arrived, and
+/// the rest is never read.
+const MAX_OAUTH_DOCUMENT_BYTES: usize = 1024 * 1024;
+
 /// One network stage of an MCP OAuth start or completion, as named by
 /// [`McpOAuthError::NetworkTimedOut`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -749,17 +758,17 @@ impl OidcUserInfoAccountStrategy {
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
         );
-        let configuration: OpenIdConfiguration = self
+        let response = self
             .http_for(&configuration_url)?
             .get(&configuration_url)
             .send()
             .await
             .map_err(verification_send_error)?
             .error_for_status()
-            .map_err(unavailable)?
-            .json()
-            .await
             .map_err(unavailable)?;
+        let configuration: OpenIdConfiguration = read_oauth_document(response)
+            .await
+            .map_err(|_| ConnectorOAuthRefusal::VerificationUnavailable)?;
         if configuration.issuer != issuer {
             return Err(ConnectorOAuthRefusal::VerificationUnavailable);
         }
@@ -4535,7 +4544,7 @@ impl McpOAuthAuthority {
                     .await?
             }
         };
-        let resource: ProtectedResourceMetadata = self
+        let response = self
             .http_for(target, &resource_metadata_url)?
             .get(resource_metadata_url.clone())
             .send()
@@ -4552,14 +4561,13 @@ impl McpOAuthAuthority {
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
                 reason: error,
-            })?
-            .json()
-            .await
-            .map_err(|error| {
-                oauth_send_error(target, stage, error, |error| {
+            })?;
+        let resource: ProtectedResourceMetadata =
+            read_oauth_document(response).await.map_err(|error| {
+                error.into_stage_error(target, stage, "protected resource metadata", |reason| {
                     McpOAuthError::DiscoveryFailed {
                         server_name: target.server_name().to_string(),
-                        reason: format!("decode protected resource metadata: {error}"),
+                        reason,
                     }
                 })
             })?;
@@ -4615,19 +4623,18 @@ impl McpOAuthAuthority {
                     .to_string(),
             });
         };
-        let auth: AuthorizationServerMetadata = response
+        let response = response
             .error_for_status_refusing_redirects()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
                 reason: error,
-            })?
-            .json()
-            .await
-            .map_err(|error| {
-                oauth_send_error(target, stage, error, |error| {
+            })?;
+        let auth: AuthorizationServerMetadata =
+            read_oauth_document(response).await.map_err(|error| {
+                error.into_stage_error(target, stage, "authorization server metadata", |reason| {
                     McpOAuthError::DiscoveryFailed {
                         server_name: target.server_name().to_string(),
-                        reason: format!("decode authorization server metadata: {error}"),
+                        reason,
                     }
                 })
             })?;
@@ -4779,7 +4786,7 @@ impl McpOAuthAuthority {
                         .to_string(),
                 }
             })?;
-        let wire: DynamicClientRegistrationResponse = self
+        let response = self
             .http_for(target, registration_endpoint)?
             .post(registration_endpoint)
             .json(&body)
@@ -4800,17 +4807,16 @@ impl McpOAuthAuthority {
             .map_err(|error| McpOAuthError::RegistrationFailed {
                 server_name: target.server_name().to_string(),
                 reason: error,
-            })?
-            .json()
-            .await
-            .map_err(|error| {
-                oauth_send_error(
+            })?;
+        let wire: DynamicClientRegistrationResponse =
+            read_oauth_document(response).await.map_err(|error| {
+                error.into_stage_error(
                     target,
                     McpOAuthNetworkStage::ClientRegistration,
-                    error,
-                    |error| McpOAuthError::RegistrationFailed {
+                    "registration response",
+                    |reason| McpOAuthError::RegistrationFailed {
                         server_name: target.server_name().to_string(),
-                        reason: format!("decode: {error}"),
+                        reason,
                     },
                 )
             })?;
@@ -5150,6 +5156,59 @@ impl RefuseRedirect for reqwest::Response {
         }
         self.error_for_status().map_err(|error| error.to_string())
     }
+}
+
+/// Why a bounded OAuth document read failed. No variant carries a byte of
+/// the answer.
+#[derive(Debug)]
+enum OAuthDocumentError {
+    /// More than [`MAX_OAUTH_DOCUMENT_BYTES`] arrived; the read stopped there.
+    TooLarge,
+    /// The body could not be read: a body still unread when its client's
+    /// bound passed included.
+    Read(reqwest::Error),
+    /// The body is not the expected JSON document.
+    Decode,
+}
+
+impl OAuthDocumentError {
+    /// This failed read of `document` as `stage`'s outcome for `target`. A
+    /// read the egress profile refused, or one that passed its client's
+    /// bound, keeps its type ([`oauth_send_error`]); otherwise `failed`
+    /// receives a reason that names no byte of the answer.
+    fn into_stage_error(
+        self,
+        target: &McpServerIdentity,
+        stage: McpOAuthNetworkStage,
+        document: &str,
+        failed: impl FnOnce(String) -> McpOAuthError,
+    ) -> McpOAuthError {
+        match self {
+            Self::TooLarge => failed(format!(
+                "{document} larger than {MAX_OAUTH_DOCUMENT_BYTES} bytes"
+            )),
+            Self::Read(error) => oauth_send_error(target, stage, error, |error| {
+                failed(format!("decode {document}: {error}"))
+            }),
+            Self::Decode => failed(format!("decode {document}: error decoding response body")),
+        }
+    }
+}
+
+/// `response`'s body as one JSON document of at most
+/// [`MAX_OAUTH_DOCUMENT_BYTES`], counted as it arrives: a larger one is
+/// refused before it is decoded, and nothing past the bound is read.
+async fn read_oauth_document<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, OAuthDocumentError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(OAuthDocumentError::Read)? {
+        if body.len().saturating_add(chunk.len()) > MAX_OAUTH_DOCUMENT_BYTES {
+            return Err(OAuthDocumentError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| OAuthDocumentError::Decode)
 }
 
 /// RFC 8252 section 7.3: the redirect must be an http loopback address.
@@ -7947,7 +8006,7 @@ mod tests {
 
     /// The bytes the oversized document's server handed over, once it ended.
     async fn bytes_sent(server: tokio::task::JoinHandle<usize>) -> usize {
-        tokio::time::timeout(Duration::from_secs(120), server)
+        tokio::time::timeout(Duration::from_mins(2), server)
             .await
             .expect("the document server ends once its client stops reading")
             .expect("the document server task")
@@ -8005,7 +8064,9 @@ mod tests {
             .await;
 
         assert_read_stopped_at_the_bound(bytes_sent(server).await);
-        let error = result.err().expect("an oversized document is refused");
+        let Err(error) = result else {
+            panic!("the oversized document was accepted");
+        };
         assert_names_no_document_content(&error);
         assert!(
             matches!(&error, McpOAuthError::DiscoveryFailed { reason, .. }
@@ -8051,7 +8112,9 @@ mod tests {
             .await;
 
         assert_read_stopped_at_the_bound(bytes_sent(server).await);
-        let error = result.err().expect("an oversized document is refused");
+        let Err(error) = result else {
+            panic!("the oversized document was accepted");
+        };
         assert_names_no_document_content(&error);
         assert!(
             matches!(&error, McpOAuthError::DiscoveryFailed { reason, .. }
@@ -8096,7 +8159,9 @@ mod tests {
             .await;
 
         assert_read_stopped_at_the_bound(bytes_sent(server).await);
-        let error = result.err().expect("an oversized response is refused");
+        let Err(error) = result else {
+            panic!("the oversized response was accepted");
+        };
         assert_names_no_document_content(&error);
         assert!(
             matches!(&error, McpOAuthError::RegistrationFailed { reason, .. }

@@ -126,6 +126,19 @@ them.
   JSON-RPC `auth/profile/get` returns, and never a credential value.
   Affects 0.6.0 through 0.9.11.
 
+- `meerkat-auth-core`: MCP OAuth discovery reads at most 1 MiB of each
+  document a server answers with: the protected resource metadata, the
+  authorization server metadata (RFC 8414 or OpenID Connect discovery, the
+  account preflight's OpenID Connect configuration included) and the dynamic
+  client registration response. These reads had no size bound, so the MCP
+  server being authorized, or the authorization server it names, could
+  stream a document into memory until a time bound ended the read, before
+  any authentication. A larger document is now refused once 1 MiB has
+  arrived and the rest is never read: discovery and registration fail with
+  `upstream_failure`, the account preflight with `verification_unavailable`,
+  and the error names none of the document's content. Affects 0.6.34
+  through 0.9.11.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

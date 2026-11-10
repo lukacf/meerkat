@@ -822,4 +822,206 @@ mod tests {
         assert!(created.created_by_session.is_none());
         assert!(created.updated_by_session.is_none());
     }
+
+    /// A task file write the operating system refuses (a file size limit, a
+    /// quota, a full filesystem that allocates at write time, an I/O error)
+    /// fails the task operation and publishes nothing: the task file stays as
+    /// it was.
+    ///
+    /// RED before, for both rows: the store wrote the temporary file through
+    /// tokio's `File` and synced it without a flush. `sync_all` waits for the
+    /// write but keeps its error for the next write or flush, so the refused
+    /// write went unseen: the operation returned `Ok` and renamed the EMPTY
+    /// temporary file over the task file.
+    #[cfg(unix)]
+    mod refused_writes {
+        use super::*;
+        use std::path::{Path, PathBuf};
+
+        /// Set, to the directory the scenario works in, in the child process
+        /// a scenario runs in.
+        const REFUSED_CHILD: &str = "MEERKAT_TOOLS_TEST_WRITES_REFUSED_CHILD";
+        /// Printed by that child once the scenario ran to its end.
+        const REFUSED_CHILD_DONE: &str = "task store scenario ran with every file write refused";
+        /// Printed by that child instead, when a probe write succeeded.
+        const REFUSED_CHILD_NOT_REFUSED: &str =
+            "NOT exercised: this platform did not refuse a write past a zero file size limit";
+
+        /// Run `scenario`, part of this module's test `test`, in a process
+        /// that can create, rename and read files but whose every write of at
+        /// least one byte to a regular file fails (EFBIG): a zero file size
+        /// limit with `SIGXFSZ` ignored. Both are process-wide, so the shared
+        /// test process never sets them: the scenario runs in a child process
+        /// of this test binary, started by a shell that sets them before
+        /// exec, that runs `test` alone.
+        ///
+        /// `prepare` runs first, in this process, where writes work: it
+        /// stores whatever content the scenario must not destroy and returns
+        /// what `verify` compares against. `verify` runs last, in this
+        /// process again. All three get the same fresh directory.
+        ///
+        /// On a platform where the limit does not refuse the write the row is
+        /// skipped, with a line on stderr that says so.
+        fn with_writes_refused<T>(
+            test: &str,
+            prepare: impl FnOnce(&Path) -> T,
+            scenario: impl FnOnce(&Path),
+            verify: impl FnOnce(&Path, T),
+        ) {
+            if let Some(root) = std::env::var_os(REFUSED_CHILD) {
+                let root = PathBuf::from(root);
+                if std::fs::write(root.join("probe").join("byte"), b"x").is_ok() {
+                    println!("\n{REFUSED_CHILD_NOT_REFUSED}");
+                    return;
+                }
+                scenario(&root.join("scenario"));
+                println!("\n{REFUSED_CHILD_DONE}");
+                return;
+            }
+            let root = tempfile::tempdir().expect("a temporary directory");
+            let work = root.path().join("scenario");
+            std::fs::create_dir(&work).expect("the scenario directory");
+            std::fs::create_dir(root.path().join("probe")).expect("the probe directory");
+            let before = prepare(&work);
+            let binary = std::env::current_exe().expect("the test binary");
+            let (_, module) = module_path!()
+                .split_once("::")
+                .expect("a module path within the crate");
+            let test_path = format!("{module}::{test}");
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "trap '' XFSZ && ulimit -f 0 && exec \"$@\"",
+                    "task-store-writes-refused",
+                ])
+                .arg(binary.as_os_str())
+                .args([
+                    "--exact",
+                    test_path.as_str(),
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(REFUSED_CHILD, root.path())
+                .output()
+                .expect("start the test with writes refused");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if output.status.success() && stdout.contains(REFUSED_CHILD_NOT_REFUSED) {
+                eprintln!("SKIPPED {test}: {REFUSED_CHILD_NOT_REFUSED}");
+                return;
+            }
+            assert!(
+                output.status.success() && stdout.contains(REFUSED_CHILD_DONE),
+                "{test} failed with writes refused ({}):\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            verify(&work, before);
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+        }
+
+        fn store(root: &Path) -> FileTaskStore {
+            FileTaskStore::new(root.join(".rkat").join("tasks.json"))
+        }
+
+        fn task(subject: &str) -> NewTask {
+            NewTask {
+                subject: subject.to_string(),
+                description: "A task".to_string(),
+                ..Default::default()
+            }
+        }
+
+        /// The names in the store's directory, sorted. A missing directory
+        /// holds none.
+        fn store_files(root: &Path) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(root.join(".rkat")) else {
+                return Vec::new();
+            };
+            let mut names: Vec<String> = entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_task_save_and_keeps_the_task_file() {
+            with_writes_refused(
+                "a_refused_write_fails_the_task_save_and_keeps_the_task_file",
+                |root| {
+                    runtime()
+                        .block_on(store(root).create(task("kept"), None))
+                        .expect("the first task");
+                    std::fs::read(root.join(".rkat").join("tasks.json")).expect("the task file")
+                },
+                |root| {
+                    let store = store(root);
+                    let runtime = runtime();
+                    let created = runtime.block_on(store.create(task("refused"), None));
+                    assert!(
+                        matches!(created, Err(TaskError::StorageError(_))),
+                        "the refused write fails the create: {created:?}"
+                    );
+                    let tasks = runtime
+                        .block_on(store.list())
+                        .expect("the tasks still load");
+                    assert_eq!(
+                        tasks
+                            .iter()
+                            .map(|task| task.subject.as_str())
+                            .collect::<Vec<_>>(),
+                        ["kept"]
+                    );
+                    assert_eq!(
+                        store_files(root),
+                        ["tasks.json"],
+                        "the failed save leaves no temporary file"
+                    );
+                },
+                |root, before| {
+                    assert_eq!(
+                        std::fs::read(root.join(".rkat").join("tasks.json"))
+                            .expect("the task file"),
+                        before,
+                        "the task file is byte-identical"
+                    );
+                    assert_eq!(store_files(root), ["tasks.json"]);
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_publishes_no_task_file_for_a_new_store() {
+            with_writes_refused(
+                "a_refused_write_publishes_no_task_file_for_a_new_store",
+                |_root| (),
+                |root| {
+                    let created = runtime().block_on(store(root).create(task("refused"), None));
+                    assert!(
+                        matches!(created, Err(TaskError::StorageError(_))),
+                        "the refused write fails the create: {created:?}"
+                    );
+                    assert_eq!(
+                        store_files(root),
+                        Vec::<String>::new(),
+                        "no task file and no temporary file"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(store_files(root), Vec::<String>::new());
+                    let tasks = runtime()
+                        .block_on(store(root).list())
+                        .expect("a store with no file lists no task");
+                    assert!(tasks.is_empty());
+                },
+            );
+        }
+    }
 }

@@ -67,16 +67,27 @@ def test_stop_rejects_missing_or_ambiguous_target_before_delegation(stop_api, bo
     service.request_stop.assert_not_awaited()
 
 
-@pytest.mark.parametrize("refresh", [False, True])
-def test_canonical_build_forwards_explicit_framework_refresh(stop_api, refresh):
+def test_canonical_build_forwards_the_selected_build(stop_api):
     client, service = stop_api
-    service.submit.return_value = {"build_id": "new-build", "status": "queued", "refresh_framework": refresh}
+    service.submit.return_value = {"build_id": "new-build", "status": "queued", "refresh_framework": False}
     response = client.post("/api/guide/selected-guide/implementation", json={
         "version": 8, "request": "Rebuild this application.", "previous_build_id": "selected-build",
-        "refresh_framework": refresh})
-    assert response.status_code == 202 and response.json()["refresh_framework"] is refresh
+        "refresh_framework": False})
+    assert response.status_code == 202 and response.json()["refresh_framework"] is False
     service.submit.assert_awaited_once_with("selected-guide", 8, "Rebuild this application.",
-        expected_selected_build_id="selected-build", refresh_framework=refresh)
+        expected_selected_build_id="selected-build", refresh_framework=False)
+
+
+def test_framework_refresh_without_a_selected_runtime_is_refused_before_the_build_owner(stop_api, monkeypatch):
+    """Without a launcher-selected runtime a refresh would compile the
+    compiler's MobKit default, so it is refused by name and never admitted."""
+    client, service = stop_api
+    monkeypatch.setattr(server, "application_host", None)
+    response = client.post("/api/guide/selected-guide/implementation", json={
+        "version": 8, "request": "Rebuild this application.", "previous_build_id": "selected-build",
+        "refresh_framework": True})
+    assert response.status_code == 409 and "no selected Meta runtime" in response.json()["detail"]
+    service.submit.assert_not_awaited()
 
 
 @pytest.mark.parametrize("refresh", [None, 0, 1, "true", "false", [], {}])

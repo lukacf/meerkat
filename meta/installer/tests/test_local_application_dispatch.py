@@ -315,16 +315,18 @@ def test_http_source_requests_cannot_select_another_runtime(dispatch, route):
     assert not f.implementation.root.exists() and not f.deployment.root.exists()
 
 
-def test_framework_refresh_keeps_existing_route_owner_without_initial_source_selection(dispatch, monkeypatch):
+def test_framework_refresh_reads_the_selected_build_before_any_runtime_choice(dispatch, monkeypatch):
+    """A refresh of a build without a host-selected product takes the launcher's
+    runtime (test_runtime_rebuild_target.py), so it first reads that build:
+    without one it is refused before any runtime choice or build admission."""
     f = dispatch
     registry = select_runtime(f)
     monkeypatch.setattr(registry, "initial_build_options",
-        lambda *args: pytest.fail("Framework refresh must not create a new initial source choice."))
+        lambda *args: pytest.fail("A refresh without a selected build must not choose a runtime."))
     response = f.client.post(f'/api/guide/{f.initial.saved["id"]}/implementation', json={
         "version": f.initial.saved["version"], "previous_build_id": "original-build", "refresh_framework": True})
-    assert response.status_code == 202
-    assert f.calls == [("build", (f.initial.saved["id"], f.initial.saved["version"], ""),
-        {"expected_selected_build_id": "original-build", "refresh_framework": True})]
+    assert response.status_code == 404
+    assert f.calls == []
     assert f.namespace["application_host"] is registry
 
 

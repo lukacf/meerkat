@@ -4260,9 +4260,11 @@ impl std::fmt::Debug for AgentFactory {
 /// (`AgentFactory::account_model_definition`): its definition for the
 /// build's model registry, and the connection that read the account's model
 /// list, which the build holds until its client is built so the client's
-/// resolution reuses the same account state.
+/// resolution reuses the same account state. The definition is `None` when
+/// the id the build named is the account's spelling of a model the registry
+/// defines: the build then runs that registry row under its own id.
 struct AccountModelDefinition {
-    definition: meerkat_core::config::CustomModelConfig,
+    definition: Option<meerkat_core::config::CustomModelConfig>,
     connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
 }
 
@@ -7353,7 +7355,12 @@ impl AgentFactory {
     ///   provider (a resumed build keeps its durable route; the resumed
     ///   provider-switch rule moves it when the provider changed), or
     ///   refuses with [`meerkat_core::ConnectionTargetError::NoCredentialAccountRoute`]
-    ///   when the account has none;
+    ///   when the account has none. When the id is the account's spelling
+    ///   of exactly one model the registry defines for that provider
+    ///   ([`Self::registry_model_for_account_id`]), the build's model
+    ///   becomes that registry id and no definition is added: the session
+    ///   runs the registry row, and its route names the account's id on
+    ///   the wire;
     /// - the account refuses the model: the build fails with
     ///   [`FactoryError::AccountModel`], and no other route or credential is
     ///   tried;
@@ -7438,6 +7445,14 @@ impl AgentFactory {
             _ => return Ok(None),
         };
         let provider = definition.provider;
+        let definition =
+            match Self::registry_model_for_account_id(registry, provider, &build_config.model) {
+                Some(registry_model) => {
+                    build_config.model = registry_model;
+                    None
+                }
+                None => Some(definition),
+            };
         build_config.provider = Some(provider);
         if fresh_build && provider != target.backend.provider {
             let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
@@ -7458,6 +7473,35 @@ impl AgentFactory {
             definition,
             connection,
         }))
+    }
+
+    /// The model `registry` defines for `provider` that `account_id`, an id
+    /// a GitHub Copilot account lists and the registry does not define,
+    /// names: the one registry model of that provider whose id differs from
+    /// it only in its separators (`meerkat_copilot::same_account_model_id`:
+    /// the account lists `claude-opus-5.5`, the catalog `claude-opus-5-5`).
+    /// `None` when no registry model of the provider matches, or more than
+    /// one does: the account's own definition of the id then applies.
+    fn registry_model_for_account_id(
+        registry: &ModelRegistry,
+        provider: Provider,
+        account_id: &str,
+    ) -> Option<String> {
+        #[cfg(feature = "copilot")]
+        {
+            let mut same = registry
+                .entries_for_provider(provider)
+                .filter(|entry| meerkat_copilot::same_account_model_id(&entry.id, account_id));
+            match (same.next(), same.next()) {
+                (Some(entry), None) => Some(entry.id.clone()),
+                _ => None,
+            }
+        }
+        #[cfg(not(feature = "copilot"))]
+        {
+            let _ = (registry, provider, account_id);
+            None
+        }
     }
 
     fn resolve_provider_from_registry(
@@ -8745,8 +8789,15 @@ impl AgentFactory {
             })
             .await?
             {
+                // The account's spelling of a model the registry defines:
+                // the build's model is that registry id now, and the
+                // registry stays as it is.
                 Some(AccountModelDefinition {
-                    definition,
+                    definition: None,
+                    connection,
+                }) => (registry, Some(connection)),
+                Some(AccountModelDefinition {
+                    definition: Some(definition),
                     connection,
                 }) => {
                     let mut models = build_config.custom_models.clone();

@@ -125,6 +125,28 @@ them.
   `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
   JSON-RPC `auth/profile/get` returns, and never a credential value.
   Affects 0.6.0 through 0.9.11.
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): rusqlite is updated to
+  0.41.1 and libsqlite3-sys to 0.39.1, in Cargo.lock and in the example
+  workspaces' lockfiles, and Meerkat's crates require rusqlite 0.41.1.
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  (`-wal`) of a different page size, so a crafted pair of files placed where
+  a Meerkat process opens its stores (a project-local `.rkat` directory in a
+  checkout, for example) could expose that process's memory. Stored values
+  keep their encoding: Meerkat's crates enable rusqlite's `fallible_uint`
+  feature, which keeps the range-checked u64 and usize conversions that
+  rusqlite 0.37 had. Affects 0.4.7 through 0.9.11.
+
+### Upgrade notes
+
+- An application that depends on rusqlite (or libsqlite3-sys) itself moves
+  to rusqlite 0.41 (libsqlite3-sys 0.39) together with Meerkat:
+  libsqlite3-sys links one SQLite per build (`links = "sqlite3"`), so Cargo
+  refuses a graph that holds rusqlite 0.37 next to Meerkat's rusqlite 0.41.
+  The rusqlite types Meerkat's API names are rusqlite 0.41's, for example
+  `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`) and
+  the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
+  carries.
 
 ## [0.9.11] - 2026-11-09
 

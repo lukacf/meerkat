@@ -127,6 +127,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   start of an earlier release did. A launch without persistent sessions
   keeps both in memory, as before.
 
+### Security
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): `meerkat-meta` and
+  `meta-extension-state` require rusqlite 0.41.1 (libsqlite3-sys 0.39.1).
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  of a different page size. Stored values keep their encoding: rusqlite's
+  `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
+  0.37 had.
+
+### Upgrade
+
+- A Rust host that depends on rusqlite (or libsqlite3-sys) itself moves to
+  rusqlite 0.41 (libsqlite3-sys 0.39) together with Meta: libsqlite3-sys
+  links one SQLite per build (`links = "sqlite3"`), so Cargo refuses a
+  graph that holds rusqlite 0.37 next to rusqlite 0.41.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

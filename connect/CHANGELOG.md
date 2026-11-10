@@ -53,6 +53,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   ready even while one currentness check takes longer than the whole
   budget, so the members after it are attached.
 
+### Security
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): Connect builds with
+  rusqlite 0.41.1 and libsqlite3-sys 0.39.1. SQLite before 3.54.0 can
+  return uninitialized page-cache memory to ordinary queries when it opens
+  a database together with a write-ahead log of a different page size.
+  Stored values keep their encoding.
+
 ## [0.9.11] - 2026-11-09
 
 Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11

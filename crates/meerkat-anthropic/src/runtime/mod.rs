@@ -1772,6 +1772,183 @@ mod tests {
         }
     }
 
+    /// A connection whose lease is a dynamic authorizer: the shape the cloud
+    /// backends' own authorizers (and an OAuth sign-in) give
+    /// `build_anthropic_client`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn authorizer_connection(
+        backend: AnthropicBackendKind,
+        base_url: Option<&str>,
+    ) -> ResolvedConnection {
+        struct BearerAuthorizer;
+
+        #[async_trait::async_trait]
+        impl meerkat_core::HttpAuthorizer for BearerAuthorizer {
+            async fn authorize(
+                &self,
+                request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+            ) -> Result<(), meerkat_core::AuthError> {
+                request
+                    .headers
+                    .push(("Authorization".to_string(), "Bearer test-token".to_string()));
+                Ok(())
+            }
+
+            fn label(&self) -> &str {
+                "test-authorizer"
+            }
+        }
+
+        let mut connection = inline_secret_connection(backend, base_url);
+        connection.auth_lease = Arc::new(
+            meerkat_llm_core::provider_runtime::binding::DynamicLease::from_authorizer(
+                Arc::new(BearerAuthorizer),
+                meerkat_core::AuthMetadata::default(),
+                "test-authorizer",
+            ),
+        );
+        connection
+    }
+
+    /// R2.1, the Claude family: the Messages client reports the backend the
+    /// connection it was built for names, whichever credential shape built
+    /// it, and the client a host builds directly reports the Claude API. No
+    /// account list and no operator levels are theirs to state.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn every_adapter_reports_its_route() {
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+        use meerkat_llm_core::LlmClient;
+
+        let observation = |backend: AnthropicBackendKind| ReasoningRouteObservation {
+            backend: ReasoningBackend::Anthropic(backend),
+            api: ModelApi::Messages,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        let base_url = |backend: AnthropicBackendKind| match backend {
+            AnthropicBackendKind::AnthropicApi => None,
+            AnthropicBackendKind::Bedrock => {
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com")
+            }
+            AnthropicBackendKind::Vertex => Some("https://us-east5-aiplatform.googleapis.com"),
+            AnthropicBackendKind::Foundry => {
+                Some("https://example.services.ai.azure.com/anthropic")
+            }
+            AnthropicBackendKind::Copilot => None,
+        };
+
+        let mut built = Vec::new();
+        for backend in AnthropicBackendKind::ALL.iter().copied() {
+            // The Copilot route's client is built by its own route closure
+            // (see `copilot_wire_model_tests`), never from a connection.
+            if backend == AnthropicBackendKind::Copilot {
+                for connection in [
+                    inline_secret_connection(backend, None),
+                    authorizer_connection(backend, None),
+                ] {
+                    assert!(build_anthropic_client(connection).is_err());
+                }
+                continue;
+            }
+            for (credential, connection) in [
+                (
+                    "inline secret",
+                    inline_secret_connection(backend, base_url(backend)),
+                ),
+                (
+                    "authorizer",
+                    authorizer_connection(backend, base_url(backend)),
+                ),
+            ] {
+                let client = build_anthropic_client(connection)
+                    .unwrap_or_else(|error| panic!("{backend:?} ({credential}) client: {error}"));
+                assert_eq!(
+                    client.reasoning_route(),
+                    Some(observation(backend)),
+                    "{backend:?} built from an {credential} connection"
+                );
+            }
+            built.push(backend);
+        }
+        assert_eq!(
+            built,
+            [
+                AnthropicBackendKind::AnthropicApi,
+                AnthropicBackendKind::Bedrock,
+                AnthropicBackendKind::Vertex,
+                AnthropicBackendKind::Foundry,
+            ],
+            "every backend a connection builds a client for"
+        );
+
+        assert_eq!(
+            crate::AnthropicClient::new("test-key".to_string())
+                .expect("the default client builds")
+                .reasoning_route(),
+            Some(observation(AnthropicBackendKind::AnthropicApi)),
+            "a client built directly serves the Claude API"
+        );
+    }
+
+    /// R2.2, Messages on the direct backends: the level Core writes on the
+    /// tag (`effort` alone) reaches the wire as `output_config.effort`, and
+    /// the rest of the body is the body of the same request without a level.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn translated_level_reaches_the_wire() {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort;
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::LlmRequest;
+
+        let request = || {
+            LlmRequest::new(
+                "claude-opus-4-8",
+                vec![Message::User(UserMessage::text("hello"))],
+            )
+        };
+        for (backend, base_url) in [
+            (AnthropicBackendKind::AnthropicApi, None),
+            (
+                AnthropicBackendKind::Bedrock,
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            ),
+            (
+                AnthropicBackendKind::Vertex,
+                Some("https://us-east5-aiplatform.googleapis.com"),
+            ),
+            (
+                AnthropicBackendKind::Foundry,
+                Some("https://example.services.ai.azure.com/anthropic"),
+            ),
+        ] {
+            let client = build_anthropic_client(inline_secret_connection(backend, base_url))
+                .unwrap_or_else(|error| panic!("{backend:?} client: {error}"));
+            let baseline = client
+                .build_request_body(&request())
+                .unwrap_or_else(|error| panic!("{backend:?} request body: {error}"));
+            assert!(baseline.get("output_config").is_none(), "{backend:?}");
+            for (level, wire) in [
+                (AnthropicEffort::Low, "low"),
+                (AnthropicEffort::Medium, "medium"),
+                (AnthropicEffort::High, "high"),
+                (AnthropicEffort::XHigh, "xhigh"),
+                (AnthropicEffort::Max, "max"),
+            ] {
+                let body = client
+                    .build_request_body(
+                        &request().with_anthropic_tag_merge(|tag| tag.effort = Some(level)),
+                    )
+                    .unwrap_or_else(|error| panic!("{backend:?} {wire}: {error}"));
+                let mut expected = baseline.clone();
+                expected["output_config"] = serde_json::json!({"effort": wire});
+                assert_eq!(body, expected, "{backend:?}, level {wire}");
+            }
+        }
+    }
+
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
     #[tokio::test]
     async fn claude_ai_oauth_authorizer_sets_bearer_and_beta_headers() {
@@ -2104,6 +2281,81 @@ mod copilot_wire_model_tests {
         let request = request("claude-opus-5", AnthropicThinkingConfig::Adaptive);
         let recorded = sent("claude-sonnet-5-5", "claude-sonnet-5.5", &request).await;
         assert_eq!(recorded.body["model"], "claude-opus-5");
+    }
+
+    /// R2.1: the Copilot route's Messages client reports the Copilot backend
+    /// of the Claude family. The account's statement is the routed client's
+    /// to add, so this client states none.
+    #[test]
+    fn every_adapter_reports_its_route() {
+        let client = copilot_messages_route_client(
+            "https://copilot.example.test".to_string(),
+            Arc::new(CopilotLabelledAuthorizer),
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+        )
+        .expect("the Copilot Messages route client builds");
+        assert_eq!(
+            client.reasoning_route(),
+            Some(meerkat_core::ReasoningRouteObservation {
+                backend: meerkat_core::ReasoningBackend::Anthropic(
+                    super::AnthropicBackendKind::Copilot
+                ),
+                api: meerkat_core::ModelApi::Messages,
+                account: meerkat_core::AccountLevelStatement::NotApplicable,
+                operator_levels: None,
+            })
+        );
+    }
+
+    /// R2.2, Messages on the Copilot route: Core writes the level there as
+    /// the pair adaptive thinking with effort. The request that carries the
+    /// pair sends `thinking: {"type": "adaptive"}` and `output_config.effort`
+    /// and nothing else the same request without a level does not send: no
+    /// other body field and no header, an `anthropic-beta` value included.
+    #[tokio::test]
+    async fn translated_level_reaches_the_wire() {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort;
+
+        const CATALOG_ID: &str = "claude-sonnet-5-5";
+        const ACCOUNT_ID: &str = "claude-sonnet-5.5";
+        let without_level = || {
+            LlmRequest::new(CATALOG_ID, vec![Message::User(UserMessage::text("hello"))])
+                .with_max_tokens(4096)
+        };
+
+        let baseline = sent(CATALOG_ID, ACCOUNT_ID, &without_level()).await;
+        assert!(baseline.body.get("output_config").is_none());
+        for (level, wire) in [
+            (AnthropicEffort::Low, "low"),
+            (AnthropicEffort::Medium, "medium"),
+            (AnthropicEffort::High, "high"),
+            (AnthropicEffort::XHigh, "xhigh"),
+            (AnthropicEffort::Max, "max"),
+        ] {
+            let with_pair = without_level().with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+                tag.effort = Some(level);
+            });
+            let recorded = sent(CATALOG_ID, ACCOUNT_ID, &with_pair).await;
+            assert_eq!(
+                recorded.body["thinking"],
+                serde_json::json!({"type": "adaptive"}),
+                "level {wire}"
+            );
+            assert_eq!(recorded.body["output_config"]["effort"], wire);
+            let mut expected = baseline.body.clone();
+            expected["thinking"] = serde_json::json!({"type": "adaptive"});
+            expected["output_config"] = serde_json::json!({"effort": wire});
+            assert_eq!(
+                recorded.body, expected,
+                "level {wire}: only the pair is added to the body"
+            );
+            assert_eq!(
+                recorded.headers, baseline.headers,
+                "level {wire}: the pair adds no header and no anthropic-beta value"
+            );
+        }
     }
 
     /// Signs like the Copilot authorizer and names the persistence the

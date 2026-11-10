@@ -276,7 +276,9 @@ const granted = await runtime.grantTool("agent-a", {
   decisionRef: "approval-7", // your own record of the decision
 });
 const grantId = (granted.grant as { grant_id: string }).grant_id;
-await runtime.listToolGrants("agent-a", { includeEnded: true });
+granted.applies; // "now", "not_mounted" or "at_next_build"
+const listed = await runtime.listToolGrants("agent-a", { includeEnded: true });
+listed.gate; // { running, next_build }
 await runtime.toolGrantAudit("agent-a", { limit: 50 });
 await runtime.revokeToolGrant(grantId, { reason: "done" });
 
@@ -290,8 +292,11 @@ try {
 ```
 
 Name exactly one of `tool` and `family`, and exactly one of `durationMs` and
-`expiresAtMs`. Every refusal rejects with `ToolGrantRequestRefusedError`; its
-kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+`expiresAtMs`. A grant answers `applies`, whether it applies to the member's
+running build, and a list answers the member's `gate` (none for a retired
+identity); both are advisory. Every refusal rejects with
+`ToolGrantRequestRefusedError`; its kinds are
+`TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/api/rpc#scoped-tool-grants).
 
 ## Realm MCP administration

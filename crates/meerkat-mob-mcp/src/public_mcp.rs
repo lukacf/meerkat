@@ -2538,6 +2538,93 @@ mod tests {
         assert!(answer["admission"]["input_id"].is_string(), "{answer}");
     }
 
+    /// A replayed external delivery answers the existing input; another key is another input.
+    #[tokio::test]
+    async fn a_replayed_external_delivery_answers_the_existing_input() {
+        async fn deliver(
+            state: &MobMcpState,
+            identity: meerkat_mob::MobExternalDeliveryIdentity,
+        ) -> Result<meerkat_mob::MemberDeliveryReceipt, meerkat_mob::MobError> {
+            state
+                .mob_member_send_with_external_identity(
+                    &meerkat_mob::MobId::from("replayed-delivery-mob"),
+                    meerkat_mob::AgentIdentity::from("worker-1"),
+                    meerkat_core::types::ContentInput::from("the same words"),
+                    meerkat_core::types::HandlingMode::Queue,
+                    None,
+                    identity,
+                )
+                .await
+        }
+        let state = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "replayed-delivery-mob",
+                    "profiles": {
+                        "worker": {
+                            "model": "gpt-5.4",
+                            "external_addressable": true,
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("create");
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_spawn",
+            &json!({
+                "mob_id": "replayed-delivery-mob",
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "runtime_mode": "turn_driven"
+            }),
+        )
+        .await
+        .expect("spawn");
+        let key_one = meerkat_mob::MobExternalDeliveryIdentity::new(
+            "delivery-key-1",
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .expect("identity one");
+        let key_two = meerkat_mob::MobExternalDeliveryIdentity::new(
+            "delivery-key-2",
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .expect("identity two");
+        let first = deliver(&state, key_one.clone()).await;
+        let replay = deliver(&state, key_one).await;
+        let other = deliver(&state, key_two).await;
+        let first = first
+            .expect("first send")
+            .admission
+            .expect("first admission");
+        let replay = replay
+            .expect("replay answered")
+            .admission
+            .expect("replay admission");
+        let other = other
+            .expect("other send")
+            .admission
+            .expect("other admission");
+        assert!(!first.deduplicated, "{first:?}");
+        assert!(replay.deduplicated, "a replay is deduplicated: {replay:?}");
+        assert_eq!(
+            replay.input_id, first.input_id,
+            "a replay names the existing input"
+        );
+        assert_eq!(replay.session_id, first.session_id);
+        assert_ne!(
+            other.input_id, first.input_id,
+            "another key is another input"
+        );
+    }
+
     /// A native work authorization host that admits nothing: these rows only
     /// need one installed.
     struct RefuseAllWork;

@@ -405,3 +405,342 @@ async fn runtime_skill_refs_reach_canonical_history_and_provider_bytes() {
         provider_task.await.unwrap();
     }).await.expect("bounded loopback RPC skill regression");
 }
+
+// The Claude effort level above `high` has two spellings: `xhigh`, which the
+// model catalog advertises and Anthropic receives, and `x_high`, which the
+// core type writes. RPC requests read both, and Claude receives `xhigh`.
+
+const CLAUDE_EFFORT_MODEL: &str = "claude-opus-4-8";
+
+type RecordedRequests = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+
+/// Loopback Anthropic Messages endpoint: records each request body and
+/// answers with a short text reply.
+async fn loopback_anthropic_messages(
+    axum::extract::State(requests): axum::extract::State<RecordedRequests>,
+    body: axum::body::Bytes,
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    requests
+        .lock()
+        .unwrap()
+        .push(serde_json::from_slice(&body).unwrap());
+    let events = [
+        serde_json::json!({"type":"message_start","message":{"id":"msg-local","type":"message","role":"assistant","model":CLAUDE_EFFORT_MODEL,"content":[],"usage":{"input_tokens":10,"output_tokens":0}}}),
+        serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}),
+        serde_json::json!({"type":"content_block_stop","index":0}),
+        serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+        serde_json::json!({"type":"message_stop"}),
+    ];
+    axum::response::Sse::new(stream::iter(events.into_iter().map(|value| {
+        Ok(axum::response::sse::Event::default()
+            .event(value["type"].as_str().unwrap())
+            .json_data(value)
+            .unwrap())
+    })))
+}
+
+struct LoopbackAnthropic {
+    base_url: String,
+    requests: RecordedRequests,
+    stop: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LoopbackAnthropic {
+    async fn start() -> Self {
+        let requests = RecordedRequests::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages",
+                axum::routing::post(loopback_anthropic_messages),
+            )
+            .with_state(requests.clone());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
+        });
+        Self {
+            base_url,
+            requests,
+            stop,
+            task,
+        }
+    }
+
+    fn client(&self) -> Arc<dyn LlmClient> {
+        Arc::new(
+            meerkat_anthropic::AnthropicClient::builder("synthetic-local-key".into())
+                .base_url(self.base_url.clone())
+                .request_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// The `output_config.effort` of every request Anthropic received.
+    fn sent_efforts(&self) -> Vec<serde_json::Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request["output_config"]["effort"].clone())
+            .collect()
+    }
+
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        self.task.await.unwrap();
+    }
+}
+
+/// Stores that outlive one runtime, as a process restart's durable stores do.
+struct DurableStores {
+    sessions: Arc<dyn meerkat::SessionStore>,
+    runtime: Arc<dyn meerkat_runtime::RuntimeStore>,
+    blobs: Arc<dyn BlobStore>,
+}
+
+impl DurableStores {
+    fn new() -> Self {
+        Self {
+            sessions: Arc::new(meerkat::MemoryStore::new()),
+            runtime: Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            blobs: Arc::new(MemoryBlobStore::new()),
+        }
+    }
+
+    fn start_runtime(
+        &self,
+        root: &std::path::Path,
+        client: Arc<dyn LlmClient>,
+    ) -> Arc<SessionRuntime> {
+        let runtime = SessionRuntime::new(
+            AgentFactory::new(root.join("sessions")),
+            Config::default(),
+            4,
+            meerkat::PersistenceBundle::new(
+                Arc::clone(&self.sessions),
+                Arc::clone(&self.runtime),
+                Arc::clone(&self.blobs),
+            )
+            .expect("construct runtime authority"),
+            meerkat_rpc::router::NotificationSink::noop(),
+        )
+        .expect("compose the RPC session runtime");
+        runtime.set_default_llm_client(Some(client));
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
+        runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+            config_store,
+            root.join("config_state.json"),
+        )));
+        Arc::new(runtime)
+    }
+}
+
+struct RpcConnection {
+    writer: tokio::io::DuplexStream,
+    reader: BufReader<tokio::io::DuplexStream>,
+    server: tokio::task::JoinHandle<Result<(), meerkat_rpc::server::ServerError>>,
+    next_id: u64,
+}
+
+impl RpcConnection {
+    fn serve(runtime: Arc<SessionRuntime>) -> Self {
+        let config_store: Arc<dyn meerkat_core::ConfigStore> = Arc::new(MemoryConfigStore::new(
+            Config::default(),
+            meerkat_models::canonical(),
+        ));
+        let (server_reader, writer) = tokio::io::duplex(1 << 16);
+        let (reader, server_writer) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            RpcServer::new(
+                BufReader::new(server_reader),
+                server_writer,
+                runtime,
+                config_store,
+            )
+            .expect("construct runtime authority")
+            .run()
+            .await
+        });
+        Self {
+            writer,
+            reader: BufReader::new(reader),
+            server,
+            next_id: 1,
+        }
+    }
+
+    /// Call `method` and return its result, failing on an error response.
+    async fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        send_request(
+            &mut self.writer,
+            &serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+        )
+        .await;
+        let response = read_response(&mut self.reader).await;
+        assert!(
+            response["error"].is_null(),
+            "{method} {params} failed: {response}"
+        );
+        response["result"].clone()
+    }
+
+    async fn close(self) {
+        drop(self.writer);
+        self.server
+            .await
+            .expect("join rpc server")
+            .expect("rpc server");
+    }
+}
+
+fn claude_params(spelling: &str) -> serde_json::Value {
+    serde_json::json!({"provider_tag": {"provider": "anthropic", "effort": spelling}})
+}
+
+/// `session/create` and `turn/start` with the Claude effort in either
+/// spelling are accepted, and each request reaches Anthropic as `xhigh`.
+#[tokio::test]
+async fn claude_xhigh_effort_in_either_spelling_reaches_anthropic_as_xhigh() {
+    tokio::time::timeout(std::time::Duration::from_mins(2), async {
+        let directory = tempfile::tempdir().unwrap();
+        let anthropic = LoopbackAnthropic::start().await;
+        let stores = DurableStores::new();
+        let runtime = stores.start_runtime(directory.path(), anthropic.client());
+        let mut rpc = RpcConnection::serve(Arc::clone(&runtime));
+
+        // The spelling the core type writes, as before.
+        let created = rpc
+            .call(
+                "session/create",
+                serde_json::json!({
+                    "model": CLAUDE_EFFORT_MODEL,
+                    "prompt": "First prompt.",
+                    "provider_params": claude_params("x_high"),
+                }),
+            )
+            .await;
+        let session_id = created["session_id"].as_str().unwrap().to_owned();
+        rpc.call(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "Second prompt.",
+                "provider_params": claude_params("x_high"),
+            }),
+        )
+        .await;
+        // The spelling the model catalog advertises.
+        rpc.call(
+            "turn/start",
+            serde_json::json!({
+                "session_id": session_id,
+                "prompt": "Third prompt.",
+                "provider_params": claude_params("xhigh"),
+            }),
+        )
+        .await;
+        rpc.call(
+            "session/create",
+            serde_json::json!({
+                "model": CLAUDE_EFFORT_MODEL,
+                "prompt": "Another session.",
+                "provider_params": claude_params("xhigh"),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            anthropic.sent_efforts(),
+            vec![serde_json::json!("xhigh"); 4],
+            "one request per turn, each with the effort Anthropic accepts"
+        );
+        rpc.close().await;
+        runtime.try_shutdown().await.expect("runtime shutdown");
+        anthropic.stop().await;
+    })
+    .await
+    .expect("bounded loopback Claude effort row");
+}
+
+/// Pin: a session stored with the Claude effort in the core type's written
+/// spelling (`x_high`) reloads after a restart and still sends `xhigh`.
+#[tokio::test]
+async fn claude_session_stored_with_x_high_resumes_and_sends_xhigh() {
+    tokio::time::timeout(std::time::Duration::from_mins(2), async {
+        let directory = tempfile::tempdir().unwrap();
+        let anthropic = LoopbackAnthropic::start().await;
+        let stores = DurableStores::new();
+        let runtime = stores.start_runtime(directory.path(), anthropic.client());
+        let mut rpc = RpcConnection::serve(Arc::clone(&runtime));
+        let created = rpc
+            .call(
+                "session/create",
+                serde_json::json!({
+                    "model": CLAUDE_EFFORT_MODEL,
+                    "prompt": "Before the restart.",
+                    "provider_params": claude_params("x_high"),
+                }),
+            )
+            .await;
+        let session_id = created["session_id"].as_str().unwrap().to_owned();
+        rpc.close().await;
+        runtime.try_shutdown().await.expect("runtime shutdown");
+
+        // The committed session the restart reloads, as the runtime store
+        // holds it.
+        let committed = meerkat_runtime::RuntimeStore::load_session_snapshot(
+            stores.runtime.as_ref(),
+            &meerkat_runtime::LogicalRuntimeId::for_session(
+                &meerkat_core::SessionId::parse(&session_id).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .expect("the committed session snapshot");
+        let committed = meerkat_core::Session::from_persisted_bytes(committed.as_slice()).unwrap();
+        let metadata = committed
+            .metadata()
+            .get(meerkat_core::session::SESSION_METADATA_KEY)
+            .expect("committed session metadata");
+        assert_eq!(
+            metadata["provider_params"]["provider_tag"]["effort"],
+            serde_json::json!("x_high"),
+            "the stored session carries the core type's written spelling: {metadata}"
+        );
+
+        let runtime = stores.start_runtime(directory.path(), anthropic.client());
+        let mut rpc = RpcConnection::serve(Arc::clone(&runtime));
+        rpc.call(
+            "turn/start",
+            serde_json::json!({"session_id": session_id, "prompt": "After the restart."}),
+        )
+        .await;
+        assert_eq!(
+            anthropic.sent_efforts(),
+            vec![serde_json::json!("xhigh"); 2],
+            "the reloaded session sends the effort Anthropic accepts"
+        );
+        rpc.close().await;
+        runtime.try_shutdown().await.expect("runtime shutdown");
+        anthropic.stop().await;
+    })
+    .await
+    .expect("bounded loopback Claude effort restart row");
+}

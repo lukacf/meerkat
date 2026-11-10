@@ -4,6 +4,20 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.grant_tool` returns the gateway's `applies` beside the
+  grant (whether it applies to the member's running build: `now`,
+  `not_mounted` or `at_next_build`), and `list_tool_grants` the member's
+  `gate` (`running` and `next_build`), now that the gateway answers them;
+  both are advisory, and the docstrings name them. An older gateway leaves
+  them out.
+- `ErrorEvent.from_dict` words a `lifecycle_effect_failed` event whose
+  `cause` is `budget_busy` as a side effect that did not run ("the
+  compaction_harvest of ... did not run: ...", or "... did not run after N
+  failed attempts: ..." when attempts failed before it): the realm's agent
+  memory background budget did not admit its run within its wait.
+  `context["cause"]` carries the cause; an event without one reads as
+  before.
+
 ## 0.9.11
 
 - `MetaRuntime.grant_tool(identity, *, tool=None, family=None,

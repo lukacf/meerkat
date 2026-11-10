@@ -950,7 +950,13 @@ fn meta_gateway_fresh_store_dir_converges_on_canonical_names() {
         response.get("error").is_none(),
         "fresh init must succeed: {response}"
     );
-    for canonical in ["runtime.sqlite", "continuity.sqlite3"] {
+    // The persistent launch keeps its metadata and console log there too.
+    for canonical in [
+        "runtime.sqlite",
+        "continuity.sqlite3",
+        "meta_metadata.sqlite3",
+        "meta_console.sqlite3",
+    ] {
         assert!(
             store_dir.join(canonical).exists(),
             "fresh boot must create canonical {canonical}"

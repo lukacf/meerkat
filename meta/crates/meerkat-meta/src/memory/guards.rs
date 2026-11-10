@@ -6,6 +6,10 @@
 //! per-window caps on background runs and a concurrency ceiling, consulted
 //! before every run. A skipped run is loud: a tracing warn always, plus a
 //! `memory.budget.denied` timeline event when a sink is wired (Principle 6).
+//! A run whose caller waits for the budget instead (the lifecycle
+//! projection's compaction harvest and retirement distillation) is not
+//! skipped: the wait takes the run for its caller once the budget is free,
+//! and the caller reports a denial only when it gives the run up.
 //!
 //! The load-*inverse* control Codex ships (skip background work below
 //! provider rate-limit headroom) needs a provider-quota surface Meta does
@@ -13,8 +17,10 @@
 //! the §16 open question on default budgets is answered by measurement.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+use tokio::sync::Notify;
 
 use crate::memory::events::{MemoryEventSink, MemoryTimelineEvent};
 
@@ -55,37 +61,114 @@ struct BudgetInner {
     event_sink: Option<Arc<dyn MemoryEventSink>>,
 }
 
+impl BudgetInner {
+    /// Why a run of `realm` would not be admitted at `now`, or `None` when
+    /// it would be. The window forgets the runs it no longer holds.
+    fn denial(&mut self, realm: &str, now: Instant) -> Option<BudgetDenied> {
+        let window = self.config.window;
+        let runs_cap = self.config.runs_per_window;
+        let concurrent_cap = self.config.max_concurrent;
+        let state = self.realms.entry(realm.to_string()).or_default();
+        state
+            .starts
+            .retain(|start| now.duration_since(*start) < window);
+        if state.concurrent >= concurrent_cap {
+            Some(BudgetDenied::ConcurrencyCeiling {
+                cap: concurrent_cap,
+            })
+        } else if state.starts.len() as u32 >= runs_cap {
+            Some(BudgetDenied::WindowExhausted {
+                used: state.starts.len() as u32,
+                cap: runs_cap,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Admit one run of `realm` at `now`, or answer why not.
+    fn admit(&mut self, realm: &str, now: Instant) -> Result<(), BudgetDenied> {
+        if let Some(denied) = self.denial(realm, now) {
+            return Err(denied);
+        }
+        let state = self.realms.entry(realm.to_string()).or_default();
+        state.starts.push(now);
+        state.concurrent += 1;
+        Ok(())
+    }
+
+    /// When the window of `realm` frees a run: when its oldest run leaves
+    /// it. `None` when it holds none (a window that admits no run never
+    /// frees one).
+    fn window_frees_at(&self, realm: &str) -> Option<Instant> {
+        self.realms
+            .get(realm)
+            .and_then(|state| state.starts.iter().min())
+            .map(|oldest| *oldest + self.config.window)
+    }
+}
+
 /// Per-realm background budget (§8.1): a sliding-window run cap plus a
 /// concurrency ceiling. Cheap to clone; clones share state.
 #[derive(Clone)]
 pub struct BackgroundBudget {
     inner: Arc<Mutex<BudgetInner>>,
+    /// Woken each time an admitted run ends (its permit is dropped): a run
+    /// waiting for the concurrency ceiling may be admitted then.
+    released: Arc<Notify>,
 }
 
 /// RAII permit for one admitted background run; dropping it releases the
-/// concurrency slot (the window slot is consumed permanently).
+/// concurrency slot and wakes the runs that wait for the budget. The window
+/// slot is the run's for good once it is spent: a run spends its permit as
+/// it starts its work, and a permit a wait took for its caller gives its
+/// window slot back when it is dropped unspent (its run found nothing to
+/// do).
 pub struct BudgetPermit {
     inner: Arc<Mutex<BudgetInner>>,
+    released: Arc<Notify>,
     realm: String,
+    /// When the run was admitted: its start in the window.
+    admitted_at: Instant,
+    spent: bool,
+}
+
+impl BudgetPermit {
+    /// The run starts its work: its window slot is spent.
+    pub(crate) fn spend(&mut self) {
+        self.spent = true;
+    }
 }
 
 impl std::fmt::Debug for BudgetPermit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BudgetPermit")
             .field("realm", &self.realm)
+            .field("spent", &self.spent)
             .finish_non_exhaustive()
     }
 }
 
 impl Drop for BudgetPermit {
     fn drop(&mut self) {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(state) = inner.realms.get_mut(&self.realm) {
-            state.concurrent = state.concurrent.saturating_sub(1);
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(state) = inner.realms.get_mut(&self.realm) {
+                state.concurrent = state.concurrent.saturating_sub(1);
+                if !self.spent
+                    && let Some(at) = state
+                        .starts
+                        .iter()
+                        .position(|start| *start == self.admitted_at)
+                {
+                    state.starts.swap_remove(at);
+                }
+            }
         }
+        self.released.notify_waiters();
     }
 }
 
@@ -117,67 +200,119 @@ impl BackgroundBudget {
                 realms: HashMap::new(),
                 event_sink: None,
             })),
+            released: Arc::new(Notify::new()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BudgetInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The permit of a run of `realm` the budget admitted at `admitted_at`.
+    fn permit(&self, realm: &str, admitted_at: Instant, spent: bool) -> BudgetPermit {
+        BudgetPermit {
+            inner: Arc::clone(&self.inner),
+            released: Arc::clone(&self.released),
+            realm: realm.to_string(),
+            admitted_at,
+            spent,
         }
     }
 
     /// Wire the §9.3 timeline sink so guard denials surface on the console
     /// alongside the tracing warn. Shared across clones.
     pub fn set_event_sink(&self, sink: Arc<dyn MemoryEventSink>) {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .event_sink = Some(sink);
+        self.lock().event_sink = Some(sink);
     }
 
     /// Admit one background run for `realm`, or say loudly why not.
     /// `stage` is only for the log line.
     pub fn try_acquire(&self, realm: &str, stage: &str) -> Result<BudgetPermit, BudgetDenied> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let window = inner.config.window;
-        let runs_cap = inner.config.runs_per_window;
-        let concurrent_cap = inner.config.max_concurrent;
-        let state = inner.realms.entry(realm.to_string()).or_default();
+        self.try_admit(realm)
+            .inspect_err(|denied| self.report_denied(realm, stage, denied))
+    }
+
+    /// Admit one background run for `realm`, spent at once, or answer why
+    /// not, unreported: a caller that waits for the budget has the wait take
+    /// the run for it ([`Self::until_admissible`]), and one that gives the
+    /// run up reports the denial ([`Self::report_denied`]).
+    pub(crate) fn try_admit(&self, realm: &str) -> Result<BudgetPermit, BudgetDenied> {
         let now = Instant::now();
-        state
-            .starts
-            .retain(|start| now.duration_since(*start) < window);
-        let denied = if state.concurrent >= concurrent_cap {
-            Some(BudgetDenied::ConcurrencyCeiling {
-                cap: concurrent_cap,
-            })
-        } else if state.starts.len() as u32 >= runs_cap {
-            Some(BudgetDenied::WindowExhausted {
-                used: state.starts.len() as u32,
-                cap: runs_cap,
-            })
-        } else {
-            None
-        };
-        if let Some(denied) = denied {
-            tracing::warn!(
-                realm,
-                stage,
-                reason = %denied,
-                "agent memory background budget: run skipped"
-            );
-            if let Some(sink) = inner.event_sink.as_ref() {
-                sink.emit(MemoryTimelineEvent::BudgetDenied {
-                    realm: realm.to_string(),
-                    stage: stage.to_string(),
-                    reason: denied.to_string(),
-                });
-            }
-            return Err(denied);
+        self.lock().admit(realm, now)?;
+        Ok(self.permit(realm, now, true))
+    }
+
+    /// Say loudly that a run of `realm` is given up on `denied`: a tracing
+    /// warn always, plus the `memory.budget.denied` timeline event when a
+    /// sink is wired. `stage` names the run in both.
+    pub(crate) fn report_denied(&self, realm: &str, stage: &str, denied: &BudgetDenied) {
+        tracing::warn!(
+            realm,
+            stage,
+            reason = %denied,
+            "agent memory background budget: run skipped"
+        );
+        let sink = self.lock().event_sink.clone();
+        if let Some(sink) = sink {
+            sink.emit(MemoryTimelineEvent::BudgetDenied {
+                realm: realm.to_string(),
+                stage: stage.to_string(),
+                reason: denied.to_string(),
+            });
         }
-        state.starts.push(now);
-        state.concurrent += 1;
-        Ok(BudgetPermit {
-            inner: self.inner.clone(),
-            realm: realm.to_string(),
-        })
+    }
+
+    /// Wait until the budget admits a run of `realm`, at most `wait`, and
+    /// take that run for the caller: the permit answered is its run, unspent
+    /// until the run starts its work ([`BudgetPermit::spend`]). It is woken
+    /// each time an admitted run ends, and when the window frees a run; every
+    /// waiter woken reads the budget again under its lock, and the first to
+    /// find it free takes the run, so the others read it taken and wait on,
+    /// and none of them asks its caller to read its evidence again for a run
+    /// it cannot have. Answers the denial that stood when the wait ran out,
+    /// and a window's at once when the window frees no run within the wait.
+    /// Unreported, like [`Self::try_admit`].
+    pub(crate) async fn until_admissible(
+        &self,
+        realm: &str,
+        wait: Duration,
+    ) -> Result<BudgetPermit, BudgetDenied> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            // Asked for before the budget is read: a run that ends between
+            // the read and the wait still wakes it.
+            let released = self.released.notified();
+            let (denied, window_frees_at) = {
+                let mut inner = self.lock();
+                let now = Instant::now();
+                match inner.admit(realm, now) {
+                    Ok(()) => return Ok(self.permit(realm, now, false)),
+                    Err(denied) => {
+                        let frees_at = inner.window_frees_at(realm);
+                        (denied, frees_at)
+                    }
+                }
+            };
+            let wake_at = match &denied {
+                BudgetDenied::ConcurrencyCeiling { .. } => deadline,
+                BudgetDenied::WindowExhausted { .. } => {
+                    match window_frees_at.map(tokio::time::Instant::from_std) {
+                        Some(frees_at) if frees_at <= deadline => frees_at,
+                        // The window frees no run within the wait.
+                        _ => return Err(denied),
+                    }
+                }
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(denied);
+            }
+            tokio::select! {
+                () = released => {}
+                () = tokio::time::sleep_until(wake_at) => {}
+            }
+        }
     }
 }
 
@@ -247,5 +382,187 @@ mod tests {
         budget
             .try_acquire("realm-a", "distiller")
             .expect("slot released on drop");
+    }
+
+    /// A run whose caller waits for the budget is denied unreported: no
+    /// timeline event, until its caller gives the run up and reports it.
+    #[test]
+    fn an_admission_its_caller_waits_for_is_denied_unreported() {
+        let budget = BackgroundBudget::new(config(10, 1));
+        let sink = Arc::new(crate::memory::events::CollectingEventSink::new());
+        budget.set_event_sink(sink.clone());
+        let _permit = budget.try_admit("realm-a").expect("first");
+        let denied = budget
+            .try_admit("realm-a")
+            .expect_err("the ceiling is reached");
+        assert!(
+            matches!(denied, BudgetDenied::ConcurrencyCeiling { cap: 1 }),
+            "{denied:?}"
+        );
+        assert!(sink.types().is_empty(), "{:?}", sink.types());
+        budget.report_denied("realm-a", "distiller", &denied);
+        assert_eq!(sink.types(), vec!["memory.budget.denied"]);
+    }
+
+    /// One run's end lets one waiting run through: the first waiter to read
+    /// the budget free takes the run, and the others read it taken and wait
+    /// on, so no other waiter goes on to read its evidence again for it.
+    ///
+    /// RED before a waiter took the run it waited for: every run's end let
+    /// every waiter through, and each read its evidence again only for all
+    /// but one to find the budget taken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_s_end_lets_one_waiting_run_through() {
+        const WAITERS: usize = 8;
+        let budget = BackgroundBudget::new(config(100, 1));
+        let holder = budget.try_admit("realm-a").expect("the holder");
+        let through = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut waiters = Vec::new();
+        for _ in 0..WAITERS {
+            waiters.push(tokio::spawn({
+                let budget = budget.clone();
+                let through = Arc::clone(&through);
+                async move {
+                    let answer = budget
+                        .until_admissible("realm-a", Duration::from_secs(30))
+                        .await;
+                    if answer.is_ok() {
+                        through.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    // Whatever the wait answered stays held until the row
+                    // ends.
+                    let _held = answer;
+                    std::future::pending::<()>().await;
+                }
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            through.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the holder holds the budget: every run waits"
+        );
+        drop(holder);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            through.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one run's end lets one waiting run through"
+        );
+        for waiter in waiters {
+            waiter.abort();
+        }
+    }
+
+    /// A wait for the concurrency ceiling ends as soon as the run that holds
+    /// it ends: its dropped permit wakes the wait, which takes the run.
+    #[tokio::test]
+    async fn a_wait_for_the_ceiling_ends_when_the_run_holding_it_ends() {
+        let budget = BackgroundBudget::new(config(10, 1));
+        let permit = budget.try_admit("realm-a").expect("first");
+        let waiting = tokio::spawn({
+            let budget = budget.clone();
+            async move {
+                budget
+                    .until_admissible("realm-a", Duration::from_secs(30))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "the ceiling is reached: it waits");
+        drop(permit);
+        let taken = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the dropped permit wakes the wait")
+            .expect("the wait task")
+            .expect("the wait takes the run");
+        budget
+            .try_admit("realm-a")
+            .expect_err("the run the wait took holds the ceiling");
+        drop(taken);
+        budget
+            .try_admit("realm-a")
+            .expect("and gives it back when dropped");
+    }
+
+    /// A run a wait took and never spent (its caller found nothing to do)
+    /// gives its window slot back when it is dropped; a run that spent it
+    /// keeps it for the window.
+    #[tokio::test]
+    async fn a_run_a_wait_took_gives_its_window_slot_back_unless_spent() {
+        let budget = BackgroundBudget::new(config(1, 10));
+        let unspent = budget
+            .until_admissible("realm-a", Duration::from_secs(1))
+            .await
+            .expect("the window admits a run");
+        drop(unspent);
+        let mut spent = budget
+            .until_admissible("realm-a", Duration::from_secs(1))
+            .await
+            .expect("the unspent run gave its window slot back");
+        spent.spend();
+        drop(spent);
+        let denied = budget
+            .try_admit("realm-a")
+            .expect_err("the spent run keeps its window slot");
+        assert!(
+            matches!(denied, BudgetDenied::WindowExhausted { used: 1, cap: 1 }),
+            "{denied:?}"
+        );
+    }
+
+    /// A wait the budget does not end within it answers the denial that
+    /// stood when it ran out.
+    #[tokio::test]
+    async fn a_wait_the_budget_does_not_end_answers_its_denial() {
+        let budget = BackgroundBudget::new(config(10, 1));
+        let _permit = budget.try_admit("realm-a").expect("first");
+        let started = std::time::Instant::now();
+        let denied = budget
+            .until_admissible("realm-a", Duration::from_millis(100))
+            .await
+            .expect_err("the ceiling stays reached");
+        assert!(
+            matches!(denied, BudgetDenied::ConcurrencyCeiling { cap: 1 }),
+            "{denied:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "it waited its whole wait: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A window that frees no run within the wait answers at once, and one
+    /// that frees a run within it ends the wait then.
+    #[tokio::test]
+    async fn a_wait_for_the_window_ends_when_it_frees_a_run_within_the_wait() {
+        let budget = BackgroundBudget::new(BackgroundBudgetConfig {
+            runs_per_window: 1,
+            window: Duration::from_secs(1),
+            max_concurrent: 10,
+        });
+        drop(budget.try_admit("realm-a").expect("the window's run"));
+        let started = std::time::Instant::now();
+        let denied = budget
+            .until_admissible("realm-a", Duration::from_millis(500))
+            .await
+            .expect_err("the window frees no run within 500 ms");
+        assert!(
+            matches!(denied, BudgetDenied::WindowExhausted { used: 1, cap: 1 }),
+            "{denied:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "answered at once: {:?}",
+            started.elapsed()
+        );
+        budget
+            .until_admissible("realm-a", Duration::from_secs(5))
+            .await
+            .expect("the window frees its run within the wait, and the wait takes it");
+        budget
+            .try_admit("realm-a")
+            .expect("the unspent run gave its window slot back");
     }
 }

@@ -628,6 +628,10 @@ pub struct PrivateOriginals {
     helper_rebind_stops_for_test: Mutex<Vec<setup_helpers::HelperRebindStop>>,
     #[cfg(test)]
     helper_rebind_stopped_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    // Delays each currentness fence of an accepted service attachment, as a
+    // slow store read on a loaded host does. It decides nothing.
+    #[cfg(test)]
+    attachment_fence_delay_for_test: OnceLock<std::time::Duration>,
     custody_recovery: custody_recovery::CustodyRecovery,
     scope: StoreScope,
     store: Arc<dyn ToolkitStore>,
@@ -883,6 +887,8 @@ impl PrivateOriginals {
             helper_rebind_stops_for_test: Mutex::new(Vec::new()),
             #[cfg(test)]
             helper_rebind_stopped_for_test: Mutex::new(None),
+            #[cfg(test)]
+            attachment_fence_delay_for_test: OnceLock::new(),
             scope,
             store,
             owner,

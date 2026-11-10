@@ -89,12 +89,13 @@ pub(crate) use gating::is_legacy_sequential_pending_id;
 pub(crate) use memory::staged_ledger_path;
 pub use metadata::{
     IdentityRotationIntent, IdentityToolRecord, InMemoryMetadataStore, LabelRpcResult,
-    LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
-    LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionBacklog, LifecycleProjectionCursor,
-    MemberIdleRetireOverrideRecord, MetadataScope, MetadataStoreError, PersistentMetadataStore,
-    RecordRetention, RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method,
-    dispatch_labels_delete, dispatch_labels_get, dispatch_labels_set, labels_to_json_value,
-    parse_labels_param, parse_run_id_param,
+    LifecycleEffectFailure, LifecycleEffectFailureCause, LifecycleEffectIntent,
+    LifecycleEffectKind, LifecycleEffectVerb, LifecycleIntentKey, LifecycleIntentSlot,
+    LifecycleProjectionBacklog, LifecycleProjectionCursor, MemberIdleRetireOverrideRecord,
+    MetadataScope, MetadataStoreError, PersistentMetadataStore, RecordRetention,
+    RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method, dispatch_labels_delete,
+    dispatch_labels_get, dispatch_labels_set, labels_to_json_value, parse_labels_param,
+    parse_run_id_param,
 };
 pub(crate) use metadata::{
     METADATA_TABLE, create_metadata_table, decode_identity_record, encode_identity_record,

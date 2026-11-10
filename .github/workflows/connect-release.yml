@@ -11,7 +11,7 @@ name: Connect release
 #      a separate job that never runs the product;
 #   2. tag push connect-vX.Y.Z: validate only (exact-main CI green, the tag
 #      names the Connect version, Connect's published-floor check), then create
-#      the release object as a prerelease that is not latest;
+#      the release object as a full release that is not latest;
 #   3. accept (dispatch): bounded, data-only acceptance of one attested
 #      candidate against the Meta reader, which in the monorepo is the in-tree
 #      meta/ at the same commit; the owner selects the printed acceptance
@@ -176,7 +176,7 @@ jobs:
         run: python3 scripts/published_crates_standalone.py floor --product connect --mode release --out "${RUNNER_TEMP}/connect-floor"
 
   create_release:
-    name: Create the Connect prerelease (not latest)
+    name: Create the Connect release (not latest)
     needs: [resolve, require_ci_green, floor_check]
     if: >-
       needs.resolve.outputs.mode == 'tag' &&
@@ -196,11 +196,11 @@ jobs:
             echo "${TAG}: release exists; nothing to create"
             exit 0
           fi
-          # A prerelease that is not latest: Core's release stays latest. The
+          # A full release that is not latest: Core's release stays latest. The
           # assets arrive later: publish-accepted adds a hosted candidate's, and
           # the release owner uploads a direct (retained-host) production's.
           gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
-            --prerelease --latest=false --title "Meerkat Connect ${TAG#connect-v}" \
+            --latest=false --title "Meerkat Connect ${TAG#connect-v}" \
             --notes "Meerkat Connect ${TAG#connect-v}. RELEASE-MANIFEST.json and SHA256SUMS name each asset and how it was produced."
 
   build:

@@ -2819,8 +2819,11 @@ export class MetaRuntime {
    * `decisionRef` records your own reference to the decision you made before
    * issuing, as attribution. The grant applies across the member's respawns
    * and the gateway's restarts, opens the tool at the member's next model
-   * request and wakes nothing. Resolves `{grant}`; a refused request rejects
-   * with {@link ToolGrantRequestRefusedError}.
+   * request and wakes nothing. Resolves `{grant, applies}`: `applies` says
+   * whether the grant applies to the member's running build (`"now"`,
+   * `"not_mounted"` or `"at_next_build"`); it is advisory, and an older
+   * gateway leaves it out. A refused request rejects with
+   * {@link ToolGrantRequestRefusedError}.
    */
   async grantTool(
     identity: string,
@@ -2863,7 +2866,11 @@ export class MetaRuntime {
   /**
    * List an identity's scoped tool grants, each due one read as expired.
    * Ended grants are listed only with `includeEnded`. Resolves
-   * `{grants, unreadable?}`.
+   * `{grants, unreadable?, gate?}`: for an identity on the mob's roster,
+   * `gate` is the member's gate, `running` (what its live build gates and
+   * the names it ignored as not mounted; `null` while no build of it is live
+   * on the gateway) and `next_build` (the gate its next build resolves). The
+   * gate is advisory, and an older gateway leaves it out.
    */
   async listToolGrants(
     identity: string,

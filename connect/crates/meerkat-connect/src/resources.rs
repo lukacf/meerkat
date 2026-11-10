@@ -24,6 +24,24 @@ use crate::{ConnectError, setup::PreparedSetupConnection};
 pub fn reserve_setup_artifacts(
     storage: &meerkat_core::ResolvedStorage,
 ) -> Result<PathBuf, ConnectError> {
+    reserve_artifacts(storage, "setup-")
+}
+
+/// Reserve private artifacts for one fixed-owner readback, under the same
+/// rules and beside the setup attempts. The retained listing pages over the
+/// `setup-` names, so a readback outside them never adds a position to it.
+#[cfg(unix)]
+fn reserve_readback_artifacts(
+    storage: &meerkat_core::ResolvedStorage,
+) -> Result<PathBuf, ConnectError> {
+    reserve_artifacts(storage, "readback-")
+}
+
+#[cfg(unix)]
+fn reserve_artifacts(
+    storage: &meerkat_core::ResolvedStorage,
+    prefix: &str,
+) -> Result<PathBuf, ConnectError> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let realm = storage.locator.realm.as_str();
     if !relative(realm) || Path::new(realm).components().count() != 1 {
@@ -56,7 +74,7 @@ pub fn reserve_setup_artifacts(
         }
     }
     let directory = tempfile::Builder::new()
-        .prefix("setup-")
+        .prefix(prefix)
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(&parent)
         .map_err(|e| ConnectError::native("reserve setup artifact directory", e))?

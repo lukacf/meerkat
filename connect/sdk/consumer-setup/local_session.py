@@ -893,10 +893,17 @@ class _SharedPeerTransport:
         self.accepted = False
         self.closing = False
         self.failed = False
+        # The first exception this peer's transport met, for its close report.
+        self.failure = None
         self.close_task = None
         if peer._transport_owner is not None:
             raise LocalSetupError("local_setup_owner_changed")
         peer._transport_owner = self
+
+    def fail(self, error):
+        self.failed = True
+        if self.failure is None:
+            self.failure = error
 
     def listen(self, listener):
         if self.listener is not None or self.closing:
@@ -915,8 +922,8 @@ class _SharedPeerTransport:
             connection, _ = self.listener.accept()
         except (BlockingIOError, InterruptedError):
             return
-        except OSError:
-            self.failed = True
+        except OSError as error:
+            self.fail(error)
             self.retirement(True)
             return
         if self.accepted:
@@ -941,8 +948,10 @@ class _SharedPeerTransport:
 
     def completed_opening(self, task):
         self.openings.discard(task)
-        if task.cancelled() or task.exception() is not None:
+        if task.cancelled():
             self.failed = True
+        elif task.exception() is not None:
+            self.fail(task.exception())
 
     def start(self, reader, writer):
         # Retain the actual stream before scheduling its coroutine. A close can
@@ -959,7 +968,7 @@ class _SharedPeerTransport:
     def completed(self, task):
         self.tasks.discard(task)
         if not task.cancelled() and task.exception() is not None:
-            self.failed = True
+            self.fail(task.exception())
 
     async def serve(self, reader, writer, accepted):
         try:
@@ -1015,12 +1024,13 @@ class _SharedPeerTransport:
         # accepted is represented by one opening task before any await.
         if self.openings:
             opened = await asyncio.gather(*tuple(self.openings), return_exceptions=True)
-            if any(isinstance(result, BaseException) for result in opened):
-                self.failed = True
+            for result in opened:
+                if isinstance(result, BaseException):
+                    self.fail(result)
         try:
             await self.peer.aclose()
-        except BaseException:
-            self.failed = True
+        except BaseException as error:
+            self.fail(error)
         while self.tasks or self.writers:
             # Close the actual streams as well as cancelling their serve tasks.
             # This includes a queued accept whose coroutine never started.
@@ -1032,11 +1042,12 @@ class _SharedPeerTransport:
             await asyncio.gather(*active, return_exceptions=True)
             closed = await asyncio.gather(*(writer.wait_closed() for writer in writers),
                                           return_exceptions=True)
-            if any(isinstance(result, BaseException) for result in closed):
-                self.failed = True
+            for result in closed:
+                if isinstance(result, BaseException):
+                    self.fail(result)
             self.writers.difference_update(writers)
         if self.failed:
-            raise LocalSetupError("local_setup_connection_failed")
+            raise LocalSetupError("local_setup_connection_failed") from self.failure
 
     async def aclose(self):
         self.retirement(True)
@@ -1058,6 +1069,8 @@ async def shared_connections(adapter_module, controller, count, stopped, ready, 
     directory = Path(tempfile.mkdtemp(prefix="connect-setup-", dir="/tmp")).resolve()
     transports, paths = [], []
     failures = []
+    # The failure on its way when the private sockets are removed, if any.
+    pending = None
     def open_peer(peer):
         transport = _SharedPeerTransport(adapter_module, peer)
         transports.append(transport)
@@ -1089,24 +1102,53 @@ async def shared_connections(adapter_module, controller, count, stopped, ready, 
             physical.ready(owner, count)
         await ready([str(path) for path, _, _ in paths])
         await stopped()
+    except BaseException as error:
+        pending = error
+        raise
     finally:
-        # Global shutdown still belongs to this host. Explicit per-peer close
-        # above never calls either of these Controller owner methods.
-        owner.close_admission()
-        owner._peer_factory = None
-        for transport in transports:
-            transport.retirement(True)
-        failures = await asyncio.gather(*(transport.aclose() for transport in transports),
-                                        return_exceptions=True)
-        await owner.aclose()
-        for path, device, inode in paths:
-            info = path.lstat()
-            if not stat.S_ISSOCK(info.st_mode) or (info.st_dev, info.st_ino) != (device, inode):
-                raise LocalSetupError("local_setup_connection_changed")
-            path.unlink()
-        directory.rmdir()
-    if any(isinstance(result, BaseException) for result in failures):
-        raise LocalSetupError("local_setup_connection_failed")
+        try:
+            # Global shutdown still belongs to this host. Explicit per-peer close
+            # above never calls either of these Controller owner methods.
+            owner.close_admission()
+            owner._peer_factory = None
+            for transport in transports:
+                transport.retirement(True)
+            failures = await asyncio.gather(*(transport.aclose() for transport in transports),
+                                            return_exceptions=True)
+            # Report each peer whose close failed, before the owner close that can
+            # raise: its index and closed categories, never exception text or paths.
+            for peer, result in enumerate(failures):
+                if isinstance(result, BaseException):
+                    print(_shared_peer_failure("peer_close", result.__cause__ or result, peer=peer), file=sys.stderr)
+            await owner.aclose()
+        except BaseException as error:
+            pending = error
+            raise
+        finally:
+            # The private sockets go even when a close above failed, each only
+            # while it is still the socket this owner bound. A refused or failed
+            # removal never takes the place of a failure: the failure on its way,
+            # or else a failed peer close, propagates with the removal's failure
+            # as its context.
+            try:
+                for path, device, inode in paths:
+                    info = path.lstat()
+                    if not stat.S_ISSOCK(info.st_mode) or (info.st_dev, info.st_ino) != (device, inode):
+                        raise LocalSetupError("local_setup_connection_changed")
+                    path.unlink()
+                directory.rmdir()
+            except BaseException as removal:
+                if pending is not None:
+                    # The failure's own context stays behind the removal's.
+                    removal.__context__ = pending.__context__
+                    raise pending
+                failed = [result for result in failures if isinstance(result, BaseException)]
+                if failed:
+                    raise LocalSetupError("local_setup_connection_failed") from failed[0]
+                raise
+    failed = [result for result in failures if isinstance(result, BaseException)]
+    if failed:
+        raise LocalSetupError("local_setup_connection_failed") from failed[0]
 
 
 async def shared_owner_requests(adapter_module, owner, reader, writer):
@@ -1191,13 +1233,14 @@ async def shared_stdio_owner(adapter_module, controller, count):
     return owner
 
 
-def _shared_peer_failure(phase, error):
-    """Last attempted phase and closed categories, never exception text or paths."""
+def _shared_peer_failure(phase, error, *, peer=None):
+    """Last attempted phase, the peer when one is named, and closed categories,
+    never exception text or paths."""
     phases = {
         "arguments", "physical_lease", "physical_bridge", "physical_close", "path_validation",
         "socket_validation", "socket_create", "socket_connect", "socket_recheck",
         "socket_nonblocking", "select", "stdin_read", "socket_read",
-        "stdout_write", "socket_write", "socket_half_close", "socket_close",
+        "stdout_write", "socket_write", "socket_half_close", "socket_close", "peer_close",
     }
     classes = {
         LocalSetupError: "LocalSetupError", OSError: "OSError",
@@ -1214,6 +1257,7 @@ def _shared_peer_failure(phase, error):
     )}
     code = codes.get(error.errno, "other") if type(error) in classes and isinstance(error, OSError) else "none"
     return ("local_setup_connection_diagnostic phase=" + (phase if phase in phases else "other")
+            + ("" if peer is None else " peer=" + str(int(peer)))
             + " exception=" + classes.get(type(error), "Other") + " errno=" + code)
 
 

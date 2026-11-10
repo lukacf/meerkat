@@ -20,14 +20,18 @@
 //! ([`meerkat_mob::MobHandle::grant_member_tool`]), which decides it against
 //! its live roster in order with the retirements that end an identity's
 //! grants: an identity no longer on the roster then is `subject_unknown`,
-//! and nothing is issued. Meta's answers do not report a grant's `applies`
-//! or a member's gate yet. List and audit resolve the mob only, so a retired
-//! identity's history stays readable. A revoke reads the grant first: only
+//! and nothing is issued. A grant answers whether it applies to the
+//! member's running build (`applies`), and a list answers the member's gate,
+//! as Core's `tool_grants/grant` and `tool_grants/list` answer them
+//! ([`meerkat::member_tool_grant_applies`],
+//! [`meerkat::wire_member_tool_grant_gate`]): the running build's gate is
+//! read from the machine of the session serving the identity here. List and
+//! audit resolve the mob only, so a retired identity's history stays
+//! readable (its list answers no gate). A revoke reads the grant first: only
 //! an identity grant of this gateway's mob is revoked here. Every refusal of
 //! a request is invalid params carrying the typed
 //! `tool_grant_request_refused` refusal.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,8 +41,9 @@ use meerkat_contracts::{
 };
 use meerkat_core::approval::decision::DecisionReference;
 use meerkat_core::tool_grant::{
-    ToolGrantId, ToolGrantIssuer, ToolGrantRequestRefusal, ToolGrantSubject,
+    RunningToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRequestRefusal, ToolGrantSubject,
 };
+use meerkat_core::types::SessionId;
 use meerkat_runtime::MeerkatMachine;
 use meerkat_runtime::tool_grant::wire::{
     wire_tool_grant, wire_tool_grant_audit_row, wire_unreadable_tool_grant,
@@ -306,14 +311,14 @@ fn public_grant(mut grant: WireToolGrant) -> WireToolGrant {
     grant
 }
 
-/// An identity a grant may name: its member in Core's roster, the gate its
-/// target must be in with the MCP servers its build configures ungated, and
-/// the session serving it here, if any.
+/// An identity a grant may name: its member in Core's roster, the gate the
+/// member's next build resolves (its target must be in it, and the MCP
+/// servers its build configures ungated stay ungated), and the session
+/// serving it here, if any.
 struct GrantSubject {
     member: meerkat_mob::ids::AgentIdentity,
-    gate: meerkat_core::tool_grant::GrantGatedTools,
-    ungated_servers: BTreeSet<String>,
-    serving: Option<meerkat_core::types::SessionId>,
+    gate: meerkat_mob::MemberGrantGate,
+    serving: Option<SessionId>,
 }
 
 /// The identity a grant names, resolved to Core's member. It must be one the
@@ -363,9 +368,8 @@ async fn identity_for_grant(
         Err(error) => return Err(mob_error(&error)),
     };
     Ok(GrantSubject {
-        gate: gate.named(),
-        ungated_servers: gate.ungated_servers,
         serving: handle.resolve_bridge_session_id(&member).await,
+        gate,
         member,
     })
 }
@@ -388,25 +392,44 @@ async fn commit_member_grant(
         .map_err(|error| member_grant_error(error, identity))
 }
 
+/// The identity a read names, resolved against the mob only, so a retired
+/// identity's history stays readable: whose grants, its member in Core's
+/// roster, and the session serving it here, if any.
+struct ReadSubject {
+    subject: ToolGrantSubject,
+    member: meerkat_mob::ids::AgentIdentity,
+    serving: Option<SessionId>,
+}
+
 /// The identity a read names: the mob only, so a retired identity's history
 /// stays readable.
 async fn identity_for_read(
     surface: &ToolGrantSurface<'_>,
     identity: &str,
-) -> Result<(ToolGrantSubject, Option<meerkat_core::types::SessionId>), JsonRpcError> {
+) -> Result<ReadSubject, JsonRpcError> {
     AgentIdentity::parse(identity)
         .map_err(|_| subject_unknown(format!("'{identity}' is not an identity")))?;
     let handle = surface.mob.handle();
     let member = crate::member_comms_id::roster_member_id_for_identity(identity);
     let serving = handle.resolve_bridge_session_id(&member).await;
-    Ok((
-        ToolGrantSubject::member(
+    Ok(ReadSubject {
+        subject: ToolGrantSubject::member(
             handle.mob_id().as_str(),
             &handle.live_incarnation(),
             member.as_str(),
         ),
+        member,
         serving,
-    ))
+    })
+}
+
+/// The gate the identity's live member build runs, read from the machine of
+/// the session serving it here: `None` when no build of it is live here.
+async fn running_gate(
+    owner: &MeerkatMachine,
+    serving: Option<&SessionId>,
+) -> Option<RunningToolGrantGate> {
+    owner.tool_grant_gate(serving?).await
 }
 
 fn result<T: serde::Serialize>(value: &T) -> Result<Value, JsonRpcError> {
@@ -440,26 +463,29 @@ async fn grant(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, 
             )
         })?;
     // A runtime that keeps no grants answers before any member is seated.
-    grant_owner(surface)?;
+    let owner = grant_owner(surface)?;
     let subject = identity_for_grant(surface, &params.identity).await?;
     let named = match &params.target {
         ToolGrantTargetRequest::Tool { name } => format!("the tool '{name}'"),
         ToolGrantTargetRequest::Family { family } => format!("the tool family '{family}'"),
         ToolGrantTargetRequest::McpServer { server, .. } => format!("the MCP server '{server}'"),
     };
-    let target =
-        meerkat::resolve_grant_target(params.target, &subject.gate, &subject.ungated_servers)
-            .map_err(|refusal| {
-                let message = match refusal {
-                    ToolGrantRequestRefusal::TargetNotGated => format!(
-                        "the gate of '{}' does not name {named}: a grant opens only what the \
-                         member's build gates",
-                        params.identity
-                    ),
-                    _ => refusal.to_string(),
-                };
-                refused(&refusal, message)
-            })?;
+    let target = meerkat::resolve_grant_target(
+        params.target,
+        &subject.gate.named(),
+        &subject.gate.ungated_servers,
+    )
+    .map_err(|refusal| {
+        let message = match refusal {
+            ToolGrantRequestRefusal::TargetNotGated => format!(
+                "the gate of '{}' does not name {named}: a grant opens only what the \
+                 member's build gates",
+                params.identity
+            ),
+            _ => refusal.to_string(),
+        };
+        refused(&refusal, message)
+    })?;
     let grant = meerkat_mob::MemberToolGrant {
         target,
         issuer: ToolGrantIssuer::Operator {
@@ -473,9 +499,18 @@ async fn grant(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, 
         run_scope: None,
     };
     let grant = commit_member_grant(surface, &params.identity, &subject, grant).await?;
+    // Advisory, as Core answers it: the grant is issued either way.
+    let applies = meerkat::member_tool_grant_applies(
+        running_gate(&owner, subject.serving.as_ref())
+            .await
+            .as_ref(),
+        &subject.gate.not_mounted,
+        &subject.gate.configured_servers,
+        &grant.record.target,
+    );
     result(&GrantToolResult {
         grant: public_grant(wire_tool_grant(&grant)),
-        applies: None,
+        applies: Some(applies),
     })
 }
 
@@ -537,7 +572,22 @@ async fn revoke(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value,
 async fn list(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, JsonRpcError> {
     let params: ListParams = parse(params)?;
     let owner = grant_owner(surface)?;
-    let (subject, serving) = identity_for_read(surface, &params.identity).await?;
+    let ReadSubject {
+        subject,
+        member,
+        serving,
+    } = identity_for_read(surface, &params.identity).await?;
+    // The member's gate, as Core's list answers it: an identity outside the
+    // roster (a retired one) has no next build, and its history stays
+    // readable without a gate.
+    let gate = match surface.mob.handle().member_grant_gate(&member).await {
+        Ok(next_build) => Some(meerkat::wire_member_tool_grant_gate(
+            running_gate(&owner, serving.as_ref()).await.as_ref(),
+            &next_build.gated,
+            &next_build.not_mounted,
+        )),
+        Err(_) => None,
+    };
     let listing = owner
         .list_tool_grants(&subject, serving.as_ref())
         .await
@@ -554,7 +604,7 @@ async fn list(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, J
             .iter()
             .map(wire_unreadable_tool_grant)
             .collect(),
-        gate: None,
+        gate,
     })
 }
 
@@ -577,7 +627,7 @@ async fn audit(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, 
     let params: AuditParams = parse(params)?;
     let limit = audit_page_limit(params.limit)?;
     let owner = grant_owner(surface)?;
-    let (subject, _serving) = identity_for_read(surface, &params.identity).await?;
+    let ReadSubject { subject, .. } = identity_for_read(surface, &params.identity).await?;
     let page = owner
         .read_tool_grant_audit(&subject, params.after_sequence, limit)
         .await
@@ -804,8 +854,7 @@ grant_gated = {{ tools = ["datetime"] }}
         let gate = handle.member_grant_gate(&member).await.unwrap();
         let subject = GrantSubject {
             member: member.clone(),
-            gate: gate.named(),
-            ungated_servers: gate.ungated_servers,
+            gate,
             serving: handle.resolve_bridge_session_id(&member).await,
         };
         handle.retire(member.clone()).await.unwrap();

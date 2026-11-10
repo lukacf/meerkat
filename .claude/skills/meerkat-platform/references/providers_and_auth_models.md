@@ -135,11 +135,19 @@ recommended, S = supported):
 The catalog keeps no per-platform model list and the client sends the model
 id unchanged on every Anthropic backend. Anthropic serves `claude-fable-5-2`
 on the Claude API, Claude Platform on AWS, Claude Models on Google Cloud and
-Microsoft Foundry, not on Amazon Bedrock. Claude Mythos 5.2
-(`claude-mythos-5-2`) is a model the catalog does not list, as Claude Mythos
-5.1 is: Anthropic serves it only to organizations it has verified, on the
-Claude API, Claude Models on Google Cloud and Microsoft Foundry, not on
-Claude Platform on AWS or Amazon Bedrock.
+Microsoft Foundry, and on Amazon Bedrock only through inference profiles: the
+global profile `global.anthropic.claude-fable-5-2` or the US geographic
+profile `us.anthropic.claude-fable-5-2`. Bedrock offers no in-region access
+to it, so the bare `anthropic.claude-fable-5-2` does not run. Claude Mythos
+5.2 (`claude-mythos-5-2`) is a model the catalog does not list, as Claude
+Mythos 5.1 is: Anthropic serves it only to organizations it has verified, on
+the Claude API, Claude Models on Google Cloud and Microsoft Foundry, on
+Amazon Bedrock only through the inference profiles
+`global.anthropic.claude-mythos-5-2` and `us.anthropic.claude-mythos-5-2`,
+not on Claude Platform on AWS. Bedrock ids are not in the catalog: declared
+under `[models."global.anthropic.claude-fable-5-2"]` (quoted, as the id
+contains dots), it runs as a model id with no catalog row, without the
+`claude-fable-5-2` row's local refusals or defaults.
 
 | OpenAI | Tier | Context / output | Reasoning effort |
 |---|---|---|---|

@@ -238,8 +238,8 @@ pub enum ReasoningEffortRefusalReason {
     /// The request also sets a thinking budget: a budget and a level are two
     /// controls.
     ConflictingThinkingBudget,
-    /// The request also sets a thinking type the model accepts only at a
-    /// lower level.
+    /// The request also sets a thinking type the model does not accept
+    /// together with the level on the route.
     ConflictingThinkingType,
     /// The request also carries a raw provider reasoning body, which may
     /// carry an effort of its own.
@@ -264,10 +264,10 @@ pub enum ReasoningFactsSource {
 /// A refused `reasoning_effort` level: what was requested, for which model
 /// and route, and why. Raised before any provider request is sent.
 ///
-/// `supported` and `facts` are always serialized, as `null` when absent
-/// (`facts` is absent exactly when `supported` is). The two `conflicting_*`
-/// fields are serialized only when present. The `Display` text is for people
-/// and is not a contract; read the fields.
+/// `route`, `supported` and `facts` are always serialized, as `null` when
+/// absent (`facts` is absent exactly when `supported` is). The two
+/// `conflicting_*` fields are serialized only when present. The `Display`
+/// text is for people and is not a contract; read the fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ReasoningEffortRefusal {
@@ -277,8 +277,10 @@ pub struct ReasoningEffortRefusal {
     pub provider: Provider,
     /// The model the request would use.
     pub model: String,
-    /// The route the request would be served on.
-    pub route: ReasoningRoute,
+    /// The route the request would be served on. `None` when the client
+    /// that serves the request reports no route and the model's provider
+    /// has no direct route to name: a route is never guessed.
+    pub route: Option<ReasoningRoute>,
     /// Why the level is refused.
     pub reason: ReasoningEffortRefusalReason,
     /// The levels the route accepts for the model: `None` when unknown or
@@ -296,6 +298,19 @@ pub struct ReasoningEffortRefusal {
     pub conflicting_level: Option<EffortLevel>,
 }
 
+/// ` on <backend>/<api>` in a refusal's text, or nothing for a refusal that
+/// names no route.
+struct OnRoute<'a>(Option<&'a ReasoningRoute>);
+
+impl fmt::Display for OnRoute<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(route) => write!(f, " on {route}"),
+            None => Ok(()),
+        }
+    }
+}
+
 impl fmt::Display for ReasoningEffortRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ReasoningEffortRefusalReason as Reason;
@@ -303,7 +318,7 @@ impl fmt::Display for ReasoningEffortRefusal {
         let requested = self.requested.as_wire_str();
         let provider = self.provider.as_str();
         let model = self.model.as_str();
-        let route = &self.route;
+        let on_route = OnRoute(self.route.as_ref());
         let param = self
             .conflicting_param
             .as_deref()
@@ -313,7 +328,7 @@ impl fmt::Display for ReasoningEffortRefusal {
                 write!(
                     f,
                     "reasoning effort '{requested}' is not supported by {provider} model \
-                     '{model}' on {route}"
+                     '{model}'{on_route}"
                 )?;
                 match self.supported.as_deref() {
                     None => Ok(()),
@@ -332,14 +347,15 @@ impl fmt::Display for ReasoningEffortRefusal {
             }
             Reason::SupportedLevelsUnknown => write!(
                 f,
-                "reasoning effort '{requested}' cannot be checked for {provider} model '{model}' \
-                 on {route}: no source states the levels this route accepts; provider_params can \
-                 set a provider-specific effort"
+                "reasoning effort '{requested}' cannot be checked for {provider} model \
+                 '{model}'{on_route}: no source states the levels this route accepts; \
+                 provider_params can set a provider-specific effort"
             ),
             Reason::SupportedLevelsUnavailable => write!(
                 f,
-                "reasoning effort '{requested}' cannot be checked for {provider} model '{model}' \
-                 on {route}: the account's model list is not loaded; try again once it is"
+                "reasoning effort '{requested}' cannot be checked for {provider} model \
+                 '{model}'{on_route}: the account's model list is not loaded; try again once \
+                 it is"
             ),
             Reason::ConflictingProviderEffort => {
                 write!(f, "reasoning effort '{requested}' conflicts with {param}")?;
@@ -356,7 +372,7 @@ impl fmt::Display for ReasoningEffortRefusal {
             Reason::ConflictingThinkingType => write!(
                 f,
                 "reasoning effort '{requested}' conflicts with {param}: {provider} model \
-                 '{model}' accepts that thinking type only up to 'high'"
+                 '{model}' does not accept that thinking type with this level{on_route}"
             ),
             Reason::ConflictingReasoningBody => write!(
                 f,
@@ -643,7 +659,7 @@ mod tests {
             requested: EffortLevel::Max,
             provider: Provider::Anthropic,
             model: "claude-opus-4-5".to_owned(),
-            route: anthropic_messages(),
+            route: Some(anthropic_messages()),
             reason: ReasoningEffortRefusalReason::UnsupportedLevel,
             supported: Some(vec![
                 EffortLevel::Low,
@@ -664,7 +680,7 @@ mod tests {
             requested: EffortLevel::High,
             provider: Provider::OpenAI,
             model: "gpt-5.5".to_owned(),
-            route,
+            route: Some(route),
             reason,
             supported: None,
             facts: None,
@@ -674,8 +690,9 @@ mod tests {
     }
 
     /// The refusal serializes as the documented shape, byte for byte: the
-    /// fields in the documented order, `supported` and `facts` as explicit
-    /// `null` when absent, and the two conflict fields left out when absent.
+    /// fields in the documented order, `route`, `supported` and `facts` as
+    /// explicit `null` when absent, and the two conflict fields left out when
+    /// absent.
     #[test]
     fn refusal_serializes_the_documented_shape() {
         // The two documented examples, as documented (the second one's model
@@ -747,6 +764,43 @@ mod tests {
             serde_json::from_str::<ReasoningEffortRefusal>(&serialized)
                 .expect("a conflict reads back"),
             conflict
+        );
+
+        // A refusal that names no route (no client observation, and a
+        // provider with no direct route to name) writes `route` as an
+        // explicit `null`, in its place, and reads back. A document that
+        // leaves the key out reads as the same refusal.
+        let unrouted = ReasoningEffortRefusal {
+            provider: Provider::Other,
+            model: "<model id>".to_owned(),
+            route: None,
+            ..openai_refusal(
+                ReasoningEffortRefusalReason::SupportedLevelsUnknown,
+                copilot(ModelApi::ChatCompletions),
+            )
+        };
+        let serialized = serde_json::to_string(&unrouted).expect("a refusal serializes");
+        assert_eq!(
+            serialized,
+            compact(
+                r#"{
+  "requested": "high", "provider": "other", "model": "<model id>",
+  "route": null,
+  "reason": "supported_levels_unknown", "supported": null, "facts": null }"#
+            )
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffortRefusal>(&serialized)
+                .expect("a refusal with no route reads back"),
+            unrouted
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffortRefusal>(
+                r#"{"requested": "high", "provider": "other", "model": "<model id>",
+  "reason": "supported_levels_unknown", "supported": null, "facts": null }"#
+            )
+            .expect("a document without the route key reads back"),
+            unrouted
         );
 
         for (source, wire) in [
@@ -842,10 +896,28 @@ mod tests {
             conflicting_param: Some("provider_params.provider_tag.thinking".to_owned()),
             ..unsupported_level_refusal()
         };
+        // The text states the conflict, not a ceiling: it holds on a route
+        // that takes the thinking type up to some level and on a route that
+        // takes it with no level at all.
         assert_eq!(
             thinking_type.to_string(),
             "reasoning effort 'max' conflicts with provider_params.provider_tag.thinking: \
-             anthropic model 'claude-opus-4-5' accepts that thinking type only up to 'high'"
+             anthropic model 'claude-opus-4-5' does not accept that thinking type with this \
+             level on anthropic_api/messages"
+        );
+        let thinking_type_at_low = ReasoningEffortRefusal {
+            requested: EffortLevel::Low,
+            route: Some(ReasoningRoute::new(
+                ReasoningBackend::Anthropic(AnthropicBackendKind::Copilot),
+                ModelApi::Messages,
+            )),
+            ..thinking_type.clone()
+        };
+        assert_eq!(
+            thinking_type_at_low.to_string(),
+            "reasoning effort 'low' conflicts with provider_params.provider_tag.thinking: \
+             anthropic model 'claude-opus-4-5' does not accept that thinking type with this \
+             level on copilot/messages"
         );
         assert_eq!(
             conflict(
@@ -865,6 +937,42 @@ mod tests {
             )
             .to_string(),
             "reasoning effort 'high' conflicts with provider_params.reasoning = 'off'"
+        );
+
+        // A refusal that names no route leaves the route out of its text.
+        let unrouted = |refusal: ReasoningEffortRefusal| ReasoningEffortRefusal {
+            route: None,
+            ..refusal
+        };
+        assert_eq!(
+            unrouted(unsupported_level_refusal()).to_string(),
+            "reasoning effort 'max' is not supported by anthropic model 'claude-opus-4-5'; \
+             supported: low, medium, high"
+        );
+        assert_eq!(
+            unrouted(openai_refusal(
+                Reason::SupportedLevelsUnknown,
+                copilot(ModelApi::ChatCompletions)
+            ))
+            .to_string(),
+            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5': no source \
+             states the levels this route accepts; provider_params can set a \
+             provider-specific effort"
+        );
+        assert_eq!(
+            unrouted(openai_refusal(
+                Reason::SupportedLevelsUnavailable,
+                copilot(ModelApi::Responses)
+            ))
+            .to_string(),
+            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5': the \
+             account's model list is not loaded; try again once it is"
+        );
+        assert_eq!(
+            unrouted(thinking_type).to_string(),
+            "reasoning effort 'max' conflicts with provider_params.provider_tag.thinking: \
+             anthropic model 'claude-opus-4-5' does not accept that thinking type with this \
+             level"
         );
     }
 

@@ -618,7 +618,7 @@ fn translation_table_covers_every_route_and_level() {
                             requested: level,
                             provider: family(backend),
                             model: MODEL.to_owned(),
-                            route: ReasoningRoute::new(backend, api),
+                            route: Some(ReasoningRoute::new(backend, api)),
                             reason: Reason::UnsupportedLevel,
                             supported: Some(golden.expressible().to_vec()),
                             facts: Some(facts),
@@ -810,7 +810,7 @@ fn uncatalogued_model_on_a_catalog_route_is_unknown() {
                         requested: level,
                         provider: family(backend),
                         model: MODEL.to_owned(),
-                        route: ReasoningRoute::new(backend, api),
+                        route: Some(ReasoningRoute::new(backend, api)),
                         reason: Reason::SupportedLevelsUnknown,
                         supported: None,
                         facts: None,
@@ -979,7 +979,7 @@ fn copilot_levels_come_from_the_account_statement_only() {
                         .expect_err("no stated levels");
                     assert_eq!(refusal.reason, reason, "{context}");
                     assert_eq!((refusal.supported, refusal.facts), (None, None));
-                    assert_eq!(refusal.route, ReasoningRoute::new(backend, api));
+                    assert_eq!(refusal.route, Some(ReasoningRoute::new(backend, api)));
                     assert_eq!(params, None);
                 }
             }
@@ -1009,7 +1009,7 @@ fn a_level_the_list_does_not_state_is_refused() {
             requested: EffortLevel::None,
             provider: Provider::OpenAI,
             model: MODEL.to_owned(),
-            route: ReasoningRoute::new(OPENAI_COPILOT, ModelApi::Responses),
+            route: Some(ReasoningRoute::new(OPENAI_COPILOT, ModelApi::Responses)),
             reason: Reason::UnsupportedLevel,
             supported: Some(vec![Low, Medium, High, Xhigh]),
             facts: Some(ReasoningFactsSource::Account),
@@ -1251,7 +1251,7 @@ fn a_refusal_without_an_observation_names_the_direct_route() {
                     .expect_err("no observation, no source");
                 assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
                 assert_eq!((refusal.supported, refusal.facts), (None, None));
-                assert_eq!(refusal.route, ReasoningRoute::new(backend, api));
+                assert_eq!(refusal.route, Some(ReasoningRoute::new(backend, api)));
                 assert_eq!(refusal.provider, provider);
                 assert_eq!(params, None);
             }
@@ -1280,10 +1280,10 @@ fn a_refusal_without_an_observation_names_the_direct_route() {
         assert_eq!((refusal.supported, refusal.facts), (None, None));
         assert_eq!(
             refusal.route,
-            ReasoningRoute::new(
+            Some(ReasoningRoute::new(
                 ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
                 ModelApi::ChatCompletions
-            )
+            ))
         );
     }
 }
@@ -1395,7 +1395,7 @@ fn copilot_messages_writes_the_adaptive_pair_or_refuses() {
                     requested: level,
                     provider: Provider::Anthropic,
                     model: MODEL.to_owned(),
-                    route: ReasoningRoute::new(ANTHROPIC_COPILOT, ModelApi::Messages),
+                    route: Some(ReasoningRoute::new(ANTHROPIC_COPILOT, ModelApi::Messages,)),
                     reason: Reason::ConflictingThinkingType,
                     supported: Some(STATED.to_vec()),
                     facts: Some(ReasoningFactsSource::Account),
@@ -2321,7 +2321,7 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
             assert_eq!(refusal.provider, provider, "{context}");
             assert_eq!(refusal.model, MODEL, "{context}");
             if let Some(observation) = observation {
-                assert_eq!(refusal.route, observation.route(), "{context}");
+                assert_eq!(refusal.route, Some(observation.route()), "{context}");
             }
             // `facts` is absent exactly when `supported` is.
             assert_eq!(

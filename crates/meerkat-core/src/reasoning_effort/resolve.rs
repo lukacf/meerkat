@@ -460,10 +460,10 @@ fn refusal(
         requested: input.requested,
         provider: input.provider,
         model: input.model.to_owned(),
-        route: match input.observation {
+        route: Some(match input.observation {
             Some(observation) => observation.route(),
             None => unobserved_route(input.provider),
-        },
+        }),
         reason,
         supported: facts.supported().map(<[EffortLevel]>::to_vec),
         facts: facts.source(),

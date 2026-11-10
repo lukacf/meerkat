@@ -34,6 +34,10 @@ pub(crate) async fn create_replacement(
     let mode = unix::replacement_mode(document).await;
     #[cfg(unix)]
     options.mode(mode);
+    // Elsewhere the file is created as the platform creates any file,
+    // whatever document it replaces.
+    #[cfg(not(unix))]
+    let _ = document;
     let file = options.open(temporary).await?;
     // The umask may have taken the group's read bit from the open's mode:
     // the mode of a shared directory's document is exact whatever the umask,

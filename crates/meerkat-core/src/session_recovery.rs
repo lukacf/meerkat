@@ -1977,11 +1977,17 @@ mod tests {
                             );
                             continue;
                         }
-                        (rule, recovered) => panic!(
-                            "the recovered build and the rule disagree on refusal: {case}: \
-                             {rule:?} / {:?}",
-                            recovered.map(|recovered| recovered.build.provider_params)
-                        ),
+                        (rule, recovered) => {
+                            // One side refused and the other did not.
+                            assert_eq!(
+                                rule.is_ok(),
+                                recovered.is_ok(),
+                                "the recovered build and the rule disagree on refusal: {case}: \
+                                 {rule:?} / {:?}",
+                                recovered.map(|recovered| recovered.build.provider_params)
+                            );
+                            continue;
+                        }
                     };
 
                     // Seam 3 alone: a resumed build that names its own

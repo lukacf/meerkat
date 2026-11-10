@@ -79,8 +79,8 @@ pub struct AnthropicClient {
     /// request time).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
     /// A model this client's backend lists under another id than the
-    /// request's: the request's model and the id the wire names for it. See
-    /// [`AnthropicClientBuilder::wire_model`].
+    /// request's: the request's model and the id the wire names for it. Set
+    /// by the GitHub Copilot route (the builder's `wire_model`).
     wire_model: Option<(String, String)>,
 }
 
@@ -120,6 +120,7 @@ impl AnthropicClientBuilder {
     /// `claude-opus-5-5`). Only the request's `model` field changes: the
     /// request's own model keeps selecting the catalog row, so its
     /// capabilities, beta headers and thinking shape are that row's.
+    #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
     pub(crate) fn wire_model(mut self, model: &str, wire_model: &str) -> Self {
         self.wire_model =
             (model != wire_model).then(|| (model.to_string(), wire_model.to_string()));
@@ -1238,8 +1239,9 @@ impl AnthropicClient {
         format!("{}/v1/messages", self.base_url)
     }
 
-    /// The id the wire names for a request whose model is `model`
-    /// ([`AnthropicClientBuilder::wire_model`]); `model` itself otherwise.
+    /// The id the wire names for a request whose model is `model`, when the
+    /// client was built with one (the builder's `wire_model`); `model`
+    /// itself otherwise.
     fn wire_model_for<'a>(&'a self, model: &'a str) -> &'a str {
         match self.wire_model.as_ref() {
             Some((requested, wire)) if requested == model => wire,

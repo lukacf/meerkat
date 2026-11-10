@@ -859,7 +859,9 @@ impl CopilotModelSnapshot {
     /// does not define: the model's registry definition when the account
     /// offers it on a protocol Meerkat speaks
     /// ([`CopilotModelOffering::registry_definition`]). The entry is the one
-    /// `model` names ([`Self::resolve`]). A model the list does not name is
+    /// `model` names: the one listed under exactly that id, or else the only
+    /// one whose id names the same model ([`same_account_model_id`]). A
+    /// model the list does not name is
     /// refused as not offered, naming the ids the account offers; a model
     /// that more than one entry names and none exactly is refused the same
     /// way, naming those entries; a model whose policy

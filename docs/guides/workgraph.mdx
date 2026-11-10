@@ -101,7 +101,10 @@ Use `workgraph_ready` instead of inferring readiness.
 }
 ```
 
-Ready work is non-terminal, not blocked, due or eligible, and claimable.
+Ready work is what the machine says is claimable now: an `open` item with no
+unresolved blocker that is due or eligible, or an `in_progress` item whose lease
+has expired. Zero edges or a past date do not by themselves make an item ready;
+ask `workgraph_ready`.
 
 ## Claim Before Shared Work
 

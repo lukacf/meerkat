@@ -411,4 +411,71 @@ mod tests {
         );
         assert_eq!(client.output_token_limit(), Some(16_000));
     }
+
+    /// A client that reports the route it was given, or none.
+    struct RouteReportingClient(Option<meerkat_core::ReasoningRouteObservation>);
+    #[async_trait]
+    impl LlmClient for RouteReportingClient {
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            self.0.clone()
+        }
+        fn stream<'a>(&'a self, _: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(futures::stream::empty())
+        }
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::SelfHosted
+        }
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The selected-target wrapper reports the route of the client it wraps
+    /// (the factory puts it around every registry-built and self-hosted
+    /// client), and none when that client reports none. A wrapper never
+    /// hides the route its client serves.
+    #[test]
+    fn the_selected_target_wrapper_reports_its_clients_route() {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        use meerkat_core::provider_matrix::SelfHostedBackendKind;
+
+        let wrapped = |route: Option<meerkat_core::ReasoningRouteObservation>| {
+            SelectedTargetClient::new(
+                Arc::new(RouteReportingClient(route)),
+                ResolvedModelAuthorizationTarget {
+                    identity: Arc::new(SessionLlmIdentity {
+                        model: "fixture".to_owned(),
+                        provider: meerkat_core::Provider::SelfHosted,
+                        self_hosted_server_id: Some("local".to_owned()),
+                        provider_params: None,
+                        auth_binding: None,
+                    }),
+                    backend_profile_id: Arc::from("profile"),
+                    backend_kind: Arc::from("backend"),
+                    credential: AuthCredentialIdentity::from_auth_binding(
+                        &meerkat_core::AuthBindingRef {
+                            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+                            binding: meerkat_core::BindingId::parse("fixture").unwrap(),
+                            profile: None,
+                            origin: meerkat_core::BindingOrigin::Configured,
+                        },
+                    ),
+                    credential_requirement: meerkat_core::ControllerCredentialRequirement::Required,
+                },
+            )
+        };
+        let reported = meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::SelfHosted(
+                SelfHostedBackendKind::OpenAiCompatible,
+            ),
+            api: meerkat_core::ModelApi::ChatCompletions,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
+        };
+        assert_eq!(
+            wrapped(Some(reported.clone())).reasoning_route(),
+            Some(reported)
+        );
+        assert_eq!(wrapped(None).reasoning_route(), None);
+    }
 }

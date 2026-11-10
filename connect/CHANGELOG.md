@@ -63,6 +63,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   approving parent or computed deadline differ, while a request with different
   content is refused as a conflict.
 
+### Security
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): Connect builds with
+  rusqlite 0.41.1 and libsqlite3-sys 0.39.1. SQLite before 3.54.0 can
+  return uninitialized page-cache memory to ordinary queries when it opens
+  a database together with a write-ahead log of a different page size.
+  Stored values keep their encoding.
+
 ### Upgrade notes
 
 - Downgrade: an access decision the next host ended as not issued records the

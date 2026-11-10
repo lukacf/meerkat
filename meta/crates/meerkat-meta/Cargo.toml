@@ -206,7 +206,7 @@ meerkat-skills = { workspace = true }
 meerkat-tools = { workspace = true, default-features = true }
 tempfile = "3"
 async-trait = "0.1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

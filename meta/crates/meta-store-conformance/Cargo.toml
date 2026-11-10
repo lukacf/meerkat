@@ -131,7 +131,7 @@ meerkat-meta = { workspace = true }
 # the suite reaches it without turning on meerkat-meta's extension-state
 # feature.
 meta-extension-state = { workspace = true }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }

@@ -35,6 +35,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   host's own wrapper of a session bridge forwards them to the bridge it
   wraps.
 
+- Rust: `meta_extension_state::SqliteExtensionDocumentStore::from_connection`
+  and `meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
+  take a rusqlite 0.41 `Connection`, no longer a rusqlite 0.37 one. A host
+  that opens that connection with its own rusqlite moves to rusqlite 0.41
+  with Meta (see Upgrade). The semver gate does not measure which version of
+  a dependency's type a signature names.
+
+### Security
+
+- RUSTSEC-2026-0462 (rmcp before 3.9.0, unbounded response bodies in rmcp's
+  built-in Streamable HTTP clients) does not affect Meta: Meta reaches rmcp
+  only through Meerkat Core's MCP client, which no longer builds rmcp's
+  reqwest client and bounds every response body and SSE event at 64 MiB
+  itself. cargo-deny matches rmcp 1.8 by version alone, so `meta/deny.toml`
+  ignores the advisory until Core moves to rmcp 3.9 or later.
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): `meerkat-meta` and
+  `meta-extension-state` require rusqlite 0.41.1 (libsqlite3-sys 0.39.1).
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  of a different page size. Stored values keep their encoding: rusqlite's
+  `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
+  0.37 had.
+
 ### Upgrade
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
@@ -44,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   state is kept unchanged, but the new team does not recall earlier
   conversations. To carry them over, follow the installer README's "Work with
   the setup team" before that first start.
+
+- A Rust host that depends on rusqlite (or libsqlite3-sys) itself moves to
+  rusqlite 0.41 (libsqlite3-sys 0.39) together with Meta: libsqlite3-sys
+  links one SQLite per build (`links = "sqlite3"`), so Cargo refuses a
+  graph that holds rusqlite 0.37 next to rusqlite 0.41.
 
 ### Added
 

@@ -604,4 +604,52 @@ mod tests {
             "invalid ids must be rejected before filesystem traversal"
         );
     }
+
+    /// A blob write the operating system refuses (a file size limit, a quota,
+    /// a full filesystem that allocates at write time, an I/O error) fails,
+    /// and publishes no object at the content address.
+    ///
+    /// RED before: the object was written through tokio's `File` and synced
+    /// without a flush. `sync_all` waits for the write but keeps its error for
+    /// the next write or flush, so the EMPTY temporary object was renamed to
+    /// the content address; only the read-back after it failed the put.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_write_fails_the_blob_put_and_publishes_no_object() {
+        use crate::refused_writes_test_support::{files_under, runtime, with_writes_refused};
+
+        with_writes_refused(
+            module_path!(),
+            "a_refused_write_fails_the_blob_put_and_publishes_no_object",
+            |_root| (),
+            |root| {
+                let store = FsBlobStore::new(root.join("blobs"));
+                let put = runtime().block_on(store.put_image("image/png", "AQID"));
+                assert!(
+                    matches!(put, Err(BlobStoreError::WriteFailed(_))),
+                    "the refused write fails the put: {put:?}"
+                );
+                assert_eq!(
+                    files_under(&root.join("blobs")),
+                    Vec::<String>::new(),
+                    "no object at the content address and no temporary object"
+                );
+            },
+            |root, ()| {
+                assert_eq!(files_under(&root.join("blobs")), Vec::<String>::new());
+                let store = FsBlobStore::new(root.join("blobs"));
+                let runtime = runtime();
+                let blob = runtime
+                    .block_on(store.put_image("image/png", "AQID"))
+                    .expect("the put once writes work");
+                assert_eq!(
+                    runtime
+                        .block_on(store.get(&blob.blob_id))
+                        .expect("the stored object")
+                        .data,
+                    "AQID"
+                );
+            },
+        );
+    }
 }

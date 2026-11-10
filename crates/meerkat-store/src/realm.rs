@@ -2619,6 +2619,311 @@ mod tests {
         let raw = raw_manifest(&realms_root, realm_id).await;
         assert_eq!(raw["backend"], "external:bigquery");
     }
+
+    /// A realm file write the operating system refuses (a file size limit, a
+    /// quota, a full filesystem that allocates at write time, an I/O error)
+    /// fails, and publishes nothing: the file it would replace stays as it
+    /// was, and the failed call leaves no file of its own behind.
+    ///
+    /// RED before, for every row: the writers wrote through tokio's `File`
+    /// and synced without a flush. `sync_all` waits for the write but keeps
+    /// its error for the next write or flush, so the refused write went
+    /// unseen and the call returned `Ok` with an EMPTY file in place.
+    #[cfg(unix)]
+    mod refused_writes {
+        use super::*;
+        use crate::refused_writes_test_support::{files_under, runtime, with_writes_refused};
+
+        const REALM: &str = "team";
+
+        /// Run `future` to its end, then wait until the manifest lock of the
+        /// realm under `root` is gone: a lock guard removes its file on a
+        /// task of the runtime, which a current-thread runtime runs only
+        /// while it is driven.
+        fn settled<T>(root: &Path, future: impl std::future::Future<Output = T>) -> T {
+            runtime().block_on(async {
+                let output = future.await;
+                let lock = realm_paths_in(root, REALM)
+                    .root
+                    .join(".realm_manifest.lock");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while lock.exists() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                output
+            })
+        }
+
+        fn lease(heartbeat_at: u64) -> RealmLeaseRecord {
+            RealmLeaseRecord {
+                realm_id: REALM.to_string(),
+                instance_id: "instance".to_string(),
+                surface: "rpc".to_string(),
+                pid: 7,
+                started_at: 1,
+                heartbeat_at,
+            }
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_manifest_replace_and_keeps_the_manifest() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_manifest_replace_and_keeps_the_manifest",
+                |root| {
+                    settled(root, ensure_realm_manifest_in(root, REALM, None, None))
+                        .expect("the realm");
+                    std::fs::read(realm_paths_in(root, REALM).manifest_path).expect("the manifest")
+                },
+                |root| {
+                    let paths = realm_paths_in(root, REALM);
+                    let replaced = runtime().block_on(write_manifest_payload_atomically(
+                        &paths,
+                        b"{\"replacement\":true}".to_vec(),
+                    ));
+                    assert!(
+                        matches!(replaced, Err(StoreError::Io(_))),
+                        "the refused write fails the replace: {replaced:?}"
+                    );
+                    assert_eq!(
+                        files_under(&paths.root),
+                        ["realm_manifest.json"],
+                        "the failed replace leaves no temporary file"
+                    );
+                },
+                |root, before| {
+                    let paths = realm_paths_in(root, REALM);
+                    assert_eq!(
+                        std::fs::read(&paths.manifest_path).expect("the manifest"),
+                        before,
+                        "the manifest is byte-identical"
+                    );
+                    assert_eq!(files_under(&paths.root), ["realm_manifest.json"]);
+                },
+            );
+        }
+
+        /// The realm is not left unreadable: no manifest is published, so the
+        /// next open, once writes work, creates it.
+        #[test]
+        fn a_refused_write_fails_the_first_open_and_publishes_no_manifest() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_first_open_and_publishes_no_manifest",
+                |_root| (),
+                |root| {
+                    let opened = settled(root, ensure_realm_manifest_in(root, REALM, None, None));
+                    assert!(
+                        matches!(opened, Err(StoreError::Io(_))),
+                        "the refused write fails the first open: {opened:?}"
+                    );
+                    assert_eq!(
+                        files_under(&realm_paths_in(root, REALM).root),
+                        Vec::<String>::new(),
+                        "no manifest, no temporary file and no lock file"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(
+                        files_under(&realm_paths_in(root, REALM).root),
+                        Vec::<String>::new()
+                    );
+                    let manifest = runtime()
+                        .block_on(ensure_realm_manifest_in(root, REALM, None, None))
+                        .expect("the realm opens once writes work");
+                    assert_eq!(manifest.realm.as_str(), REALM);
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_governing_a_realm_and_keeps_its_manifest() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_governing_a_realm_and_keeps_its_manifest",
+                |root| {
+                    settled(root, ensure_realm_manifest_in(root, REALM, None, None))
+                        .expect("the realm");
+                    std::fs::read(realm_paths_in(root, REALM).manifest_path).expect("the manifest")
+                },
+                |root| {
+                    let governed = settled(root, govern_realm_in(root, REALM));
+                    assert!(
+                        matches!(governed, Err(StoreError::Io(_))),
+                        "the refused write fails the selection: {governed:?}"
+                    );
+                    assert_eq!(
+                        files_under(&realm_paths_in(root, REALM).root),
+                        ["realm_manifest.json"]
+                    );
+                },
+                |root, before| {
+                    let paths = realm_paths_in(root, REALM);
+                    assert_eq!(
+                        std::fs::read(&paths.manifest_path).expect("the manifest"),
+                        before,
+                        "the manifest is byte-identical"
+                    );
+                    let runtime = runtime();
+                    assert_eq!(
+                        runtime
+                            .block_on(read_realm_posture_in(root, REALM))
+                            .expect("the posture"),
+                        RealmPosture::Ungoverned
+                    );
+                    runtime
+                        .block_on(govern_realm_in(root, REALM))
+                        .expect("the selection once writes work");
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_lease_write_and_keeps_the_lease_record() {
+            fn lease_path(root: &Path) -> PathBuf {
+                realm_lease_dir(&realm_paths_in(root, REALM)).join("instance.json")
+            }
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_lease_write_and_keeps_the_lease_record",
+                |root| {
+                    runtime()
+                        .block_on(write_lease_record(&lease_path(root), &lease(100)))
+                        .expect("the first lease record");
+                    std::fs::read(lease_path(root)).expect("the lease record")
+                },
+                |root| {
+                    let written =
+                        runtime().block_on(write_lease_record(&lease_path(root), &lease(200)));
+                    assert!(
+                        matches!(written, Err(StoreError::Io(_))),
+                        "the refused write fails the lease write: {written:?}"
+                    );
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        ["instance.json"],
+                        "the failed write leaves no temporary file"
+                    );
+                },
+                |root, before| {
+                    assert_eq!(
+                        std::fs::read(lease_path(root)).expect("the lease record"),
+                        before,
+                        "the lease record is byte-identical"
+                    );
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        ["instance.json"]
+                    );
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_lease_start_and_publishes_no_lease() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_lease_start_and_publishes_no_lease",
+                |_root| (),
+                |root| {
+                    let runtime = runtime();
+                    let started = runtime.block_on(start_realm_lease_in(
+                        root,
+                        REALM,
+                        Some("instance"),
+                        "rpc",
+                    ));
+                    let error = started.as_ref().err().map(ToString::to_string);
+                    if let Ok(guard) = started {
+                        runtime.block_on(guard.shutdown());
+                    }
+                    assert!(error.is_some(), "the refused write fails the lease start");
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        Vec::<String>::new(),
+                        "no lease record and no temporary file"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(
+                        files_under(&realm_lease_dir(&realm_paths_in(root, REALM))),
+                        Vec::<String>::new()
+                    );
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_manifest_lock_and_leaves_no_lock_file() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_manifest_lock_and_leaves_no_lock_file",
+                |_root| (),
+                |root| {
+                    let lock_path = root.join(".realm_manifest.lock");
+                    let runtime = runtime();
+                    let acquired = runtime.block_on(ManifestLockGuard::acquire(&lock_path, REALM));
+                    let error = acquired.as_ref().err().map(ToString::to_string);
+                    // A guard removes its file on a task of the runtime.
+                    drop(acquired);
+                    assert!(
+                        error.is_some(),
+                        "the refused write fails the lock acquisition"
+                    );
+                    assert!(
+                        !lock_path.exists(),
+                        "the failed acquisition leaves no lock file behind"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(files_under(root), Vec::<String>::new());
+                },
+            );
+        }
+
+        #[test]
+        fn a_refused_write_fails_the_first_start_reservation_and_leaves_no_marker() {
+            with_writes_refused(
+                module_path!(),
+                "a_refused_write_fails_the_first_start_reservation_and_leaves_no_marker",
+                |_root| (),
+                |root| {
+                    let candidates = [root.join("a"), root.join("b")];
+                    let opened = runtime().block_on(ensure_realm_manifest_pin_with_candidates(
+                        &candidates[0],
+                        &candidates,
+                        REALM,
+                        None,
+                        None,
+                        None,
+                    ));
+                    assert!(
+                        matches!(opened, Err(RealmFirstStartError::Store(StoreError::Io(_)))),
+                        "the refused write fails the first start: {opened:?}"
+                    );
+                    assert_eq!(
+                        files_under(root),
+                        Vec::<String>::new(),
+                        "no marker in any candidate root, and no manifest"
+                    );
+                },
+                |root, ()| {
+                    assert_eq!(files_under(root), Vec::<String>::new());
+                    let candidates = [root.join("a"), root.join("b")];
+                    runtime()
+                        .block_on(ensure_realm_manifest_pin_with_candidates(
+                            &candidates[0],
+                            &candidates,
+                            REALM,
+                            None,
+                            None,
+                            None,
+                        ))
+                        .expect("the first start once writes work");
+                },
+            );
+        }
+    }
 }
 
 /// Filesystem-backed [`meerkat_core::RealmConfigSource`] shared by every

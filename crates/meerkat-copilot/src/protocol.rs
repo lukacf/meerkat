@@ -675,6 +675,79 @@ pub struct CopilotModelSupports {
     pub max_thinking_budget: Option<u32>,
     #[serde(default)]
     pub min_thinking_budget: Option<u32>,
+    /// The reasoning effort levels the entry states for the model
+    /// (`capabilities.supports.reasoning_effort`), as the list words them.
+    /// Every string of the array is kept, a word that names no
+    /// [`EffortLevel`] and a repeated word included, so the statement
+    /// serializes as it was read and two lists that state different words
+    /// compare as different. `None` when the entry states no levels: the
+    /// field is absent, `null`, or anything other than an array. Elements of
+    /// the array that are not strings are skipped. A value of any other
+    /// shape never fails the parse of the model list.
+    /// [`Self::stated_effort_levels`] reads the levels.
+    ///
+    /// [`EffortLevel`]: meerkat_core::model_profile::capabilities::EffortLevel
+    #[serde(default, deserialize_with = "stated_reasoning_effort")]
+    pub reasoning_effort: Option<Vec<String>>,
+}
+
+impl CopilotModelSupports {
+    /// The reasoning effort levels the account's list states for the model:
+    /// `None` when its entry states none, otherwise the stated words that
+    /// name an [`EffortLevel`], each once, in the order the enum declares
+    /// them (`none` to `max`). A word that names no level is left out, so a
+    /// statement of such words only is `Some` and empty, like an empty
+    /// statement: the entry states that the model takes none of the levels
+    /// Meerkat knows.
+    ///
+    /// [`EffortLevel`]: meerkat_core::model_profile::capabilities::EffortLevel
+    #[must_use]
+    pub fn stated_effort_levels(
+        &self,
+    ) -> Option<Vec<meerkat_core::model_profile::capabilities::EffortLevel>> {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        let stated = self.reasoning_effort.as_ref()?;
+        let levels: std::collections::BTreeSet<EffortLevel> = stated
+            .iter()
+            .filter_map(|word| EffortLevel::from_wire_str(word))
+            .collect();
+        Some(levels.into_iter().collect())
+    }
+}
+
+/// Reads [`CopilotModelSupports::reasoning_effort`] without ever refusing
+/// the value: an array gives its strings, in order, and skips every other
+/// element; any other value gives `None`.
+fn stated_reasoning_effort<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Statement {
+        Array(Vec<Element>),
+        Other(serde::de::IgnoredAny),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Element {
+        Word(String),
+        Other(serde::de::IgnoredAny),
+    }
+
+    Ok(match Statement::deserialize(deserializer)? {
+        Statement::Array(elements) => Some(
+            elements
+                .into_iter()
+                .filter_map(|element| match element {
+                    Element::Word(word) => Some(word),
+                    Element::Other(_) => None,
+                })
+                .collect(),
+        ),
+        Statement::Other(_) => None,
+    })
 }
 
 /// The state of the account's policy for a model, as `/models` states it.

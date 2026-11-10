@@ -43,6 +43,11 @@ them.
   answer. On the wire the field is optional and left out when absent, so a
   client that does not read it is unaffected.
 
+- `meerkat-copilot`: `CopilotModelSupports` gains the field
+  `reasoning_effort: Option<Vec<String>>` (see Added). Code that builds it
+  with a struct literal sets the new field or ends the literal with
+  `..Default::default()`; `None` is an entry that states no levels.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
@@ -112,6 +117,21 @@ them.
   `WireMemberInputAdmission`. The SDKs keep it on the member-send receipt
   (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
   answer without it.
+
+- `meerkat-copilot`: Meerkat reads the reasoning effort levels a GitHub
+  Copilot account's model list states per model
+  (`capabilities.supports.reasoning_effort`). `CopilotModelSupports` keeps
+  the statement as the list words it in `reasoning_effort`, and
+  `CopilotModelSupports::stated_effort_levels` returns it as `EffortLevel`s:
+  `None` when the entry states none, otherwise the stated levels, each once,
+  from `none` to `max`; a word that names no level is left out. The read is
+  tolerant: a value that is not an array states no levels, array elements
+  that are not strings are skipped, and neither fails the model list. No
+  request changes: nothing Meerkat sends to Copilot reads the levels yet,
+  and the account capability gate does not check them. The levels are part
+  of what a Copilot route compares, so when a refreshed list states other
+  levels for a session's model, the session's prepared route is rebuilt, as
+  it already is when the list changes another capability of the model.
 
 ### Changed
 

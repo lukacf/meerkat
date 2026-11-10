@@ -413,3 +413,49 @@ async fn catalog_scope_requires_explicit_parent_and_uses_exact_original_session(
             .is_none()
     );
 }
+
+/// A not-issued MCP decision keeps its live attachment and its catalog
+/// choice: another destination, or an added catalog grant that the parent
+/// grant would admit, under its route and decision id is answered as a
+/// conflict and issues nothing.
+#[tokio::test]
+async fn not_issued_mcp_access_refuses_a_changed_live_attachment_or_catalog() {
+    let dir = directory();
+    let path = dir.path().join("grants");
+    let config = config();
+    let selected = selection(&config);
+    let decision = live_decision(&config);
+    let mut with_catalog = decision.clone();
+    with_catalog.catalog = Some(PrivateServiceMcpCatalog::OriginalSession);
+    let adapter = selected_adapter_for_decision(
+        initialized(&path),
+        &dir.path().join("originals"),
+        &selected,
+        &with_catalog,
+    )
+    .await;
+    let ended = not_issued_mcp_access(&adapter, &decision, &selected).await;
+    let mut destination = decision;
+    let session = meerkat_core::SessionId::new();
+    let target = &mut destination.live_attachment.as_mut().unwrap().destination;
+    target.context = EvidenceId::new(session.to_string()).unwrap();
+    target.logical_runtime =
+        EvidenceId::new(meerkat_runtime::LogicalRuntimeId::for_session(&session).to_string())
+            .unwrap();
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "live attachment destination",
+        apply(&adapter, destination, selected.clone()),
+    )
+    .await;
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "catalog",
+        apply(&adapter, with_catalog, selected),
+    )
+    .await;
+}

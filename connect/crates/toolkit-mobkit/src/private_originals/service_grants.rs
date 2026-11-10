@@ -1834,6 +1834,131 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before, "nothing is issued");
     }
 
+    /// The decision a host lost before its native issuance left pending, with
+    /// no grant recorded, which the next installed host's cold start ended as
+    /// not issued: the decision and its ended row.
+    async fn not_issued_access(
+        adapter: &PrivateOriginals,
+        owner: &ToolkitOriginalOwner,
+    ) -> (PrivateServiceAccessDecision, StoredRecord) {
+        let pending = admit_lost_pending_access(adapter, owner, &[("unrecorded", false)]).await;
+        adapter.select_installed_pair_recovery().unwrap();
+        adapter.reconcile_pending_access().await.unwrap();
+        let (request, _, key) = pending.into_iter().next().unwrap();
+        let ended = adapter.store.get(&key).await.unwrap().unwrap();
+        assert_eq!(ended.data.body["issuance"]["state"], "not_issued");
+        (request, ended)
+    }
+
+    /// Apply a changed proposal under an ended decision's route and decision
+    /// id: it must be answered as a conflict, leave the ended row as it was
+    /// and issue nothing.
+    pub(super) async fn refuse_changed_proposal(
+        adapter: &PrivateOriginals,
+        journal: &std::path::Path,
+        ended: &StoredRecord,
+        part: &str,
+        apply: impl std::future::Future<
+            Output = Result<PrivateServiceGrantObservation, PrivateOriginalError>,
+        >,
+    ) {
+        let before = std::fs::read(journal).unwrap();
+        let applied = apply.await;
+        let stored = adapter.store.get(&ended.key).await.unwrap().unwrap();
+        let issued = std::fs::read(journal).unwrap() != before;
+        assert!(
+            matches!(applied, Err(PrivateOriginalError::Conflict)) && stored == *ended && !issued,
+            "a changed {part} under the ended decision's route and id was answered {}, its row \
+             now reads {}, and the native owner issued a grant: {issued}",
+            match &applied {
+                Ok(observation) => format!("{:?}", observation.state),
+                Err(error) => format!("{error:?}"),
+            },
+            stored.data.body["issuance"]["state"]
+        );
+    }
+
+    /// A decision ended as not issued is replaced only by an approval of the
+    /// same proposal. A changed permission under its route and decision id is
+    /// answered as a conflict and issues nothing; a refreshed approval of the
+    /// same proposal, with new evidence, still issues the grant once.
+    #[tokio::test]
+    async fn not_issued_access_refuses_a_changed_permission() {
+        let directory = directory();
+        let path = directory.path().join("grants");
+        let owner = crate::original_ingress::tests::initialized(&path);
+        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+        let (request, ended) = not_issued_access(&adapter, &owner).await;
+        let mut resource = request.clone();
+        resource.permission.resource = Id::new("account-two").unwrap();
+        refuse_changed_proposal(
+            &adapter,
+            &path,
+            &ended,
+            "resource",
+            adapter.apply_service_access_decision(resource),
+        )
+        .await;
+        let mut operation = request.clone();
+        operation.permission.operation = Id::new("send-message").unwrap();
+        refuse_changed_proposal(
+            &adapter,
+            &path,
+            &ended,
+            "operation",
+            adapter.apply_service_access_decision(operation),
+        )
+        .await;
+        let mut refreshed = request;
+        refreshed.evidence.revision = EvidenceId::new("2").unwrap();
+        refreshed.evidence.sha256 = "b".repeat(64);
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            adapter
+                .apply_service_access_decision(refreshed.clone())
+                .await
+                .unwrap()
+                .state,
+            PrivateServiceGrantState::GrantIssued
+        );
+        let issued = std::fs::read(&path).unwrap();
+        assert_ne!(issued, before, "the refreshed approval issued the grant");
+        assert_eq!(
+            adapter
+                .apply_service_access_decision(refreshed)
+                .await
+                .unwrap()
+                .state,
+            PrivateServiceGrantState::GrantIssued
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            issued,
+            "nothing issues twice"
+        );
+    }
+
+    /// A decision ended as not issued keeps its choice: a denial under its
+    /// route and decision id is answered as a conflict and changes nothing.
+    #[tokio::test]
+    async fn not_issued_access_refuses_a_changed_choice() {
+        let directory = directory();
+        let path = directory.path().join("grants");
+        let owner = crate::original_ingress::tests::initialized(&path);
+        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+        let (request, ended) = not_issued_access(&adapter, &owner).await;
+        let mut denied = request;
+        denied.choice = PrivateAccessChoice::Deny;
+        refuse_changed_proposal(
+            &adapter,
+            &path,
+            &ended,
+            "choice",
+            adapter.apply_service_access_decision(denied),
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn task_access_cannot_be_bound_to_sibling_original() {
         let directory = directory();

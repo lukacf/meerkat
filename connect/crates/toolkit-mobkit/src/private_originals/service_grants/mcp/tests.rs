@@ -1,5 +1,6 @@
 //! Actual native issuance and retained source controls. No MCP process or input
 //! is admitted here. The protected parent-review control lives with OperatorSetup.
+use super::super::tests::refuse_changed_proposal;
 use super::*;
 use crate::original_ingress::tests::{claims, initialized, private_event, source};
 use meerkat_authorization_contracts::constraints::DomainRestriction;
@@ -797,6 +798,128 @@ async fn narrowed_intermediate_parent_cannot_restore_removed_connector_approval(
         PrivateServiceGrantState::GrantUnavailable
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// Admit `decision`'s row with `selected` as pending native issuance, as a
+/// host lost before its native issuance leaves it, under the route's parent
+/// grant, and settle it at the next installed host's cold start: the native
+/// owner recorded no grant, so the row ends as not issued.
+async fn not_issued_mcp_access(
+    adapter: &PrivateOriginals,
+    decision: &PrivateServiceMcpAccessDecision,
+    selected: &ServiceMcpSelection,
+) -> StoredRecord {
+    let route = adapter.routes.get().unwrap()[0].clone();
+    let reference = PrivateOriginals::service_mcp_reference(decision, selected).unwrap();
+    let key = adapter.access_key(&reference).unwrap();
+    let record = AccessRecord {
+        decision: AccessDecision::Mcp(decision.clone()),
+        caller: route.grant_caller,
+        parent: route.application_parent.unwrap(),
+        issuance: IssuanceObservation::PendingNativeIssuance,
+        mcp: Some(selected.0.clone()),
+        application_policy: None,
+    };
+    adapter
+        .store
+        .admit(AdmissionRequest {
+            key: key.clone(),
+            admission_key: key.id.clone(),
+            data: encode_access(&record).unwrap(),
+            events: vec![],
+            effects: vec![],
+        })
+        .await
+        .unwrap();
+    adapter.select_installed_pair_recovery().unwrap();
+    adapter.reconcile_pending_access().await.unwrap();
+    let ended = adapter.store.get(&key).await.unwrap().unwrap();
+    assert_eq!(ended.data.body["issuance"]["state"], "not_issued");
+    ended
+}
+
+/// A not-issued MCP decision is replaced only by an approval of the same
+/// proposal. A changed operation set under its route and decision id is
+/// answered as a conflict and issues nothing, though the parent grant would
+/// admit it; an exact retry still issues the grant once.
+#[tokio::test]
+async fn not_issued_mcp_access_refuses_changed_operations() {
+    let dir = directory();
+    let path = dir.path().join("grants");
+    let selected = selection(&config());
+    let adapter =
+        selected_adapter(initialized(&path), &dir.path().join("originals"), &selected).await;
+    let ended = not_issued_mcp_access(&adapter, &decision(), &selected).await;
+    let mut changed = decision();
+    changed
+        .permission
+        .operations
+        .remove(&Id::new("list-labels").unwrap());
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "operation set",
+        apply(&adapter, changed, selected.clone()),
+    )
+    .await;
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        apply(&adapter, decision(), selected.clone())
+            .await
+            .unwrap()
+            .state,
+        PrivateServiceGrantState::GrantIssued
+    );
+    let issued = std::fs::read(&path).unwrap();
+    assert_ne!(issued, before, "the exact retry issued the grant");
+    assert_eq!(
+        apply(&adapter, decision(), selected).await.unwrap().state,
+        PrivateServiceGrantState::GrantIssued
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        issued,
+        "nothing issues twice"
+    );
+}
+
+/// A not-issued MCP decision keeps its MCP selection: another account of the
+/// same connector, or no connector, under its route and decision id is
+/// answered as a conflict and issues nothing.
+#[tokio::test]
+async fn not_issued_mcp_access_refuses_a_changed_selection() {
+    let dir = directory();
+    let path = dir.path().join("grants");
+    let config = config();
+    let selected = selection(&config);
+    let adapter =
+        selected_adapter(initialized(&path), &dir.path().join("originals"), &selected).await;
+    let ended = not_issued_mcp_access(&adapter, &decision(), &selected).await;
+    let mut other_account = config.clone();
+    other_account.connector.as_mut().unwrap().account = "other-account".into();
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "connector account",
+        apply(&adapter, decision(), selection(&other_account)),
+    )
+    .await;
+    let mut no_connector = config;
+    no_connector.connector = None;
+    refuse_changed_proposal(
+        &adapter,
+        &path,
+        &ended,
+        "connector",
+        apply(
+            &adapter,
+            decision(),
+            ServiceMcpSelection::no_connector(&no_connector).unwrap(),
+        ),
+    )
+    .await;
 }
 
 mod service_instruction;

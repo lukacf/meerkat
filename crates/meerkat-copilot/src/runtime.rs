@@ -13070,6 +13070,154 @@ mod tests {
             );
         }
 
+        /// A model listing of `gpt-test` and `gpt-other`, both served on
+        /// Responses. `gpt-test` states `levels` as its reasoning effort
+        /// levels; `gpt-other` states the same ones in every listing.
+        fn listing_stating_levels(levels: &[&str]) -> CopilotHttpResponse {
+            json_response(
+                200,
+                serde_json::json!({
+                    "data": [
+                        {
+                            "id": "gpt-test",
+                            "supported_endpoints": ["/responses"],
+                            "capabilities": {
+                                "supports": {"streaming": true, "reasoning_effort": levels}
+                            }
+                        },
+                        {
+                            "id": "gpt-other",
+                            "supported_endpoints": ["/responses"],
+                            "capabilities": {
+                                "supports": {
+                                    "streaming": true,
+                                    "reasoning_effort": ["low", "medium", "high"]
+                                }
+                            }
+                        }
+                    ]
+                }),
+            )
+        }
+
+        /// A session's routed client for `gpt-test` on `account`, as its
+        /// concrete type and built as [`routed_client`] builds it, so a row
+        /// can ask it to refresh its prepared route.
+        async fn concrete_routed_client(account: &RouteAccount) -> CopilotRoutedClient {
+            let resolved = account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .expect("the session's auth resolves");
+            let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: account.binding.backend(),
+                backend_profile: account.binding.backend_profile().clone(),
+                credential_identity: account.binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            };
+            let factory: CopilotRouteClientFactory = Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+            let route = account
+                .runtime
+                .resolve_route(&connection, Provider::OpenAI, "gpt-test")
+                .expect("the resolution cached a route");
+            let schema_compiler = factory(&route, &connection).expect("the stand-in adapter");
+            CopilotRoutedClient {
+                runtime: Arc::clone(&account.runtime),
+                prepared_route: RwLock::new(PreparedCopilotRoute {
+                    fingerprint: CopilotRouteFingerprint::from(&route),
+                    client: capability_gated_client(
+                        Arc::clone(&schema_compiler),
+                        route.capabilities.clone(),
+                    ),
+                }),
+                connection,
+                provider: Provider::OpenAI,
+                model: "gpt-test".to_string(),
+                factory,
+                schema_compiler,
+            }
+        }
+
+        /// A route's identity compares what the account's list states about
+        /// the model's capabilities, its reasoning effort levels included:
+        /// once a refreshed list states other levels for a model, the model
+        /// resolves to a different route and a session's prepared route is
+        /// rebuilt. A model whose entry did not change keeps its route.
+        #[tokio::test]
+        async fn a_list_that_changes_a_models_levels_changes_its_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                listing_stating_levels(&["low", "medium", "high"]),
+                listing_stating_levels(&["low", "medium", "high", "xhigh"]),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let client = concrete_routed_client(&account).await;
+            assert_eq!(transport.request_count(), 2, "one mint and one listing");
+            let state = account
+                .runtime
+                .connection_state(&client.connection)
+                .expect("the account's state");
+            let loaded_list = || {
+                state
+                    .cache
+                    .read()
+                    .as_ref()
+                    .and_then(|cached| cached.models.clone())
+                    .expect("a loaded model list")
+            };
+            let fingerprint = |model: &str| {
+                CopilotRouteFingerprint::from(
+                    &resolve_route_for_state(&state, Provider::OpenAI, model)
+                        .expect("a cached route"),
+                )
+            };
+            let first_list = loaded_list();
+            let first = fingerprint("gpt-test");
+            let first_other = fingerprint("gpt-other");
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the list did not change, so the prepared route stands"
+            );
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            // The next request preparation starts it off the request path.
+            clock.set(301);
+            client
+                .connection
+                .resolved_authorizer()
+                .expect("the route's authorizer")
+                .prepare_request()
+                .await
+                .expect("the token is fresh");
+            settle(|| !Arc::ptr_eq(&first_list, &loaded_list())).await;
+            assert_eq!(transport.request_count(), 3, "one more listing");
+
+            assert!(
+                fingerprint("gpt-other") == first_other,
+                "a model whose entry did not change keeps its route"
+            );
+            assert!(
+                fingerprint("gpt-test") != first,
+                "a list that states other reasoning effort levels for the model is another route"
+            );
+            assert!(
+                client.refresh_prepared_route().expect("the route resolves"),
+                "the prepared route is rebuilt for the levels the list now states"
+            );
+            assert!(
+                !client.refresh_prepared_route().expect("the route resolves"),
+                "the rebuilt route stands while the list does not change"
+            );
+        }
+
         /// A model listing 403 that asks for no account action (a policy, an
         /// integration the account does not allow) is a discovery failure:
         /// the token keeps serving, the sign-in stays valid, and the list is

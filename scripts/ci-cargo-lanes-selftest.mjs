@@ -2341,6 +2341,28 @@ for (const path of [
     "a row whose targets are all checks every target",
   );
   assert.ok(closureCheck.includes("          ROW_FEATURES: ${{ matrix.features }}"), "each closure-check job checks its row's features");
+  // Each closure-check job uploads its sccache log under a name of its own:
+  // after a Core change a product's two parts (every feature, default
+  // features) share the product, and a second upload under one name fails.
+  {
+    const upload = closureCheck.find((line) => line.startsWith("          name: sccache-log-closure-check-"));
+    assert.ok(upload, "the closure-check job uploads its sccache log");
+    const template = upload.trim().slice("name: ".length);
+    const planned = run(["--format", "github", "--", "crates/meerkat-core/src/lib.rs"]);
+    assert.equal(planned.status, 0, planned.stderr);
+    const outputs = Object.fromEntries(
+      planned.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+    );
+    const rows = JSON.parse(outputs.closure_check_matrix).include;
+    assert.ok(rows.some((row) => row.features === "default"), "a Core change plans default-feature closure-check rows");
+    const names = rows.map((row) =>
+      template.replace(/\$\{\{ matrix\.([a-z_]+) \}\}/g, (_, key) => {
+        assert.ok(Object.hasOwn(row, key), `the closure-check matrix carries ${key}, which the upload name reads`);
+        return String(row[key]);
+      }),
+    );
+    assert.equal(new Set(names).size, names.length, `each closure-check job uploads its sccache log under a name of its own: ${names.join(", ")}`);
+  }
   // The check step itself, run with a stub scripts/repo-cargo that prints
   // its arguments: each row checks its part's targets with its features.
   {

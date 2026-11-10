@@ -7,6 +7,8 @@
 //! route, what a client observes about it, the typed refusal of a level, and
 //! the reports of the level a request was sent with. It decides nothing.
 
+mod resolve;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};

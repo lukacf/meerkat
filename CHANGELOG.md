@@ -499,6 +499,18 @@ them.
   check that a binding's credential resolves without reading it, run
   `rkat auth test <BINDING_ID>`.
 
+- A configuration that defines one of this release's new catalog models
+  itself must drop that entry when upgrading. Model IDs are unique across
+  the catalog, `[models.<id>]` entries and self-hosted models, and this
+  release adds `claude-fable-5-2` and `gemini-4-carbon` to the catalog. If
+  your realm or project configuration has `[models.claude-fable-5-2]` or
+  `[models.gemini-4-carbon]` (for example because you ran the model before
+  the catalog listed it), configuration validation now refuses it with
+  "model id '<id>' must be unique across built-in, custom, and self-hosted
+  entries". Remove the entry; the catalog row then serves the model with
+  its own limits and capabilities. The same applies whenever a release adds
+  a model you had defined yourself.
+
 ### Known limitations
 
 - File tools: `apply_patch` and `blob_save_file` check a path against the

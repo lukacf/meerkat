@@ -43,6 +43,21 @@ them.
   answer. On the wire the field is optional and left out when absent, so a
   client that does not read it is unaffected.
 
+- `meerkat-sqlite`, `meerkat-store`, `meerkat-runtime`, `meerkat-workgraph`:
+  every public signature that names a rusqlite type names rusqlite 0.41's
+  (`Connection`, `Transaction`, `Error`, `FromSql`, `ValueRef`), no longer
+  0.37's. They include `meerkat_sqlite::Connection` (a re-export of
+  `rusqlite::Connection`), `meerkat_sqlite::open`, `open_with` and
+  `begin_immediate`, `meerkat_sqlite::SqliteStoreError` and
+  `meerkat_store::StoreError` (`From<rusqlite::Error>` and their
+  `rusqlite::Error` sources), `meerkat_sqlite::classify_sqlite_error` and
+  `is_busy_or_locked`, the ledger's `Migration::apply`,
+  `SchemaDomain::initialize_current` and `MaintenancePrepareFn`, and the
+  connection and `*_in_txn` functions of `meerkat_store::sqlite_store`.
+  Code that passes these types to or from its own rusqlite moves to
+  rusqlite 0.41 with Meerkat (see Upgrade notes). The semver gate does not
+  measure which version of a dependency's type a signature names.
+
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
@@ -234,6 +249,40 @@ them.
   JSON-RPC `auth/profile/get` returns, and never a credential value.
   Affects 0.6.0 through 0.9.11.
 
+- `meerkat-auth-core`: MCP OAuth discovery reads at most 1 MiB of each
+  document a server answers with: the protected resource metadata, the
+  authorization server metadata (RFC 8414 or OpenID Connect discovery, the
+  account preflight's OpenID Connect configuration included) and the dynamic
+  client registration response. These reads had no size bound, so the MCP
+  server being authorized, or the authorization server it names, could
+  stream a document into memory until a time bound ended the read, before
+  any authentication. A larger document is now refused once 1 MiB has
+  arrived and the rest is never read: discovery and registration fail with
+  `upstream_failure`, the account preflight with `verification_unavailable`,
+  and the error names none of the document's content. Affects 0.6.34
+  through 0.9.11.
+
+- `meerkat-mcp`: rmcp's built-in reqwest Streamable HTTP client is no longer
+  built (meerkat-mcp stopped enabling rmcp's unused
+  `transport-streamable-http-client-reqwest` feature), and reqwest 0.13,
+  which only that client used, leaves the dependency graph of every Meerkat
+  binary. RUSTSEC-2026-0462 (unbounded response bodies in that client, rmcp
+  before 3.9.0) does not affect Meerkat, whose own MCP client bounds every
+  response body and SSE event at 64 MiB, so an audit that reports rmcp 1.8
+  by version can ignore it.
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): rusqlite is updated to
+  0.41.1 and libsqlite3-sys to 0.39.1, in Cargo.lock and in the example
+  workspaces' lockfiles, and Meerkat's crates require rusqlite 0.41.1.
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  (`-wal`) of a different page size, so a crafted pair of files placed where
+  a Meerkat process opens its stores (a project-local `.rkat` directory in a
+  checkout, for example) could expose that process's memory. Stored values
+  keep their encoding: Meerkat's crates enable rusqlite's `fallible_uint`
+  feature, which keeps the range-checked u64 and usize conversions that
+  rusqlite 0.37 had. Affects 0.4.7 through 0.9.11.
+
 - `meerkat-tools`: the in-process file tools `apply_patch` and
   `blob_save_file` wrote any path inside the project root, the engine's own
   directory `<project root>/.rkat/` included. A host reads that directory at
@@ -296,11 +345,21 @@ them.
 
 ### Upgrade notes
 
+- An application that depends on rusqlite (or libsqlite3-sys) itself moves
+  to rusqlite 0.41 (libsqlite3-sys 0.39) together with Meerkat:
+  libsqlite3-sys links one SQLite per build (`links = "sqlite3"`), so Cargo
+  refuses a graph that holds rusqlite 0.37 next to Meerkat's rusqlite 0.41.
+  The rusqlite types Meerkat's API names are rusqlite 0.41's, for example
+  `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`) and
+  the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
+  carries.
+
 - Agents cannot change engine configuration with the file tools any more
   (see Security and Changed). If you asked an agent to edit `.rkat/mcp.toml`,
   `.rkat/config.toml` or a file under `.rkat/skills/`, make the change with
   `rkat mcp add`, `rkat config set` or `rkat config patch`, `rkat skill add`,
   or edit the file yourself.
+
 - If you run `rkat-rpc` or `rkat-mcp` (directly or through the Python or
   TypeScript SDK) and let agents write files, start the server with a
   context root: `--context-root <dir>`, or the SDK option `context_root` /
@@ -308,9 +367,11 @@ them.
   lies outside it. Without one, files still land in the realm directory as
   before, the realm's documents are refused, and the realm's stores remain
   writable by the file tools.
+
 - An agent can no longer write a `.rkat` directory anywhere under its
   project root, not only the one at the root: a nested project's
   `.rkat/mcp.toml`, hooks, skills or realm is changed by its operator.
+
 - A Rust host that keeps its realm state, config documents or credential
   store inside the project root it gives its tools, outside `.rkat`, should
   declare them with `AgentFactory::with_protected_host_inputs`.

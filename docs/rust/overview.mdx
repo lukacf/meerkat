@@ -118,7 +118,7 @@ adapter types remain owned by `meerkat-live`.
 
 <Note>
 Meerkat's stores run on the SQLite that `libsqlite3-sys` bundles, whose
-defaults put every connection in the process behind three process-wide locks.
+defaults put every connection in the process behind process-wide locks.
 Build your application with
 `LIBSQLITE3_FLAGS="-DSQLITE_DEFAULT_MEMSTATUS=0 -USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS"`
 (for example in the `[env]` table of your workspace's `.cargo/config.toml`),

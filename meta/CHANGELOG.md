@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Meta 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12 and Connect
+0.9.12, released together) and pins Core `=0.9.12`.
+
+Meta serves identities created at runtime: a send by name, a dispatch, a
+member mutation or a schedule fire to one goes through the identity's door
+instead of answering `-32001`. See Breaking, Fixed and Known limitations.
+
+`meta_gateway` with persistent sessions keeps its metadata and its console
+log across a restart, and a retirement's harvest and distillation wait out a
+busy agent memory budget instead of ending failed. See Fixed.
+
+Forge runs the Meerkat release it is built from. An existing Forge folder
+starts a fresh setup team on its first start. See Upgrade and Changed.
+
 ### Breaking
 
 - Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
@@ -75,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Upgrade
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
-  from (0.9.11), so an existing Forge folder starts a fresh setup team in its
+  from, so an existing Forge folder starts a fresh setup team in its
   state directory on its first start. Saved setups, proposals, provider
   settings and installed applications stay, and the previous setup team's
   state is kept unchanged, but the new team does not recall earlier
@@ -146,9 +160,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   timeout.
 
 - Forge runs the Meerkat release it is built from instead of older pinned
-  releases. Its Guide runs that release's Meta and Core (0.9.11; until now
+  releases. Its Guide runs that release's Meta and Core (until now
   Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
-  published Meta from the monorepo's `meta-v` release (0.9.11; until now the
+  published Meta from the monorepo's `meta-v` release (until now the
   standalone repository's 0.9.6), and the protected application receiver
   selects that release (until now Meta 0.9.7 with Core 0.9.8). A source
   checkout installs its own `sdk/python` for the Guide, and a packaged Forge
@@ -226,7 +240,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   persistent. A store that does not open refuses `meta/init` with `-32014`.
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
-  keeps both in memory, as before.
+  keeps both in memory, as before. With persistent sessions, the two 0.9.11
+  known limitations on `meta_gateway`'s metadata and console log no longer
+  apply.
 
 - Forge: **Rebuild with updated runtime** on an application built without a
   selected product runtime (an ordinary application an earlier Forge built)
@@ -341,6 +357,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Meta's build preparer before it wakes or restores a member, not before
   the member it starts at a create, and Meta attaches its tool dispatcher
   to the builds of a registered identity's member only.
+
+- The realm's agent memory background budget still admits at most
+  `runtime_options.agent_memory.distiller.runs_per_hour` runs an hour (12
+  by default): in a burst of retirements past it, the harvests and
+  distillations that no run frees up for within their wait end unrun
+  (`budget_busy`), and their discards stay in the session's memory scope.
+  Raise `runs_per_hour`, or spread the retirements out.
+
+- On a console whose visibility policy includes nested mob members (the policy
+  trait's default; the stock gateway policy does not), a temporary council's
+  participants are listed as members, and their stored history holds a copy of
+  the source member's earlier turns: a caller denied the source can read them
+  through a participant. Affects 0.8.27 through 0.9.12. Keep the stock policy,
+  or deny the participants by name (`council-p0`, ...). The next release no
+  longer lists them.
+
+- A mob that a member private to one person created with the agent mob
+  tools is recorded as private to no one once the process restarts. A host
+  whose console visibility policy lists nested mobs can then show that
+  mob's members to people the private member itself is hidden from. The
+  stock console lists no nested mob, so it does not show them.
 
 ## [0.9.11] - 2026-11-09
 

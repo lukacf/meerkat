@@ -619,6 +619,214 @@ mod tests {
         }
     }
 
+    /// The typed owners of the run and resume paths each give a failure
+    /// document whose code is their public code, with the stderr text as its
+    /// message, and keep their exit status.
+    #[test]
+    fn a_typed_failure_before_the_turn_prints_its_code() {
+        let id = SessionId::new();
+        let cases = [
+            (
+                crate::runtime_accept_failure(
+                    RuntimeDriverError::InputRefused {
+                        refusal: meerkat_core::OperationRefused::new(
+                            meerkat_core::OperationRefusalKind::Denied,
+                        ),
+                    },
+                    &Some("grant the route".to_string()),
+                ),
+                "INPUT_REFUSED",
+                50,
+            ),
+            (
+                crate::runtime_accept_failure(
+                    RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: meerkat_core::authorization::ControllerReadinessFailure::Busy,
+                    },
+                    &None,
+                ),
+                "INPUT_NOT_READY",
+                51,
+            ),
+            (
+                crate::session_err_to_anyhow(SessionError::Busy { id: id.clone() }),
+                "SESSION_BUSY",
+                11,
+            ),
+            (
+                crate::session_err_to_anyhow(SessionError::Agent(AgentError::BuildError(
+                    "no provider key".into(),
+                ))),
+                "PROVIDER_ERROR",
+                20,
+            ),
+            (session_not_found(&id), "SESSION_NOT_FOUND", 10),
+            (
+                typed_failure(AgentError::Cancelled, |_| "request cancelled".to_string()),
+                "REQUEST_CANCELLED",
+                14,
+            ),
+        ];
+        for (error, code, status) in cases {
+            let document = serde_json::to_value(failure_document(&error)).unwrap();
+            assert_eq!(document["error"]["code"], code, "{error}");
+            assert_eq!(document["error"]["message"], error.to_string(), "{error}");
+            let expected = failure_error_code(&error).expect("a typed owner with a code");
+            assert_eq!(
+                document["error"]["category"],
+                serde_json::json!(expected.category()),
+                "{error}"
+            );
+            assert_eq!(failure_exit_status(&error), status, "{error}");
+        }
+    }
+
+    /// A typed session error's wire data is the document's details.
+    #[test]
+    fn a_session_error_document_carries_its_wire_data() {
+        let id = SessionId::new();
+        let error = crate::session_err_to_anyhow(SessionError::ServedElsewhere { id: id.clone() });
+        let document = serde_json::to_value(failure_document(&error)).unwrap();
+        assert_eq!(document["error"]["code"], "SESSION_BUSY");
+        assert_eq!(
+            document["error"]["details"],
+            serde_json::json!({
+                "kind": "session_served_elsewhere",
+                "session_id": id.to_string(),
+            })
+        );
+        // An error without wire data has no details key at all.
+        let plain = serde_json::to_value(failure_document(&session_not_found(&id))).unwrap();
+        assert!(plain["error"].get("details").is_none(), "{plain}");
+    }
+
+    /// A failure with no typed owner, and a typed owner without a public
+    /// code, print `INTERNAL_ERROR` with no details and exit 1.
+    #[test]
+    fn an_untyped_failure_prints_internal_error_and_exits_1() {
+        for error in [
+            anyhow::anyhow!("--comms-listen-tcp cannot be used with --no-comms"),
+            anyhow::Error::new(RuntimeDriverError::Destroyed),
+        ] {
+            let document = serde_json::to_value(failure_document(&error)).unwrap();
+            assert_eq!(
+                document,
+                serde_json::json!({
+                    "error": {
+                        "code": "INTERNAL_ERROR",
+                        "category": "internal",
+                        "message": error.to_string(),
+                    }
+                }),
+                "{error}"
+            );
+            assert_eq!(failure_exit_status(&error), crate::EXIT_ERROR, "{error}");
+        }
+    }
+
+    fn abandoned_turn(reason: &str, error: meerkat_core::TurnErrorMetadata) -> anyhow::Error {
+        match crate::completion_outcome_to_cli_runtime_turn_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: reason.to_string(),
+                error,
+            },
+            &SessionId::new(),
+            &meerkat_core::connection::RealmId::parse("cli-exit").unwrap(),
+            true,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("an abandoned completion is a failure"),
+        }
+    }
+
+    /// A failed turn's document carries the code of its cause kind (the
+    /// shared turn-failure mapping) and the typed turn error as
+    /// `details.error`; its stderr text is what it was before the error was
+    /// typed, and it still exits 1 whatever the document's code.
+    #[test]
+    fn a_failed_turn_prints_its_cause_code_and_exits_1() {
+        use meerkat_core::{TurnTerminalCauseKind as Kind, TurnTerminalOutcome as Outcome};
+        for (kind, outcome, code) in [
+            (Kind::LlmFailure, Outcome::Failed, "PROVIDER_ERROR"),
+            (Kind::RetryExhausted, Outcome::Failed, "PROVIDER_ERROR"),
+            (
+                Kind::TimeBudgetExceeded,
+                Outcome::TimeBudgetExceeded,
+                "BUDGET_EXHAUSTED",
+            ),
+            (Kind::HookDenied, Outcome::Failed, "HOOK_DENIED"),
+            (Kind::TurnLimitReached, Outcome::Failed, "INTERNAL_ERROR"),
+            (Kind::ToolFailure, Outcome::Failed, "INTERNAL_ERROR"),
+        ] {
+            let mut turn_error =
+                meerkat_core::TurnErrorMetadata::terminal(kind, outcome, "provider said no");
+            turn_error.retryable = Some(kind == Kind::LlmFailure);
+            let error = abandoned_turn("turn failed", turn_error.clone());
+            let text = format!(
+                "turn abandoned: turn failed; error={}",
+                serde_json::to_string(&turn_error).unwrap()
+            );
+            assert_eq!(error.to_string(), text, "{kind:?}");
+
+            let document = serde_json::to_value(failure_document(&error)).unwrap();
+            assert_eq!(document["error"]["code"], code, "{kind:?}");
+            assert_eq!(
+                document["error"]["code"],
+                serde_json::json!(meerkat_contracts::error::turn_failure_error_code(
+                    &turn_error
+                )),
+                "{kind:?}"
+            );
+            assert_eq!(document["error"]["message"], text, "{kind:?}");
+            assert_eq!(
+                document["error"]["details"],
+                serde_json::json!({ "error": turn_error }),
+                "{kind:?}"
+            );
+            assert_eq!(failure_exit_status(&error), crate::EXIT_ERROR, "{kind:?}");
+            assert_eq!(failure_error_code(&error), None, "{kind:?}");
+
+            // A shutdown failure joined onto it keeps the typed turn error.
+            let mut slot = Some(error);
+            crate::accumulate_anyhow_error(&mut slot, anyhow::anyhow!("drain failed"));
+            let joined = slot.expect("both failures are kept");
+            let joined_document = serde_json::to_value(failure_document(&joined)).unwrap();
+            assert_eq!(joined_document["error"]["code"], code, "{kind:?}");
+            assert_eq!(
+                joined_document["error"]["details"],
+                serde_json::json!({ "error": turn_error }),
+                "{kind:?}"
+            );
+            assert_eq!(failure_exit_status(&joined), crate::EXIT_ERROR, "{kind:?}");
+        }
+    }
+
+    /// A turn abandoned because its session's build refused a scoped tool
+    /// grant gate stays a failed turn on the CLI: exit status 1 and the
+    /// turn-failure document, with the typed refusal inside the turn error.
+    /// (JSON-RPC answers the same turn as an invalid-params refusal.)
+    #[test]
+    fn a_refused_grant_gate_turn_stays_a_failed_turn() {
+        let mut turn_error = meerkat_core::TurnErrorMetadata::terminal(
+            meerkat_core::TurnTerminalCauseKind::FatalFailure,
+            meerkat_core::TurnTerminalOutcome::Failed,
+            "grant gate refused",
+        );
+        turn_error.reason = Some(
+            meerkat_core::event::AgentErrorReason::ToolGrantGateRefused {
+                refusal: meerkat_core::tool_grant::GrantGateRefusal::NoGrantService,
+            },
+        );
+        let error = abandoned_turn("grant gate refused", turn_error.clone());
+        let document = serde_json::to_value(failure_document(&error)).unwrap();
+        assert_eq!(document["error"]["code"], "INTERNAL_ERROR");
+        assert_eq!(
+            document["error"]["details"],
+            serde_json::json!({ "error": turn_error })
+        );
+        assert_eq!(failure_exit_status(&error), crate::EXIT_ERROR);
+    }
+
     /// Joining a shutdown failure onto an earlier failure keeps the earlier
     /// failure's typed owner, under the same combined message.
     #[test]
@@ -795,5 +1003,25 @@ mod mob_tests {
         );
         assert!(deciding_mob_wire_detail(&crate::mob_anyhow(member_reload_required())).is_none());
         assert!(deciding_mob_wire_detail(&anyhow::anyhow!("boom")).is_none());
+    }
+
+    /// A mob error's failure document carries its public code and, when it
+    /// has a typed console detail, that detail as the document's details.
+    #[test]
+    fn a_mob_error_document_carries_its_typed_detail() {
+        let denied = crate::mob_anyhow(scope_denied());
+        let document = serde_json::to_value(failure_document(&denied)).unwrap();
+        assert_eq!(document["error"]["code"], "SCOPE_DENIED");
+        assert_eq!(
+            document["error"]["details"],
+            serde_json::json!({ "required": "admin_host", "presented": ["list"] })
+        );
+        assert_eq!(failure_exit_status(&denied), 45);
+
+        let reload = crate::mob_anyhow(member_reload_required());
+        let document = serde_json::to_value(failure_document(&reload)).unwrap();
+        assert_eq!(document["error"]["code"], "MEMBER_RELOAD_REQUIRED");
+        assert!(document["error"].get("details").is_none(), "{document}");
+        assert_eq!(failure_exit_status(&reload), 49);
     }
 }

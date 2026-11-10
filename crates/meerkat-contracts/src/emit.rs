@@ -2501,6 +2501,30 @@ mod tests {
         fs::remove_dir_all(&output_dir).unwrap();
     }
 
+    /// The `rkat run --output json` failure document is an emitted schema:
+    /// one required `error`, the wire error envelope.
+    #[test]
+    fn emitted_errors_schema_has_the_run_failure_document() {
+        let output_dir = temp_output_dir("errors-run-failure");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let errors: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("errors.json")).unwrap()).unwrap();
+        let run_failure = errors
+            .get("WireRunFailure")
+            .expect("errors.json should publish WireRunFailure");
+        assert_eq!(
+            run_failure.pointer("/required"),
+            Some(&serde_json::json!(["error"]))
+        );
+        assert_eq!(
+            run_failure.pointer("/properties/error/$ref"),
+            Some(&serde_json::json!("#/$defs/WireError"))
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
     #[test]
     fn emitted_rest_openapi_contains_wire_contracts_not_only_paths() {
         let output_dir = temp_output_dir("rest-openapi-contracts");

@@ -158,6 +158,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the Meta runtime Forge started with, keeping its application source, and a
   Forge without a selected Meta runtime refuses the rebuild and says so.
 
+- A mob that a member private to a person creates with its own `mob_create`
+  stays private to that person after a restart, so every member spawned into
+  it after the restart is private to that person too, as the members spawned
+  before it are. The restart reads who each such mob is private to from the
+  mob's creation record, and it read the creating member only from the record
+  of a create a host makes for a member's session (`MobProvenance::Member`):
+  a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
+  private to no one, so a member spawned into that mob after the restart
+  carried no private owner, the label that hides it from other people. Both
+  records now name the creating member, and the mob is private to whoever
+  that member is private to. A mob whose record names no member (a host's
+  create, a session that is no member's) stays private to no one, as does a
+  mob a shared member creates.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

@@ -892,6 +892,56 @@ async fn a_mob_a_private_side_chat_creates_itself_stays_private_after_a_restart(
     Ok(())
 }
 
+/// A mob a shared member creates with its own `mob_create` is private to no
+/// one, before and after the gateway restarts: its creation record names a
+/// member that is private to no one, so a member seated in it carries no
+/// private owner and every person sees it.
+#[tokio::test]
+async fn a_mob_a_shared_member_creates_itself_stays_shared_after_a_restart() -> TestResult {
+    const MOB: &str = "shared-own-child-mob";
+    const CREW: &str = "alpha-crew";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let crew = own_mob_create(&runtime, "alpha", CREW).await?;
+    assert_eq!(
+        seated_private_owner(
+            &crew,
+            "shared-crew-before",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        None,
+        "before the restart the mob is private to no one"
+    );
+    drop(crew);
+
+    let runtime = restarted(runtime, state.path(), MOB).await?;
+    let crew = runtime
+        .agent_mob_mcp_state()
+        .ok_or("agent mob tools")?
+        .handle_for(&meerkat_mob::MobId::from(CREW))
+        .await?;
+    assert_eq!(
+        seated_private_owner(
+            &crew,
+            "shared-crew-after",
+            member_session(&runtime, "alpha").await?
+        )
+        .await?,
+        None,
+        "after the restart the mob is still private to no one"
+    );
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    for person in [bearer(alice_claims()), bearer(bob_claims())] {
+        assert!(
+            row(&sidebar(&app, Some(&person)).await, "shared-crew-after").is_some(),
+            "every person sees a member seated in it after the restart"
+        );
+    }
+    Ok(())
+}
+
 /// Another person's `meta/reset_all` neither closes a private side chat nor
 /// names it.
 #[tokio::test]

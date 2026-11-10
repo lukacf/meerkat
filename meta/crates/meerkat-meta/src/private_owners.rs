@@ -151,6 +151,39 @@ fn crossed_owners(source: &str) -> MobError {
     ))
 }
 
+/// The member a mob's creation record names as its creator, with the mob
+/// that member is seated in: a create a host made for a member's session
+/// (`Member`) and a member's own `mob_create` (`OperatorMember`) both name
+/// one, and the mob is private to whoever that member is private to. Every
+/// other record names no member (the host, a session no roster named, a
+/// session several rosters named, a store from before creations were
+/// recorded), so the mob it describes is private to no one.
+fn creating_member(
+    provenance: &meerkat_mob::MobProvenance,
+) -> Option<(&meerkat_mob::MobId, &meerkat_mob::AgentIdentity)> {
+    use meerkat_mob::MobProvenance;
+    match provenance {
+        MobProvenance::Member {
+            parent_mob_id,
+            creator_identity,
+            ..
+        }
+        | MobProvenance::OperatorMember {
+            parent_mob_id,
+            creator_identity,
+            ..
+        } => Some((parent_mob_id, creator_identity)),
+        MobProvenance::Host
+        | MobProvenance::Session { .. }
+        | MobProvenance::OperatorSession { .. }
+        | MobProvenance::Ambiguous { .. }
+        | MobProvenance::Unrecorded => None,
+        // `MobProvenance` is open to new variants: one this release does
+        // not know names no member here.
+        _ => None,
+    }
+}
+
 /// The wait before the next try of a durable read that failed, growing to
 /// [`SEED_RETRY_MAX`].
 fn next_wait(wait: std::time::Duration) -> std::time::Duration {
@@ -405,14 +438,8 @@ impl PrivateOwners {
             creations.push((mob_id, provenance));
         }
         for (mob_id, provenance) in creations {
-            let owner = match provenance {
-                meerkat_mob::MobProvenance::Member {
-                    parent_mob_id,
-                    creator_identity,
-                    ..
-                } => self.owner_of(parent_mob_id.as_str(), creator_identity.as_str()),
-                _ => None,
-            };
+            let owner = creating_member(&provenance)
+                .and_then(|(parent, creator)| self.owner_of(parent.as_str(), creator.as_str()));
             self.record_mob(mob_id.as_str(), owner);
         }
         Ok(())
@@ -758,6 +785,62 @@ mod tests {
             crate::access::PRIVATE_TO_LABEL.to_string(),
             OWNER.to_string(),
         )])
+    }
+
+    /// A creation record names its creating member exactly when a member's
+    /// session made the create: the create a host made for it (`Member`) and
+    /// the member's own `mob_create` (`OperatorMember`) both answer the
+    /// member and the mob it is seated in. A record of the host, of a session
+    /// no roster named (a host's create for it, or its own), of a session
+    /// several rosters named, or of a store from before creations were
+    /// recorded names none.
+    #[test]
+    fn a_creation_record_names_its_creating_member() {
+        use meerkat_mob::{AgentIdentity, Generation, MobId, MobProvenance};
+
+        let parent = MobId::from("parent-mob");
+        let creator = AgentIdentity::from("creator");
+        let session = meerkat_core::SessionId::new();
+        let incarnation = meerkat_core::service::MobIncarnationId::mint();
+        let names_the_creator = [
+            MobProvenance::Member {
+                parent_mob_id: parent.clone(),
+                parent_incarnation: incarnation,
+                creator_identity: creator.clone(),
+                creator_generation: Generation::INITIAL,
+                owner_session: session.clone(),
+            },
+            MobProvenance::OperatorMember {
+                parent_mob_id: parent.clone(),
+                parent_incarnation: incarnation,
+                creator_identity: creator.clone(),
+                creator_generation: Generation::INITIAL,
+                owner_session: session.clone(),
+            },
+        ];
+        for provenance in &names_the_creator {
+            assert_eq!(
+                creating_member(provenance),
+                Some((&parent, &creator)),
+                "{provenance:?}"
+            );
+        }
+        let names_no_member = [
+            MobProvenance::Host,
+            MobProvenance::Session {
+                session_id: session.clone(),
+            },
+            MobProvenance::OperatorSession {
+                session_id: session,
+            },
+            MobProvenance::Ambiguous {
+                matching_rosters: 2,
+            },
+            MobProvenance::Unrecorded,
+        ];
+        for provenance in &names_no_member {
+            assert_eq!(creating_member(provenance), None, "{provenance:?}");
+        }
     }
 
     /// A spawn a private member asks for gets its owner and keeps no label

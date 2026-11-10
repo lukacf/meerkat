@@ -162,31 +162,26 @@ fn strictly_inside(path: &Path, base: &Path) -> bool {
 
 /// Whether `name`, a path component, opens an engine directory. Letter
 /// case is ignored on every platform: a case-insensitive filesystem (the
-/// default on macOS and Windows) opens `.rkat` for `.RKAT`. Two more
-/// spellings such a filesystem opens `.rkat` for are folded first: the
-/// KELVIN SIGN (U+212A), which case folding maps to `k`, and the code
-/// points HFS+ ignores in a name. No other Unicode equivalence is applied.
+/// default on macOS and Windows) opens `.rkat` for `.RKAT`.
 fn is_engine_directory_name(name: &OsStr, windows_names: bool) -> bool {
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    let folded: String = name
-        .chars()
+    same_name(name, OsStr::new(ENGINE_DIRECTORY), true, windows_names)
+}
+
+/// `name` as a comparison that ignores letter case reads it: ASCII letters
+/// in lower case, and the other spellings a case-insensitive filesystem
+/// opens the same entry for folded as well. Those are the two characters
+/// whose case folding is an ASCII letter (the KELVIN SIGN, U+212A, for `k`
+/// and LATIN SMALL LETTER LONG S, U+017F, for `s`) and the code points HFS+
+/// ignores in a name. No other Unicode equivalence is applied.
+fn fold_name(name: &str) -> String {
+    name.chars()
         .filter(|character| !is_hfs_ignorable(*character))
-        .map(|character| {
-            if character == '\u{212A}' {
-                'k'
-            } else {
-                character
-            }
+        .map(|character| match character {
+            '\u{212A}' => 'k',
+            '\u{017F}' => 's',
+            other => other.to_ascii_lowercase(),
         })
-        .collect();
-    same_name(
-        OsStr::new(&folded),
-        OsStr::new(ENGINE_DIRECTORY),
-        true,
-        windows_names,
-    )
+        .collect()
 }
 
 /// The code points HFS+ ignores when it compares names.
@@ -198,26 +193,28 @@ const fn is_hfs_ignorable(character: char) -> bool {
 }
 
 /// Whether two path component names open the same directory entry. With
-/// `windows_names`, each name is first reduced the way Windows reduces it
+/// `ignore_case`, both names are folded first ([`fold_name`]). With
+/// `windows_names`, each name is then reduced the way Windows reduces it
 /// before it opens a file: an alternate data stream suffix (`:name`) and
 /// trailing dots and spaces are dropped.
 fn same_name(left: &OsStr, right: &OsStr, ignore_case: bool, windows_names: bool) -> bool {
     let (Some(left), Some(right)) = (left.to_str(), right.to_str()) else {
         return left == right;
     };
-    let reduce = |name: &'_ str| -> String {
-        let name = if windows_names {
-            name.split(':')
-                .next()
-                .unwrap_or(name)
-                .trim_end_matches(['.', ' '])
-        } else {
-            name
-        };
-        if ignore_case {
-            name.to_ascii_lowercase()
+    let reduce = |name: &str| -> String {
+        let name = if ignore_case {
+            fold_name(name)
         } else {
             name.to_owned()
+        };
+        if windows_names {
+            name.split(':')
+                .next()
+                .unwrap_or(&name)
+                .trim_end_matches(['.', ' '])
+                .to_owned()
+        } else {
+            name
         }
     };
     reduce(left) == reduce(right)
@@ -518,6 +515,52 @@ mod tests {
         assert!(!same_name(name("statement"), name("state"), true, true));
     }
 
+    /// Every comparison that ignores letter case also folds the spellings a
+    /// case-insensitive filesystem opens the same entry for: LATIN SMALL
+    /// LETTER LONG S for `s`, the KELVIN SIGN for `k`, and the code points
+    /// HFS+ ignores. So a declared name with an `s` or a `k` in it cannot be
+    /// spelled around. A comparison that keeps case folds nothing, and
+    /// unrelated letters stay different.
+    #[test]
+    fn case_ignoring_comparisons_fold_long_s_kelvin_and_ignorable_code_points() {
+        let name = |text: &'static str| OsStr::new(text);
+        for (spelled, declared) in [
+            ("\u{017F}tate", "state"),
+            ("\u{017F}kill\u{017F}", "skills"),
+            ("s\u{212A}ills", "SKILLS"),
+            ("config_\u{017F}tate.j\u{017F}on", "config_state.json"),
+            ("realm_manife\u{017F}t.json", "realm_manifest.json"),
+            ("st\u{200D}ate", "state"),
+            ("\u{FEFF}credentials", "Credentials"),
+            (".r\u{212A}at", ".rkat"),
+        ] {
+            assert!(
+                same_name(name(spelled), name(declared), true, false),
+                "{} opens {declared}",
+                spelled.escape_unicode()
+            );
+            assert!(
+                !same_name(name(spelled), name(declared), false, false),
+                "{} is another name where case is kept",
+                spelled.escape_unicode()
+            );
+        }
+        for (spelled, declared) in [
+            ("ztate", "state"),
+            ("\u{017F}tate", "ftate"),
+            ("\u{212A}eys", "xeys"),
+            ("st\u{00E4}te", "state"),
+            ("\u{0455}tate", "state"),
+            ("st\u{2060}ate", "state"),
+        ] {
+            assert!(
+                !same_name(name(spelled), name(declared), true, false),
+                "{} does not open {declared}",
+                spelled.escape_unicode()
+            );
+        }
+    }
+
     /// A symbolic link into a protected location is judged by where it
     /// leads, for the engine directory and for a host-declared path, also
     /// when the declared path is itself reached through a link.
@@ -567,6 +610,37 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    /// A symbolic link into an engine directory deeper in the project is
+    /// judged by where it leads: the path names no `.rkat`, the real path
+    /// of its deepest existing ancestor does.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_nested_engine_directory_is_refused_on_its_real_path() {
+        use std::os::unix::fs::symlink;
+
+        let (_dir, root) = project();
+        std::fs::create_dir_all(root.join("packages/app/.rkat/skills")).unwrap();
+        symlink("packages/app/.rkat", root.join("alias")).unwrap();
+        symlink(root.join("packages/app/.rkat/skills"), root.join("tools")).unwrap();
+        let rule = ProtectedPaths::default();
+        for refused in [
+            "alias",
+            "alias/mcp.toml",
+            "alias/realms/r/config.toml",
+            "tools/planted/SKILL.md",
+        ] {
+            assert_eq!(
+                rule.admit_write(&root, &root.join(refused)),
+                Err(WriteRefusal::Protected),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            rule.admit_write(&root, &root.join("packages/app/src/main.rs")),
+            Ok(())
+        );
     }
 
     /// An engine directory that is itself a symbolic link is protected

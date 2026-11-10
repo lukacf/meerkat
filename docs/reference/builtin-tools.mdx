@@ -1284,12 +1284,13 @@ their own and keep the whole realm out of these tools' reach. `rkat-rest`
 without a context root roots the tools in its own instance directory, which
 does not hold the realm.
 
-Two limits of the rule: a hard link that already exists in the project to a
-protected file is written through, and a symbolic link deeper inside a
+Three limits of the rule: a hard link that already exists in the project to
+a protected file is written through; a symbolic link deeper inside a
 protected directory is not followed (the rule follows a link at
 `<project root>/.rkat` and at each declared path, so the directory such a
 link leads to is refused under its own name; a link inside it to another
-place is not).
+place is not); and a `.rkat` below the project root that is itself a
+symbolic link is refused by its name, not where it leads.
 
 <Accordion title="datetime">
 Get the current date and time. Returns ISO 8601 formatted datetime and Unix timestamp.

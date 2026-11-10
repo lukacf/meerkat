@@ -237,8 +237,9 @@ Rust `AgentBuildConfig.provider_params`. A realm-level
   `{"type": "enabled", "budget_tokens": N}`, `{"type": "between_tools"}`,
   `{"type": "disabled"}`),
   `thinking_budget_tokens`, `effort` (`low`, `medium`, `high`, `xhigh`,
-  `max`), `top_k`, `inference_geo` (`{"kind": "us"}`, `{"kind": "global"}`,
-  `{"kind": "other", "region": "..."}`),
+  `max`; `x_high` is accepted as a spelling of `xhigh`, and Claude receives
+  `xhigh` either way), `top_k`, `inference_geo` (`{"kind": "us"}`,
+  `{"kind": "global"}`, `{"kind": "other", "region": "..."}`),
   `cache_control` (`disabled`,
   `automatic`, `system_prefix`, `system_and_conversation`), `cache_ttl`
   (`5m` default, `1h`).

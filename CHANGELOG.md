@@ -43,6 +43,14 @@ them.
   answer. On the wire the field is optional and left out when absent, so a
   client that does not read it is unaffected.
 
+- `meerkat-core`: `OpenAiProviderTag` gains the public field
+  `reasoning_effort_resolved: bool`, a request-local marker for the
+  provider-neutral `reasoning_effort` option (see Added). Code that builds
+  the tag with a struct literal sets the new field: `false`, or
+  `..Default::default()`. The field is never serialized, so no wire or
+  stored form changes, and a serialized tag that names it is refused as an
+  unknown field.
+
 - `meerkat-core`: `ProviderParamsOverride` gains the field
   `reasoning_effort: Option<EffortLevel>`; `RuntimeTurnMetadata`,
   `SessionLlmIdentityOverride` and
@@ -145,6 +153,23 @@ them.
   `WireMemberInputAdmission`. The SDKs keep it on the member-send receipt
   (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
   answer without it.
+
+- `meerkat-core`, `meerkat-llm-core`: the vocabulary of a provider-neutral
+  `reasoning_effort` option, as types only. Nothing reads them yet: no
+  request, wire form or schema changes. `meerkat_core::reasoning_effort`
+  (re-exported at the crate root) adds the route a request is served on
+  (`ModelApi`, `ReasoningBackend`, and the reported form `ReasoningRoute`,
+  `{"backend": "<provider-matrix string>", "api": "<snake_case API>"}`),
+  what a client observes about its route (`ReasoningRouteObservation`,
+  `AccountLevelStatement`), the typed refusal (`ReasoningEffortRefusal` with
+  `ReasoningEffortRefusalReason` and `ReasoningFactsSource`) and the reports
+  of the level a request was sent with (`ReasoningEffortResolution`,
+  `ReasoningEffortDecidedBy`, `ReasoningEffortSent`,
+  `ReasoningEffortReport`). `ReasoningEffortRefusalReason` is a closed set
+  of eight reasons; adding one is a breaking change.
+  `AgentLlmClient::reasoning_route()` and `LlmClient::reasoning_route()`
+  are a request-free accessor with a `None` default, so existing clients
+  compile unchanged; `LlmClientAdapter` forwards its client's answer.
 
 - `meerkat-core`, `meerkat-contracts`, `meerkat-runtime`, `meerkat-session`,
   `meerkat-mob`, `meerkat-rpc`, `meerkat-llm-core`: a session can store a

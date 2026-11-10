@@ -1322,6 +1322,9 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
                 prompt_cache_options: prompt_cache_options.map(Into::into),
                 supports_temperature_override,
                 supports_reasoning_override,
+                // Request-local and never on a wire: a tag read from a wire
+                // form is never marked.
+                reasoning_effort_resolved: false,
             }),
             WireProviderTag::Gemini {
                 thinking,

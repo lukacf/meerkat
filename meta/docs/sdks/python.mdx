@@ -1509,6 +1509,7 @@ Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`re
 | `gating_evaluate(...)` | `GatingEvaluateResult` | Evaluate a gating rule |
 | `gating_pending()` | `list[GatingPendingEntry]` | List pending gating decisions |
 | `gating_decide(...)` | `GatingDecisionResult` | Submit a gating decision |
+| `gating_withdraw(pending_id, reason=None)` | `GatingWithdrawResult` | Withdraw a pending request this host minted, with no decision |
 | `gating_audit(limit)` | `list[GatingAuditEntry]` | Retrieve gating audit log |
 | `memory_query(filters)` | `MemoryQueryResult` | Query the assertion ledger by `entity`, `topic`, and `store` filters |
 | `remember_agent_memory(identity, ...)` | `AgentMemoryRecord` | Persist durable memory for an identity |

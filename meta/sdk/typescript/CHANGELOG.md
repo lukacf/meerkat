@@ -14,6 +14,11 @@
   failed attempts: ..." when attempts failed before it): the realm's agent
   memory background budget did not admit its run within its wait.
   `context.cause` carries the cause; an event without one reads as before.
+- `MobHandle.gatingWithdraw(pendingId, reason?)` calls
+  `meta/gating/withdraw` and returns `GatingWithdrawResult`: the host
+  withdraws a pending request it minted, with no decision. An escalated
+  request is followed to its live successor; `pendingId` names the id
+  withdrawn.
 
 ## 0.9.11
 

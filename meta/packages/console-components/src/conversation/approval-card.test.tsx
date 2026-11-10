@@ -1,6 +1,6 @@
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApprovalAttention, ApprovalCard, HostAttentionCard, HostDecideSourcesProvider, PrivateReplyCard } from "./approval-card";
+import { ApprovalAttention, ApprovalCard, DepartedApprovalCard, HostAttentionCard, HostDecideSourcesProvider, PrivateReplyCard } from "./approval-card";
 import { ConversationApprovals } from "./conversation-approvals";
 import { ConsoleNavigationProvider } from "../panel-kit";
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
@@ -413,5 +413,14 @@ describe("ConversationApprovals host decide links", () => {
     view.rerender(chat({ approvalSnapshot: chatSnapshot(true) }));
     expect(view.queryByRole("link", { name: /Decide in/ }) === null).toBe(true);
     expect((view.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("DepartedApprovalCard", () => {
+  it("shows a withdrawn request as withdrawn by the requester, with nothing to decide", () => {
+    const view = render(<DepartedApprovalCard departed={{ request, departedAtMs: 1, decided: { action: "withdrawn" } }} />);
+    expect(view.getByRole("status").textContent).toBe("Withdrawn by the requester");
+    expect(view.queryAllByRole("button")).toHaveLength(0);
+    expect(view.getByTestId("gating-departed:request:1").getAttribute("data-state")).toBe("departed");
   });
 });

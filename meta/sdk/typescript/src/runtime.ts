@@ -175,6 +175,7 @@ import {
   parseRuntimeRouteResult,
   parseGatingEvaluateResult,
   parseGatingDecisionResult,
+  parseGatingWithdrawResult,
   parseGatingAuditEntry,
   parseGatingPendingEntry,
   parseRediscoverReport,
@@ -275,6 +276,7 @@ import {
   type RuntimeRouteResult,
   type GatingEvaluateResult,
   type GatingDecisionResult,
+  type GatingWithdrawResult,
   type GatingAuditEntry,
   type GatingPendingEntry,
   type RediscoverReport,
@@ -4286,6 +4288,30 @@ export class MobHandle {
         decision,
         approver_id: approverId,
         ...(options ?? {}),
+      }),
+    );
+  }
+
+  /**
+   * Withdraw a pending request this host minted (`meta/gating/withdraw`).
+   * Not a decision: the request leaves the queue with no approver, its audit
+   * records `request_withdrawn` and nothing runs. An escalated request is
+   * followed along its escalations to the live successor, which is
+   * withdrawn; the result's `pendingId` names the id actually withdrawn. A
+   * request already decided, timed out or withdrawn (or whose escalation
+   * chain ended so) answers an unknown id. The chain is read from the gating
+   * audit, which keeps only the last 512 records: if the escalation record
+   * has aged out, withdrawing the original id answers an unknown id although
+   * the successor is still pending, so withdraw the successor by its own id.
+   */
+  async gatingWithdraw(
+    pendingId: string,
+    reason?: string,
+  ): Promise<GatingWithdrawResult> {
+    return parseGatingWithdrawResult(
+      await this._runtime._rpc("meta/gating/withdraw", {
+        pending_id: pendingId,
+        ...(reason === undefined ? {} : { reason }),
       }),
     );
   }

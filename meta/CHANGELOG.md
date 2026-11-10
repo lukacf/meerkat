@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `meta/gating/withdraw {pending_id, reason?}`: the embedding host
+  withdraws a pending gating request it minted, with no decision. Host-only
+  (the stdio gateway, or `withdraw_gating_action` in the library); the
+  console has no withdraw route (`-32601`) and a candidate launch refuses it
+  (`-32047` `candidate_launch`). It is a transition of the gating owner, so a
+  request ends exactly once: after a withdrawal a decision gets an unknown
+  id, and after a decision or timeout a withdrawal does. An escalated request
+  is followed hop by hop along the `next_pending_id` its escalations recorded
+  to the live successor, which is withdrawn; the result names the id
+  withdrawn. The audit records `request_withdrawn` (outcome `safe_draft`,
+  detail `reason`, `withdrawn_by`, route and delivery ids, origin; no
+  approver, no payload). The console shows a withdrawn request as a departed
+  "Withdrawn by the requester" card without decision buttons, and its inbox
+  row reads "Withdrawn". Python `gating_withdraw`, TypeScript
+  `gatingWithdraw`.
+
 - `LifecycleEffectFailureCause` (`failed`, `budget_busy`), carried by
   `LifecycleEffectFailure::cause` and by `cause` on
   `lifecycle_effect_failed`: `budget_busy` says the side effect did not run
@@ -34,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `gateway_wiring::keep_identity_records_in_runtime_metadata` keeps an
   identity runtime's records in its runtime's metadata store, as both stock
   gateways and `UnifiedRuntimeBuilder` keep them.
+
+### Changed
+
+- A `GatingResolutionObserver` now also receives cause `withdrawn` with
+  `approved: false`; it is not a rejection. The agent memory steward settles
+  a withdrawn promotion gate as expired: the stage is discarded and a
+  proposal-sourced gate's proposal stays held (re-dreamable), as after a
+  timeout.
 
 ### Fixed
 

@@ -63,6 +63,16 @@ them.
 
 ### Fixed
 
+- `meerkat-core`, `meerkat-contracts`: the Claude effort `xhigh` is now
+  accepted under both spellings, `xhigh` and `x_high`, on every request
+  surface. RPC session and turn requests, MCP `meerkat_run` and
+  `meerkat_resume`, schedule targets, mob definition files and the CLI's
+  provider params (`--param`, `--params-json`) accepted only `x_high`; REST
+  session creation and the profiles that `mob/create` and `mob/spawn` take
+  accepted only `xhigh`, the spelling the model catalog advertises. Requests
+  to Claude send `xhigh` either way. The spellings Meerkat writes and the
+  published schemas are unchanged.
+
 - `meerkat-runtime`: a run whose operation records an authorization audit
   observation after the run's terminal input rows were written now settles
   in the same process. The observation waits on the live input row for the

@@ -7,6 +7,7 @@ pub struct TestClient {
     events: Vec<LlmEvent>,
     provider: meerkat_core::Provider,
     synthesize_usage: bool,
+    reasoning_route: Option<meerkat_core::ReasoningRouteObservation>,
 }
 
 impl TestClient {
@@ -15,6 +16,7 @@ impl TestClient {
             events,
             provider: meerkat_core::Provider::Other,
             synthesize_usage: false,
+            reasoning_route: None,
         }
     }
 
@@ -24,7 +26,18 @@ impl TestClient {
             events: Self::default_events(),
             provider,
             synthesize_usage: true,
+            reasoning_route: None,
         }
+    }
+
+    /// Report `route` as the route this client serves
+    /// ([`LlmClient::reasoning_route`]), so a test can script the route a
+    /// request's reasoning effort is resolved against. A test client
+    /// reports no route unless one is set here.
+    #[must_use]
+    pub fn with_reasoning_route(mut self, route: meerkat_core::ReasoningRouteObservation) -> Self {
+        self.reasoning_route = Some(route);
+        self
     }
 
     fn default_events() -> Vec<LlmEvent> {
@@ -46,6 +59,7 @@ impl Default for TestClient {
             events: Self::default_events(),
             provider: meerkat_core::Provider::Other,
             synthesize_usage: true,
+            reasoning_route: None,
         }
     }
 }
@@ -53,6 +67,10 @@ impl Default for TestClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for TestClient {
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.reasoning_route.clone()
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],

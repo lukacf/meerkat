@@ -141,6 +141,30 @@ for DOC in "$ROOT/docs/quickstart.mdx" "$ROOT/docs/sdks/rust.mdx"; do
     fi
 done
 
+# 5. Meta Forge runs the workspace's own Meta: the Guide's selected version
+# and the installer's development pin are Meta's version (bump-sdk-versions.sh
+# moves both).
+GUIDE_FILE="$ROOT/installer/launchkit/guide_sdk.py"
+if [ -f "$GUIDE_FILE" ]; then
+    GUIDE_VER=$(sed -n 's/^SELECTED_VERSION = "\([^"]*\)"$/\1/p' "$GUIDE_FILE")
+    if [ "$GUIDE_VER" != "$CARGO_VER" ]; then
+        red "FAIL: Forge Guide Meta version mismatch (${GUIDE_VER:-missing} != $CARGO_VER)"
+        FAIL=1
+    else
+        green "  Forge Guide Meta version: OK"
+    fi
+fi
+FORGE_PROJECT="$ROOT/installer/pyproject.toml"
+if [ -f "$FORGE_PROJECT" ]; then
+    FORGE_PINS=$(sed -n 's/.*"meerkat-meta==\([^"]*\)".*/\1/p' "$FORGE_PROJECT" | sort -u)
+    if [ "$FORGE_PINS" != "$CARGO_VER" ]; then
+        red "FAIL: Forge development Meta SDK pin mismatch (${FORGE_PINS:-missing} != $CARGO_VER)"
+        FAIL=1
+    else
+        green "  Forge development Meta SDK pin: OK"
+    fi
+fi
+
 echo ""
 if [ $FAIL -ne 0 ]; then
     red "Version parity check FAILED"

@@ -1,12 +1,12 @@
 {
   "format": "forge-public-meta-model-catalog-v1",
-  "version": "0.9.6",
+  "version": "0.9.11",
   "source": {
-    "release": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.6",
-    "archive": "meta-rpc-gateway-0.9.6-x86_64-unknown-linux-gnu.tar.gz",
-    "archive_sha256": "aa7c30fa60b6ea530ff986ed560a8bce3bcdf65d6dd7432ebb521da9e8884f6a",
-    "sdk": "meerkat-meta==0.9.6",
-    "sdk_wheel_sha256": "40e2f2a48fa8dc656953d8a6e11fe66b5cc059df66b0162c14678d89c86349dc",
+    "release": "https://github.com/lukacf/meerkat/releases/download/meta-v0.9.11",
+    "archive": "meta-rpc-gateway-0.9.11-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "b456af91f5d309757e07cd34ed447bc01c00f6763385d738e6b97800e6dcd610",
+    "sdk": "meerkat-meta==0.9.11",
+    "sdk_wheel_sha256": "ee0d717ee67a36d97252c08b74e76573893fbc2549f3201a57d0bf24a4afe223",
     "method": "runtime.mob_handle().models_catalog()"
   },
   "models": [
@@ -173,6 +173,16 @@
     {
       "id": "gpt-6.1-sol",
       "display_name": "GPT-6.1 Sol",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "display_name": "GPT-6.1 Terra",
       "provider": "openai",
       "tier": "supported",
       "context_window": 1050000,
@@ -671,6 +681,16 @@
         {
           "id": "gpt-6.1-sol",
           "display_name": "GPT-6.1 Sol",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-6.1-terra",
+          "display_name": "GPT-6.1 Terra",
           "provider": "openai",
           "tier": "supported",
           "context_window": 1050000,

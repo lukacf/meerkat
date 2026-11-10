@@ -24,13 +24,26 @@ MAX_BINARY_BYTES = 512 * 1024 * 1024
 HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _route_text(value):
+    return type(value) is str and 0 < len(value) <= 4096 and "\x00" not in value
+
+
+def auth_binding_reference(value):
+    """A realm auth binding reference: realm and binding, optionally a profile."""
+    return (type(value) is dict and {"realm", "binding"} <= value.keys() <= {"realm", "binding", "profile"}
+            and all(_route_text(item) for item in value.values()))
+
+
 @dataclass(frozen=True)
 class SelectedGuideRuntime:
     """Trusted launcher selection for a fresh Meta guide generation.
 
     The caller accepts the actual candidate and source provenance before
     constructing this value. Byte checks preserve that selection; they do not
-    establish native qualification, credentials or provider readiness.
+    establish native qualification, credentials or provider readiness. The
+    version is the workspace's own Meta release (guide_sdk), with Core of the
+    same version. A model route may name the realm auth binding its profiles
+    resolve credentials through; the binding is a reference, never a secret.
     """
 
     gateway: object
@@ -57,15 +70,13 @@ class SelectedGuideRuntime:
         object.__setattr__(self, "_gateway_pin", (self.gateway.path, self.gateway.sha256))
         route = deepcopy(self._model_route)
         if route is not None:
-            if type(route) is dict and "auth_binding" in route:
-                # Core ignores this key in mob profiles. An explicit selection
-                # must reach the native member API before Forge can accept it.
-                raise GatewayInstallError("This guide runtime cannot apply an explicit auth binding.")
-            allowed = {"provider", "model", "meerkat_config_path"}
+            # auth_binding becomes the Guide profiles' auth_binding (Core's mob
+            # Profile.auth_binding): realm and binding, optionally a profile.
+            allowed = {"provider", "model", "meerkat_config_path", "auth_binding"}
             if (type(route) is not dict or not {"provider", "model"} <= route.keys()
                     or not route.keys() <= allowed
-                    or any(type(value) is not str or not value or len(value) > 4096
-                        or "\x00" in value for value in route.values())):
+                    or any(not _route_text(value) for name, value in route.items() if name != "auth_binding")
+                    or "auth_binding" in route and not auth_binding_reference(route["auth_binding"])):
                 raise GatewayInstallError("The guide requires its original trusted model route.")
         object.__setattr__(self, "_model_route", route)
         object.__setattr__(self, "_route_bytes", json.dumps(route, sort_keys=True,

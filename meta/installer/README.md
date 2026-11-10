@@ -81,7 +81,8 @@ The Meta 0.9 source launcher stops before dependency preparation when the
 complete product manifest is absent. Installing a Python SDK or running a
 frontend build does not supply its original runtime selection.
 [The product packager](launchkit/product_distribution.py) assembles the exact
-Meta/Toolkit wheels, selected Connect product, separate guide gateway and
+Meta/Toolkit wheels, selected Connect product, the Guide's own gateway and
+client wheel (the published artifacts of the workspace's Meta release) and
 frontend into the launchable archive. Private model configuration stays with
 its original owner. The emitted manifest and generated README describe that
 specific package.
@@ -194,8 +195,8 @@ source checkout are not required to open this wizard. New bundles carry the
 published MobKit 0.8.47 SDK, which pins Meerkat 0.8.51, for the application
 packages they build. Packaging and startup verify the SDK's fixed PyPI checksum, package
 identity, release provenance and matching SDK/native version pins. Agent team
-packages install the published Meta 0.9.6 release instead (see **Install agent
-team**). The bundle downloads no native runtime of its own: each exported
+packages install the published Meta release of the Meerkat release this Forge
+is built from instead (see **Install agent team**). The bundle downloads no native runtime of its own: each exported
 package installs its runtime and checks the release checksums itself.
 
 This is a developer alpha bundle. Dependency verification establishes the
@@ -569,10 +570,12 @@ the behavior of retained packages and receipts.
 
 The installed Forge (the packaged product) and the developer source entry both
 offer the agent-team path. An agent team package, downloaded or installed,
-installs the published Meta 0.9.6 release it pins: the `meerkat-meta` 0.9.6 SDK
-from PyPI by its fixed SHA-256, and the official `meta-rpc-gateway` and
-`meta-gateway` archives, each checked against the release's published SHA-256
-checksums. It does not use the runtime an installed Forge selected for its own
+installs the published Meta release it pins (`VERSION` in
+`launchkit/public_meta_runtime.py`, the Meta release a packaged Forge's guide
+runs): the `meerkat-meta` SDK from PyPI by its fixed SHA-256, and the
+official `meta-rpc-gateway` and `meta-gateway` archives from the monorepo's
+`meta-v<version>` release, each checked against the release's published
+SHA-256 checksums. It does not use the runtime an installed Forge selected for its own
 applications. A model the pinned release does not list is refused before export
 or installation, and the message names models it does list. Such a package keeps
 the definition it was installed with; to change instructions, classes or flows,
@@ -1652,11 +1655,13 @@ generation takes over the saved provider and compaction settings. Saved wizard
 conversations and proposals keep their existing store.
 
 The fresh setup team does not recall the earlier team's native conversations or
-memory. To carry them over, stop Forge before its first start on Meta 0.9.4, copy
-the complete `architect-runtime-meta-v1` folder to `architect-runtime-meta-v2` in
-the same state directory, and run Meta 0.9.4's
+memory. To carry them over, stop Forge before its first start with a guide on
+Meta 0.9.4 or later, copy the complete `architect-runtime-meta-v1` folder to
+`architect-runtime-meta-v2` in the same state directory, and run the guide's
+Meta release's
 `meta_gateway storage-migrate-native --state-dir architect-runtime-meta-v2/.mobkit/state`
-there. If the census is clean, run the same command with `--apply`, then start
+there (the tool is in that release's `meta-gateway` archive). If the census is
+clean, run the same command with `--apply`, then start
 Forge. Run it on the same computer as the same user: the agents' comms identity
 keys are kept in that user's home directory, not in the state directory. If the
 census refuses, remove only the copied `architect-runtime-meta-v2` folder; Forge

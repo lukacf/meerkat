@@ -141,9 +141,9 @@ list, as Claude Mythos 5.1 is: Anthropic serves it only to organizations it
 has verified, on the Claude API, Claude Models on Google Cloud and Microsoft
 Foundry, on Amazon Bedrock as `anthropic.claude-mythos-5-2`, not on Claude
 Platform on AWS. Bedrock ids are not in the catalog: declared under
-`[models.<id>]`, `anthropic.claude-fable-5-2` runs as a model id with no
-catalog row, without the `claude-fable-5-2` row's local refusals or
-defaults.
+`[models."anthropic.claude-fable-5-2"]` (quoted, as the id contains dots), it
+runs as a model id with no catalog row, without the `claude-fable-5-2` row's
+local refusals or defaults.
 
 | OpenAI | Tier | Context / output | Reasoning effort |
 |---|---|---|---|

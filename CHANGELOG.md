@@ -133,11 +133,36 @@ them.
   and `same_account_model_id(left, right)`, whether two IDs name the same
   model on a GitHub Copilot account (see Fixed).
 
+- `meerkat`, `meerkat-tools`: a host can tell the in-process file tools which
+  paths inside the project root are its own state and inputs (see Security).
+  `AgentFactory::with_protected_host_inputs(inputs, realm_documents,
+  convention_sources)` takes the lists a host already builds with
+  `HostConfinement::host_inputs`, `HostConfinement::credential_store_input`
+  and `HostConfinement::convention_sources`, and the new
+  `HostConfinement::realm_documents(realm_root)`, which names the documents a
+  realm keeps at its root: `config.toml`, `config_state.json`,
+  `realm_manifest.json` and the `authorization` directory.
+  `CompositeDispatcher::protect_host_paths(paths)` sets such paths on a
+  dispatcher built without the factory. `rkat`, `rkat-rpc`, `rkat-rest` and
+  `rkat-mcp` call the builder. `<project root>/.rkat` is refused without it;
+  an embedder that keeps engine state elsewhere inside its project root (a
+  realm state root, a config document, a credential store) should call the
+  builder with those paths.
+
 ### Changed
 
 - Intel macOS binaries (`x86_64-apple-darwin`) now need macOS 11.0 or later
   (previously 10.12). They are built on the BuildBuddy release lane for macOS
   11.0, and the release refuses one that needs a newer macOS.
+
+- `meerkat-tools`: an agent can no longer edit files under `.rkat/` with the
+  file tools (see Security). Asking an agent to add an MCP server to
+  `.rkat/mcp.toml`, to add a hook to `.rkat/config.toml` or to write a skill
+  under `.rkat/skills/` now ends in a tool error that says so. Make such a
+  change with the CLI (`rkat mcp add`, `rkat config set`, `rkat config patch`,
+  `rkat skill add`) or by editing the file yourself. Reading those files is
+  unchanged, and so is the shell tool: a session that has it runs commands
+  with whatever access its confinement leaves.
 
 ### Fixed
 
@@ -210,18 +235,6 @@ them.
   end, and writes them. Any other difference from the stored row still
   refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
-- `meerkat-runtime`: every archive of a terminal input row now writes the
-  authorization audit observations recorded on the row since it was last
-  written before the row leaves memory, not only the archive after its
-  completion or publication receipt. The archives that follow an abandon,
-  retire, reset, destroy or stop of inputs, a resumable run's settlement, a
-  queued input's cancel, an admission that supersedes or coalesces a queued
-  input, the end of unstageable queued inputs, a live boundary join's
-  cancel, and a run's terminal dropped such an observation. Once a row is
-  archived, its audit refuses any later observation, so an operation that
-  records after its run's rows were archived is refused as observation
-  unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
-
 - `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
   runtime store and drops it no longer breaks that realm's credential
   rotation and OAuth sign-ins. Every handle of one database shares the
@@ -243,6 +256,18 @@ them.
   its receipt (`continuation.status`, or `session/input_status` by its
   `delivery_id` or `input_id`), not by its caller key. Affects 0.9.5 through
   0.9.11.
+
+- `meerkat-runtime`: every archive of a terminal input row now writes the
+  authorization audit observations recorded on the row since it was last
+  written before the row leaves memory, not only the archive after its
+  completion or publication receipt. The archives that follow an abandon,
+  retire, reset, destroy or stop of inputs, a resumable run's settlement, a
+  queued input's cancel, an admission that supersedes or coalesces a queued
+  input, the end of unstageable queued inputs, a live boundary join's
+  cancel, and a run's terminal dropped such an observation. Once a row is
+  archived, its audit refuses any later observation, so an operation that
+  records after its run's rows were archived is refused as observation
+  unavailable instead of losing the record. Affects 0.8.52 through 0.9.11.
 
 ### Security
 
@@ -288,6 +313,68 @@ them.
   feature, which keeps the range-checked u64 and usize conversions that
   rusqlite 0.37 had. Affects 0.4.7 through 0.9.11.
 
+- `meerkat-tools`: the in-process file tools `apply_patch` and
+  `blob_save_file` wrote any path inside the project root, the engine's own
+  directory `<project root>/.rkat/` included. A host reads that directory at
+  its next start and acts on it: the project's MCP servers
+  (`.rkat/mcp.toml`), hooks and skills, and, with the CLI's default
+  project-local state, the realm's config document and stores. So a session
+  that was given no command execution (the default `safe` tool preset of
+  `rkat run` has the file tools and no shell) could have its model write
+  files there that the next `rkat` start in that project loads, a server
+  command or a credential command that the host then runs as the user among
+  them. `--confinement workspace` on macOS did not prevent it: its `.rkat`
+  protection covers confined processes, and these tools run in the host. The
+  file tools now refuse to create, change, delete or move a path in a `.rkat`
+  directory, at the project root and in any directory under it (in any
+  letter case, through `..`, an absolute path or a symbolic link, and when
+  the directory does not exist yet), and a path the host declares as its own
+  state or input wherever it lies inside the project root: the realm state
+  root (`--state-root` included), the realm's config document, the user
+  config document, the MCP, hook and skill sources and a file credential
+  store. A `.rkat` directory deeper in the project is refused like the one
+  at the root, because a host started from that directory reads it as its
+  own. The call fails with an invalid-arguments tool error, nothing is
+  written, and a patch that names one such path applies none of its
+  operations. Three limits remain. A hard link that already exists in the
+  project to such a file is written through. Where a protected directory
+  holds a symbolic link to another place, that place is not refused: the
+  rule follows a link at `<project root>/.rkat` and at each declared path,
+  not links deeper inside them. And a `.rkat` below the project root that
+  is itself a symbolic link is refused by its name, not where it leads. To
+  change engine
+  configuration, use the CLI (`rkat mcp add`, `rkat config`, `rkat auth`,
+  `rkat skill add`) or edit the files yourself. `apply_patch` is affected
+  from 0.4.6 and `blob_save_file` from 0.6.2, both through 0.9.11.
+
+- `meerkat-rpc`, `meerkat-mcp-server`: `rkat-rpc` and `rkat-mcp` started
+  without `--context-root` root the file tools in the realm directory
+  itself, so `apply_patch` could rewrite the realm's own `config.toml` there
+  as an ordinary project file. The realm's documents (`config.toml`,
+  `config_state.json`, `realm_manifest.json` and the `authorization`
+  directory) are now refused in that layout as well, and so are the hooks
+  and skills these servers read from that directory's `.rkat`. Other files
+  there are still written as before, and that includes the realm's stores
+  (sessions, runtime, jobs, tasks, blobs and the rest): in this layout the
+  file tools can still write them. Start the server with
+  `--context-root <dir>` (the SDK option `context_root` / `contextRoot`) to
+  give agents a project directory of their own and keep the whole realm out
+  of the file tools' reach. `rkat-rpc` and `rkat-mcp` sessions have the shell
+  tool on unless a request turns it off, so this matters for sessions and
+  hosts that run without it or confine it. `rkat-rest` without a context
+  root roots the tools in its own instance directory, which does not hold
+  the realm, and mounts no built-in tools unless its configuration turns
+  them on; what it declares is refused there in the same way. Affects 0.4.6
+  through 0.9.11.
+
+- `meerkat-tools`: `apply_patch` and `blob_save_file` wrote through a
+  symbolic link whose target does not exist, which a repository can contain:
+  adding or moving a file onto such a link, or saving a blob onto it with
+  `overwrite`, created the link's target, outside the project root too. A
+  write path with a symbolic link that leads nowhere is now refused.
+  `apply_patch` is affected from 0.4.6 and `blob_save_file` from 0.6.2, both
+  through 0.9.11.
+
 ### Upgrade notes
 
 - An application that depends on rusqlite (or libsqlite3-sys) itself moves
@@ -298,6 +385,28 @@ them.
   `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`) and
   the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
   carries.
+
+- Agents cannot change engine configuration with the file tools any more
+  (see Security and Changed). If you asked an agent to edit `.rkat/mcp.toml`,
+  `.rkat/config.toml` or a file under `.rkat/skills/`, make the change with
+  `rkat mcp add`, `rkat config set` or `rkat config patch`, `rkat skill add`,
+  or edit the file yourself.
+
+- If you run `rkat-rpc` or `rkat-mcp` (directly or through the Python or
+  TypeScript SDK) and let agents write files, start the server with a
+  context root: `--context-root <dir>`, or the SDK option `context_root` /
+  `contextRoot`. Agents then work in that directory and the realm's state
+  lies outside it. Without one, files still land in the realm directory as
+  before, the realm's documents are refused, and the realm's stores remain
+  writable by the file tools.
+
+- An agent can no longer write a `.rkat` directory anywhere under its
+  project root, not only the one at the root: a nested project's
+  `.rkat/mcp.toml`, hooks, skills or realm is changed by its operator.
+
+- A Rust host that keeps its realm state, config documents or credential
+  store inside the project root it gives its tools, outside `.rkat`, should
+  declare them with `AgentFactory::with_protected_host_inputs`.
 
 ## [0.9.11] - 2026-11-09
 

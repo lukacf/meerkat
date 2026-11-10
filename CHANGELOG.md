@@ -47,11 +47,11 @@ them.
   requests carry the `drop_block` control and the
   `thinking-binding-controls-2026-08-01` beta, as Claude Fable 5.1's do,
   and a session that moves onto Fable 5.2 keeps sending its earlier turns'
-  thinking. Anthropic does not serve it on Amazon Bedrock (see the
-  providers page). Claude Mythos 5.2 (`claude-mythos-5-2`), which
-  Anthropic serves only to organizations it has verified, is not a catalog
-  model, as Claude Mythos 5.1 is not. The Anthropic default model stays
-  `claude-opus-5-5`.
+  thinking. Anthropic serves it on Amazon Bedrock as
+  `anthropic.claude-fable-5-2` (see the providers page). Claude Mythos 5.2
+  (`claude-mythos-5-2`), which Anthropic serves only to organizations it
+  has verified, is not a catalog model, as Claude Mythos 5.1 is not. The
+  Anthropic default model stays `claude-opus-5-5`.
 
 - `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
   identity applies to the member's running build (a grant's `applies`), and

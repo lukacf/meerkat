@@ -144,8 +144,14 @@ impl HeldIdentityChange {
                 decision.decision_id, descriptor.kind
             ));
         }
-        let body: Self = serde_json::from_str(descriptor.request.get())
-            .map_err(|error| format!("decision {}: {error}", decision.decision_id))?;
+        // The reason names the decision and never quotes its body: it is
+        // logged, and kept as the failure reason of a notice.
+        let body: Self = serde_json::from_str(descriptor.request.get()).map_err(|_| {
+            format!(
+                "decision {} holds a body this version does not read",
+                decision.decision_id
+            )
+        })?;
         if body.format != HELD_CHANGE_FORMAT {
             return Err(format!(
                 "decision {} holds the body {}",
@@ -160,10 +166,12 @@ impl HeldIdentityChange {
                 body.request.decision_kind()
             ));
         }
-        let digest = body
-            .request
-            .request_digest()
-            .map_err(|error| format!("decision {}: {error}", decision.decision_id))?;
+        let digest = body.request.request_digest().map_err(|_| {
+            format!(
+                "decision {} holds a request that has no digest",
+                decision.decision_id
+            )
+        })?;
         if digest.as_str() != descriptor.request_digest.as_str() {
             return Err(format!(
                 "decision {} holds a request other than the one it binds",
@@ -1185,7 +1193,12 @@ impl DecisionExecutor for IdentityDecisionExecutor {
                 IdentityOutcome::PendingDecision { .. } => DecisionExecution::Released,
             },
             // The commit ended with no outcome: Core's receipt says
-            // whether it landed.
+            // whether it landed. With no receipt the permit is released,
+            // and the next pass asks the same operation again, which Core
+            // commits at most once. A known limit: Core's loop has no
+            // answer that leaves a permit outstanding, so a commit that
+            // landed while its receipt could not be read, at the decision's
+            // deadline, ends the decision expired though the change stands.
             Err(error) => {
                 tracing::warn!(%error, "a held change of agents ended with no outcome");
                 match committed_outcome(&mob, &operation_id).await {

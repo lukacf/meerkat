@@ -2131,7 +2131,9 @@ A change of an agent whose outcome under the host's identity policy
 when it is asked. It is held as one durable decision and answers
 `pending_decision {operation_id, decision_id, deadline_ms}`; the same request
 id asked again answers the same state, and nothing is written but the
-decision: no agent is created, built or woken while it is held.
+decision: no agent is created, built or woken while it is held. One request
+id names one change: any other request under it, of the same action or
+another, is refused `operation_reused`.
 
 | Kind | The held change |
 |------|-----------------|
@@ -2142,31 +2144,57 @@ decision: no agent is created, built or woken while it is held.
 | `identity.remove` | A removal of one agent |
 | `identity.adopt` | An adoption of one agent |
 
+These kinds are decided by people only: no reviewer stage exists for them,
+and a decision no person decided is never carried out.
+
 The decision's subject key is `{mob id}/{operation id}`, its approver id the
 one the policy's rule names, and its deadline the time of the hold plus the
 policy's timeout for the change (`approval.timeouts_ms`, or the rule's own
 `timeout_ms`). Its rendering (`renderer` `identity.render-v1`) is the whole
 request as canonical text, in this order: who asks and what the request does;
 the structural fields of each agent; the consequences the policy states; the
-host's consequence lines; the tool configuration; then the text the requester
-wrote (display name, instructions, first message, context). The tool
-configuration names each agent with the profile it runs on after the change
-and the digest of what that profile declares for tools, and shows the
-declaration: the tool families it turns on, whether it is read-only, the
-tools it denies, the MCP servers it connects to by name, its tool bundles and
-what it mounts closed until a tool grant. A server's own configuration is
-never rendered; the digest covers it. No agent is built to render a request.
+host's consequence lines; what the agents run on; then the text the requester
+wrote (display name, instructions, first message, context).
+
+What the agents run on names each agent with the profile it runs on after
+the change (for a role change, the profile it moves to) and the digest of
+what the mob declares for that profile, and shows the declaration: the
+model, the auth binding, the names of the skills, the tool families it turns
+on, whether it is read-only, the tools it denies, the MCP servers of the host
+it reaches, the MCP servers it configures itself, its tool bundles and what
+it mounts closed until a tool grant. A profile that names no server of the
+host reaches every MCP server the host offers, and the rendering says so in
+words. The digest covers the whole declaration: the profile, the wiring
+rules that name it, and the definitions of the skills it names. Prompts and
+skill texts are inside the digest and never rendered. A server the profile
+configures itself is shown by its name and its configuration is inside the
+digest only; a server of the host that the profile names is covered by its
+name, and what the host runs behind that name is the host's. A profile bound
+to a realm profile is read from the realm; where the host cannot read it the
+change is refused `unsupported` and nothing is held. No agent is built to
+render a request.
+
 Consequence lines come from a Rust host composition
 (`GatewayHostComposition::identity_consequences`) in this release: the
 decisions of a host that runs behind an SDK render without them.
 
 A person decides through `meta/decisions/decide`, as for any decision: the
 stdio operator, or a person an application attests from its own channel with
-`attestation`. A person cannot approve their own request: a decide by the
-person who asked, or by an identity the approver map links with them in one
-person, is refused `self_approval`, whatever approver id they hold. A person
-who asks for a change is named in the decision by their principal key, the
-same key their decide carries.
+`attestation`. A person cannot approve a request the decision records as
+theirs:
+
+- a request a signed-in Console person asked is that person's;
+- a request a host asks that names a person as its `proposer`, by that
+  person's principal key (`principal:["human", trust domain, id]`, the key
+  their decide carries), is that person's;
+- a decide by that person, or by an identity the approver map links with
+  them in one person, is refused `self_approval`, whatever approver id they
+  hold.
+
+A request a host asks with no proposer, or with a proposer that is any other
+text, is the host's, whoever the application carried it for: any approver
+may decide it. An application that carries a person's request over the host
+methods names the person as the proposer to keep them from approving it.
 
 Once approved, the change is carried out by the gateway, once. Before it
 commits, the request is rendered again from what stands then, and the
@@ -2174,9 +2202,10 @@ rendering must be the one the person was shown:
 
 | What changed after the approval | The decision ends | `execution_refusal` |
 |---------------------------------|-------------------|---------------------|
-| The declared tool configuration of a profile an agent of the request runs on | `execution_refused` | `subject_widened` |
+| What the mob declares for a profile an agent of the request runs on (model, auth binding, skills, wiring rules, tools) | `execution_refused` | `subject_widened` |
+| The profile of the agent the request changes (it moved to another profile) | `execution_refused` | `subject_widened` |
 | The host's consequence lines for the request | `execution_refused` | `subject_widened` |
-| The agent the request changes (its spec is no longer the one the requester read) | `execution_refused` | `stale_spec` |
+| The agent the request changes, in any other way (its spec is no longer the one the requester read) | `execution_refused` | `stale_spec` |
 | The requester's grant, a name taken meanwhile, or any other refusal of the commit that the same request cannot outlive | `execution_refused` | The refusal's kind |
 | Nothing | `executed` | |
 
@@ -2194,12 +2223,24 @@ A decision nobody decided by its deadline ends `expired`, a rejected one
 decision refused when it was carried out answers the kind it was refused
 with where that kind carries nothing but its name (`subject_widened`,
 `grant_revoked`), and `decision_closed` with the state `execution_refused`
-otherwise. An agent that asked is told
-the outcome by a message to its own name once the decision ended. A host
-surface or a person that asked reads the operation's state, or the decision.
+otherwise. An agent that asked is told the outcome by a message to its own
+name once the decision ended.
 
-A candidate launch holds no decision (`candidate_launch`) and carries none
-out; a decision a serving gateway holds is carried out by a serving gateway.
+Limits of this release:
+
+- A host surface or a person that asked gets no pushed notice: it reads the
+  operation's state, or the decision.
+- A decision is carried out only by a gateway whose launch enables the
+  identity policy. On a launch with no enabled policy a held decision can
+  still be read and decided, nothing carries it out, and its requester
+  cannot withdraw it through the identity methods (the host withdraws it
+  with `meta/decisions/withdraw`); a later launch whose policy allows the
+  change carries it out, or it expires at its deadline.
+- A decision that cannot be recorded because the decision store fails
+  answers `approval_unavailable`, with a detail that says to ask again.
+- A candidate launch holds no decision (`candidate_launch`) and carries none
+  out; a decision a serving gateway holds is carried out by a serving
+  gateway.
 
 ### On the Console
 

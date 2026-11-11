@@ -26,30 +26,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   host's identity policy is `require_approval` is held as one durable
   decision of kind `identity.create`, `identity.update`, `identity.archive`,
   `identity.unarchive`, `identity.remove` or `identity.adopt` and answers
-  `pending_decision`; the same request id answers the same state, and
-  nothing else is written, built or woken while it is held. One decision
-  covers the whole request: a create of several agents is one decision. Its
-  deadline is the policy's timeout for the change, and a decision nobody
-  decided by then ends `expired`. A person decides it through
-  `meta/decisions/decide` (the stdio operator, or a person an application
-  attests from its own channel), and a person cannot approve their own
-  request (`self_approval`). The requester or the host withdraws a change
-  that is still held.
+  `pending_decision`; the same request id answers the same state, any
+  other request under it is `operation_reused`, and nothing else is written,
+  built or woken while it is held. One decision covers the whole request: a
+  create of several agents is one decision. Its deadline is the policy's
+  timeout for the change, and a decision nobody decided by then ends
+  `expired`. A person decides it through `meta/decisions/decide` (the stdio
+  operator, or a person an application attests from its own channel); these
+  kinds are decided by people only. A person cannot approve a request the
+  decision records as theirs (`self_approval`): a request a signed-in
+  Console person asked, and a request a host asked that names the person as
+  its `proposer` by their principal key. A request a host asks with no such
+  proposer is the host's, whoever the application carried it for. The
+  requester or the host withdraws a change that is still held.
 - The rendering a person approves shows, ahead of anything the requester
-  wrote, the host's consequence lines and the declared tool configuration of
-  every profile an agent of the request runs on, with its digest. An MCP
-  server is shown by its name and its configuration is never rendered. When
-  the approved change is carried out the request is rendered again: a tool
-  configuration or host lines that differ refuse it `subject_widened` and
-  close the decision, and an agent that changed meanwhile is refused
-  `stale_spec`. A refusal the same request may outlive releases the attempt
+  wrote, the host's consequence lines and what the mob declares for every
+  profile an agent of the request runs on: its model, auth binding, skill
+  names and tool configuration, with one digest of the whole declaration
+  (the profile, the wiring rules that name it, the definitions of its
+  skills). An MCP server the profile configures is shown by its name and its
+  configuration is never rendered; a profile that names no server of the
+  host is shown to reach every server the host offers. A profile bound to a
+  realm profile is read from the realm, and the change is refused
+  `unsupported` where the host cannot read it. When the approved change is
+  carried out the request is rendered again: a declaration or host lines
+  that differ, or an agent that moved to another profile, refuse it
+  `subject_widened` and close the decision, and an agent that changed
+  otherwise is refused `stale_spec`. A refusal the same request may outlive
+  releases the attempt
   and keeps the approval. Consequence lines come from a Rust host
   composition (`GatewayHostComposition::identity_consequences`); a host
   behind an SDK supplies none in this release.
 - An approved change is carried out once: a gateway that stops between the
   commit and the decision's settlement settles it executed at its next
   start and commits nothing twice. An agent that asked is told the outcome
-  by a message to its own name once its decision ended.
+  by a message to its own name once its decision ended; a host surface or a
+  person that asked reads the operation's state. A decision is carried out
+  only by a gateway whose launch enables the identity policy.
 - On the Console, the requester of a change of an agent reads its own
   request whole (`meta/decisions/get`, `rendering`), as the requester of a
   tool grant does.
@@ -61,7 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   which drives a runtime's decision executors: one pass at start, one after
   each change of a decision (`RuntimeDecisions::notify_work`), and a tick
   only while a decision of its kinds waits. A host with no such decision
-  makes no further pass.
+  makes no further pass, and a pass with nothing owed reads decision records
+  only. `HeldChangeHost::realm_profile` is the read of a realm profile a
+  host gives the holder.
 
 ### Changed
 

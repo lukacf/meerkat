@@ -164,10 +164,15 @@ impl OpenAiCompatibleClient {
     ) -> Self {
         let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url);
         let responses_delegate = matches!(mode, OpenAiCompatibleMode::Responses).then(|| {
+            // The delegate speaks the public API's wire to this client's
+            // server; it is not the public API. As an issuer of continuity
+            // material it is a self-hosted server: the configured one this
+            // client declares, or the one at this base URL.
             crate::OpenAiClient::new_with_optional_api_key_and_base_url(
                 bearer_token.clone(),
                 trim_v1_suffix(&base_url),
             )
+            .into_self_hosted_delegate(None)
         });
         Self {
             mode,
@@ -192,6 +197,45 @@ impl OpenAiCompatibleClient {
             operator_reasoning_effort_levels: None,
             copilot_chat_stream: false,
         }
+    }
+
+    /// Declare which configured self-hosted server
+    /// (`[self_hosted.servers.<id>]`) this client speaks to. Responses
+    /// continuity material (encrypted reasoning, item and response ids) is
+    /// replayed only to the issuer the process received it from; a declared
+    /// server is that issuer by its id, whatever its base URL, and a client
+    /// that declares none is the self-hosted server at its base URL.
+    #[must_use]
+    pub fn with_self_hosted_server(mut self, server: impl Into<String>) -> Self {
+        let server = server.into();
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.into_self_hosted_delegate(Some(server)));
+        self
+    }
+
+    /// The issuer of this client's Responses continuity material; `None`
+    /// for a Chat Completions client, whose wire carries none.
+    pub fn continuity_issuer(&self) -> Option<meerkat_core::OpenAiContinuityIssuer> {
+        self.responses_delegate
+            .as_ref()
+            .map(crate::OpenAiClient::continuity_issuer)
+    }
+
+    /// Give this client its own record of what it received from which
+    /// issuer, in place of the one every client of the process shares (see
+    /// [`crate::OpenAiClient::with_continuity_ledger`]).
+    #[must_use]
+    pub fn with_continuity_ledger(
+        mut self,
+        ledger: Arc<meerkat_core::OpenAiContinuityLedger>,
+    ) -> Self {
+        self.responses_delegate = self
+            .responses_delegate
+            .take()
+            .map(|delegate| delegate.with_continuity_ledger(ledger));
+        self
     }
 
     /// For GitHub Copilot's Chat Completions routes only. A stream counts
@@ -927,7 +971,10 @@ impl OpenAiCompatibleClient {
                 };
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
                     let mut translated = self.request_with_remote_model(request);
-                    translated.messages = self.project_replay_messages(&request.messages)?;
+                    translated.messages = self.project_replay_messages_for(
+                        &request.messages,
+                        self.decided_continuity(prepared).as_ref(),
+                    )?;
                     let lowered;
                     let mut stream = if let Some(prepared) = prepared {
                         lowered = prepared.with_lowered_request(translated);
@@ -1501,63 +1548,46 @@ impl LlmClient for OpenAiCompatibleClient {
         })
     }
 
-    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        let mode = match self.mode {
-            OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
-            OpenAiCompatibleMode::ChatCompletions => OpenAiReplayProjectionMode::ChatCompletions,
+    /// Project for this client's server and, on the Responses wire, freeze
+    /// the decision into the projection's replay witness (see
+    /// `OpenAiClient::project_replay_request`).
+    fn project_replay_request(
+        &self,
+        messages: &[Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, LlmError> {
+        let continuity = self.live_continuity();
+        let projected = self.project_replay_messages_for(messages, continuity.as_ref())?;
+        let projection = match &continuity {
+            Some(continuity) => {
+                let decision = crate::client::OpenAiReplayDecision::freeze(
+                    continuity.issuer(),
+                    messages,
+                    &projected,
+                );
+                meerkat_llm_core::LlmReplayProjection::new(projected)
+                    .with_replay_witness(decision.witness())
+            }
+            None => meerkat_llm_core::LlmReplayProjection::new(projected),
         };
-        project_openai_replay_messages_for_capabilities(
-            messages,
-            mode,
-            self.supports_image_input,
-            self.supports_image_tool_results,
-        )
+        Ok(projection)
+    }
+
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        self.project_replay_messages_for(messages, self.live_continuity().as_ref())
     }
 
     fn request_pressure(
         &self,
         request: &LlmRequest,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
-        let mut projected_request = request.clone();
-        projected_request.messages = self.project_replay_messages(&request.messages)?;
-        match self.mode {
-            OpenAiCompatibleMode::Responses => {
-                let Some(delegate) = self.responses_delegate.as_ref() else {
-                    return Ok(None);
-                };
-                let translated = self.request_with_remote_model(&projected_request);
-                let Some(mut pressure) = delegate.request_pressure(&translated)? else {
-                    return Ok(None);
-                };
-                pressure.max_bytes = meerkat_models::approximate_request_byte_cap(self.provider);
-                if let Some(provenance) = pressure.lowered_request_provenance.as_mut() {
-                    provenance.provider = self.provider;
-                }
-                Ok(Some(pressure))
-            }
-            OpenAiCompatibleMode::ChatCompletions => {
-                let body = self.build_chat_completions_body(&projected_request)?;
-                let encoded_body =
-                    serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
-                        message: format!(
-                            "failed to serialize OpenAI-compatible request body: {error}"
-                        ),
-                    })?;
-                Ok(Some(
-                    meerkat_core::ProviderRequestPressure::new(
-                        encoded_body.len() as u64,
-                        meerkat_models::approximate_request_byte_cap(self.provider),
-                    )
-                    .with_lowered_request_provenance(
-                        meerkat_core::LoweredRequestProvenance::from_body(
-                            self.provider,
-                            meerkat_core::LoweredRequestEncoding::OpenAiChatCompletionsJson,
-                            &encoded_body,
-                        ),
-                    ),
-                ))
-            }
-        }
+        self.request_pressure_for(request, None)
+    }
+
+    fn prepared_request_pressure(
+        &self,
+        request: &PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        self.request_pressure_for(request.request(), Some(request))
     }
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
@@ -1602,6 +1632,102 @@ impl LlmClient for OpenAiCompatibleClient {
             schema,
             warnings: Vec::new(),
         })
+    }
+}
+
+impl OpenAiCompatibleClient {
+    /// What the process knows now, for this client's server: its
+    /// delegate's continuity target. `None` on the Chat Completions wire,
+    /// which carries no continuity material.
+    fn live_continuity(&self) -> Option<meerkat_core::OpenAiContinuityTarget> {
+        self.responses_delegate
+            .as_ref()
+            .map(crate::OpenAiClient::continuity_target)
+    }
+
+    /// The continuity target a request is lowered against: the decision its
+    /// projection froze, when it carries one, and otherwise what the process
+    /// knows now.
+    fn decided_continuity(
+        &self,
+        prepared: Option<&PreparedLlmRequest>,
+    ) -> Option<meerkat_core::OpenAiContinuityTarget> {
+        self.responses_delegate
+            .as_ref()
+            .map(|delegate| delegate.decided_continuity(prepared))
+    }
+
+    fn project_replay_messages_for(
+        &self,
+        messages: &[Message],
+        continuity: Option<&meerkat_core::OpenAiContinuityTarget>,
+    ) -> Result<Vec<Message>, LlmError> {
+        let mode = match self.mode {
+            OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
+            OpenAiCompatibleMode::ChatCompletions => OpenAiReplayProjectionMode::ChatCompletions,
+        };
+        project_openai_replay_messages_for_capabilities(
+            messages,
+            mode,
+            self.supports_image_input,
+            self.supports_image_tool_results,
+            continuity,
+        )
+    }
+
+    fn request_pressure_for(
+        &self,
+        request: &LlmRequest,
+        prepared: Option<&PreparedLlmRequest>,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, LlmError> {
+        let mut projected_request = request.clone();
+        projected_request.messages = self.project_replay_messages_for(
+            &request.messages,
+            self.decided_continuity(prepared).as_ref(),
+        )?;
+        match self.mode {
+            OpenAiCompatibleMode::Responses => {
+                let Some(delegate) = self.responses_delegate.as_ref() else {
+                    return Ok(None);
+                };
+                let translated = self.request_with_remote_model(&projected_request);
+                let pressure = match prepared {
+                    Some(prepared) => delegate
+                        .prepared_request_pressure(&prepared.with_lowered_request(translated))?,
+                    None => delegate.request_pressure(&translated)?,
+                };
+                let Some(mut pressure) = pressure else {
+                    return Ok(None);
+                };
+                pressure.max_bytes = meerkat_models::approximate_request_byte_cap(self.provider);
+                if let Some(provenance) = pressure.lowered_request_provenance.as_mut() {
+                    provenance.provider = self.provider;
+                }
+                Ok(Some(pressure))
+            }
+            OpenAiCompatibleMode::ChatCompletions => {
+                let body = self.build_chat_completions_body(&projected_request)?;
+                let encoded_body =
+                    serde_json::to_vec(&body).map_err(|error| LlmError::InvalidRequest {
+                        message: format!(
+                            "failed to serialize OpenAI-compatible request body: {error}"
+                        ),
+                    })?;
+                Ok(Some(
+                    meerkat_core::ProviderRequestPressure::new(
+                        encoded_body.len() as u64,
+                        meerkat_models::approximate_request_byte_cap(self.provider),
+                    )
+                    .with_lowered_request_provenance(
+                        meerkat_core::LoweredRequestProvenance::from_body(
+                            self.provider,
+                            meerkat_core::LoweredRequestEncoding::OpenAiChatCompletionsJson,
+                            &encoded_body,
+                        ),
+                    ),
+                ))
+            }
+        }
     }
 }
 
@@ -5240,6 +5366,13 @@ mod tests {
             None,
             options(true, true, true, true),
         );
+        // The OpenAI-family material is this server's own: the process
+        // received it from the server the client declares.
+        let ledger = Arc::new(meerkat_core::OpenAiContinuityLedger::new());
+        let server = meerkat_core::OpenAiContinuityIssuer::self_hosted_server("local");
+        let client = client
+            .with_self_hosted_server("local")
+            .with_continuity_ledger(Arc::clone(&ledger));
         assert_eq!(client.provider(), Provider::SelfHosted);
         let messages = vec![Message::BlockAssistant(BlockAssistantMessage::new(
             vec![
@@ -5272,6 +5405,7 @@ mod tests {
             StopReason::EndTurn,
         ))];
 
+        crate::client::record_received_for_test(&ledger, &server, &messages);
         let projected = client
             .project_replay_messages(&messages)
             .expect("SelfHosted OpenAI-family projection");

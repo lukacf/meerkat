@@ -263,12 +263,16 @@ pub(super) fn parse_handling_mode(
 /// 3. A failed read of a registered identity's Core facts while choosing its
 ///    door refuses the send typed (retryable, nothing submitted); it is never
 ///    taken as "not an identity".
-/// 4. A name the `IdentityRuntime` has not registered that Core holds for an
-///    identity (an identity entry, a reserved or removed name, or a member
-///    seated before identity entries existed while the first roster pass
-///    has not run) is refused before any door, with the identity door's
-///    typed refusal: retryable while the next roster pass registers it,
-///    final otherwise. So is a name whose Core entry could not be read.
+/// 4. An identity created at runtime (Core holds it as a created entry, whose
+///    record is its row in the mob's identity store) that the
+///    `IdentityRuntime` has not registered yet is registered from its row,
+///    and takes the identity door as in 2. Any other name the
+///    `IdentityRuntime` has not registered that Core holds for an identity
+///    (a declared entry, a reserved or removed name, or a member seated
+///    before identity entries existed while the first roster pass has not
+///    run) is refused before any door, with the identity door's typed
+///    refusal: retryable while the next roster pass registers it, final
+///    otherwise. So is a name whose Core entry could not be read.
 /// 5. Anything else (no identity runtime, unparseable identity, a name Core
 ///    holds for no identity) keeps raw member-id semantics so the original
 ///    mob `member not found` error surfaces unchanged.
@@ -321,22 +325,20 @@ async fn resolve_send_message_target(
         return Ok(SendMessageTarget::AuthorityUnavailable { alias: member_id });
     }
     // The identity's registration, or Core's entry of its name, never its
-    // status view, chooses its door. A name this runtime has not registered
-    // that Core holds for an identity (an entry, a reserved or removed name,
-    // a legacy member waiting for the first roster pass) is refused before
-    // any door, typed: retryable while the next roster pass registers it,
-    // final otherwise. A read of Core's entry Core could not serve refuses
-    // the send retryable: never the member door on a read that could not
-    // tell.
+    // status view, chooses its door. An identity created at runtime that this
+    // runtime has not registered yet is registered from its row and takes
+    // the identity's door. Any other name this runtime has not registered
+    // that Core holds for an identity (a declared entry, a reserved or
+    // removed name, a legacy member waiting for the first roster pass) is
+    // refused before any door, typed: retryable while the next roster pass
+    // registers it, final otherwise. A read of Core's entry Core could not
+    // serve refuses the send retryable: never the member door on a read
+    // that could not tell.
     if let Some(identity_rt) = configured_identity_runtime
         && let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id)
+        && identity_rt.admit_unregistered_name(&identity).await?
     {
-        if identity_rt.contains(&identity).await {
-            return identity_send_target(identity_rt, identity, None).await;
-        }
-        if let Some(refusal) = identity_rt.unregistered_name_refusal(&identity).await {
-            return Err(refusal);
-        }
+        return identity_send_target(identity_rt, identity, None).await;
     }
     Ok(SendMessageTarget::MobMember)
 }
@@ -5592,19 +5594,18 @@ external_addressable = true
     }
 
     /// A send by name to a name no roster pass of this runtime will ever
-    /// register is refused for good, typed, and nothing is delivered: an
-    /// identity created at runtime (Core holds it as a created entry, whose
-    /// record the mob's identity store owns) and a removed identity are
-    /// unknown to this runtime (`-32001`); a name whose record Core cannot
-    /// read (written by a newer release, or contradicted by its journal)
-    /// needs a repair or an upgrade (`-32014`, `identity_name_unreadable`).
-    /// The identity runtime's send and `meta/send_message` answer the same,
-    /// `meta/send_message` before any door (no interaction is reserved).
+    /// register is refused for good, typed, and nothing is delivered: a
+    /// removed identity is unknown to this runtime (`-32001`); a name whose
+    /// record Core cannot read (written by a newer release, or contradicted
+    /// by its journal) needs a repair or an upgrade (`-32014`,
+    /// `identity_name_unreadable`). The identity runtime's send and
+    /// `meta/send_message` answer the same, `meta/send_message` before any
+    /// door (no interaction is reserved). (An identity created at runtime is
+    /// no such name: its door registers it from its row.)
     ///
-    /// RED before the door told the three apart: it refused a created
-    /// entry, a removed name and an unreadable one alike, and
-    /// `meta/send_message` answered every refusal of its identity door as an
-    /// untyped `-32000`.
+    /// RED before the door told them apart: it refused a removed name and
+    /// an unreadable one alike, and `meta/send_message` answered every
+    /// refusal of its identity door as an untyped `-32000`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn send_to_a_name_no_roster_pass_registers_is_refused_for_good() -> Result<(), String> {
         let definition = meerkat_mob::MobDefinition::from_toml(
@@ -5633,20 +5634,8 @@ external_addressable = true
             crate::identity_first::AgentIdentity::parse(name)
                 .map_err(|err| format!("a valid identity: {err:?}"))
         };
-        let created = parse("door-created")?;
         let removed = parse("door-removed")?;
         let unreadable = parse("door-unreadable")?;
-        // An identity created at runtime: Core holds it as a created entry,
-        // its member seated.
-        crate::identity_first::core_test_bridge::bind_live(
-            &bridge.core,
-            &created,
-            &meerkat_mob::ProfileName::from("worker"),
-            1,
-            Some(meerkat_core::types::SessionId::new()),
-        )
-        .map_err(|err| format!("Core's member: {err:?}"))?;
-        bridge.hold_created(&created);
         bridge.hold_removed(&removed);
         bridge.hold_unreadable(&unreadable);
         let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
@@ -5676,11 +5665,7 @@ external_addressable = true
                 "retryable": false,
             })),
         );
-        for (name, expected) in [
-            (&created, &unknown),
-            (&removed, &unknown),
-            (&unreadable, &unreadable_answer),
-        ] {
+        for (name, expected) in [(&removed, &unknown), (&unreadable, &unreadable_answer)] {
             let refused = identity_rt
                 .send(name, &meerkat_core::ContentInput::Text("hello".to_string()))
                 .await
@@ -5725,6 +5710,116 @@ external_addressable = true
             return Err("nothing reaches a member through a refused door".to_string());
         }
         let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// A dispatch by name to a name this runtime has not registered answers
+    /// the identity door's typed refusal, as a send does, never a blanket
+    /// unknown identity: an entry a host declared, before this runtime's
+    /// roster pass registers it, and a read of Core's entry that Core could
+    /// not serve refuse retryable (`-32052`, `identity_history_unavailable`);
+    /// a name whose record Core cannot read refuses as unreadable (`-32014`);
+    /// a removed identity and a name Core holds for no identity are unknown
+    /// (`-32001`). Nothing is delivered.
+    ///
+    /// RED before the dispatch door propagated its admission's refusal: it
+    /// answered every one of them `-32001`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_to_a_name_this_runtime_has_not_registered_answers_the_doors_typed_refusal()
+    -> Result<(), String> {
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let parse = |name: &str| {
+            crate::identity_first::AgentIdentity::parse(name)
+                .map_err(|err| format!("a valid identity: {err:?}"))
+        };
+        let declared = parse("dispatch-declared")?;
+        let removed = parse("dispatch-removed")?;
+        let unreadable = parse("dispatch-unreadable")?;
+        let nobody = parse("dispatch-nobody")?;
+        bridge.hold_declared(&declared);
+        bridge.hold_removed(&removed);
+        bridge.hold_unreadable(&unreadable);
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "dispatch-to-an-unregistered-name".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+        let retryable = |name: &str| {
+            (
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                Some(serde_json::json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": name,
+                    "retryable": true,
+                })),
+            )
+        };
+        let unknown = (-32001, None);
+        let unreadable_answer = (
+            crate::rpc::STORAGE_RESOLUTION_CODE,
+            Some(serde_json::json!({
+                "kind": "identity_name_unreadable",
+                "identity": "dispatch-unreadable",
+                "remedy": "repair_or_upgrade",
+                "retryable": false,
+            })),
+        );
+        let dispatch = |name: crate::identity_first::AgentIdentity| {
+            let identity_rt = identity_rt.clone();
+            async move {
+                identity_rt
+                    .dispatch(
+                        &name,
+                        &crate::identity_first::DispatchInput::system("hello"),
+                    )
+                    .await
+                    .err()
+                    .map(|refused| {
+                        (
+                            crate::rpc::identity_error_code(&refused),
+                            refused.structured_data(),
+                        )
+                    })
+            }
+        };
+        for (name, expected) in [
+            (&declared, retryable("dispatch-declared")),
+            (&removed, unknown.clone()),
+            (&unreadable, unreadable_answer),
+            (&nobody, unknown),
+        ] {
+            assert_eq!(
+                dispatch(name.clone()).await,
+                Some(expected),
+                "{name}: the dispatch door's typed refusal"
+            );
+        }
+
+        // Every read of Core's entry fails: the dispatch to a name this
+        // runtime has not registered is refused retryable, never as an
+        // unknown identity.
+        bridge.fail_entry_reads(0, u64::MAX);
+        assert_eq!(
+            dispatch(parse("dispatch-plain")?).await,
+            Some(retryable("dispatch-plain")),
+            "a read Core could not serve refuses the dispatch retryable"
+        );
+        if !bridge.delivered().is_empty() {
+            return Err("nothing reaches a member through a refused door".to_string());
+        }
         Ok(())
     }
 

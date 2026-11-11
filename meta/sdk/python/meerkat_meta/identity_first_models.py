@@ -1115,9 +1115,12 @@ class IdentityStatus:
     #: ``{"reason", "artifact_refusal"?}`` while a restored member's customizer
     #: tools are not published yet.
     customizer_tools_pending: dict[str, Any] | None = None
-    #: ``True`` when a host intent declaration in Core manages the identity;
-    #: Meta's lifecycle verbs then refuse it with
-    #: :class:`~meerkat_meta.errors.IdentityHostAdoptedError`.
+    #: ``True`` when Core drives the identity itself, so Meta's lifecycle
+    #: verbs refuse it: a host intent declaration in Core manages it (the
+    #: verbs raise :class:`~meerkat_meta.errors.IdentityHostAdoptedError`), or
+    #: it is store-owned, created at runtime or adopted into store custody
+    #: (they raise a plain :class:`~meerkat_meta.errors.RpcError`, ``-32603``
+    #: with ``data["kind"] == "identity_store_owned"``).
     intent_managed: bool = False
     #: Core's convergence status, when :attr:`intent_managed` is set and Core
     #: could read it.

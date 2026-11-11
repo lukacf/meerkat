@@ -1,6 +1,6 @@
 {
   "name": "@rkat/meta-sdk",
-  "version": "0.9.11",
+  "version": "0.9.13",
   "description": "Meta TypeScript SDK - companion orchestration for the Meerkat agent runtime",
   "type": "module",
   "main": "./dist/index.js",

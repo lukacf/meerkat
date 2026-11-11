@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-mobkit"
-version = "0.9.11"
+version = "0.9.13"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

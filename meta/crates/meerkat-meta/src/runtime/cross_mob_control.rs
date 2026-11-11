@@ -2305,7 +2305,12 @@ fn control_identity_error(error: crate::identity_first::IdentityRuntimeError) ->
             "stale_runtime_alias"
         }
         crate::identity_first::IdentityRuntimeError::UnknownIdentity(_) => "unknown_identity",
-        crate::identity_first::IdentityRuntimeError::InvalidState { .. } => "identity_not_active",
+        // An archived identity created at runtime has no member until its
+        // unarchive: not active, as any identity Core holds no member of.
+        crate::identity_first::IdentityRuntimeError::InvalidState { .. }
+        | crate::identity_first::IdentityRuntimeError::IdentityArchived { .. } => {
+            "identity_not_active"
+        }
         _ => "identity_error",
     };
     (code.to_string(), error.to_string())

@@ -4097,6 +4097,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The paths the host declared as its own state and inputs with
+    /// [`Self::with_protected_host_inputs`]: the in-process file tools of
+    /// every dispatcher this factory builds never write them.
+    #[cfg(not(target_arch = "wasm32"))]
+    protected_host_paths: Vec<PathBuf>,
     /// The host's trust over the convention hook sources, installed with
     /// [`Self::with_hook_source_trust`]: asked about each source over the
     /// bytes the build read.
@@ -5422,6 +5427,8 @@ impl AgentFactory {
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
+            protected_host_paths: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
@@ -5633,6 +5640,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            protected_host_paths: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -5960,6 +5969,46 @@ impl AgentFactory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn host_confinement(&self) -> Option<&crate::HostConfinement> {
         self.host_confinement.as_ref()
+    }
+
+    /// Declare the host's own state and inputs to the in-process file
+    /// tools (`apply_patch`, `blob_save_file`) of every dispatcher this
+    /// factory builds, so a model's call never writes them: `inputs` and
+    /// `convention_sources` are the lists a host assembles for
+    /// [`crate::HostConfinement::admit_host_inputs`] and its startup report
+    /// ([`crate::HostConfinement::host_inputs`],
+    /// [`crate::HostConfinement::credential_store_input`],
+    /// [`crate::HostConfinement::convention_sources`]), and
+    /// `realm_documents` is [`crate::HostConfinement::realm_documents`] of
+    /// the realm it serves. Those tools run in the host process, so OS
+    /// process confinement does not reach them, whatever its mode.
+    ///
+    /// A declared path that lies strictly inside a dispatcher's project
+    /// root is refused with everything under it (a realm state root given
+    /// inside the project, a config document, a credential store). One
+    /// that contains or equals the project root is not applied, so a host
+    /// whose tools are rooted in its realm directory keeps the realm
+    /// documents and still lets other files be written there. A relative
+    /// path is taken from the process working directory, as the host
+    /// itself opens it. A `.rkat` directory at or below the project root is
+    /// refused without this call. A declared path that is a symbolic link is
+    /// refused where it leads as well; a link deeper inside a declared
+    /// directory is not followed. Each call replaces the declared paths.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_protected_host_inputs(
+        mut self,
+        inputs: &[(crate::HostInput, PathBuf)],
+        realm_documents: &[PathBuf],
+        convention_sources: &[PathBuf],
+    ) -> Self {
+        self.protected_host_paths = inputs
+            .iter()
+            .map(|(_, path)| path)
+            .chain(realm_documents)
+            .chain(convention_sources)
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.clone()))
+            .collect();
+        self
     }
 
     /// How this factory's skill repositories meet its host confinement: the
@@ -7868,6 +7917,10 @@ impl AgentFactory {
                 },
             )
             .with_image_input_support(spec.supports_image_input)
+            // The configured server that serves the model is the issuer
+            // of the continuity material this client receives: such
+            // material is replayed to that server only.
+            .with_self_hosted_server(spec.server_id)
             .with_static_credential()
             .with_operator_reasoning_effort_levels(spec.reasoning_effort_levels);
             // The route the client reports names the backend of the
@@ -8028,7 +8081,7 @@ impl AgentFactory {
         session_id: Option<String>,
         ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
-        CompositeDispatcher::new_with_ops_lifecycle(
+        let mut composite = CompositeDispatcher::new_with_ops_lifecycle(
             store,
             config,
             project_root,
@@ -8036,7 +8089,18 @@ impl AgentFactory {
             external,
             session_id,
             ops_lifecycle,
-        )
+        )?;
+        self.protect_host_paths_of(&mut composite);
+        Ok(composite)
+    }
+
+    /// Give `composite`'s file tools the paths this factory's host declared
+    /// ([`Self::with_protected_host_inputs`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn protect_host_paths_of(&self, composite: &mut CompositeDispatcher) {
+        if !self.protected_host_paths.is_empty() {
+            composite.protect_host_paths(self.protected_host_paths.iter().cloned());
+        }
     }
 
     /// Build a shared builtin dispatcher using the provided config.
@@ -8177,6 +8241,9 @@ impl AgentFactory {
             ops_lifecycle,
             durable_shell_runtime,
         )?;
+        // Before the blob file tools are registered: they are built with the
+        // declared paths.
+        self.protect_host_paths_of(&mut composite);
 
         #[cfg(feature = "skills")]
         if let Some(engine) = skill_engine {
@@ -13762,6 +13829,11 @@ mod tests {
             65_536,
             "Gemini 4 Argon defaults to its synchronous output cap, above Google's \
              32,768 minimum recommendation"
+        );
+        assert_eq!(
+            model_aware_default_max_tokens(&registry, Provider::Gemini, "gemini-4-carbon"),
+            65_536,
+            "Gemini 4 Carbon defaults to its synchronous output cap, as Gemini 4 Argon"
         );
     }
 
@@ -22101,6 +22173,111 @@ mod tests {
         assert!(
             message.contains("localhost:11434") && message.contains("no credential binding"),
             "the failure must name the server it could not authenticate: {err}"
+        );
+    }
+
+    /// The factory declares the configured server to the self-hosted
+    /// Responses client it builds, so that client is that server as an
+    /// issuer of continuity material: a step the process received from the
+    /// configured server keeps its material in the client's replay
+    /// projection, whatever base URL the binding resolves to. (Without the
+    /// declaration the client would be the self-hosted server at its base
+    /// URL, and the configured server's material another issuer's.)
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_self_hosted_responses_client_is_its_configured_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let _calls = install_authless_self_hosted_runtime(&mut factory);
+        let server = "continuity_row_server";
+        let mut config = config_with_self_hosted_server_id(
+            server,
+            SelfHostedServerConfig {
+                transport: SelfHostedTransport::OpenAiCompatible,
+                base_url: "http://127.0.0.1:11434".to_string(),
+                api_style: SelfHostedApiStyle::Responses,
+            },
+        );
+        insert_self_hosted_realm_binding(
+            &mut config,
+            "dev",
+            "dev_local",
+            "http://realm.example/v1",
+            CredentialSourceSpec::ManagedStore,
+        );
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .auth
+            .get_mut("dev_local_auth")
+            .unwrap()
+            .auth_method = "none".to_string();
+        let identity = SessionLlmIdentity {
+            model: "gemma-4-e2b".into(),
+            provider: Provider::SelfHosted,
+            self_hosted_server_id: Some(server.into()),
+            provider_params: None,
+            auth_binding: Some(configured_auth_binding("dev", "dev_local")),
+        };
+        let client = factory
+            .build_llm_client_for_identity_with_auth_lease(&config, &identity, None)
+            .await
+            .unwrap_or_else(|error| panic!("the self-hosted client is built: {error}"));
+
+        let response = "resp_facade_continuity_row";
+        let step = vec![
+            meerkat_core::AssistantBlock::Reasoning {
+                text: String::new(),
+                meta: Some(Box::new(meerkat_core::ProviderMeta::OpenAi {
+                    id: "rs_facade_continuity_row".to_string(),
+                    encrypted_content: Some("ciphertext-facade-continuity-row".to_string()),
+                    phase: None,
+                    response_id: Some(response.to_string()),
+                })),
+            },
+            meerkat_core::AssistantBlock::Text {
+                text: "Done.".to_string(),
+                meta: Some(Box::new(
+                    meerkat_core::ProviderMeta::OpenAiAssistantMessage {
+                        id: "msg_facade_continuity_row".to_string(),
+                        phase: None,
+                        response_id: Some(response.to_string()),
+                    },
+                )),
+            },
+        ];
+        let transcript = vec![
+            meerkat_core::Message::User(meerkat_core::UserMessage::text("question".to_string())),
+            meerkat_core::Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                step.clone(),
+                meerkat_core::StopReason::EndTurn,
+            )),
+            meerkat_core::Message::User(meerkat_core::UserMessage::text("next".to_string())),
+        ];
+        let keeps_material = || {
+            client
+                .project_replay_messages(&transcript)
+                .expect("replay projection")
+                .iter()
+                .any(|message| {
+                    matches!(message, meerkat_core::Message::BlockAssistant(assistant) if assistant
+                        .blocks
+                        .iter()
+                        .any(|block| meerkat_core::replay_provider_metadata(block).is_some()))
+                })
+        };
+        assert!(
+            !keeps_material(),
+            "a step the process did not receive is of unknown issuer"
+        );
+        meerkat_core::OpenAiContinuityLedger::process().record_step(
+            &meerkat_core::OpenAiContinuityIssuer::self_hosted_server(server),
+            &step,
+        );
+        assert!(
+            keeps_material(),
+            "the client the factory builds is the configured server"
         );
     }
 

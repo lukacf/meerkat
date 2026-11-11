@@ -13,7 +13,9 @@
 //! process hosting a runtime, and the maintenance fence.
 //!
 //! An identity a host adopted (Core holds an identity intent row for it) is
-//! refused, as every Meta lifecycle verb refuses it. A held-completion mark
+//! refused, as every Meta lifecycle verb refuses it, and so is a store-owned
+//! identity (created at runtime, or adopted into store custody), which
+//! Core's MobMachine drives. A held-completion mark
 //! counts by the runtime's rule (the marks read at the first wake): owed while
 //! Core binds the identity to nothing since the latest mob reset, which is
 //! refused; stale beside a binding, which the next start drops and the report
@@ -108,6 +110,12 @@ pub enum IdentityResetRefusal {
     PendingRow { row: String },
     /// Writing the manifest failed.
     WriteFailed { detail: String },
+    /// The identity is store-owned: created at runtime, or adopted into
+    /// store custody, its record is its row in the mob's identity store and
+    /// Core's MobMachine drives it (Core answers its identity management
+    /// `CreatedEntry`). Meta resets nothing it does not drive; Core's
+    /// store-owned changes change it.
+    IdentityStoreOwned,
 }
 
 impl std::fmt::Display for IdentityResetRefusal {
@@ -162,6 +170,10 @@ impl std::fmt::Display for IdentityResetRefusal {
             Self::WriteFailed { detail } => {
                 write!(f, "writing the first-boot manifest failed: {detail}")
             }
+            Self::IdentityStoreOwned => f.write_str(
+                "the identity is store-owned (its record is its row in the mob's identity store, \
+                 and Core's MobMachine drives it): change it through Core's store-owned changes",
+            ),
         }
     }
 }
@@ -251,11 +263,15 @@ async fn reset(
         })?;
     let core_identity = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
     // As every Meta lifecycle verb: an identity a host adopted is the host's,
-    // and an intent row this build cannot read may declare anything.
+    // a store-owned identity is Core's MobMachine's, and an intent row this
+    // build cannot read may declare anything.
     match history.identity_management(&core_identity) {
         meerkat_mob::MemberIdentityManagement::CommandDriven => {}
         meerkat_mob::MemberIdentityManagement::IntentManaged => {
             return Err(Refusal::IdentityHostAdopted);
+        }
+        meerkat_mob::MemberIdentityManagement::CreatedEntry => {
+            return Err(Refusal::IdentityStoreOwned);
         }
         meerkat_mob::MemberIdentityManagement::IntentUnreadable => {
             return Err(Refusal::MemberHistoryUnreadable {

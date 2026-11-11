@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.13
+
+No SDK API changes; released with Meta 0.9.13.
+
+## 0.9.12
+
 - `MetaRuntime.grantTool` resolves the gateway's `applies` beside the
   grant (whether it applies to the member's running build: `now`,
   `not_mounted` or `at_next_build`), and `listToolGrants` the member's

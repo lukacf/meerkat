@@ -1651,12 +1651,17 @@ impl MeerkatMcpState {
                 .and_then(meerkat::HostConfinement::credential_store_input),
         );
         host_confinement.admit_host_inputs(&host_inputs)?;
-        host_confinement.log_startup(
-            &host_inputs,
-            &meerkat::HostConfinement::convention_sources(
-                conventions_context_root.as_deref(),
-                bootstrap.context.user_config_root.as_deref(),
-            ),
+        let convention_sources = meerkat::HostConfinement::convention_sources(
+            conventions_context_root.as_deref(),
+            bootstrap.context.user_config_root.as_deref(),
+        );
+        host_confinement.log_startup(&host_inputs, &convention_sources);
+        // The factory reads its hooks and skills from the context root, or
+        // from its project root when there is none: those are the convention
+        // sources its file tools must not write.
+        let tool_convention_sources = meerkat::HostConfinement::convention_sources(
+            Some(&project_root),
+            bootstrap.context.user_config_root.as_deref(),
         );
         let mcp_stdio_launch_profile = host_mcp_stdio_launch_profile(&host_confinement);
 
@@ -1665,7 +1670,11 @@ impl MeerkatMcpState {
         // It builds no MCP router of its own (its sessions configure no
         // servers and its runtime carries no configured attachment
         // authority), so the host's attempt guards live with the routers
-        // this server builds below.
+        // this server builds below. The agents' in-process file tools never
+        // write the host's inputs, the realm's own documents or the
+        // convention sources, in any confinement mode; without a context
+        // root the tools are rooted in the realm directory, where the realm
+        // documents are kept too.
         let mut factory = AgentFactory::new(store_path)
             .session_store(session_store.clone())
             .runtime_root(realm_paths.root.clone())
@@ -1674,7 +1683,12 @@ impl MeerkatMcpState {
             .shell(true)
             .workgraph(true)
             .schedule(true)
-            .with_host_confinement(&host_confinement);
+            .with_host_confinement(&host_confinement)
+            .with_protected_host_inputs(
+                &host_inputs,
+                &meerkat::HostConfinement::realm_documents(&realm_paths.root),
+                &tool_convention_sources,
+            );
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);
         }
@@ -12816,5 +12830,107 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
             ),
             "{refused}"
         );
+    }
+
+    /// The server's own construction declares its inputs to its agents'
+    /// in-process file tools. Started without a context root, the tools are
+    /// rooted in the realm directory: the realm's documents are refused
+    /// there, and so is the skills directory the factory reads from that
+    /// root (`.rkat/skills`), also where it is a link to a directory beside
+    /// it. An ordinary file is still written in the realm directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_tools_never_write_the_servers_own_documents() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical tempdir");
+        let realms = base.join("realms");
+        let realm_paths = meerkat_store::realm_paths_in(&realms, "file-tools");
+        let realm_dir = realm_paths.root.clone();
+        let document_text = "[realm.file-tools]\n";
+        std::fs::create_dir_all(realm_dir.join(".rkat")).expect("realm dir");
+        std::fs::create_dir_all(realm_dir.join("shared-skills")).expect("skills dir");
+        std::os::unix::fs::symlink("../shared-skills", realm_dir.join(".rkat/skills"))
+            .expect("link the skills directory");
+        std::fs::write(&realm_paths.config_path, document_text).expect("realm document");
+        let mut bootstrap = RuntimeBootstrap::default();
+        bootstrap.realm.selection = RealmSelection::Explicit {
+            realm_id: "file-tools".into(),
+        };
+        bootstrap.realm.state_root = Some(realms.clone());
+        bootstrap.context.user_config_root = Some(base.join("user"));
+        let llm = Arc::new(ToolCallScriptLlmClient::default());
+        let state = MeerkatMcpState::new_with_bootstrap_options_and_llm(
+            bootstrap,
+            false,
+            Some(Arc::clone(&llm) as Arc<dyn meerkat::LlmClient>),
+            None,
+        )
+        .await
+        .expect("the server starts");
+
+        let add = |path: &str| {
+            format!("*** Begin Patch\n*** Add File: {path}\n+written by the model\n*** End Patch")
+        };
+        let patches = [
+            (
+                "the realm config document",
+                "config.toml",
+                "*** Begin Patch\n*** Update File: config.toml\n@@\n+# appended by the model\n*** End Patch"
+                    .to_string(),
+                false,
+            ),
+            (
+                "the grant owner store",
+                "authorization/grant-owner.jsonl",
+                add("authorization/grant-owner.jsonl"),
+                false,
+            ),
+            (
+                "the hooks the factory reads from the tool root",
+                ".rkat/config.toml",
+                add(".rkat/config.toml"),
+                false,
+            ),
+            (
+                "the skills directory behind the link",
+                "shared-skills/planted/SKILL.md",
+                add("shared-skills/planted/SKILL.md"),
+                false,
+            ),
+            ("an ordinary file", "out.txt", add("out.txt"), true),
+        ];
+        for (case, path, patch, written) in patches {
+            llm.arm_call("apply_patch", json!({ "patch": patch }));
+            let run_input: MeerkatRunInput = serde_json::from_value(json!({
+                "prompt": "Apply the patch.",
+                "model": "claude-sonnet-4-5",
+                "provider": "anthropic",
+                "enable_workgraph": false,
+            }))
+            .expect("run input");
+            Box::pin(handle_meerkat_run(&state, run_input, None, None))
+                .await
+                .expect("meerkat_run succeeds");
+            assert!(
+                llm.armed_call.lock().expect("armed call lock").is_none(),
+                "{case}: the model's apply_patch call was made"
+            );
+            let target = realm_dir.join(path);
+            if written {
+                assert_eq!(
+                    std::fs::read_to_string(&target).expect("the ordinary file"),
+                    "written by the model\n",
+                    "{case}"
+                );
+            } else if path == "config.toml" {
+                assert_eq!(
+                    std::fs::read_to_string(&target).expect("realm document"),
+                    document_text,
+                    "{case} was changed by the file tool"
+                );
+            } else {
+                assert!(!target.exists(), "{case}: {path} was written");
+            }
+        }
     }
 }

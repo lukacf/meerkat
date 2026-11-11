@@ -243,6 +243,30 @@ fn gemini_4_argon_owns_the_gemini_default() {
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
+/// Gemini 4 Carbon (GA 2026-11-10, paid Gemini API tiers only) is a
+/// recommended row and does not change the Gemini or the global default.
+/// <https://ai.google.dev/gemini-api/docs/models/gemini-4-carbon>
+/// <https://ai.google.dev/gemini-api/docs/changelog>
+#[test]
+fn gemini_4_carbon_is_cataloged_without_changing_the_defaults() {
+    let id = "gemini-4-carbon";
+    let entry = entry_for(Provider::Gemini, id).expect("gemini-4-carbon must be in the catalog");
+    assert_eq!(entry.provider, "gemini");
+    assert_eq!(entry.display_name, "Gemini 4 Carbon");
+    assert_eq!(entry.tier, ModelTier::Recommended);
+    assert_eq!(entry.release_stage, meerkat_core::ModelReleaseStage::Stable);
+    assert_eq!(entry.context_window, Some(1_048_576));
+    assert_eq!(entry.max_input_tokens, None);
+    assert_eq!(entry.max_output_tokens, Some(65_536));
+    assert!(
+        allowed_models(Provider::Gemini).any(|allowed| allowed == id),
+        "gemini-4-carbon must be in the Gemini allowlist"
+    );
+    assert_eq!(infer_provider(id), Some(Provider::Gemini));
+    assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+}
+
 #[test]
 fn gemini_38_stays_recommended_without_owning_the_default() {
     let recommended = entry_for(Provider::Gemini, "gemini-3.8-flash")
@@ -1469,6 +1493,70 @@ fn gemini_4_argon_capability_row_matches_the_official_model_page() {
     );
 }
 
+/// Google's model page, thinking guide and pricing page give Gemini 4 Carbon
+/// the limits, inputs, thinking levels, caching and tier of Gemini 4 Argon,
+/// so its row is the Argon row under its own identity.
+#[test]
+fn gemini_4_carbon_capability_row_matches_the_official_model_page() {
+    let caps = capabilities_for(Provider::Gemini, "gemini-4-carbon")
+        .expect("gemini-4-carbon must be in the Gemini catalog");
+    assert_eq!(caps.provider, Provider::Gemini);
+    assert_eq!(caps.display_name, "Gemini 4 Carbon");
+    assert_eq!(caps.tier, ModelTier::Recommended);
+    assert_eq!(caps.model_family, "gemini-4");
+    assert_eq!(
+        caps.context_window,
+        Some(1_048_576),
+        "input, thinking and output share one 1,048,576-token window"
+    );
+    assert_eq!(caps.max_input_tokens, None);
+    assert_eq!(
+        caps.max_output_tokens,
+        Some(65_536),
+        "synchronous output cap; longer output needs long decode"
+    );
+    assert_eq!(caps.thinking, ThinkingSupport::GeminiThinkingLevel);
+    assert_eq!(
+        caps.effort_levels,
+        [EffortLevel::Low, EffortLevel::Medium, EffortLevel::High],
+        "Gemini 4 Carbon documents thinking levels low, medium and high"
+    );
+    assert!(
+        !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
+        "Gemini 4 Carbon takes no sampling parameters, as Gemini 4 Argon"
+    );
+    assert!(
+        !caps.supports_thinking_budget_legacy,
+        "Gemini 4 Carbon documents thinking_level only"
+    );
+    assert!(caps.vision);
+    assert!(caps.image_tool_results);
+    assert!(caps.inline_video);
+    assert!(
+        !caps.realtime,
+        "the Live API does not serve Gemini 4 Carbon"
+    );
+    assert!(!caps.image_generation);
+    assert!(caps.supports_structured_output);
+    assert!(caps.supports_web_search);
+    assert!(caps.supports_forced_tool_choice);
+    assert_eq!(
+        caps.call_timeout_secs,
+        Some(900),
+        "Google asks for stream read timeouts of 15 to 20 minutes"
+    );
+    assert_eq!(caps.stream_inactivity_timeout_secs, Some(900));
+
+    // Every other field equals the Argon row's: the two rows differ in
+    // identity only.
+    let argon = capabilities_for(Provider::Gemini, "gemini-4-argon")
+        .expect("gemini-4-argon must be in the Gemini catalog");
+    let carbon_as_argon = format!("{caps:?}")
+        .replace("gemini-4-carbon", "gemini-4-argon")
+        .replace("Gemini 4 Carbon", "Gemini 4 Argon");
+    assert_eq!(carbon_as_argon, format!("{argon:?}"));
+}
+
 #[test]
 fn claude_opus_5_capability_row_mirrors_the_claude_5_generation() {
     let caps = capabilities_for(Provider::Anthropic, "claude-opus-5")
@@ -1685,7 +1773,7 @@ fn stream_inactivity_windows_follow_documented_long_silent_responses() {
     for caps in all_capabilities() {
         let expected = match (caps.provider, caps.id) {
             // Google: set client timeouts to at least 15 minutes.
-            (Provider::Gemini, "gemini-4-argon") => Some(900),
+            (Provider::Gemini, "gemini-4-argon" | "gemini-4-carbon") => Some(900),
             // OpenAI: requests may take several minutes; no streaming.
             (Provider::OpenAI, "gpt-5.5-pro") => Some(7200),
             _ => None,
@@ -2192,10 +2280,12 @@ mod schema {
     /// Live probe 2026-10-14: `thinkingConfig.thinkingLevel: "minimal"`
     /// answers 400 "Thinking level MINIMAL is not supported for this model"
     /// on these models and 200 on every other Gemini row, so only the others
-    /// may advertise `minimal`.
+    /// may advertise `minimal`. Gemini 4 Carbon (GA 2026-11-10) is listed
+    /// from the thinking guide, which gives it low, medium and high.
     #[test]
     fn gemini_rows_advertise_only_the_thinking_levels_the_model_accepts() {
         const REFUSES_MINIMAL: &[&str] = &[
+            "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-3.8-flash",
             "gemini-3.7-flash",

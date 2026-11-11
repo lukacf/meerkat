@@ -403,6 +403,10 @@ fn native_failure_kind(error: &IdentityRuntimeError) -> &'static str {
         IdentityRuntimeError::IdentityHostAdopted { .. } => {
             "IdentityRuntimeError::IdentityHostAdopted"
         }
+        IdentityRuntimeError::IdentityStoreOwned { .. } => {
+            "IdentityRuntimeError::IdentityStoreOwned"
+        }
+        IdentityRuntimeError::IdentityArchived { .. } => "IdentityRuntimeError::IdentityArchived",
         IdentityRuntimeError::IdentityNameHeldByRawMember { .. } => {
             "IdentityRuntimeError::IdentityNameHeldByRawMember"
         }

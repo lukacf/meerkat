@@ -593,6 +593,7 @@ describe("identity family: typed answers", () => {
       { outcome: "reviewed", operation_id: OPERATION_ID },
       { outcome: "done", agents: [] },
       { outcome: "done", operation_id: OPERATION_ID },
+      { outcome: "pending_preparation", operation_id: OPERATION_ID },
       { outcome: "done", operation_id: OPERATION_ID, agents: [{ state: "committed" }] },
       { outcome: "pending_decision", operation_id: OPERATION_ID },
       {

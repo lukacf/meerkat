@@ -646,6 +646,8 @@ def test_an_answer_that_is_no_outcome_is_a_contract_mismatch():
         {},
         {"outcome": "reviewed", "operation_id": OPERATION_ID},
         {"outcome": "done", "agents": []},
+        {"outcome": "done", "operation_id": OPERATION_ID},
+        {"outcome": "pending_preparation", "operation_id": OPERATION_ID},
         {"outcome": "done", "operation_id": OPERATION_ID, "agents": [{"state": "committed"}]},
         {"outcome": "pending_decision", "operation_id": OPERATION_ID},
         {
@@ -727,6 +729,13 @@ async def test_a_held_decision_is_an_answer_and_the_operation_is_read_later():
     assert isinstance(ended, IdentityRefused)
     assert ended.refusal.kind == "decision_closed"
     assert ended.refusal.details == {"state": "denied"}
+
+    # An unknown operation names the operation it read.
+    identities, _ = make_identities(
+        results={"meta/identity/operation": {"outcome": "unknown"}}
+    )
+    with pytest.raises(ContractMismatchError):
+        await identities.operation(request_id="req-2")
 
 
 @pytest.mark.asyncio

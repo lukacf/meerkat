@@ -1270,9 +1270,27 @@ Every change takes `request_id`, 1 to 256 bytes of text the caller chooses.
 It names the operation: the same caller sending the same request under the
 same `request_id` gets the same answer again and nothing is written twice,
 so a change whose answer was lost is retried as it was. Another request
-under a `request_id` the caller already used is refused `operation_reused`.
-The id is the caller's own: two callers (the stdio host and a person at the
-Console, for example) that pick the same `request_id` name two operations.
+under a `request_id` the caller already used is refused `operation_reused`,
+whatever change it asks for: one `request_id` names one change, and one
+held decision. The id is the caller's own: two callers (the stdio host and
+a person at the Console, for example) that pick the same `request_id` name
+two operations.
+
+A retry is compared with what committed as far as it can be normalized
+again. Two limits follow. A different update sent under the id of a
+committed update with the digest read before it is answered the committed
+outcome, not `operation_reused`: the digest it names is stale, and a stale
+retry is taken for the request that committed. And a retry of a committed
+change that can no longer be normalized for another reason (a peer removed
+since, a profile gone) answers that refusal; `meta/identity/operation`
+reads the committed outcome in both cases.
+
+With every change the mob drives the seats it still owes again (see
+[`meta/identity/create`](#metaidentitycreate)), beside the change: the
+change's answer does not wait for them. That completes a change that
+committed earlier, so it happens whatever becomes of the request that came
+by, and while the mob's changes are held: a hold stops new changes, not
+the completion of a committed one.
 
 A change of one agent also takes `expected_spec_digest`, the agent's
 `spec_digest` as the caller last read it (from `get`, `list` or an
@@ -1280,8 +1298,12 @@ outcome). An agent that changed meanwhile answers `stale_spec` with the
 current digest.
 
 `proposer` (a reference to who drafted the request) and `source_evidence`
-(`{attestor, subject, source_ref, observed_at_ms}`) may accompany any
-change. They are recorded with it and are never authority.
+(`{attestor, subject, source_ref, observed_at_ms}`) are the host's to
+state: host code may send them with any change, and a person at the Console
+or an agent that sends one is refused `invalid_request` at that member.
+They are never authority. A create records them with its agents, and a
+held change shows them to the person who decides it; the other changes
+record neither.
 
 ### Outcomes
 
@@ -1298,8 +1320,8 @@ Each entry of `agents` is `{name, state, spec_digest?, spec_revision?,
 session_id?, seat?, instructions?}`. `state` is `committed`,
 `pending_preparation`, `archiving`, `archived`, `restored`, `retiring` or
 `removed`. `seat`, on a create, is `seated` or `owed` (see
-[`meta/identity/create`](#metaidentitycreate)). `instructions`, on an
-update, says what became of an instructions change (see
+[`meta/identity/create`](#metaidentitycreate)). `instructions` is absent
+unless the launch has an instruction step for updates (see
 [`meta/identity/update`](#metaidentityupdate)).
 
 ### Refusals
@@ -1375,6 +1397,11 @@ seated without a restart when the mob drives its owed seats again, which it
 does at each later change of the family and at its next start, and its
 first message runs once then.
 
+A create with a first message (and a create of an agent whose profile
+starts a run of its own) answers once the new agent's session exists; its
+first run continues after the answer. No other change waits for that run,
+nor for the seats the mob still owes.
+
 A mob whose runtime is governed runs no first message: a first turn has no
 requester its host could govern, so a create that gives `first_message`
 there is refused `unsupported` (`feature: "first_message_in_governed_realm"`)
@@ -1401,19 +1428,12 @@ An update can touch several change classes of the policy at once; each is
 judged by its own rules and the strictest outcome applies to the whole
 update.
 
-The entry of the agent says `instructions` when the update named them:
-
-| `instructions.kind` | Meaning |
-|---------------------|---------|
-| `applies_at_next_run` | The change reaches the agent at its next run |
-| `applies_after_compaction` | The agent's model takes new instructions only at the head of what it reads: the change reaches it after its next compaction |
-| `applies_at_next_session` | The change does not reach the agent as it runs now, for `reason` (`prepared_authorization_required`, `slot_limit_exceeded`, `active_set_budget_exceeded`, `lowering_unavailable`, `body_too_large`, `record_unavailable`): it applies when the agent next starts afresh |
-| `unchanged` | The agent holds these instructions already |
-
-Whatever the kind, the new instructions are in the agent's record at once.
-They reach the agent at its next run; a run that starts within moments of
-the change may still use the earlier instructions; and earlier instructions
-are never rewritten.
+New instructions are in the agent's record at once. What carries them to
+an agent that is running is the launch's instruction step for updates: a
+launch that has one answers what became of the change in the agent's
+`instructions` member, on the first answer of an update that names
+`set.instructions` (a retry states none). A launch without one answers no
+such member.
 
 ### `meta/identity/archive`, `meta/identity/unarchive`, `meta/identity/remove`, `meta/identity/adopt`
 
@@ -1470,19 +1490,27 @@ Takes exactly one of `{request_id}` (the caller's own operation) and
 outcome as the change answered it, or `{"outcome": "unknown",
 "operation_id"}` when no change committed under it and no decision is held
 for it: such an operation was never asked or was refused, and asking it
-commits it at most once.
+commits it at most once. An operation whose decision ended without its
+change (rejected, expired, withdrawn, or refused when it was carried out)
+answers a result too: `{"outcome": "refused", "kind", "retryable",
+"detail"}` with the kind's members and no `operation_id`. Such an operation
+is closed for good: ask the change again under a new `request_id`.
 
 ### `meta/identity/withdraw` and `meta/identity/changes_hold`
 
 `meta/identity/withdraw` takes the operation as `meta/identity/operation`
 does and withdraws its held decision; it answers `{operation_id,
-decision_id}`, or `decision_not_found` when none is held.
+decision_id}`, or `decision_not_found` when none is held. The requester
+that asked for the change withdraws it, and so does the host's operator on
+the stdio gateway, for any held change.
 
 `meta/identity/changes_hold` takes `{held, reason?}` and answers `{held}`.
 While changes are held, every change of the family is refused the retryable
-`changes_held` and nothing of it is written. The hold is the host's alone,
-and it is not durable: a host that holds changes across a deploy holds them
-again at its next start.
+`changes_held` and nothing of it is written. The hold is the host's: its
+operator's on the stdio gateway, or a signed-in person's with
+`runtime.admin` on the Console; an agent holds nothing. It is not durable:
+a host that holds changes across a deploy holds them again at its next
+start.
 
 ### `meta/identity/directory` and `meta/identity/plan`
 
@@ -1509,7 +1537,16 @@ actions (see [Access control](/concepts/access-control)):
 `agent.identity.create` for a create, `agent.identity.manage` on the named
 agent for an update, an archive, an unarchive and an adoption, and
 `agent.identity.remove` on the named agent for a removal.
-`meta/identity/changes_hold` needs `runtime.admin`. The reads need
+`meta/identity/changes_hold` needs `runtime.admin`: a signed-in person who
+has it holds and releases the mob's changes, and a caller the Console
+could not verify does not. `meta/identity/plan` needs what the change it
+plans needs, on the agent that change names. `meta/identity/operation`
+answers the caller's own operations; another requester's operation, named
+by its `operation_id`, reads as `unknown` unless the caller has
+`runtime.admin`. `meta/identity/withdraw` is the signed-in person's who
+asked for the change: a caller the Console could not verify withdraws
+nothing. A `get` names the peers the caller may view, and no page's `next`
+names an agent the caller may not view. The reads need
 `agent.view`: `get` on the named agent, and a list and the directory leave
 out the agents the caller may not view. A read-only Console refuses the
 changes.

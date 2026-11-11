@@ -606,7 +606,11 @@ fn is_json_web_token(token: &[u8]) -> bool {
 }
 
 /// At `://`, the userinfo of the URL's authority (`user:pass` in
-/// `scheme://user:pass@host`): its start and the index of its `@`.
+/// `scheme://user:pass@host`): its start and the index of its `@`. The
+/// authority ends at whitespace, at `/`, `?` or `#`, and where the text
+/// that holds the URL closes it: a quote, a backslash, `<` or `>`. A URL
+/// without a path inside a JSON string therefore never reaches a later `@`
+/// of the body.
 fn url_userinfo_at(line: &str, start: usize) -> Option<(usize, usize)> {
     let bytes = line.as_bytes();
     if !bytes[start..].starts_with(b"://") {
@@ -615,7 +619,13 @@ fn url_userinfo_at(line: &str, start: usize) -> Option<(usize, usize)> {
     let authority_start = start + 3;
     let authority_len = bytes[authority_start..]
         .iter()
-        .take_while(|byte| !byte.is_ascii_whitespace() && !matches!(**byte, b'/' | b'?' | b'#'))
+        .take_while(|byte| {
+            !byte.is_ascii_whitespace()
+                && !matches!(
+                    **byte,
+                    b'/' | b'?' | b'#' | b'"' | b'\'' | b'\\' | b'<' | b'>'
+                )
+        })
         .count();
     let authority = &bytes[authority_start..authority_start + authority_len];
     let at = authority.iter().rposition(|byte| *byte == b'@')?;

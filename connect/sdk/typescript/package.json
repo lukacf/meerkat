@@ -1,6 +1,6 @@
 {
   "name": "@rkat/toolkit",
-  "version": "0.9.12",
+  "version": "0.9.13",
   "description": "Optional Meerkat Toolkit host-injected service operations",
   "type": "module",
   "main": "./dist/index.js",

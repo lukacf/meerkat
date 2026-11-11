@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ### Changed
 
 - `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
-  from 0.9.13 below 0.10.0 (`>=0.9.13 <0.10.0`; it accepted them from 0.9.10):
+  from 0.9.14 below 0.10.0 (`>=0.9.14 <0.10.0`; it accepted them from 0.9.10):
   the package is built and tested with the SDKs of its own release, and each
   release moves the floor to its version; a release that reaches the ceiling
   also moves the ceiling, to the next minor release on the 0.x line (at
@@ -18,11 +18,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   against the SDKs of the same commit; build the repository's
   `sdks/typescript` and `meta/sdk/typescript` first (see BUILDING.md).
 
-## [0.9.12] - 2026-11-10
+## [0.9.13] - 2026-11-11
 
-Meerkat Connect 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12
-and Connect 0.9.12, released together): GitHub release `connect-v0.9.12`, a
+Meerkat Connect 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13
+and Connect 0.9.13, released together): GitHub release `connect-v0.9.13`, a
 full release that is never the repository's latest.
+
+Connect 0.9.13 holds every change of Connect 0.9.12, which was not released
+because the `meerkat-meta` 0.9.12 crate it builds against was never
+published.
 
 First-run setup on a Linux prefix packaged from Connect's resources no
 longer ends `owner_refused`, and native services attach under sustained
@@ -108,6 +112,12 @@ See Fixed and Upgrade notes.
   issuance state `not_issued`. A Connect without this change answers a
   conflict when that decision is applied or read again; other decisions are
   unaffected.
+
+## [0.9.12] - 2026-11-10
+
+Connect 0.9.12 was not released: the tag `connect-v0.9.12` has no GitHub
+release and no packages, because the `meerkat-meta` 0.9.12 crate it is built
+with was never published. Its changes are listed under 0.9.13.
 
 ## [0.9.11] - 2026-11-09
 

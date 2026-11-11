@@ -3278,6 +3278,7 @@ jobs:
     # that adds the use. Advisory on pull requests and main pushes (the step
     # reports and the job passes); required on the product's own release
     # branch (release/meta-*, release/connect-*) and in its release workflow.
+    # The size check of the crates that step packaged is required everywhere.
     if: ${{ needs.changes.outputs.floor_check_count != '0' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -3324,6 +3325,16 @@ jobs:
         env:
           PRODUCT: ${{ matrix.product }}
         run: echo "::warning title=Published floor::${PRODUCT} is not releasable against its published dependencies (advisory here; required on release/${PRODUCT}-* and at its release)."
+
+      # crates.io refuses a crate file above 10 MiB, whatever the crate
+      # depends on, so this step is required on every ref: the pull request
+      # that takes a crate above 9.5 MiB fails here, not its release. It
+      # weighs the archives the floor step packaged and packages nothing; an
+      # archive that step did not write fails it too.
+      - name: Require every packaged crate to fit the registry's size limit
+        env:
+          PRODUCT: ${{ matrix.product }}
+        run: python3 scripts/published_crates_standalone.py package-size --product "${PRODUCT}" --package-dir "${RUNNER_TEMP}/floor-${PRODUCT}/target/package"
 
       # The floor compiles the product's published dependency graph in a
       # scratch workspace whose objects only earlier floor runs cached: about

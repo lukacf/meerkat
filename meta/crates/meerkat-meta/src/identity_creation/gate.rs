@@ -96,7 +96,7 @@ use super::family::{
     WithdrawRequest, Withdrawn,
 };
 use super::operation::OperationId;
-use super::outcome::{IdentityOutcome, InstructionOutcome};
+use super::outcome::IdentityOutcome;
 use super::policy::IdentityCreationPolicy;
 use super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem, ValidationRefusal};
 use super::render::render_v1;
@@ -1168,14 +1168,10 @@ impl IdentityGate {
             Err(refusal) => return Err(refusal),
         }
         match committed_outcome(mob, &call.operation_id).await {
-            // The record holds an update's instructions since its commit:
-            // its retry changes nothing of them.
-            Ok(Some(outcome)) => Ok(match &call.change {
-                IdentityChangeSpec::Update(update) => {
-                    outcome.with_instruction_outcome(&update.name, InstructionOutcome::Unchanged)
-                }
-                _ => outcome,
-            }),
+            // The outcome as Core's receipt holds it. What became of an
+            // update's instructions is part of the first answer only: a
+            // replay states none.
+            Ok(Some(outcome)) => Ok(outcome),
             Ok(None) => Err(reused()),
             Err(error) => Err(unsettled(&call.operation_id, &error)),
         }

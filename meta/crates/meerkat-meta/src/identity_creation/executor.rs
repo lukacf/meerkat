@@ -587,10 +587,11 @@ fn refused(refusal: IdentityRefusal) -> Result<ChangeCommitted, ExecutorError> {
 /// placed on a member host, bound to an external process or given a
 /// backend is not changed through this surface.
 ///
-/// After the commit, when the update changed the agent's instructions
-/// text, the instruction step is asked and its answer is the agent's
-/// instruction outcome; an update that left the text as it was answers
-/// `unchanged`. The step takes the agent's lifecycle lock itself: none is
+/// After the commit, when the update named instructions and changed the
+/// agent's text, the instruction step is asked and its answer is the
+/// agent's instruction outcome; one that named the text the record held
+/// answers `unchanged`, and an update that names no instructions answers
+/// none. The step takes the agent's lifecycle lock itself: none is
 /// held here. A refusal of Core's goes through [`refusal_of_error`], which
 /// answers the retryable `admission_unsettled` for a member step in flight.
 async fn commit_update(
@@ -721,11 +722,17 @@ async fn commit_update(
     {
         Ok(updated) => {
             let mut committed = core_commit::committed(commit, &updated.change)?;
-            let instructions =
-                match InstructionsChanged::between(update.identity.clone(), previous, now) {
-                    Some(changed) => executor.after_update(commit.mob, &changed).await,
-                    None => Some(InstructionOutcome::Unchanged),
-                };
+            // An update that names no instructions says nothing of them;
+            // one that names the text the record holds leaves it unchanged.
+            let instructions = match &update.additional_instructions {
+                None => None,
+                Some(_) => {
+                    match InstructionsChanged::between(update.identity.clone(), previous, now) {
+                        Some(changed) => executor.after_update(commit.mob, &changed).await,
+                        None => Some(InstructionOutcome::Unchanged),
+                    }
+                }
+            };
             if let Some(instructions) = instructions {
                 committed.outcome = committed
                     .outcome

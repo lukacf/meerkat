@@ -138,6 +138,16 @@ impl OpenAiLiveClient {
         error
     }
 
+    /// The line the opt-in frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
+    /// prints for a received `frame`: the frame as JSON, redacted as
+    /// [`Self::redact_diagnostic`] does, so a frame that repeats the
+    /// connection's API key anywhere is traced without it.
+    fn traced_frame(&self, frame: &ServerEvent) -> Option<String> {
+        let mut line = trace_server_event_json(frame)?;
+        self.redact_diagnostic(&mut line);
+        Some(line)
+    }
+
     /// `connection`, opened with this client's API key, as the client hands
     /// it out: what it reports about a failure carries no API key.
     fn session_over<S: OpenAiLiveSession>(&self, connection: S) -> KeyRedactingLiveSession<S> {
@@ -190,6 +200,12 @@ impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
                 }
             }
             _ => {}
+        }
+        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
+            && let Some(event) = event.as_ref()
+            && let Some(line) = self.client.traced_frame(event)
+        {
+            eprintln!("[openai-realtime-recv] {line}");
         }
         Ok(event)
     }
@@ -499,12 +515,8 @@ impl OpenAiLiveSession for RealtimeOpenAiLiveSession {
             Some(Err(err)) => return Err(map_openai_live_error(err)),
             None => None,
         };
-        if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
-            && let Some(event) = event.as_ref()
-            && let Some(serialized) = trace_server_event_json(event)
-        {
-            eprintln!("[openai-realtime-recv] {serialized}");
-        }
+        // A received frame is traced by the session the client hands out
+        // (`KeyRedactingLiveSession`), after its redaction.
         Ok(event)
     }
 }
@@ -7084,8 +7096,7 @@ mod tests {
     /// The line the opt-in frame trace prints for `frame` on a connection
     /// of `client`.
     fn traced_frame_line(client: &OpenAiLiveClient, frame: &ServerEvent) -> Option<String> {
-        let _ = client;
-        trace_server_event_json(frame)
+        client.traced_frame(frame)
     }
 
     /// The opt-in frame trace prints a frame without the connection's API

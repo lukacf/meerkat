@@ -30,6 +30,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
 
+- A console whose visibility policy includes nested members listed the
+  participants of a running temporary council as members and read their
+  history into the timeline. The `ConsoleVisibilityPolicy` trait default and
+  `AllowAllConsoleVisibilityPolicy` include nested members; the stock
+  console, which hides them, was not affected. A participant is a fork of
+  its source member, so its history begins with a copy of the source's
+  earlier turns, and nothing linked it to its source: it was decided on its
+  own name, its council role and the labels it inherits. A caller the access
+  rules deny the source by identity, by role or through the member that
+  spawned it could therefore read the source's earlier turns in the
+  participant's frames, while the council ran and, in a timeline read by the
+  participant's name, after it ended; such a caller could also send to,
+  inspect and retire the participant by name. A rule on a label the
+  participant inherits still applied, so a source private to a person stayed
+  private. A council participant is now a console member on no policy: it is
+  not listed, every member action by its name (send, inspect, retire, blobs,
+  timeline) answers as for an agent that does not exist, the console reads
+  none of its history, and a frame a console stored for one is served to
+  nobody. A council's mob is known from the council's own record; a stored
+  frame whose mob id has a council mob's form (`council--...`) and names no
+  mob the runtime holds is treated the same, so those frames stay unserved
+  on a host that does not keep council records across a restart. Other
+  nested members are listed and served as before. Frames a console stored
+  for participants before this release stay in its console store, unserved.
+  Affected: 0.8.27 through 0.9.13.
+
+### Fixed
+
+- On Linux, a runtime that starts in a process whose previous runtime on the
+  same state directory is still alive (shut down, its handles still in
+  scope) could miss another process that holds the directory's runtime
+  custody, and start beside it. For such a start the custody check reads
+  the kernel's lock table (`/proc/locks`) to see whether anyone but this
+  process holds `runtime.sqlite.execution-custody`, and it decided from one
+  read. The kernel hands that table out at most a page per read call and
+  resumes by position, so when the table takes more than one read call and
+  a lock elsewhere on the host is released between two calls, one entry
+  drops out of the read; when that entry was the other holder's, the check
+  answered that there was none. It took both at once: such a same-process
+  start, and a holder that does not run this check itself (a release before
+  0.9.4, or a Core-only tool on the directory). Under heavy file-lock churn
+  on the host a read could miss a held lock; on a quiet host it did not.
+  Meta 0.9.4 through 0.9.13. The check now reads the table up to three
+  times, each read split at other entries, and refuses the start as soon as
+  any read names another holder; it admits the start only when no read
+  does. That makes a miss far less likely, not impossible: after a read
+  that missed, the next read named the holder in every measured case. Where
+  the table names no holder at all (macOS, Windows, and on Linux btrfs
+  subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
+
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

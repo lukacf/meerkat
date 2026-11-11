@@ -165,16 +165,18 @@ contains dots), it runs as a model id with no catalog row, without the
 | `gpt-live-1-codex` (experimental) | S | not published | - |
 
 Gemini (all 1,048,576 / 65,536 tokens, thinking via `thinking_level`):
-`gemini-4-argon` (default, R; paid Gemini API tiers only; levels `low`,
-`medium`, `high`, default `medium`), `gemini-3.8-flash` (R; the recommended
-Flash model, also on the free tier), then `gemini-3.7-flash`,
+`gemini-4-carbon` (0.9.12, R; Google's strongest Gemini 4 reasoning model;
+paid Gemini API tiers only; levels `low`, `medium`, `high`, default
+`medium`), `gemini-4-argon` (default, R; paid Gemini API tiers only; levels
+`low`, `medium`, `high`, default `medium`), `gemini-3.8-flash` (R; the
+recommended Flash model, also on the free tier), then `gemini-3.7-flash`,
 `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`,
 `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite` and
-`gemini-3.1-flash-lite-preview` (S). `gemini-4-argon`, `gemini-3.8-flash`,
-`gemini-3.7-flash` and `gemini-3.1-pro-preview` accept only `low`, `medium`
-and `high` (Google refuses `minimal` for them); the other rows also accept
-`minimal`, which is the default on `gemini-3.5-flash-lite` and the 3.1
-Flash-Lite rows.
+`gemini-3.1-flash-lite-preview` (S). `gemini-4-carbon`, `gemini-4-argon`,
+`gemini-3.8-flash`, `gemini-3.7-flash` and `gemini-3.1-pro-preview` accept
+only `low`, `medium` and `high` (Google refuses `minimal` for them); the
+other rows also accept `minimal`, which is the default on
+`gemini-3.5-flash-lite` and the 3.1 Flash-Lite rows.
 
 Custom hosted models (an API provider serves an id the catalog lacks):
 
@@ -214,15 +216,17 @@ Capability flags come from the catalog row, never from the model name:
   `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2` and
   `claude-fable-5-1` (`ModelDoesNotSupportForcedToolChoice`).
 - Sampling: the Claude 5 family (including `claude-haiku-5-5`), Claude Opus
-  4.8/4.7, all GPT-5.x and GPT-6 rows, `gemini-4-argon`, `gemini-3.8-flash`,
-  `gemini-3.7-flash`, `gemini-3.6-flash` and `gemini-3.5-flash-lite` take no
+  4.8/4.7, all GPT-5.x and GPT-6 rows, `gemini-4-carbon`, `gemini-4-argon`,
+  `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash` and
+  `gemini-3.5-flash-lite` take no
   `temperature`, `top_p` or `top_k` (`supports_temperature: false`). The Anthropic and
   OpenAI clients drop a generic `temperature` for them.
 - Default per-call timeout (catalog `call_timeout_secs`): 300 s for Claude
   Opus and Fable rows, 120 s for Sonnet rows, `claude-haiku-5-5` and the
   Gemini Flash and Flash-Lite rows, 60 s for Haiku 4.5, 600 s for OpenAI rows
-  and `gemini-3.1-pro-preview`, 900 s for `gemini-4-argon`, 7200 s for
-  `gpt-5.5-pro`. Custom and self-hosted entries set their own.
+  and `gemini-3.1-pro-preview`, 900 s for `gemini-4-carbon` and
+  `gemini-4-argon`, 7200 s for `gpt-5.5-pro`. Custom and self-hosted entries
+  set their own.
 
 Thinking and effort are typed per model (tables above); `between_tools`, and
 `disabled` on `claude-opus-5` and `claude-haiku-5-5`, are accepted only at
@@ -273,9 +277,9 @@ Rust `AgentBuildConfig.provider_params`. A realm-level
 - Gemini (`"provider": "gemini"`): `thinking` (`include_thoughts`,
   `thinking_level`, `thinking_budget`), `thinking_level` (`minimal`, `low`,
   `medium`, `high`; each model's `params_schema` lists the levels it accepts:
-  `gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.7-flash` and
-  `gemini-3.1-pro-preview` refuse `minimal`), `thinking_budget`, `top_k`, `top_p`,
-  `cached_content_name`.
+  `gemini-4-carbon`, `gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.7-flash`
+  and `gemini-3.1-pro-preview` refuse `minimal`), `thinking_budget`, `top_k`,
+  `top_p`, `cached_content_name`.
 
 ```bash
 rkat run -m gpt-5.6-terra --params-json '{"provider_tag":{"provider":"open_ai","reasoning_effort":"max","reasoning_mode":"pro"}}' "Prove it"
@@ -435,9 +439,13 @@ rkat run -p self-hosted "Say hello"   # uses [self_hosted] default_model
   `phase` (`commentary` or `final_answer`), and reasoning items keep their
   `encrypted_content` (requested with `include:
   ["reasoning.encrypted_content"]` when reasoning is on). These replay in
-  order with the tool calls and outputs and survive session save and
-  resume. A provider switch or Chat Completions mode never receives this
-  OpenAI-private state.
+  order with the tool calls and outputs, to the service the running process
+  received them from. A step the process did not receive from that service
+  (a session that moved from the public OpenAI API to a Copilot route or a
+  self-hosted server, and every earlier turn after a restart or a resume
+  from the store) is replayed as plain text and paired tool calls, without
+  reasoning items, hosted-tool items, item ids or phases. A provider switch
+  or Chat Completions mode never receives this OpenAI-private state.
 - With `store = true` in an `open_ai` tag, the client continues from
   `previous_response_id` and falls back to a full replay when the server
   rejects that id.

@@ -332,11 +332,13 @@ multiplier = 2.0
 - Call timeout: a hard deadline on one model call, from `[retry]
   call_timeout`, else the catalog's `call_timeout_secs` (Claude Opus and Fable
   300s, Sonnet, `claude-haiku-5-5` and Gemini Flash 120s, Haiku 4.5 60s, most
-  OpenAI models and `gemini-3.1-pro-preview` 600s, `gemini-4-argon` 900s;
+  OpenAI models and `gemini-3.1-pro-preview` 600s, `gemini-4-carbon` and
+  `gemini-4-argon` 900s;
   custom models: `[models.<id>] call_timeout_secs`). No per-request setting.
 - Stream watchdog: a stream silent for the window is aborted as a retryable
   stall. The window is `[retry] stream_inactivity_timeout`, else the model's
-  own (`gemini-4-argon` 900s, `gpt-5.5-pro` 7200s; self-hosted models:
+  own (`gemini-4-carbon` and `gemini-4-argon` 900s, `gpt-5.5-pro` 7200s;
+  self-hosted models:
   `[self_hosted.models.<id>] stream_inactivity_timeout_secs`, at least 60),
   else 300s. It is resolved for each call, so a model switch or fallback uses
   the new model's window. An explicit window must be above zero (`"0s"` is

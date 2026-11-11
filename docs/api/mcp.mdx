@@ -662,6 +662,16 @@ ask its user.
   `Settled`, reads `HostAuthService::mcp_status`, which reports what a use of
   the stored credential would do. An embedding host sets the bounds with
   `HostAuthService::with_mcp_network_bounds`.
+- **Bounded discovery documents.** A login reads at most 1 MiB of each
+  document the servers it discovers answer with: the protected resource
+  metadata, the authorization-server metadata (RFC 8414 or OpenID Connect
+  discovery), the OpenID Connect configuration the account preflight reads,
+  and the client registration response. The bytes are counted as they
+  arrive, so a larger document is refused once 1 MiB has arrived and the
+  rest is never read. Discovery and registration then end the call with
+  `error.data.reason` `upstream_failure`, the account preflight with
+  `verification_unavailable`, and the error names none of the document's
+  content. Nothing is published.
 
 <Warning>
 The authorize URL and `state`, and the callback's `code` and `state`, let
@@ -1470,7 +1480,7 @@ Returns the runtime capability set with status resolved against config.
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 11},
+  "contract_version": {"major": 0, "minor": 9, "patch": 13},
   "capabilities": [
     {
       "id": "sessions",
@@ -1537,7 +1547,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 11},
+  "contract_version": {"major": 0, "minor": 9, "patch": 13},
   "providers": [
     {
       "provider": "anthropic",

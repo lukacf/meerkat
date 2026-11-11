@@ -563,8 +563,8 @@ pub(crate) struct CoreReadsBridge {
     /// The identities Core holds declared.
     declared: DeclaredSet,
     /// The identities Core holds as created entries, whose records the mob's
-    /// identity store owns ([`Self::hold_created`]).
-    created: Mutex<BTreeSet<AgentIdentity>>,
+    /// identity store owns, each with its row's spec ([`Self::hold_created`]).
+    created: Mutex<BTreeMap<AgentIdentity, DurableAgentSpec>>,
     /// The names Core holds as removed identities ([`Self::hold_removed`]).
     removed: Mutex<BTreeSet<AgentIdentity>>,
     /// The names Core reserves as unreadable ([`Self::hold_unreadable`]).
@@ -738,13 +738,39 @@ impl CoreReadsBridge {
     }
 
     /// Core holds `identity` as a created entry: an identity created at
-    /// runtime, whose record the mob's identity store owns, so no roster
-    /// pass declares it.
-    pub(crate) fn hold_created(&self, identity: &AgentIdentity) {
+    /// runtime in the role `profile`, whose record is its row in the mob's
+    /// identity store, so no roster pass declares it. Its row's spec names
+    /// the role and nothing else (addressable, no display name, no labels),
+    /// and Core's MobMachine drives it: its identity management is
+    /// `CreatedEntry`.
+    pub(crate) fn hold_created(&self, identity: &AgentIdentity, profile: &str) {
+        let row = DurableAgentSpec {
+            identity: identity.clone(),
+            profile: meerkat_mob::ProfileName::from(profile),
+            addressability: super::types::AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        };
         self.created
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(identity.clone());
+            .insert(identity.clone(), row);
+    }
+
+    /// The row's spec of `identity` while Core holds it as a created entry.
+    fn created_row(&self, identity: &AgentIdentity) -> Option<DurableAgentSpec> {
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+            .cloned()
     }
 
     /// Core holds `identity` as a removed identity: its name is never an
@@ -961,12 +987,7 @@ impl SessionBridge for CoreReadsBridge {
         if held(&self.unreadable) {
             return Ok(CoreIdentityEntry::reserved());
         }
-        let created = self
-            .created
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(identity);
-        if created {
+        if self.created_row(identity).is_some() {
             return Ok(self
                 .core
                 .identity_entry(identity, true)
@@ -977,10 +998,46 @@ impl SessionBridge for CoreReadsBridge {
             .identity_entry(identity, self.declared.contains(identity)))
     }
 
+    /// The created entries Core holds, each with its row's spec
+    /// ([`Self::hold_created`]), in identity order.
+    async fn created_identities(&self) -> Result<Vec<DurableAgentSpec>, BridgeError> {
+        if self.entry_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "created_identities",
+            });
+        }
+        self.take_entry_read()?;
+        Ok(self
+            .created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn created_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<DurableAgentSpec>, BridgeError> {
+        if self.entry_reads_refused.load(Ordering::SeqCst) {
+            return Err(BridgeError::Unsupported {
+                operation: "created_identity",
+            });
+        }
+        self.take_entry_read()?;
+        Ok(self.created_row(identity))
+    }
+
+    /// A created entry is Core's MobMachine's to drive; every other identity
+    /// is command-driven.
     async fn identity_management(
         &self,
-        _identity: &AgentIdentity,
+        identity: &AgentIdentity,
     ) -> Result<meerkat_mob::MemberIdentityManagement, BridgeError> {
+        if self.created_row(identity).is_some() {
+            return Ok(meerkat_mob::MemberIdentityManagement::CreatedEntry);
+        }
         Ok(meerkat_mob::MemberIdentityManagement::CommandDriven)
     }
 

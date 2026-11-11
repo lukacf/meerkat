@@ -786,6 +786,15 @@ impl<S> FirstFixture<S> {
         &self,
         result: &Result<PrivateOriginalSubmission, String>,
     ) -> Result<(), String> {
+        self.finish_within(result, WAIT).await
+    }
+    /// [`Self::finish`] with the turn's deadline chosen by the row: a row
+    /// whose turn outlasts a hold by construction waits for the hold too.
+    pub(crate) async fn finish_within(
+        &self,
+        result: &Result<PrivateOriginalSubmission, String>,
+        deadline: std::time::Duration,
+    ) -> Result<(), String> {
         let Ok(PrivateOriginalSubmission::Admitted {
             turn_ticket: Some(ticket),
             ..
@@ -798,8 +807,8 @@ impl<S> FirstFixture<S> {
         };
         let ticket = TurnTicket::parse(ticket).map_err(|error| format!("{error:?}"))?;
         let outcome = tokio::time::timeout(
-            WAIT,
-            self.runtime.wait_for_turn(&self.identity, ticket, WAIT),
+            deadline,
+            self.runtime.wait_for_turn(&self.identity, ticket, deadline),
         )
         .await
         .map_err(|_| "native first turn timed out".to_owned())?;

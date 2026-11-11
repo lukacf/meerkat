@@ -22,7 +22,7 @@ impl ContractVersion {
     pub const CURRENT: Self = Self {
         major: 0,
         minor: 9,
-        patch: 11,
+        patch: 13,
     };
     pub const PRERELEASE: Option<&'static str> = None;
 

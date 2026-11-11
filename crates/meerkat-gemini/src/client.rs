@@ -4398,6 +4398,7 @@ mod tests {
     fn a_thinking_level_the_model_refuses_is_refused_locally() {
         let client = GeminiClient::new("test-key".to_string());
         for model in [
+            "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-3.8-flash",
             "gemini-3.7-flash",
@@ -4429,6 +4430,7 @@ mod tests {
         for (model, level, wire) in [
             ("gemini-3.8-flash", GeminiThinkingLevel::Low, "low"),
             ("gemini-4-argon", GeminiThinkingLevel::High, "high"),
+            ("gemini-4-carbon", GeminiThinkingLevel::High, "high"),
             (
                 "gemini-3.5-flash-lite",
                 GeminiThinkingLevel::Minimal,
@@ -4517,31 +4519,33 @@ mod tests {
         Ok(())
     }
 
-    /// Gemini 4 Argon ignores sampling parameters, does not support explicit
-    /// context caching, and thinks at its default level (`medium`) unless the
-    /// caller picks one: a default request carries none of those fields and
-    /// keeps the caller's output budget.
+    /// Gemini 4 Argon and Gemini 4 Carbon ignore sampling parameters, do not
+    /// support explicit context caching, and think at their default level
+    /// (`medium`) unless the caller picks one: a default request carries none
+    /// of those fields and keeps the caller's output budget.
     #[test]
-    fn test_gemini_4_argon_default_request_sends_no_sampling_caching_or_thinking_override()
+    fn test_gemini_4_default_request_sends_no_sampling_caching_or_thinking_override()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = GeminiClient::new("test-key".to_string());
-        let mut request = LlmRequest::new(
-            "gemini-4-argon",
-            vec![Message::User(UserMessage::text("test".to_string()))],
-        );
-        request.max_tokens = 65_536;
-
-        let body = client.build_request_body(&request)?;
-        let generation_config = body.get("generationConfig").ok_or("missing config")?;
-
-        assert_eq!(generation_config["maxOutputTokens"], 65_536);
-        for field in ["temperature", "topP", "topK", "thinkingConfig"] {
-            assert!(
-                generation_config.get(field).is_none(),
-                "{field} must not be sent by default: {body}"
+        for model in ["gemini-4-argon", "gemini-4-carbon"] {
+            let mut request = LlmRequest::new(
+                model,
+                vec![Message::User(UserMessage::text("test".to_string()))],
             );
+            request.max_tokens = 65_536;
+
+            let body = client.build_request_body(&request)?;
+            let generation_config = body.get("generationConfig").ok_or("missing config")?;
+
+            assert_eq!(generation_config["maxOutputTokens"], 65_536, "{model}");
+            for field in ["temperature", "topP", "topK", "thinkingConfig"] {
+                assert!(
+                    generation_config.get(field).is_none(),
+                    "{model}: {field} must not be sent by default: {body}"
+                );
+            }
+            assert!(body.get("cachedContent").is_none(), "{model}: {body}");
         }
-        assert!(body.get("cachedContent").is_none(), "{body}");
         Ok(())
     }
 

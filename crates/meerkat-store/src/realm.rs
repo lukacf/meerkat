@@ -496,9 +496,41 @@ async fn write_lease_record(path: &Path, record: &RealmLeaseRecord) -> Result<()
 
 /// One heartbeat of a lease holder: replace the record at `path` with one
 /// that carries the current time.
+///
+/// A heartbeat that cannot replace the record (a full disk refuses the
+/// write, or the temporary file cannot be created or renamed) leaves the
+/// last good record in place, and that record goes stale after
+/// [`REALM_LEASE_STALE_TTL_SECS`] although its holder is alive: `rkat realm
+/// delete` and `rkat realm prune`, the commands an operator reaches for on a
+/// full disk, would then remove the realm under the holder. So the holder
+/// marks its own record instead, see [`mark_lease_record_not_current`].
 async fn heartbeat_lease_record(path: &Path, record: &mut RealmLeaseRecord) {
     record.heartbeat_at = now_unix_secs();
-    let _ = write_lease_record(path, record).await;
+    if write_lease_record(path, record).await.is_err() {
+        mark_lease_record_not_current(path).await;
+    }
+}
+
+/// The mark of a holder that is alive but could not write its heartbeat:
+/// its own lease record, emptied in place.
+///
+/// An empty record does not parse, and [`inspect_realm_leases_in`] counts
+/// an unparseable record as a lease that may be live: it blocks destructive
+/// operations ([`RealmLeaseStatus::blocks_destructive_prune`]) and is never
+/// cleaned up as stale. Emptying a file needs no free space (it gives some
+/// back), so it works exactly when the heartbeat write does not. The next
+/// heartbeat that succeeds renames a full record over it; shutdown removes
+/// it with the record's name, as it removes the record.
+///
+/// Best effort: when even this fails (an I/O error, a read-only
+/// filesystem) the last good record stays and goes stale, as before.
+async fn mark_lease_record_not_current(path: &Path) {
+    let _ = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await;
 }
 
 #[deprecated(

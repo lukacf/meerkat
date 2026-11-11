@@ -810,11 +810,19 @@ fn a_policy_naming_a_preparation_is_refused_at_init() {
         assert_eq!(init["error"]["code"], json!(-32602), "{mode}: {init:#}");
         let message = init["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            message.contains("identity_creation.preparation.worker.mode")
-                && message.contains(mode)
-                && message.contains("no method of this release settles"),
+            message.contains("identity_creation.preparation.worker"),
             "{mode}: {message}"
         );
+        // A required preparation is refused for what it is. A constructed
+        // one needs a native host first, which the stdio gateway is not.
+        if mode == "required" {
+            assert!(
+                message.contains("identity_creation.preparation.worker.mode")
+                    && message.contains(mode)
+                    && message.contains("no method of this release settles"),
+                "{mode}: {message}"
+            );
+        }
     }
     // The mode `none` is what every profile has without a word: accepted.
     let scratch = tempfile::tempdir().unwrap();
@@ -1087,6 +1095,21 @@ fn create_refusals_carry_the_kind_and_the_field_and_write_nothing() {
     );
     assert_eq!(taken["kind"], json!("name_taken"), "{taken:#}");
     assert_eq!(taken["by"], json!("identity"), "{taken:#}");
+    assert_eq!(taken["field"], json!("agents[0].name"), "{taken:#}");
+    let second = gateway.refused(
+        "meta/identity/create",
+        json!({"request_id": "taken-2",
+               "agents": [{"name": "fresh", "profile": "worker"},
+                          {"name": HOST_A, "profile": "worker"}]}),
+    );
+    assert_eq!(second["kind"], json!("name_taken"), "{second:#}");
+    assert_eq!(second["field"], json!("agents[1].name"), "{second:#}");
+    let nothing = gateway.refused("meta/identity/get", json!({"name": "fresh"}));
+    assert_eq!(
+        nothing["kind"],
+        json!("identity_unknown"),
+        "all or nothing: {nothing:#}"
+    );
     let unknown_member = gateway.refused(
         "meta/identity/create",
         json!({"request_id": "member",
@@ -1310,16 +1333,42 @@ fn an_update_of_descriptive_labels_keeps_every_authority_label_and_every_other_l
                "expected_spec_digest": after["spec_digest"],
                "set": {"labels": {"team": "field"}}}),
     );
-    assert!(
-        ["change_denied", "authority_field_needs_approval"]
-            .contains(&authority["kind"].as_str().unwrap_or_default()),
-        "{authority:#}"
-    );
+    assert_eq!(authority["kind"], json!("change_denied"), "{authority:#}");
+    assert_eq!(authority["change"], json!("authority"), "{authority:#}");
     assert_eq!(
         gateway.get(DESK)["labels"],
         json!({"team": "core", "shift": "night", "zone": "b"}),
         "a refused update writes nothing"
     );
+}
+
+/// An update removes a peer and keeps the rest: the peer it names is no
+/// longer listed, and the other stays.
+#[test]
+fn an_update_removes_a_peer_and_keeps_the_rest() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched(scratch.path(), Some(worker_policy()));
+    gateway.create(
+        "create-1",
+        json!([{"name": "scout", "profile": "worker", "peers": ["ledger", "courier"]},
+               {"name": "ledger", "profile": "worker"},
+               {"name": "courier", "profile": "worker"}]),
+    );
+    let mut before: Vec<Value> = gateway.get("scout")["peers"]
+        .as_array()
+        .expect("peers")
+        .clone();
+    before.sort_by_key(|peer| peer.as_str().map(str::to_owned));
+    assert_eq!(before, [json!("courier"), json!("ledger")]);
+    let digest = gateway.digest("scout");
+    let unwired = gateway.ok(
+        "meta/identity/update",
+        json!({"request_id": "update-peers", "name": "scout",
+               "expected_spec_digest": digest, "peers_remove": ["ledger"]}),
+    );
+    assert_eq!(unwired["outcome"], json!("done"), "{unwired:#}");
+    assert_eq!(gateway.get("scout")["peers"], json!(["courier"]));
+    assert_eq!(gateway.get("ledger")["readiness"], json!("dormant"));
 }
 
 /// An update that touches several change classes is judged per class and
@@ -1999,6 +2048,14 @@ runtime_mode = "turn_driven"
 [profiles.planner.tools]
 comms = true
 mob = true
+
+[profiles.runner]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+
+[profiles.runner.tools]
+comms = true
 "#
     ))
     .expect("parse the definition")
@@ -2068,6 +2125,14 @@ struct RecordingClient {
     asked: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
+/// How long a session of the rows takes to be built, in milliseconds:
+/// none, but in the row about an agent that starts slowly.
+static SESSION_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
+/// How long the rows' model waits before it answers a turn, in
+/// milliseconds: none, but in the row about an agent that starts slowly.
+static MODEL_DELAY_MS: AtomicU64 = AtomicU64::new(0);
+
 impl meerkat_client::LlmClient for RecordingClient {
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         Some(controller())
@@ -2093,7 +2158,11 @@ impl meerkat_client::LlmClient for RecordingClient {
         }
         let [usage, done] =
             llm_usage::usage_then_done(request, meerkat::Provider::OpenAI, StopReason::EndTurn);
+        let delay = MODEL_DELAY_MS.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
             yield Ok(LlmEvent::TextDelta { delta: "noted".to_string(), meta: None });
             yield Ok(usage);
             yield Ok(done);
@@ -2154,6 +2223,10 @@ struct FailNextSession {
 #[async_trait]
 impl SessionHook for FailNextSession {
     async fn before_create(&self, _req: &mut CreateSessionRequest) -> Result<(), SessionError> {
+        let delay = SESSION_DELAY_MS.load(Ordering::Relaxed);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         if self.armed.swap(false, Ordering::SeqCst) {
             return Err(SessionError::Unsupported(
                 "the row fails this session once".to_owned(),
@@ -2421,6 +2494,40 @@ fn console_decisions(read_only: bool) -> meerkat_meta::RuntimeDecisionState {
         console: meerkat_meta::ConsolePolicy {
             require_app_auth: false,
             read_only,
+            ..meerkat_meta::ConsolePolicy::default()
+        },
+        ops: meerkat_meta::RuntimeOpsPolicy::default(),
+        release_metadata_json: include_str!("../assets/release-targets.json").to_string(),
+    })
+    .expect("decision state builds")
+}
+
+/// The decisions of a Console that asks for sign-in and admits the two
+/// persons the rows sign in as.
+fn signed_console_decisions() -> meerkat_meta::RuntimeDecisionState {
+    meerkat_meta::build_runtime_decision_state(meerkat_meta::RuntimeDecisionInputs {
+        bigquery: meerkat_meta::BigQueryNaming {
+            dataset: "meta_identity_methods".to_string(),
+            table: "events".to_string(),
+        },
+        trusted_meta_toml: "modules = []\n".to_string(),
+        auth: meerkat_meta::AuthPolicy {
+            default_provider: meerkat_meta::AuthProvider::GoogleOAuth,
+            email_allowlist: vec!["root@example.org".to_string(), "ann@example.org".to_string()],
+        },
+        trusted_oidc: meerkat_meta::TrustedOidcRuntimeConfig {
+            discovery_json:
+                r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
+                    .to_string(),
+            jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
+                .to_string(),
+            audience: "meerkat-console".to_string(),
+            require_verified_email: false,
+            shared_account_tokens: false,
+        },
+        console: meerkat_meta::ConsolePolicy {
+            require_app_auth: true,
+            read_only: false,
             ..meerkat_meta::ConsolePolicy::default()
         },
         ops: meerkat_meta::RuntimeOpsPolicy::default(),
@@ -2982,7 +3089,7 @@ fn held_policy() -> Arc<IdentityCreationPolicy> {
                  "target": {"profile": ["worker"]}, "outcome": {"kind": "allow"}},
                 {"change": ["create"], "requester": {"kind": "host"},
                  "target": {"identity": ["scout"]}, "outcome": approval},
-                {"change": ["archive", "remove"], "requester": {"kind": "host"},
+                {"change": ["archive", "remove", "descriptive"], "requester": {"kind": "host"},
                  "target": {"profile": ["worker"]}, "outcome": approval},
             ]},
         }))
@@ -3010,7 +3117,10 @@ async fn one_request_id_holds_one_decision_whatever_is_asked_under_it() {
     let temp = tempfile::tempdir().unwrap();
     let (runtime, _asked, _fail_next_session) =
         launch_with(temp.path(), &fresh_mob_id(), false, true).await;
-    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    assert!(runtime.attach_identity_policy(
+        held_policy(),
+        IdentityFamilyOptions::new().with_host_hooks(Arc::new(NamingHooks))
+    ));
     let family = runtime.identity_family().expect("the family");
     let mob = runtime.mob_handle();
     let host = ChangeRequester::host("ops");
@@ -3066,6 +3176,52 @@ async fn one_request_id_holds_one_decision_whatever_is_asked_under_it() {
     )
     .await;
     assert_eq!(refusal_of(&other).0, "operation_reused", "{other:?}");
+    // An update the rules would hold too, under the same id.
+    let update: IdentityChangeSpec = IdentityChangeSpec::Update(
+        serde_json::from_value(json!({
+            "name": "alpha", "expected_spec_digest": digest("alpha").await.as_str(),
+            "set": {"display_name": "Alpha"},
+        }))
+        .expect("an update as a surface writes it"),
+    );
+    let updated = ask("r-1", update).await;
+    assert_eq!(refusal_of(&updated).0, "operation_reused", "{updated:?}");
+    // A create the host's own check refuses, under the same id: the check
+    // is not passed by, and nothing is held for it.
+    let forbidden = ask(
+        "r-1",
+        create_of(json!([{"name": "forbidden", "profile": "worker"}])),
+    )
+    .await;
+    assert_eq!(
+        refusal_of(&forbidden).0,
+        "validation_refused",
+        "{forbidden:?}"
+    );
+    // A change of an agent the host configures under a fresh id, which the
+    // rules would hold: refused, and nothing is held.
+    let fresh = ask(
+        "r-2",
+        IdentityChangeSpec::Archive(agent_ref(HOST_A, &digest(HOST_A).await)),
+    )
+    .await;
+    assert_eq!(refusal_of(&fresh).0, "owner_read_only", "{fresh:?}");
+    let unheld = family
+        .read(
+            &mob,
+            &host,
+            IdentityRead::Operation(
+                OperationId::for_request(&host.recorded(), "r-2").expect("a request id"),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            unheld,
+            Ok(IdentityReadAnswer::Operation(OperationState::Unknown))
+        ),
+        "nothing is held for a refused change: {unheld:?}"
+    );
     // Another create under the same id.
     let reused = ask(
         "r-1",
@@ -3211,6 +3367,580 @@ async fn an_approved_change_the_launchs_policy_now_denies_is_not_carried_out() {
         .read(&mob, &host, IdentityRead::Get(GetAgent::new("scout")))
         .await;
     assert!(created.is_err(), "nothing was created: {created:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// The issuer the Console's sign-in fixture trusts.
+const ISSUER: &str = "https://trusted.meta.localhost";
+
+/// The gateway's runtime composition on `state` under the access rules
+/// `access` (TOML), with its Console, which asks for sign-in.
+async fn console_under(state: &Path, access: &str) -> (UnifiedRuntime, axum::Router) {
+    let (asked_tx, _asked) = tokio::sync::mpsc::unbounded_channel();
+    let config: meerkat_meta::AccessControlConfig = toml::from_str(access).expect("access TOML");
+    let builder = UnifiedRuntimeBuilder::default()
+        .definition(in_process_definition(&fresh_mob_id()))
+        .persistent_state(state)
+        .continuity_from_state_dir(state)
+        .await
+        .expect("open the state-dir identity substrate")
+        .roster_provider(Arc::new(InProcessRoster))
+        .identity_runtime_instance_id("meta-identity-methods-console")
+        .access_controller(meerkat_meta::AccessController::new(config).expect("controller"))
+        .default_llm_client(Arc::new(RecordingClient { asked: asked_tx }));
+    let runtime = Box::pin(builder.build())
+        .await
+        .expect("build the gateway-shaped UnifiedRuntime");
+    let app = runtime.build_console_json_router(signed_console_decisions());
+    (runtime, app)
+}
+
+/// One Console JSON-RPC call on `app`, signed in as `subject` when given.
+async fn console_rpc(
+    app: &axum::Router,
+    subject: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Value {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/console/rpc")
+        .header(axum::http::header::CONTENT_TYPE, "application/json");
+    if let Some(subject) = subject {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("kid-current".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &json!({
+                "iss": ISSUER,
+                "aud": "meerkat-console",
+                "sub": subject,
+                "email": subject,
+                "provider": "google_oauth",
+                "exp": chrono::Utc::now().timestamp() + 300,
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+        )
+        .expect("signed fixture token");
+        request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let request = request
+        .body(axum::body::Body::from(
+            json!({"jsonrpc": "2.0", "id": "identity", "method": method, "params": params})
+                .to_string(),
+        ))
+        .expect("rpc request");
+    let response = tokio::time::timeout(TURN_BOUND, app.clone().oneshot(request))
+        .await
+        .expect("bounded rpc")
+        .expect("rpc response");
+    let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("rpc body");
+    serde_json::from_slice(&body).unwrap_or_else(|_| panic!("rpc json for {method}"))
+}
+
+/// The result of a Console call that must answer one.
+fn console_ok(answer: &Value) -> &Value {
+    assert!(
+        answer["error"].is_null(),
+        "the call answers a result: {answer:#}"
+    );
+    &answer["result"]
+}
+
+/// The Console scopes the family to what its caller may see and do. A
+/// caller that may view and change one agent: reads no peer it may not
+/// view; plans a change only as it could make it, an agent it may not view
+/// answering as a name no agent holds; names no peer it may not view;
+/// reads only its own operations by id, while an administrator reads any;
+/// states neither `proposer` nor `source_evidence`; and holds the mob's
+/// changes only with `runtime.admin`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_console_scopes_the_family_to_what_its_caller_may_see_and_do() {
+    const ROOT: &str = "root@example.org";
+    const ANN: &str = "ann@example.org";
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, app) = console_under(
+        temp.path(),
+        r#"
+enabled = true
+admins = ["root@example.org"]
+
+[[rules]]
+id = "works"
+actions = ["agent.identity.create", "agent.view", "agent.identity.manage", "agent.identity.remove"]
+
+[[rules]]
+id = "not-beta"
+effect = "deny"
+actions = ["agent.view", "agent.identity.manage", "agent.identity.remove"]
+agents = ["beta"]
+"#,
+    )
+    .await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "peers": {"default": "allow"},
+        "approval": {"rules": [{
+            "change": ["create", "descriptive", "peers", "archive", "remove"],
+            "requester": {"kind": "human"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+
+    let made = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/create",
+        json!({"request_id": "root-1", "agents": [
+            {"name": "alpha", "profile": "worker", "peers": ["beta"]},
+            {"name": "beta", "profile": "worker"},
+        ]}),
+    )
+    .await;
+    let made = console_ok(&made).clone();
+    assert_eq!(made["outcome"], json!("done"), "{made:#}");
+    let roots_operation = made["operation_id"]
+        .as_str()
+        .expect("an operation id")
+        .to_owned();
+    let get = |subject: &'static str, name: &'static str| {
+        let app = app.clone();
+        async move {
+            console_rpc(
+                &app,
+                Some(subject),
+                "meta/identity/get",
+                json!({"name": name}),
+            )
+            .await
+        }
+    };
+
+    // A read names no peer the caller may not view.
+    let whole = get(ROOT, "alpha").await;
+    assert_eq!(console_ok(&whole)["peers"], json!(["beta"]), "{whole:#}");
+    let seen = get(ANN, "alpha").await;
+    assert_eq!(console_ok(&seen)["peers"], json!([]), "{seen:#}");
+    let alpha = console_ok(&seen)["spec_digest"].clone();
+    let beta = console_ok(&get(ROOT, "beta").await)["spec_digest"].clone();
+
+    // A plan is judged as the change it plans, on the agent it names: an
+    // agent the caller may not view answers as a name no agent holds.
+    let plan = |name: &'static str, digest: Value| {
+        let app = app.clone();
+        async move {
+            console_rpc(
+                &app,
+                Some(ANN),
+                "meta/identity/plan",
+                json!({"change": "update", "request_id": "plan-1", "name": name,
+                       "expected_spec_digest": digest, "set": {"display_name": "Other"}}),
+            )
+            .await
+        }
+    };
+    let own = plan("alpha", alpha.clone()).await;
+    assert_eq!(console_ok(&own)["outcome"], json!("allow"), "{own:#}");
+    let hidden = plan("beta", beta.clone()).await;
+    let unviewed = get(ANN, "beta").await;
+    assert!(
+        hidden["result"].is_null(),
+        "no plan of an agent it may not view: {hidden:#}"
+    );
+    assert_eq!(
+        (&hidden["error"]["code"], &hidden["error"]["data"]["kind"]),
+        (
+            &unviewed["error"]["code"],
+            &unviewed["error"]["data"]["kind"]
+        ),
+        "a plan of an agent the caller may not view answers as a get of it: {hidden:#}"
+    );
+    assert_eq!(
+        hidden["error"]["data"]["kind"],
+        json!("access_denied"),
+        "{hidden:#}"
+    );
+
+    // A peer the caller may not view is a name no agent holds.
+    let peered = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/create",
+        json!({"request_id": "ann-0", "agents": [
+            {"name": "gamma", "profile": "worker", "peers": ["beta"]},
+        ]}),
+    )
+    .await;
+    assert_eq!(
+        peered["error"]["data"]["kind"],
+        json!("peer_unknown"),
+        "{peered:#}"
+    );
+    assert_eq!(
+        peered["error"]["data"]["field"],
+        json!("agents[0].peers[0]"),
+        "{peered:#}"
+    );
+
+    // An operation is read by its own requester, and by an administrator.
+    let created = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/create",
+        json!({"request_id": "ann-1", "agents": [{"name": "delta", "profile": "worker"}]}),
+    )
+    .await;
+    let anns_operation = console_ok(&created)["operation_id"]
+        .as_str()
+        .expect("an operation id")
+        .to_owned();
+    let operation = |subject: &'static str, params: Value| {
+        let app = app.clone();
+        async move { console_rpc(&app, Some(subject), "meta/identity/operation", params).await }
+    };
+    let own = operation(ANN, json!({"request_id": "ann-1"})).await;
+    assert_eq!(console_ok(&own)["outcome"], json!("done"), "{own:#}");
+    let foreign = operation(ANN, json!({"operation_id": roots_operation})).await;
+    assert_eq!(
+        console_ok(&foreign)["outcome"],
+        json!("unknown"),
+        "another requester's operation reads as one nobody asked: {foreign:#}"
+    );
+    let administered = operation(ROOT, json!({"operation_id": anns_operation})).await;
+    assert_eq!(
+        console_ok(&administered)["outcome"],
+        json!("done"),
+        "{administered:#}"
+    );
+
+    // `proposer` and `source_evidence` are the host plane's: a person
+    // states neither, and nothing is recorded.
+    for (member, value) in [
+        ("proposer", json!("ticket-7")),
+        (
+            "source_evidence",
+            json!({"attestor": "crm", "subject": "case-7", "source_ref": "crm:case:7",
+                   "observed_at_ms": 1_762_700_000_000_u64}),
+        ),
+    ] {
+        let mut params = json!({"request_id": format!("ann-{member}"),
+                   "agents": [{"name": "epsilon", "profile": "worker"}]});
+        params[member] = value;
+        let stated = console_rpc(&app, Some(ANN), "meta/identity/create", params).await;
+        assert_eq!(
+            stated["error"]["data"]["kind"],
+            json!("invalid_request"),
+            "{stated:#}"
+        );
+        assert_eq!(
+            stated["error"]["data"]["field"],
+            json!(member),
+            "{stated:#}"
+        );
+    }
+    let listed = console_rpc(&app, Some(ROOT), "meta/identity/list", json!({})).await;
+    assert!(
+        !console_ok(&listed).to_string().contains("epsilon"),
+        "nothing was recorded: {listed:#}"
+    );
+
+    // The hold of the mob's changes needs `runtime.admin`: a person who has
+    // it holds and releases them, and one who has not does not reach it.
+    let denied = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/changes_hold",
+        json!({"held": true}),
+    )
+    .await;
+    assert_eq!(
+        denied["error"]["data"]["kind"],
+        json!("access_denied"),
+        "{denied:#}"
+    );
+    let held = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/changes_hold",
+        json!({"held": true}),
+    )
+    .await;
+    assert_eq!(console_ok(&held), &json!({"held": true}), "{held:#}");
+    let stopped = console_rpc(
+        &app,
+        Some(ANN),
+        "meta/identity/create",
+        json!({"request_id": "ann-2", "agents": [{"name": "zeta", "profile": "worker"}]}),
+    )
+    .await;
+    assert_eq!(
+        stopped["error"]["data"]["kind"],
+        json!("changes_held"),
+        "{stopped:#}"
+    );
+    let released = console_rpc(
+        &app,
+        Some(ROOT),
+        "meta/identity/changes_hold",
+        json!({"held": false}),
+    )
+    .await;
+    assert_eq!(
+        console_ok(&released),
+        &json!({"held": false}),
+        "{released:#}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A Console caller that is no verified person withdraws nothing and holds
+/// nothing: on a Console that signs nobody in, a held change stays held
+/// when such a caller asks to withdraw it, and the mob's changes are not
+/// held for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_console_caller_that_is_no_verified_person_withdraws_and_holds_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "host", "surface": "console"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "require_approval", "approver": {"id": "owner"}},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let app = runtime.build_reference_app_router(console_decisions(false));
+    let held = console_rpc(
+        &app,
+        None,
+        "meta/identity/create",
+        json!({"request_id": "anon-1", "agents": [{"name": "scout", "profile": "worker"}]}),
+    )
+    .await;
+    assert_eq!(
+        console_ok(&held)["outcome"],
+        json!("pending_decision"),
+        "{held:#}"
+    );
+
+    let withdrawn = console_rpc(
+        &app,
+        None,
+        "meta/identity/withdraw",
+        json!({"request_id": "anon-1"}),
+    )
+    .await;
+    assert_eq!(
+        withdrawn["error"]["data"]["kind"],
+        json!("decision_not_found"),
+        "a caller that is no verified person withdraws nothing: {withdrawn:#}"
+    );
+    let still = console_rpc(
+        &app,
+        None,
+        "meta/identity/operation",
+        json!({"request_id": "anon-1"}),
+    )
+    .await;
+    assert_eq!(
+        console_ok(&still)["outcome"],
+        json!("pending_decision"),
+        "{still:#}"
+    );
+    let hold = console_rpc(
+        &app,
+        None,
+        "meta/identity/changes_hold",
+        json!({"held": true}),
+    )
+    .await;
+    assert_eq!(
+        hold["error"]["data"]["kind"],
+        json!("change_denied"),
+        "{hold:#}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// After an adoption the agent's record is its one owner, also while the
+/// host's roster still lists the name: what the identity runtime serves
+/// the agent from follows the record, at once and after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn after_an_adoption_the_identity_runtime_serves_the_agent_from_its_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host = ChangeRequester::host("ops");
+    let served = |runtime: &UnifiedRuntime| {
+        let identities = runtime.identity_runtime().expect("the identity runtime");
+        async move {
+            identities
+                .registered_spec(&AgentIdentity::parse(HOST_A).unwrap())
+                .await
+                .ok()
+                .and_then(|registered| {
+                    registered
+                        .spec
+                        .display_name
+                        .as_ref()
+                        .map(|name| name.as_str().to_owned())
+                })
+        }
+    };
+    {
+        let (runtime, _asked, _fail_next_session) =
+            launch_with(temp.path(), &mob_id, false, false).await;
+        assert!(runtime.attach_identity_policy(in_process_policy(), IdentityFamilyOptions::new()));
+        let family = runtime.identity_family().expect("the family");
+        let mob = runtime.mob_handle();
+        let digest = |family: Arc<dyn IdentityFamily>, mob: meerkat_mob::MobHandle| {
+            let host = host.clone();
+            async move {
+                match family
+                    .read(&mob, &host, IdentityRead::Get(GetAgent::new(HOST_A)))
+                    .await
+                {
+                    Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest.clone(),
+                    other => panic!("a get answers the agent: {other:?}"),
+                }
+            }
+        };
+        let operation =
+            |request: &str| OperationId::for_request(&host.recorded(), request).expect("an id");
+        let adopted = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(
+                    operation("adopt-1"),
+                    IdentityChangeSpec::Adopt(agent_ref(
+                        HOST_A,
+                        &digest(Arc::clone(&family), mob.clone()).await,
+                    )),
+                ),
+            )
+            .await;
+        assert_eq!(adopted.token(), "done", "{adopted:?}");
+        let renamed = family
+            .change(
+                &mob,
+                &host,
+                IdentityChangeCall::new(
+                    operation("update-1"),
+                    IdentityChangeSpec::Update(
+                        serde_json::from_value(json!({
+                            "name": HOST_A,
+                            "expected_spec_digest":
+                                digest(Arc::clone(&family), mob.clone()).await.as_str(),
+                            "set": {"display_name": "Renamed"},
+                        }))
+                        .expect("an update as a surface writes it"),
+                    ),
+                ),
+            )
+            .await;
+        assert_eq!(renamed.token(), "done", "{renamed:?}");
+        assert_eq!(
+            served(&runtime).await.as_deref(),
+            Some("Renamed"),
+            "the registration follows the record at once"
+        );
+        let _ = runtime.shutdown().await;
+    }
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, false).await;
+    assert_eq!(
+        served(&runtime).await.as_deref(),
+        Some("Renamed"),
+        "and after a restart, although the roster still lists the name without it"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A change's answer never waits on another agent's start. An agent of a
+/// profile that runs on its own is created, and its first turn is slow
+/// (its model takes 20 s to answer): a second create, and an update of the
+/// agent just created, are answered within a few seconds all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_after_a_create_does_not_wait_for_the_created_agents_start() {
+    const BOUND: Duration = Duration::from_secs(8);
+    MODEL_DELAY_MS.store(20_000, Ordering::Relaxed);
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch(temp.path(), false).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create", "descriptive"],
+            "requester": {"kind": "host"},
+            "target": {"profile": ["runner"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let ask = |request: &'static str, change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), request).expect("a request id");
+            let asked = std::time::Instant::now();
+            let outcome = family
+                .change(&mob, &host, IdentityChangeCall::new(operation, change))
+                .await;
+            (outcome, asked.elapsed())
+        }
+    };
+    let (first, took) = ask(
+        "r-1",
+        create_of(json!([{"name": "runner-1", "profile": "runner"}])),
+    )
+    .await;
+    assert_eq!(first.token(), "done", "{first:?}");
+    assert!(took < BOUND, "the create itself took {took:?}");
+    let (second, took) = ask(
+        "r-2",
+        create_of(json!([{"name": "runner-2", "profile": "runner"}])),
+    )
+    .await;
+    assert_eq!(second.token(), "done", "{second:?}");
+    assert!(
+        took < BOUND,
+        "a create that follows a create waited {took:?} for the first agent's start"
+    );
+    let digest = first.agents()[0]
+        .spec_digest
+        .clone()
+        .expect("a spec digest");
+    let (renamed, took) = ask(
+        "r-3",
+        IdentityChangeSpec::Update(
+            serde_json::from_value(json!({
+                "name": "runner-1", "expected_spec_digest": digest.as_str(),
+                "set": {"display_name": "Runner One"},
+            }))
+            .expect("an update as a surface writes it"),
+        ),
+    )
+    .await;
+    assert_eq!(renamed.token(), "done", "{renamed:?}");
+    assert!(
+        took < BOUND,
+        "an update of the agent just created waited {took:?} for its start"
+    );
     let _ = runtime.shutdown().await;
 }
 
@@ -3457,8 +4187,8 @@ async fn an_instructions_update_asks_the_instruction_step_and_a_removal_tells_it
         .await;
     assert_eq!(
         renamed.agents()[0].instructions,
-        Some(InstructionOutcome::Unchanged),
-        "{renamed:?}"
+        None,
+        "an update that names no instructions says nothing of them: {renamed:?}"
     );
     assert_eq!(
         rig.step.updated.lock().unwrap().len(),
@@ -3693,24 +4423,32 @@ async fn the_hosts_own_check_refuses_a_request_before_it_commits() {
         plan.rendering
     );
 
-    // The hold of the mob's changes is the host's alone.
+    // The hold of the mob's changes is the host's: its operator's, or a
+    // verified person's whom the host's surface admitted to it. An agent
+    // holds nothing, and neither does a caller a surface could not verify.
     let hold: ChangesHoldRequest = serde_json::from_value(json!({"held": true})).unwrap();
-    let denied = rig
-        .family()
-        .changes_hold(
-            &rig.runtime.mob_handle(),
-            &ChangeRequester::human("person-1"),
-            hold.clone(),
-        )
-        .await
-        .expect_err("a person holds nothing");
-    assert_eq!(denied.kind_token(), "change_denied", "{denied}");
-    let held = rig
-        .family()
-        .changes_hold(&rig.runtime.mob_handle(), &host, hold)
-        .await
-        .expect("the host holds the changes");
-    assert_eq!(serde_json::to_value(held).unwrap(), json!({"held": true}));
+    for (who, requester) in [
+        ("an agent", ChangeRequester::agent_recorded(PLANNER)),
+        ("an unverified caller", ChangeRequester::host("console")),
+    ] {
+        let denied = rig
+            .family()
+            .changes_hold(&rig.runtime.mob_handle(), &requester, hold.clone())
+            .await
+            .expect_err("it holds nothing");
+        assert_eq!(denied.kind_token(), "change_denied", "{who}: {denied}");
+    }
+    for (who, requester) in [
+        ("a verified person", ChangeRequester::human("person-1")),
+        ("the host's operator", ChangeRequester::host_operator("ops")),
+    ] {
+        let held = rig
+            .family()
+            .changes_hold(&rig.runtime.mob_handle(), &requester, hold.clone())
+            .await
+            .unwrap_or_else(|refusal| panic!("{who} holds the changes: {refusal}"));
+        assert_eq!(serde_json::to_value(held).unwrap(), json!({"held": true}));
+    }
     rig.shutdown().await;
 }
 

@@ -179,7 +179,9 @@ impl Gateway {
                              "display_name": "Host A",
                              "additional_instructions": ["Keep the ledger."],
                              "labels": {"desk": "east"}},
-                            {"identity": DESK, "profile": "worker"},
+                            {"identity": DESK, "profile": "worker",
+                             "labels": {"team": "core", "shift": "day", "floor": "2",
+                                        "zone": "b"}},
                             {"identity": REVIEWER, "profile": "reviewer"},
                         ],
                     }),
@@ -305,29 +307,127 @@ fn named<'a>(agents: &'a [Value], name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("the list names {name}: {agents:?}"))
 }
 
-/// A launch without an identity policy serves no method of the family and
-/// lists none: every one answers method not found, and the configured
-/// agent is as it was.
+/// The verdict of one directory entry.
+fn verdict_of(entry: &Value) -> &str {
+    entry["verdict"]
+        .as_str()
+        .or_else(|| entry["verdict"]["verdict"].as_str())
+        .unwrap_or_else(|| panic!("a directory entry carries a verdict: {entry:#}"))
+}
+
+/// A launch without an identity policy, and one whose policy is not
+/// enabled, list the family's methods and serve its reads. Every change and
+/// every plan is refused `change_denied`, with a sentence that says the
+/// launch gives no identity creation policy; the directory answers every
+/// entry not allowed; nothing is written and no method answers method not
+/// found.
 #[test]
-fn a_launch_without_an_identity_policy_serves_no_identity_method() {
-    let scratch = tempfile::tempdir().unwrap();
-    let mut gateway = Gateway::launched(scratch.path(), None);
-    let capabilities = gateway.ok("meta/capabilities", json!({}));
-    let advertised = capabilities["methods"].as_array().expect("methods");
-    for method in METHODS {
-        assert!(
-            !advertised.contains(&json!(method)),
-            "{method} is not advertised without a policy"
+fn a_launch_without_an_enabled_identity_policy_serves_the_reads_and_refuses_every_change() {
+    for policy in [None, Some(json!({"enabled": false}))] {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut gateway = Gateway::launched(scratch.path(), policy.clone());
+        let capabilities = gateway.ok("meta/capabilities", json!({}));
+        let advertised = capabilities["methods"].as_array().expect("methods");
+        for method in METHODS {
+            assert!(
+                advertised.contains(&json!(method)),
+                "{method} is advertised under {policy:?}"
+            );
+        }
+
+        // The reads answer.
+        let agents = gateway.listed(json!({"include_archived": true}));
+        let digest = named(&agents, HOST_A)["spec_digest"].clone();
+        assert_eq!(gateway.get(HOST_A)["spec_digest"], digest);
+        let directory = gateway.ok("meta/identity/directory", json!({}));
+        let profiles = directory["profiles"].as_array().expect("profiles");
+        let peers = directory["peers"].as_array().expect("peers");
+        assert_eq!(profiles.len(), 2, "{directory:#}");
+        assert_eq!(peers.len(), 3, "{directory:#}");
+        for entry in profiles.iter().chain(peers) {
+            assert_eq!(verdict_of(entry), "not_allowed", "{directory:#}");
+        }
+        let unknown = gateway.ok(
+            "meta/identity/operation",
+            json!({"request_id": "never-asked"}),
         );
-        let answer = gateway.rpc(method, json!({}));
+        assert_eq!(unknown["outcome"], json!("unknown"), "{unknown:#}");
+
+        // Every change is refused, and so is its plan.
+        let one = json!({"name": HOST_A, "expected_spec_digest": digest});
+        let changes = [
+            (
+                "create",
+                json!({"agents": [{"name": "scout", "profile": "worker"}]}),
+                "create",
+            ),
+            (
+                "update",
+                json!({"name": HOST_A, "expected_spec_digest": digest,
+                       "set": {"display_name": "Other"}}),
+                "descriptive",
+            ),
+            (
+                "update",
+                json!({"name": HOST_A, "expected_spec_digest": digest,
+                       "set": {"profile": "reviewer"}}),
+                "profile",
+            ),
+            (
+                "update",
+                json!({"name": HOST_A, "expected_spec_digest": digest, "peers_add": [DESK]}),
+                "peers",
+            ),
+            ("archive", one.clone(), "archive"),
+            ("unarchive", one.clone(), "archive"),
+            ("remove", one.clone(), "remove"),
+            ("adopt", one.clone(), "adopt"),
+        ];
+        let no_policy = |data: &Value, class: &str, asked: &str| {
+            assert_eq!(data["kind"], json!("change_denied"), "{asked}: {data:#}");
+            assert_eq!(data["change"], json!(class), "{asked}: {data:#}");
+            assert_eq!(data["retryable"], json!(false), "{asked}: {data:#}");
+            assert!(
+                data["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("no identity creation policy")),
+                "{asked} says why: {data:#}"
+            );
+        };
+        for (index, (change, body, class)) in changes.iter().enumerate() {
+            let mut params = body.clone();
+            params["request_id"] = json!(format!("no-policy-{index}"));
+            let method = format!("meta/identity/{change}");
+            let refused = gateway.refused(&method, params.clone());
+            no_policy(&refused, class, &method);
+            params["change"] = json!(change);
+            let planned = gateway.refused("meta/identity/plan", params);
+            no_policy(&planned, class, &format!("the plan of {change}"));
+        }
+        let withdrawn = gateway.refused(
+            "meta/identity/withdraw",
+            json!({"request_id": "no-policy-0"}),
+        );
+        no_policy(&withdrawn, "create", "meta/identity/withdraw");
+        let held = gateway.refused("meta/identity/changes_hold", json!({"held": true}));
+        no_policy(&held, "create", "meta/identity/changes_hold");
+
+        // Nothing was written: no operation, and the agents are as they were.
+        let unknown = gateway.ok(
+            "meta/identity/operation",
+            json!({"request_id": "no-policy-0"}),
+        );
+        assert_eq!(unknown["outcome"], json!("unknown"), "{unknown:#}");
         assert_eq!(
-            answer["error"]["code"],
-            json!(-32601),
-            "{method}: {answer:#}"
+            gateway.listed(json!({"include_archived": true})),
+            agents,
+            "the agents are as they were under {policy:?}"
         );
+        let missing = gateway.refused("meta/identity/get", json!({"name": "scout"}));
+        assert_eq!(missing["kind"], json!("identity_unknown"), "{missing:#}");
+        let status = gateway.status(HOST_A);
+        assert_eq!(status["identity"], json!(HOST_A), "{status:#}");
     }
-    let status = gateway.status(HOST_A);
-    assert_eq!(status["identity"], json!(HOST_A), "{status:#}");
 }
 
 /// The launch's identity policy reaches the family: the gateway lists the
@@ -346,11 +446,12 @@ fn the_launch_policy_reaches_the_family_and_its_methods_are_advertised() {
         );
     }
     let agents = gateway.listed(json!({}));
-    let names: Vec<&str> = agents
+    let mut names: Vec<&str> = agents
         .iter()
         .filter_map(|agent| agent["name"].as_str())
         .collect();
-    assert_eq!(names, [DESK, HOST_A, REVIEWER], "in name order: {agents:?}");
+    names.sort_unstable();
+    assert_eq!(names, [DESK, HOST_A, REVIEWER], "{agents:?}");
 }
 
 /// A list and a get read a configured agent the way they read every agent:
@@ -395,8 +496,21 @@ fn get_and_list_read_a_configured_agent_and_wake_nothing() {
     // The filters of a list, and the other reads.
     let workers = gateway.listed(json!({"profile": "worker"}));
     assert_eq!(workers.len(), 2, "{workers:?}");
-    let after_desk = gateway.listed(json!({"after": DESK}));
-    assert_eq!(after_desk.len(), 2, "{after_desk:?}");
+    // A list is in one stable order, and `after` continues it: the agents
+    // after a name are exactly the ones the whole list names after it.
+    let order = |agents: &[Value]| -> Vec<String> {
+        agents
+            .iter()
+            .filter_map(|agent| agent["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let whole = order(&before);
+    assert_eq!(whole.len(), 3, "{before:?}");
+    assert_eq!(order(&gateway.listed(json!({}))), whole, "a stable order");
+    for (index, name) in whole.iter().enumerate() {
+        let after = gateway.listed(json!({"after": name}));
+        assert_eq!(order(&after), whole[index + 1..], "after {name}");
+    }
     let directory = gateway.ok("meta/identity/directory", json!({}));
     let profiles: Vec<&str> = directory["profiles"]
         .as_array()
@@ -670,6 +784,50 @@ fn a_policy_naming_notify_or_review_is_refused_at_init() {
             "{named}: {message}"
         );
     }
+}
+
+/// A policy that names a preparation other than `none` is refused at
+/// init: no method of this release settles an agent's preparation, so an
+/// agent of such a profile would wait for it without end. The refusal names
+/// the policy path and says so.
+#[test]
+fn a_policy_naming_a_preparation_is_refused_at_init() {
+    for (mode, rule) in [
+        ("required", json!({"mode": "required"})),
+        (
+            "constructed",
+            json!({"mode": "constructed", "construction_deadline_ms": 60_000}),
+        ),
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        let mut gateway = Gateway::start(scratch.path());
+        let init = gateway.init(
+            &scratch.path().join("state"),
+            Some(json!({
+                "enabled": true,
+                "preparation": {"worker": rule},
+            })),
+        );
+        assert_eq!(init["error"]["code"], json!(-32602), "{mode}: {init:#}");
+        let message = init["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("identity_creation.preparation.worker.mode")
+                && message.contains(mode)
+                && message.contains("no method of this release settles"),
+            "{mode}: {message}"
+        );
+    }
+    // The mode `none` is what every profile has without a word: accepted.
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::start(scratch.path());
+    let init = gateway.init(
+        &scratch.path().join("state"),
+        Some(json!({
+            "enabled": true,
+            "preparation": {"worker": {"mode": "none"}},
+        })),
+    );
+    assert!(init["error"].is_null(), "{init:#}");
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1136,73 @@ fn an_update_changes_what_it_names_and_keeps_the_rest() {
     );
     assert_eq!(profile["kind"], json!("profile_unknown"), "{profile:#}");
     assert_eq!(profile["field"], json!("set.profile"), "{profile:#}");
+}
+
+/// An update of descriptive labels writes only what it names: one label
+/// set and another removed keep the agent's authority label (a label the
+/// policy declares an authority field) and every descriptive label the
+/// update does not name. The authority label is no descriptive change: an
+/// update that names it under the descriptive rule alone is not admitted.
+#[test]
+fn an_update_of_descriptive_labels_keeps_every_authority_label_and_every_other_label() {
+    let scratch = tempfile::tempdir().unwrap();
+    let policy = json!({
+        "enabled": true,
+        "reserved_keys": {"labels": ["team"]},
+        "authority_fields": {"team": {"values": ["core", "field"]}},
+        "approval": {"rules": [{
+            "change": ["adopt", "descriptive"],
+            "requester": {"kind": "host", "surface": "rpc"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "allow"},
+        }]},
+    });
+    let mut gateway = Gateway::launched(scratch.path(), Some(policy));
+    let configured = gateway.digest(DESK);
+    let adopted = gateway.ok(
+        "meta/identity/adopt",
+        json!({"request_id": "adopt-desk", "name": DESK, "expected_spec_digest": configured}),
+    );
+    assert_eq!(adopted["outcome"], json!("done"), "{adopted:#}");
+    let before = gateway.get(DESK);
+    assert_eq!(
+        before["labels"],
+        json!({"team": "core", "shift": "day", "floor": "2", "zone": "b"}),
+        "the adoption keeps the labels: {before:#}"
+    );
+
+    let updated = gateway.ok(
+        "meta/identity/update",
+        json!({"request_id": "labels-1", "name": DESK,
+               "expected_spec_digest": before["spec_digest"],
+               "set": {"labels": {"shift": "night"}, "labels_remove": ["floor"]}}),
+    );
+    assert_eq!(updated["outcome"], json!("done"), "{updated:#}");
+    let after = gateway.get(DESK);
+    assert_eq!(
+        after["labels"],
+        json!({"team": "core", "shift": "night", "zone": "b"}),
+        "the authority label and the unnamed label stay: {after:#}"
+    );
+
+    // The authority label is not a descriptive label: the descriptive rule
+    // alone admits no change of it, and it stays.
+    let authority = gateway.refused(
+        "meta/identity/update",
+        json!({"request_id": "labels-2", "name": DESK,
+               "expected_spec_digest": after["spec_digest"],
+               "set": {"labels": {"team": "field"}}}),
+    );
+    assert!(
+        ["change_denied", "authority_field_needs_approval"]
+            .contains(&authority["kind"].as_str().unwrap_or_default()),
+        "{authority:#}"
+    );
+    assert_eq!(
+        gateway.get(DESK)["labels"],
+        json!({"team": "core", "shift": "night", "zone": "b"}),
+        "a refused update writes nothing"
+    );
 }
 
 /// An update that touches several change classes is judged per class and

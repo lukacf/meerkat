@@ -5250,7 +5250,7 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
         }
         // Decided once per mob, from the council's own record.
         let council_participant =
-            Box::pin(council::council_owns_mob(&state, mob_id.as_str())).await;
+            Box::pin(council::council_owns_mob(&state, mob_id.as_str(), &handle)).await;
         for member in handle.list_members_observation_snapshot().await {
             resolved.push(ResolvedConsoleMember {
                 entry: entry.clone(),
@@ -10438,10 +10438,7 @@ async fn frame_is_visible_cached(
             return Ok(false);
         }
         // A frame a council participant wrote is served on no policy.
-        if read
-            .frame_source_is_council_mob(&entry, &provenance.source_mob_id)
-            .await
-        {
+        if read.council_wrote_frame(&entry, frame, provenance).await {
             return Ok(false);
         }
     }

@@ -146,27 +146,33 @@ impl CutMember {
 pub(super) struct FrameVisibilityRead {
     pub(super) identities: HashMap<(String, String), CachedIdentityVisibility>,
     cuts: HashMap<String, Arc<MemberCut>>,
-    /// [`council::frame_source_is_council_mob`] of each (runtime key,
-    /// captured source mob) the read decided.
-    council_sources: HashMap<(String, String), bool>,
+    /// [`council::council_frames_of_source`] of each (runtime key, captured
+    /// source mob) the read decided.
+    council_sources: HashMap<(String, String), council::CouncilFrames>,
 }
 
 impl FrameVisibilityRead {
-    /// Whether a stored frame of `entry`'s runtime whose captured provenance
-    /// names `source_mob_id` was written by a council participant, decided
-    /// once per read.
-    pub(super) async fn frame_source_is_council_mob(
+    /// Whether the stored `frame` of `entry`'s runtime, with its captured
+    /// `provenance`, was written by a council participant. The frame's
+    /// source mob is decided once per read.
+    pub(super) async fn council_wrote_frame(
         &mut self,
         entry: &RuntimeEntry,
-        source_mob_id: &str,
+        frame: &ConsoleFrame,
+        provenance: &ConsoleFrameMemberProvenance,
     ) -> bool {
-        let key = (entry.runtime_key.clone(), source_mob_id.to_string());
+        let key = (entry.runtime_key.clone(), provenance.source_mob_id.clone());
         if let Some(decided) = self.council_sources.get(&key) {
-            return *decided;
+            return decided.wrote(frame, provenance);
         }
-        let decided = Box::pin(council::frame_source_is_council_mob(entry, source_mob_id)).await;
+        let decided = Box::pin(council::council_frames_of_source(
+            entry,
+            &provenance.source_mob_id,
+        ))
+        .await;
+        let wrote = decided.wrote(frame, provenance);
         self.council_sources.insert(key, decided);
-        decided
+        wrote
     }
 
     /// Whether the read decided a frame of an identity the identity read

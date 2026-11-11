@@ -785,6 +785,11 @@ fn a_refusal_of_cores_keeps_its_token_and_whether_it_is_retryable() {
     .expect("a member step in flight is a typed refusal");
     assert_eq!(pending.kind_token(), "admission_unsettled");
     assert!(pending.is_retryable());
+    assert_eq!(
+        pending.to_data(),
+        json!({"kind": "admission_unsettled", "correlation": "member_step"}),
+        "Core's sentence for the step is not written"
+    );
     assert!(
         refusal_of_error(meerkat_mob::MobError::Internal("store".to_owned())).is_err(),
         "an error that is no refusal stays an error"

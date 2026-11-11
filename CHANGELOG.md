@@ -198,8 +198,13 @@ them.
   independent of the other params: a turn that replaces or clears
   `provider_params` keeps the session's level, unless it also sets or clears
   `reasoning_effort` or its new params name the nested key. A turn that
-  gives both spellings with different levels is refused
-  (`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`). One
+  names the level in both places must ask for one outcome: two different
+  levels are refused, and so is a turn that clears `reasoning_effort` while
+  its new `provider_params` name a level, whatever level that is
+  (`SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree`,
+  whose `top_level` is the level the field sets, or `None` when the field
+  clears it). The same level in both places is accepted, and a clear beside
+  new params that name no level is a clear. One
   function decides this, `resolve_session_provider_params`, for all three
   ways a session's identity changes: a live session's turn override, the
   recovered build of a session that is not live

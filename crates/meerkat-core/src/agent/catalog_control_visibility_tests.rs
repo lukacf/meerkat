@@ -114,6 +114,13 @@ impl Source {
         self.session.lock().unwrap().push(tool);
     }
 
+    fn remove(&self, name: &str) {
+        self.session
+            .lock()
+            .unwrap()
+            .retain(|tool| tool.name.as_str() != name);
+    }
+
     fn dispatched(&self) -> Vec<String> {
         self.dispatched.lock().unwrap().clone()
     }
@@ -710,4 +717,181 @@ async fn a_source_that_declares_the_control_plane_gets_no_second_instruction() {
         "the control tools were in the requests all along: {:?}",
         requests[0].user_texts
     );
+}
+
+// ---------------------------------------------------------------------------
+// A catalog that starts to defer never takes a tool away from the model.
+// ---------------------------------------------------------------------------
+
+/// A deferrable tool of five eighths of the byte budget: under it alone,
+/// over it together with a second one of the same size.
+fn medium(name: &str) -> Arc<ToolDef> {
+    tool(
+        name,
+        format!(
+            "medium tool {name} {}",
+            "x".repeat(DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD * 5 / 8)
+        ),
+    )
+}
+
+fn has(request: &Request, name: &str) -> bool {
+    request.tools.iter().any(|tool| tool == name)
+}
+
+/// When a later tool takes the session over the byte budget, the tool the
+/// model already had stays in the request and is called with no load; the
+/// tool that arrived waits behind the catalog.
+#[tokio::test]
+async fn a_tool_the_model_had_stays_callable_when_the_catalog_starts_to_defer() {
+    let model = Arc::new(Model::new());
+    let source = Arc::new(Source::new(vec![small("alpha")]));
+    let mut agent = agent(&model, &source).await;
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests[0].tools, names(&["alpha"]));
+
+    source.add(large("big"));
+    model.will_call("alpha", json!({}));
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests.len(), 2);
+    assert!(
+        has(&requests[0], "alpha"),
+        "the tool the model had is still in the request: {:?}",
+        requests[0].tools
+    );
+    assert!(
+        !has(&requests[0], "big"),
+        "the tool that arrived waits behind the catalog: {:?}",
+        requests[0].tools
+    );
+    for name in [SEARCH, LOAD] {
+        assert!(
+            has(&requests[0], name),
+            "{name} is offered for the waiting tool"
+        );
+    }
+    assert_eq!(
+        requests[1].results,
+        vec![("call-2".to_string(), false, "ran alpha".to_string())],
+        "the call went through with no load"
+    );
+    assert_eq!(source.dispatched(), names(&["alpha"]));
+
+    let view = agent.tool_catalog_view().expect("catalog view");
+    assert_eq!(view.mode, ToolCatalogMode::Deferred);
+    assert_eq!(
+        view_visibility(&agent, "alpha"),
+        Some(ToolCatalogVisibility::Visible)
+    );
+    assert_eq!(
+        view_visibility(&agent, "big"),
+        Some(ToolCatalogVisibility::Deferred)
+    );
+}
+
+/// Only tools that arrive after the catalog started to defer wait: a later
+/// small tool is behind the catalog like any other, and a load brings it in.
+#[tokio::test]
+async fn only_tools_that_arrive_after_the_change_wait() {
+    let model = Arc::new(Model::new());
+    let source = Arc::new(Source::new(vec![small("alpha")]));
+    let mut agent = agent(&model, &source).await;
+    run(&mut agent, &model).await;
+    source.add(large("big"));
+    run(&mut agent, &model).await;
+
+    source.add(small("later"));
+    model.will_call(LOAD, json!({ "names": ["later"] }));
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests.len(), 2);
+    assert!(has(&requests[0], "alpha"));
+    assert!(
+        !has(&requests[0], "later") && !has(&requests[0], "big"),
+        "tools that arrived after the change wait: {:?}",
+        requests[0].tools
+    );
+    assert!(
+        has(&requests[1], "alpha") && has(&requests[1], "later"),
+        "the loaded tool joins the one the model had: {:?}",
+        requests[1].tools
+    );
+    assert!(!has(&requests[1], "big"));
+}
+
+/// Crossing the budget up and down several times never hides a tool the
+/// model had: not the first tool, not one that arrived while the session
+/// was inline, and not one that waited and then became visible when the
+/// session went back under the budget.
+#[tokio::test]
+async fn crossing_the_budget_up_and_down_never_hides_a_tool_the_model_had() {
+    let model = Arc::new(Model::new());
+    let source = Arc::new(Source::new(vec![small("alpha")]));
+    let mut agent = agent(&model, &source).await;
+    run(&mut agent, &model).await;
+
+    // Up: two medium tools together are over the budget; both wait.
+    source.add(medium("first"));
+    source.add(medium("second"));
+    let requests = run(&mut agent, &model).await;
+    assert!(has(&requests[0], "alpha"));
+    assert!(!has(&requests[0], "first") && !has(&requests[0], "second"));
+
+    // Down: without the second one the session is under the budget, so the
+    // first one is in the request now.
+    source.remove("second");
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests[0].tools, names(&["alpha", "first"]));
+
+    // Inline: a small tool arrives and is offered directly.
+    source.add(small("beta"));
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests[0].tools, names(&["alpha", "first", "beta"]));
+
+    // Up again: everything the model had stays; only the new tool waits.
+    source.add(medium("third"));
+    let requests = run(&mut agent, &model).await;
+    for name in ["alpha", "first", "beta"] {
+        assert!(
+            has(&requests[0], name),
+            "{name} was the model's and stays: {:?}",
+            requests[0].tools
+        );
+    }
+    assert!(!has(&requests[0], "third"));
+
+    // Down and up once more: nothing the model had is hidden a second time.
+    source.remove("third");
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests[0].tools, names(&["alpha", "first", "beta"]));
+    source.add(medium("fourth"));
+    let requests = run(&mut agent, &model).await;
+    for name in ["alpha", "first", "beta"] {
+        assert!(
+            has(&requests[0], name),
+            "{name} stays on the second crossing: {:?}",
+            requests[0].tools
+        );
+    }
+    assert!(!has(&requests[0], "fourth"));
+}
+
+/// A source that starts connecting defers the catalog whatever its size.
+/// The tools the model had stay in the request while it connects.
+#[tokio::test]
+async fn a_source_that_starts_connecting_does_not_hide_the_tools_the_model_had() {
+    let model = Arc::new(Model::new());
+    let source = Arc::new(Source::new(vec![small("alpha"), small("beta")]));
+    let mut agent = agent(&model, &source).await;
+    let requests = run(&mut agent, &model).await;
+    assert_eq!(requests[0].tools, names(&["alpha", "beta"]));
+
+    source.connecting.lock().unwrap().push("late".to_string());
+    let requests = run(&mut agent, &model).await;
+    for name in ["alpha", "beta", SEARCH, LOAD] {
+        assert!(
+            has(&requests[0], name),
+            "{name} is in the request while a source connects: {:?}",
+            requests[0].tools
+        );
+    }
 }

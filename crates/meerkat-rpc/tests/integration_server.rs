@@ -836,6 +836,10 @@ async fn late_registered_callbacks_defer_with_the_control_tools_after_an_inline_
         !first_call.iter().any(|name| name == "secret_audit"),
         "late-added deferred tools should remain hidden until loaded, got {first_call:?}"
     );
+    assert!(
+        first_call.iter().any(|name| name == "secret_lookup"),
+        "the tool the model already had stays in the request, got {first_call:?}"
+    );
 
     drop(writer);
     server_handle.await.unwrap().unwrap();
@@ -961,6 +965,11 @@ async fn a_session_created_before_any_registration_defers_only_once_it_is_over_t
     assert!(
         !seen[2].iter().any(|name| name == "secret_audit"),
         "the tool that took the session over the budget waits behind the catalog, got {:?}",
+        seen[2]
+    );
+    assert!(
+        seen[2].iter().any(|name| name == "secret_lookup"),
+        "the tool the model already had stays in the request, got {:?}",
         seen[2]
     );
 

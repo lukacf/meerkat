@@ -50,8 +50,11 @@ from .errors import (
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
     IDENTITY_HOST_ADOPTED_CODE,
+    IDENTITY_REFUSED_CODE,
     IDENTITY_UNRESUMABLE_CODE,
     IDENTITY_WAKE_HELD_KINDS,
+    IdentityRefusal,
+    IdentityRefusedError,
     CapabilityUnavailableError,
     CompositionProvenanceError,
     FlowRoleTargetsNotAppliedError,
@@ -89,6 +92,28 @@ from .errors import (
     announcement_error_from_rpc,
 )
 from .events import AgentEvent, MobEvent
+from .identities import (
+    AgentDirectoryPage,
+    AgentPage,
+    AgentRecord,
+    AgentRef,
+    AgentSet,
+    AgentSpec,
+    CreateAgents,
+    IdentityChangePlan,
+    IdentityChangeRequest,
+    IdentityChangeResult,
+    IdentityChangesHold,
+    IdentityOperation,
+    IdentityOperationUnknown,
+    IdentityRefused,
+    IdentityWithdrawn,
+    SourceEvidence,
+    UpdateAgent,
+    _operation_ref,
+    _plan_params,
+    identity_outcome_from_dict,
+)
 from .identity_first_models import (
     CompletionCursor,
     CompletionProgress,
@@ -440,6 +465,16 @@ def _rpc_error_from_payload(
             method=method,
             data=data,
         )
+    if code == IDENTITY_REFUSED_CODE:
+        refusal = IdentityRefusal.from_dict(data)
+        if refusal is not None:
+            return IdentityRefusedError(
+                message,
+                refusal=refusal,
+                request_id=request_id,
+                method=method,
+                data=data,
+            )
     announcement_error = announcement_error_from_rpc(
         code, message, request_id=request_id, method=method, data=data
     )
@@ -685,6 +720,321 @@ class MonitorsHandle:
         return await self._runtime._rpc("monitors/start", params)
 
 
+class IdentitiesHandle:
+    """Long-term agents from host code: one call per ``meta/identity/*``
+    method (``runtime.identities``).
+
+    Every agent of the mob is read and changed here the same way, whoever
+    asked for it and by whatever route it came to exist. A change is named
+    by your ``request_id``: the same id and request return the same state
+    and commit at most once, so a retry after a lost answer is safe, and
+    another request under the same id is refused ``operation_reused``.
+
+    A change returns :class:`~meerkat_meta.identities.IdentityDone`,
+    :class:`~meerkat_meta.identities.IdentityPendingDecision` (a person must
+    decide: a normal answer, read it later with :meth:`operation`) or
+    :class:`~meerkat_meta.identities.IdentityPendingPreparation`. Every
+    refusal of every call raises
+    :class:`~meerkat_meta.errors.IdentityRefusedError` with the typed
+    ``kind``, ``field`` and ``detail``; nothing of a refused change was
+    written. A read never wakes an agent.
+    """
+
+    def __init__(self, runtime: MetaRuntime) -> None:
+        self._runtime = runtime
+
+    async def _change(self, method: str, params: dict[str, Any]) -> IdentityChangeResult:
+        raw = await self._runtime._rpc(method, params)
+        outcome = identity_outcome_from_dict(raw)
+        if isinstance(outcome, IdentityRefused):
+            # One error for a refusal, however the gateway carried it.
+            refusal = outcome.refusal
+            raise IdentityRefusedError(
+                refusal.detail or f"identity change refused: {refusal.kind}",
+                refusal=refusal,
+                method=method,
+                data=raw,
+            )
+        return outcome
+
+    async def create(
+        self,
+        agents: Sequence[AgentSpec],
+        *,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Create 1 to 256 long-term agents, all or nothing.
+
+        Each :class:`~meerkat_meta.identities.AgentSpec` names a unique
+        ``name`` and a ``profile`` of the mob; the agents may name each other
+        as ``peers``. A new agent is dormant: nothing is loaded and nothing
+        wakes until its first delivery or its ``first_message``. Each
+        agent's outcome carries its ``spec_digest`` and its ``seat``
+        (``owed`` when its first message did not start: the agent exists and
+        is seated without a restart at its next delivery). A removed
+        agent's name is never available again (``name_taken``).
+        """
+        request = CreateAgents(
+            agents=agents,
+            request_id=request_id,
+            proposer=proposer,
+            source_evidence=source_evidence,
+        )
+        return await self._change("meta/identity/create", request.to_dict())
+
+    async def update(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        set: AgentSet | None = None,  # noqa: A002 - the request's own name
+        peers_add: Sequence[str] = (),
+        peers_remove: Sequence[str] = (),
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Change one long-term agent.
+
+        ``expected_spec_digest`` is the agent's ``spec_digest`` as you read
+        it: an agent that changed meanwhile refuses ``stale_spec``, whose
+        ``details`` carry ``current_digest``. ``set`` is what changes
+        (:class:`~meerkat_meta.identities.AgentSet`). The agent's outcome
+        carries its new ``spec_digest`` and, for an instructions change,
+        ``instructions`` (:class:`~meerkat_meta.identities.InstructionOutcome`):
+        the new text is in the record at once and reaches the agent at its
+        next run; a run that starts within moments of the change may still
+        use the earlier instructions; earlier instructions are never
+        rewritten. A profile change moves the agent to that profile's model
+        and tools on the same conversation. An agent the host's
+        configuration declares refuses ``owner_read_only``: change it there,
+        or :meth:`adopt` it first.
+        """
+        request = UpdateAgent(
+            name=name,
+            expected_spec_digest=expected_spec_digest,
+            request_id=request_id,
+            set=set if set is not None else AgentSet(),
+            peers_add=peers_add,
+            peers_remove=peers_remove,
+            proposer=proposer,
+            source_evidence=source_evidence,
+        )
+        return await self._change("meta/identity/update", request.to_dict())
+
+    async def _change_one(
+        self,
+        change: str,
+        name: str,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None,
+        source_evidence: SourceEvidence | None,
+    ) -> IdentityChangeResult:
+        request = AgentRef(
+            name=name,
+            expected_spec_digest=expected_spec_digest,
+            request_id=request_id,
+            proposer=proposer,
+            source_evidence=source_evidence,
+        )
+        return await self._change(f"meta/identity/{change}", request.to_dict())
+
+    async def archive(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Stop a long-term agent and keep it: its name, record,
+        conversation and memory stay, messages to it are refused, and
+        :meth:`unarchive` brings it back."""
+        return await self._change_one(
+            "archive", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def unarchive(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Bring an archived agent back, on its archived conversation and
+        its current instructions. Refused ``not_archived`` for an agent that
+        is not archived."""
+        return await self._change_one(
+            "unarchive", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def remove(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Remove a long-term agent for good. Its name can never be used
+        again; its conversation and memory are kept and no other agent can
+        reach them. Use :meth:`archive` when it may be needed later."""
+        return await self._change_one(
+            "remove", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def adopt(
+        self,
+        name: str,
+        *,
+        expected_spec_digest: str,
+        request_id: str,
+        proposer: str | None = None,
+        source_evidence: SourceEvidence | None = None,
+    ) -> IdentityChangeResult:
+        """Release an agent from configuration: from now on it is changed
+        at run time and configuration no longer declares it.
+
+        The agent keeps its name, its conversation, its memory and the
+        peers it has. ``expected_spec_digest`` is its ``spec_digest`` as
+        :meth:`get` or :meth:`list` read it. The same ``request_id`` and
+        request return the same state, so a retry is safe. Refused
+        ``not_adoptable`` (``details["reason"]`` says why; an agent that is
+        changed at run time already answers ``nothing_to_adopt``) and the
+        retryable ``declared_apply_open`` while the host's configuration is
+        being applied. Stop declaring the agent in configuration once the
+        adoption committed.
+        """
+        return await self._change_one(
+            "adopt", name, expected_spec_digest, request_id, proposer, source_evidence
+        )
+
+    async def withdraw(
+        self, *, request_id: str | None = None, operation_id: str | None = None
+    ) -> IdentityWithdrawn:
+        """Withdraw a change whose decision is still held; nothing of it is
+        written. Name the change by your own ``request_id`` or by the
+        ``operation_id`` its outcome named: exactly one. Refused
+        ``decision_not_found`` when no decision is held for it."""
+        params = _operation_ref(request_id, operation_id)
+        return IdentityWithdrawn.from_dict(
+            await self._runtime._rpc("meta/identity/withdraw", params)
+        )
+
+    async def changes_hold(
+        self, held: bool, *, reason: str | None = None
+    ) -> IdentityChangesHold:
+        """Hold the mob's changes of agents (``held=True``) or release them.
+
+        While held, every change is refused the retryable ``changes_held``
+        and nothing of it is written. The hold is not durable: a host that
+        holds changes holds them again at its next start. ``reason`` is for
+        the host's own record.
+        """
+        params: dict[str, Any] = {"held": held}
+        if reason is not None:
+            params["reason"] = reason
+        return IdentityChangesHold.from_dict(
+            await self._runtime._rpc("meta/identity/changes_hold", params)
+        )
+
+    async def list(
+        self,
+        *,
+        profile: str | None = None,
+        include_archived: bool = False,
+        after: str | None = None,
+    ) -> AgentPage:
+        """One page of the mob's agents, in name order.
+
+        Every agent is listed the same way, whoever asked for it and by
+        whatever route it came to exist. ``profile`` keeps only agents of
+        that profile; archived agents are listed only with
+        ``include_archived``; ``after`` is the previous page's ``next``.
+        Each :class:`~meerkat_meta.identities.AgentSummary` carries the
+        ``spec_digest`` a change names. Never wakes an agent.
+        """
+        params: dict[str, Any] = {"include_archived": include_archived}
+        if profile is not None:
+            params["profile"] = profile
+        if after is not None:
+            params["after"] = after
+        return AgentPage.from_dict(await self._runtime._rpc("meta/identity/list", params))
+
+    async def get(self, name: str) -> AgentRecord:
+        """One agent in full: what :meth:`list` says of it, and its
+        instructions, context, labels and peers. Refused
+        ``identity_unknown`` for a name no agent has. Never wakes the
+        agent."""
+        return AgentRecord.from_dict(
+            await self._runtime._rpc("meta/identity/get", {"name": name})
+        )
+
+    async def operation(
+        self, *, request_id: str | None = None, operation_id: str | None = None
+    ) -> IdentityOperation:
+        """The state of one change: read it after a lost answer, or to
+        learn what became of a held decision.
+
+        Name it by your own ``request_id`` or by the ``operation_id`` an
+        outcome named: exactly one. Answers the change's outcome
+        (:class:`~meerkat_meta.identities.IdentityDone`,
+        :class:`~meerkat_meta.identities.IdentityPendingDecision`,
+        :class:`~meerkat_meta.identities.IdentityPendingPreparation`, or
+        :class:`~meerkat_meta.identities.IdentityRefused` for an operation
+        that ended refused, as a value, not raised), or
+        :class:`~meerkat_meta.identities.IdentityOperationUnknown`: nothing
+        committed under it and no decision is held, so asking the change
+        commits it at most once. The SDK does not poll: call this when you
+        want the state.
+        """
+        params = _operation_ref(request_id, operation_id)
+        raw = await self._runtime._rpc("meta/identity/operation", params)
+        if isinstance(raw, dict) and raw.get("outcome") == IdentityOperationUnknown.outcome:
+            return IdentityOperationUnknown()
+        return identity_outcome_from_dict(raw)
+
+    async def directory(
+        self, *, query: str | None = None, after: str | None = None
+    ) -> AgentDirectoryPage:
+        """One page of what may be named in a create or an update: the
+        mob's profiles, and the agents that may be listed as peers, each
+        with the verdict the host's rules give it. ``query`` keeps entries
+        whose name or display name contains it; ``after`` is the previous
+        page's ``next``. Never wakes an agent."""
+        params: dict[str, Any] = {}
+        if query is not None:
+            params["query"] = query
+        if after is not None:
+            params["after"] = after
+        return AgentDirectoryPage.from_dict(
+            await self._runtime._rpc("meta/identity/directory", params)
+        )
+
+    async def plan(self, change: str, request: IdentityChangeRequest) -> IdentityChangePlan:
+        """The outcome and the rendering a change would get; nothing is
+        held and nothing is written.
+
+        ``change`` is ``create`` (with a
+        :class:`~meerkat_meta.identities.CreateAgents`), ``update`` (an
+        :class:`~meerkat_meta.identities.UpdateAgent`), or ``archive``,
+        ``unarchive``, ``remove`` or ``adopt`` (an
+        :class:`~meerkat_meta.identities.AgentRef`). A change the host's
+        rules deny is refused, not planned.
+        """
+        params = _plan_params(change, request)
+        return IdentityChangePlan.from_dict(
+            await self._runtime._rpc("meta/identity/plan", params)
+        )
+
+
 class MetaRuntime:
     """Running Meta runtime instance.
 
@@ -730,6 +1080,8 @@ class MetaRuntime:
         self._last_gateway_transport: PersistentTransport | None = None
         self.jobs = JobsHandle(self)
         self.monitors = MonitorsHandle(self)
+        #: Long-term agents from host code (``meta/identity/*``).
+        self.identities = IdentitiesHandle(self)
 
     async def __aenter__(self) -> MetaRuntime:
         if not self._running:

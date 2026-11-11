@@ -1,7 +1,8 @@
 """Typed error hierarchy for Meta SDK."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+import dataclasses
+from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
 if TYPE_CHECKING:
     from ._transport import TransportTermination
@@ -155,6 +156,84 @@ ANNOUNCEMENT_FRONTIER_CODE: int = -32046
 ANNOUNCEMENT_REFUSED_CODE: int = -32047
 # The named subscription, delivery, source or mob does not exist here.
 ANNOUNCEMENT_NOT_FOUND_CODE: int = -32048
+# The long-term agent family (``meta/identity/*``) refused a request; nothing
+# of it was written. Every refusal of the family rides this one code, and the
+# error data is the typed refusal: ``{"kind", "field"?, "retryable",
+# "detail", ...the kind's own members}``.
+IDENTITY_REFUSED_CODE: int = -32049
+# The identity refusal kinds, a closed vocabulary: a new kind is a breaking
+# change. It is the gateway's own list (``IdentityRefusalKind``), and the SDK
+# suite fails when the two differ.
+IDENTITY_REFUSAL_KINDS: frozenset[str] = frozenset(
+    {
+        # Profile.
+        "profile_unknown",
+        "profile_not_allowed",
+        "privileged_field",
+        "grant_revoked",
+        # Request data.
+        "reserved_key",
+        "authority_field_needs_approval",
+        "authority_field_invalid",
+        "text_too_large",
+        "consequences_unavailable",
+        "invalid_request",
+        # Name.
+        "invalid_name",
+        "name_taken",
+        # Peers.
+        "peer_not_allowed",
+        "peer_unknown",
+        # Policy.
+        "batch_too_large",
+        "validation_refused",
+        "change_denied",
+        "unsupported",
+        # Agents and operations.
+        "identity_unknown",
+        "self_change_refused",
+        "private_requester",
+        "stale_spec",
+        "operation_reused",
+        "owner_read_only",
+        "not_adoptable",
+        "not_archived",
+        "declared_apply_open",
+        "admission_unsettled",
+        "predecessor_mismatch",
+        "import_refused",
+        "purge_refused",
+        "preparation_not_pending",
+        "preparation_mismatch",
+        "construction_open",
+        "stale_attempt",
+        "not_constructed",
+        "construction_required",
+        "activation_pending",
+        # Decisions.
+        "approval_unavailable",
+        "decision_open",
+        "subject_widened",
+        "decision_closed",
+        "decision_not_found",
+        # Decide side.
+        "evidence_required",
+        "subject_changed",
+        "presentation_incomplete",
+        "requester_cannot_decide",
+        "approver_not_eligible",
+        "decided_before_presentation",
+        # Admission.
+        "changes_held",
+        "host_preparation_pending",
+        "candidate_launch",
+        "identity_member",
+        "storage_unsupported",
+        "mob_not_running",
+        "purged",
+        "construction_refused",
+    }
+)
 # A wake Core holds until an operator acts rides JSON-RPC's internal-error
 # code with structured data; the data ``kind`` names the hold.
 IDENTITY_WAKE_HELD_KINDS: frozenset[str] = frozenset(
@@ -858,6 +937,129 @@ class ToolGrantRequestRefusedError(RpcError):
         self.refusal: dict[str, Any] = dict(refusal) if isinstance(refusal, dict) else {}
         kind = self.refusal.get("kind")
         self.refusal_kind: str | None = kind if isinstance(kind, str) else None
+
+
+# The members of a refusal that are not the kind's own details.
+_IDENTITY_REFUSAL_MEMBERS: frozenset[str] = frozenset(
+    {"kind", "field", "detail", "retryable", "outcome"}
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class IdentityRefusal:
+    """Why a request of the long-term agent family was refused.
+
+    ``kind`` is one of :data:`IDENTITY_REFUSAL_KINDS`. ``field`` is the
+    request field the refusal concerns, as a path into the request as you
+    wrote it (``agents[1].name``, ``set.labels``, ``peers_add[0]``,
+    ``name``); ``None`` for the request as a whole. ``detail`` says what was
+    wrong and what to send instead, in one sentence. ``retryable`` says
+    whether the same request may succeed later unchanged (``None`` when the
+    gateway did not say). ``details`` holds the kind's own members: for
+    example ``current_digest`` and ``current_revision`` for ``stale_spec``,
+    ``by`` for ``name_taken``, ``reason`` for ``not_adoptable``, ``change``
+    for ``change_denied``.
+
+    The vocabulary is closed, and a gateway newer than this SDK may still
+    send a kind this SDK does not list. It reaches you as the same type with
+    its token in ``kind`` and :attr:`known_kind` false: handle it as a
+    refusal you do not know, by ``retryable`` and ``detail``.
+    """
+
+    kind: str
+    field: str | None = None
+    detail: str | None = None
+    retryable: bool | None = None
+    details: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+    @property
+    def known_kind(self) -> bool:
+        """Whether ``kind`` is one of :data:`IDENTITY_REFUSAL_KINDS`."""
+        return self.kind in IDENTITY_REFUSAL_KINDS
+
+    @classmethod
+    def from_dict(cls, data: Any) -> IdentityRefusal | None:
+        """The refusal ``data`` carries; ``None`` unless it is an object
+        whose ``kind`` is text."""
+        if not isinstance(data, dict):
+            return None
+        kind = data.get("kind")
+        if not isinstance(kind, str):
+            return None
+        field = data.get("field")
+        detail = data.get("detail")
+        retryable = data.get("retryable")
+        return cls(
+            kind=kind,
+            field=field if isinstance(field, str) else None,
+            detail=detail if isinstance(detail, str) else None,
+            retryable=retryable if isinstance(retryable, bool) else None,
+            details={
+                key: value
+                for key, value in data.items()
+                if key not in _IDENTITY_REFUSAL_MEMBERS
+            },
+        )
+
+
+class IdentityRefusedError(RpcError):
+    """Raised when the long-term agent family (``meta/identity/*``) refused
+    a request; nothing of it was written.
+
+    This is the one refusal error of the family: every call of
+    ``MetaRuntime.identities`` raises it for every refusal. The gateway
+    answers :data:`IDENTITY_REFUSED_CODE` with the typed refusal as the
+    error data; both must match, and any other answer stays a plain
+    :class:`RpcError`. ``refusal`` is the :class:`IdentityRefusal`;
+    ``kind``, ``field``, ``detail``, ``retryable`` and ``details`` read it.
+    ``kind`` is one of :data:`IDENTITY_REFUSAL_KINDS`; a kind newer than
+    this SDK is still this error, with its token in ``kind`` and
+    ``known_kind`` false.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        refusal: IdentityRefusal,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            IDENTITY_REFUSED_CODE,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+        self.refusal = refusal
+
+    @property
+    def kind(self) -> str:
+        return self.refusal.kind
+
+    @property
+    def known_kind(self) -> bool:
+        return self.refusal.known_kind
+
+    @property
+    def field(self) -> str | None:
+        return self.refusal.field
+
+    @property
+    def detail(self) -> str:
+        """What was wrong and what to send instead: the refusal's sentence,
+        or the error's message when the gateway sent none."""
+        return self.refusal.detail if self.refusal.detail is not None else str(self)
+
+    @property
+    def retryable(self) -> bool | None:
+        return self.refusal.retryable
+
+    @property
+    def details(self) -> Mapping[str, Any]:
+        return self.refusal.details
 
 
 class RealmMcpRefusedError(RpcError):

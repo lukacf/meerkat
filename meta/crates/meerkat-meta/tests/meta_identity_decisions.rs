@@ -40,9 +40,10 @@ use meerkat_meta::identity_creation::{
     IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts,
     IdentityOutcome, IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest,
     OperationId, ProfileTools, RemoveIdentitySpec, RequestContext, RequestEnvelope, Requester,
-    RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, WithdrawRequest,
-    consent_of_plan, core_member_name, host_consequences_of, normalize_adopt, normalize_archive,
-    normalize_create, normalize_remove, normalize_unarchive, render_held_v1,
+    RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, UpdateIdentitySpec,
+    WithdrawRequest, consent_of_plan, core_member_name, host_consequences_of, normalize_adopt,
+    normalize_archive, normalize_create, normalize_remove, normalize_unarchive, normalize_update,
+    render_held_v1,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -102,6 +103,15 @@ runtime_mode = "turn_driven"
 
 [profiles.worker.tools]
 {tools}
+
+[profiles.lead]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.lead.tools]
+comms = true
+mob = true
 "#
     ))
     .expect("parse the definition")
@@ -404,7 +414,7 @@ fn approval_policy(timeout_ms: u64) -> IdentityCreationPolicy {
     IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
-            "change": ["create", "descriptive", "remove", "archive", "adopt"],
+            "change": ["create", "descriptive", "profile", "remove", "archive", "adopt"],
             "outcome": {
                 "kind": "require_approval",
                 "approver": {"id": APPROVERS},
@@ -570,7 +580,48 @@ fn normalized_create(
     requester: &RequesterFacts,
     specs: &[DurableAgentSpec],
 ) -> NormalizedRequest {
-    let profiles = BTreeSet::from(["worker".to_owned()]);
+    normalized_create_with(policy, requester, specs, RequestEnvelope::default())
+}
+
+/// The mob's profiles, as normalization is given them.
+fn mob_profiles() -> BTreeSet<String> {
+    BTreeSet::from(["worker".to_owned(), "lead".to_owned()])
+}
+
+/// A normalized update of `entry`: its instructions change, and with
+/// `profile` it moves to that profile.
+fn normalized_update(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    entry: &IdentityEntryFacts,
+    profile: Option<&str>,
+) -> NormalizedRequest {
+    let profiles = mob_profiles();
+    let peers = BTreeMap::new();
+    let mut update = UpdateIdentitySpec::new(entry.identity.as_str(), entry.spec_digest.clone());
+    update.set.additional_instructions = Some(vec!["A new brief.".to_owned()]);
+    update.set.profile = profile.map(ProfileName::from);
+    normalize_update(
+        policy,
+        &RequestContext {
+            requester,
+            profiles: &profiles,
+            peers: &peers,
+        },
+        RequestEnvelope::default(),
+        entry,
+        &update,
+    )
+    .expect("the update normalizes")
+}
+
+fn normalized_create_with(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    specs: &[DurableAgentSpec],
+    envelope: RequestEnvelope,
+) -> NormalizedRequest {
+    let profiles = mob_profiles();
     let peers = BTreeMap::new();
     let specs: Vec<CreateIdentitySpec> =
         specs.iter().cloned().map(CreateIdentitySpec::new).collect();
@@ -581,7 +632,7 @@ fn normalized_create(
             profiles: &profiles,
             peers: &peers,
         },
-        RequestEnvelope::default(),
+        envelope,
         &specs,
     )
     .expect("the create normalizes")
@@ -1947,6 +1998,216 @@ async fn a_decision_whose_body_is_not_the_request_it_binds_is_never_carried_out(
     rig.shutdown().await;
 }
 
+/// One request id names one change. A create is held under a request id;
+/// an update and a removal asked under the same id are another request and
+/// are refused `operation_reused`, and one decision exists.
+///
+/// RED before the holder looked a held operation up across its kinds: the
+/// update was held as a second decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_change_under_a_held_request_id_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let held = rig.ask_create(&facts, "one-1", &["scout"]).await;
+    pending(&held);
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry =
+        IdentityEntryFacts::new("keeper", digest.clone(), Some(1), "worker", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(entry.clone(), false));
+    let operation_id = operation(&facts, "one-1");
+
+    let update = normalized_update(&rig.policy, &facts, &entry, None);
+    let updated = rig.decisions.hold(&rig.mob(), &operation_id, &update).await;
+    assert_eq!(refused(&updated), "operation_reused");
+    let removal = normalize_remove(
+        &rig.policy,
+        &facts,
+        RequestEnvelope::default(),
+        &entry,
+        &RemoveIdentitySpec::new("keeper", digest),
+    )
+    .expect("the removal normalizes");
+    let removed = rig
+        .decisions
+        .hold(&rig.mob(), &operation_id, &removal)
+        .await;
+    assert_eq!(refused(&removed), "operation_reused");
+
+    assert_eq!(
+        rig.count(DecisionPhase::Open),
+        1,
+        "one decision holds the id"
+    );
+    assert_eq!(
+        rig.decisions.held(&rig.mob(), &operation_id).await.unwrap(),
+        Some(held),
+        "the id still answers the create"
+    );
+    rig.shutdown().await;
+}
+
+/// A person a host names as the proposer of a request cannot approve it.
+/// The host asks on its own surface and names the chat person as proposer
+/// by their principal key: the decision records that person as its
+/// requester, their decide is refused `self_approval`, and another person
+/// of the map approves. A request with no proposer is the host's: the same
+/// person approves it.
+///
+/// RED before the holder read the proposer: the decision recorded the host,
+/// and the proposer approved their own request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_a_host_names_as_proposer_cannot_approve_the_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let mut envelope = RequestEnvelope::default();
+    envelope.proposer = Some(chat_person_key(OWNER));
+    let proposed = normalized_create_with(&rig.policy, &facts, &[spec("scout")], envelope);
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "proposed-1"), &proposed)
+        .await;
+    let (decision_id, _) = pending(&held);
+    assert_eq!(
+        rig.row(&decision_id).descriptor.requester.as_str(),
+        chat_person_key(OWNER),
+        "the decision names the person the host named"
+    );
+    rig.present(&decision_id);
+    let own = rig.chat_decides(&decision_id, OWNER, true).await;
+    assert_eq!(
+        own["error"]["data"]["decision_refusal"]["kind"],
+        json!("self_approval"),
+        "{own:#?}"
+    );
+    assert_eq!(rig.row(&decision_id).state.phase, DecisionPhase::Open);
+    let other = rig.chat_decides(&decision_id, SECOND_OWNER, true).await;
+    assert!(other["error"].is_null(), "{other:#?}");
+
+    let (hosts, _) = pending(&rig.ask_create(&facts, "hosts-1", &["scribe"]).await);
+    assert_ne!(
+        rig.row(&hosts).descriptor.requester.as_str(),
+        chat_person_key(OWNER),
+        "a request with no proposer is the host's"
+    );
+    rig.present(&hosts);
+    let approved = rig.chat_decides(&hosts, OWNER, true).await;
+    assert!(approved["error"].is_null(), "{approved:#?}");
+    rig.shutdown().await;
+}
+
+/// A held role change shows the tools of the profile the agent moves TO,
+/// and an update that keeps the profile shows the agent's own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_role_change_shows_the_new_profiles_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry = IdentityEntryFacts::new("keeper", digest, Some(1), "worker", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(entry.clone(), false));
+
+    let moved = normalized_update(&rig.policy, &facts, &entry, Some("lead"));
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "role-1"), &moved)
+        .await;
+    let (decision_id, _) = pending(&held);
+    let row = rig.row(&decision_id);
+    assert_eq!(row.descriptor.kind.as_str(), "identity.update");
+    let rendering = row.descriptor.rendering.to_string();
+    assert!(
+        rendering.contains("\"keeper\" profile \"lead\""),
+        "the agent is shown on the profile it moves to:\n{rendering}"
+    );
+    assert!(
+        rendering.contains("Tool families (2):\n- comms\n- mob\n"),
+        "with that profile's tools:\n{rendering}"
+    );
+    assert!(
+        !rendering.contains("profile: \"worker\"\n"),
+        "and no block of the profile it leaves:\n{rendering}"
+    );
+
+    let kept = normalized_update(&rig.policy, &facts, &entry, None);
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "brief-1"), &kept)
+        .await;
+    let (decision_id, _) = pending(&held);
+    let rendering = rig.row(&decision_id).descriptor.rendering.to_string();
+    assert!(
+        rendering.contains("\"keeper\" profile \"worker\""),
+        "an update that keeps the profile shows the agent's own:\n{rendering}"
+    );
+    rig.shutdown().await;
+}
+
+/// The agent a held change names moved to another profile after the
+/// approval: its tools are no longer the ones the person was shown, and the
+/// change is refused `subject_widened` without asking the seam.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_target_whose_profile_moved_since_the_hold_is_refused_subject_widened() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry =
+        IdentityEntryFacts::new("keeper", digest.clone(), Some(1), "worker", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(entry.clone(), false));
+    let removal = normalize_remove(
+        &rig.policy,
+        &facts,
+        RequestEnvelope::default(),
+        &entry,
+        &RemoveIdentitySpec::new("keeper", digest.clone()),
+    )
+    .expect("the removal normalizes");
+    let held = rig
+        .decisions
+        .hold(&rig.mob(), &operation(&facts, "moved-1"), &removal)
+        .await;
+    let (decision_id, _) = pending(&held);
+    rig.approve(&decision_id).await;
+
+    let moved = IdentityEntryFacts::new("keeper", digest, Some(2), "lead", BTreeMap::new());
+    rig.host
+        .targets
+        .lock()
+        .unwrap()
+        .insert("keeper".to_owned(), HeldTarget::new(moved, false));
+    let mut executors = rig.executor_loop();
+    assert_eq!(
+        drive(&mut executors).await,
+        vec![
+            DecisionPassOutcome::ExecutionRefused,
+            DecisionPassOutcome::NoticeSettled
+        ]
+    );
+    assert_eq!(
+        rig.row(&decision_id)
+            .execution_refusal
+            .as_ref()
+            .map(DecisionReference::as_str),
+        Some("subject_widened")
+    );
+    assert_eq!(rig.seam.asked(), Vec::new(), "the seam was not asked");
+    rig.shutdown().await;
+}
+
 /// A candidate launch holds nothing and carries nothing out: its holder
 /// refuses a change that needs approval `candidate_launch`, and starts no
 /// driver. A decision held by a host that acts is carried out by a host
@@ -2106,7 +2367,11 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
             &AdoptIdentitySpec::new("keeper", digest),
         ),
     ];
-    for normalized in whole {
+    let updates = [
+        normalized_update(&policy, &facts, &entry, None),
+        normalized_update(&policy, &facts, &entry, Some("lead")),
+    ];
+    for normalized in whole.into_iter().chain(updates.into_iter().map(Ok)) {
         let request = normalized.expect("the change normalizes").request;
         let configurations = ToolConfigurations::of_request(
             &request,

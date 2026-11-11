@@ -241,6 +241,10 @@ them.
     on the OpenAI realtime and live error paths and in an Anthropic stream
     rate-limit object.
 
+  The cause is provider text. On a client with an authorizer it passes the
+  authorizer's credential redaction, like every other error a stream ends
+  with. No request is changed and nothing is retried in another form.
+
 - `meerkat-auth-core`, `meerkat-store`, `meerkat-tools`, `rkat`: a file write
   that the operating system refuses no longer replaces the file with an empty
   one while the operation reports success. These writers write a temporary
@@ -277,6 +281,27 @@ them.
     `session-store` and keep tasks in SQLite;
   - an ATIF trajectory export (`rkat session export-atif`, `rkat run
     --export-atif`, since 0.8.22): reported as written, and empty or short.
+
+  Each of these writes now fails with the error the operation already
+  returns for a failed open or rename, publishes nothing and removes its
+  temporary file: the file it would have replaced stays as it was, and a
+  file that did not exist is not created. A realm whose first open fails
+  this way opens normally once writes work again. A lease record is the one
+  file that is still emptied, now on purpose and only at a heartbeat: a
+  holder whose heartbeat cannot replace its record (the write is refused, or
+  the temporary file cannot be created or renamed) empties its own record,
+  which needs no free space. An empty record is counted as unreadable, so
+  `rkat realm delete` and `rkat realm prune` keep refusing without `--force`
+  while the holder is alive on a full disk. Left as it was, the last good
+  record would go stale 30 seconds later and both commands would remove the
+  realm under the running holder, as they could through 0.9.13 when a
+  heartbeat failed to create or rename its temporary file. The next
+  heartbeat that succeeds restores the record; a refused write at a
+  surface's start still fails the start and writes nothing. The realm
+  manifest lock and the first-start marker (since 0.8.4), which such a write
+  left empty without effect, now fail the same way and are removed, so
+  neither stays behind to be waited on. A file an earlier release already
+  emptied is not restored.
 
 ### Known limitations
 

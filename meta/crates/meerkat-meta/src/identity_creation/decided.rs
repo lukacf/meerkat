@@ -16,8 +16,10 @@
 //!   of anything the requester wrote. Nothing else is written: no agent is
 //!   created, built or woken, and no other agent's record is read. The
 //!   answer is `pending_decision`; the same operation asked again answers
-//!   the decision as it stands. One decision covers the whole request: a
-//!   create of N agents is one decision.
+//!   the decision as it stands, and any other request under its id, of the
+//!   same action or another, is refused `operation_reused`: one operation
+//!   id names one change. One decision covers the whole request: a create
+//!   of N agents is one decision.
 //! - **Decide.** A person decides through the decisions surface that exists
 //!   (`meta/decisions/decide`), with attested evidence: the stdio operator,
 //!   or a person an application attests from its own channel. The requester
@@ -825,7 +827,10 @@ impl IdentityDecisions {
         }
         let request = &normalized.request;
         let binding = Binding::of(mob, operation_id, request)?;
-        if let Some(row) = self.read(&binding.decision_id)? {
+        // One operation id names one change: a decision that holds it, of
+        // whichever kind, answers it, and another request under it is
+        // refused.
+        if let Some(row) = self.find(mob, operation_id)? {
             return self.replayed(mob, operation_id, &binding, &row).await;
         }
         let rendering = self.render(mob, request).await?;

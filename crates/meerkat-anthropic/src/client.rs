@@ -145,7 +145,9 @@ impl AnthropicClientBuilder {
         self
     }
 
-    /// Set custom base URL
+    /// Set custom base URL. The route the client reports
+    /// (`LlmClient::reasoning_route`) does not follow the URL: a client
+    /// pointed at another backend names it with [`Self::backend`].
     pub fn base_url(mut self, url: String) -> Self {
         self.base_url = url;
         self
@@ -1146,7 +1148,10 @@ impl AnthropicClient {
         AnthropicClientBuilder::new(api_key)
     }
 
-    /// Set custom base URL
+    /// Set custom base URL. The route the client reports
+    /// (`LlmClient::reasoning_route`) does not follow the URL: it stays the
+    /// backend the client was built for, which
+    /// [`AnthropicClientBuilder::backend`] names.
     pub fn with_base_url(self, url: String) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()

@@ -1160,12 +1160,17 @@ impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
 ///   optimistic endpoint, and the account's statement is unavailable.
 /// - An entry states its levels in `capabilities.supports.reasoning_effort`
 ///   ([`crate::CopilotModelSupports::stated_effort_levels`]); an entry
-///   without the statement states none.
+///   without the statement states none. An empty statement says that the
+///   model takes no level. A statement made only of words that name no
+///   level this binary knows cannot be read: the entry is reported as
+///   stating none, so a level asked for there is refused as unknown and not
+///   as unsupported.
 /// - On the Messages endpoint a level is sent only as the pair adaptive
 ///   thinking with effort. An entry there that states levels and states
 ///   `adaptive_thinking: false` cannot take that pair, so its levels are not
 ///   usable and it is reported as stating none. An entry that does not state
-///   `adaptive_thinking` keeps its levels.
+///   `adaptive_thinking` keeps its levels, and an empty statement stays an
+///   empty statement.
 fn reasoning_route_observation(
     provider: Provider,
     route: &CopilotRouteFingerprint,
@@ -1199,9 +1204,23 @@ fn reasoning_route_observation(
             .map(|capabilities| &capabilities.supports);
         let refuses_the_messages_pair = api == ModelApi::Messages
             && supports.is_some_and(|supports| supports.adaptive_thinking == Some(false));
-        match supports.and_then(crate::CopilotModelSupports::stated_effort_levels) {
-            Some(levels) if !refuses_the_messages_pair => AccountLevelStatement::Stated(levels),
-            Some(_) | None => AccountLevelStatement::NotStated,
+        // Whether the entry's statement holds any word, and the levels
+        // among its words.
+        let statement = supports.and_then(|supports| {
+            let holds_words = !supports.reasoning_effort.as_ref()?.is_empty();
+            Some((holds_words, supports.stated_effort_levels()?))
+        });
+        match statement {
+            // An empty statement: the model takes no level, on any endpoint.
+            Some((false, levels)) => AccountLevelStatement::Stated(levels),
+            // Words, none of which this binary knows as a level: the
+            // statement cannot be read, so it states nothing to check
+            // against.
+            Some((true, levels)) if levels.is_empty() => AccountLevelStatement::NotStated,
+            Some((true, levels)) if !refuses_the_messages_pair => {
+                AccountLevelStatement::Stated(levels)
+            }
+            Some((true, _)) | None => AccountLevelStatement::NotStated,
         }
     } else {
         AccountLevelStatement::ListUnavailable

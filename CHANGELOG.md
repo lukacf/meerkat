@@ -161,7 +161,10 @@ them.
     statement once it has loaded, and a refreshed list's statement once it
     has changed, with no new session. On the Messages endpoint an entry
     that states levels and also states `adaptive_thinking: false` is
-    reported as `NotStated`.
+    reported as `NotStated`; an empty statement stays `Stated` and empty
+    there, as on every endpoint. An entry whose statement holds only words
+    this release does not know as levels is reported as `NotStated`: what
+    it states cannot be read.
   - Wrappers forward: the fallback client reports its active candidate's
     route, and the selected-target wrapper and the Copilot account
     capability gate report their client's. `TestClient` reports a route a

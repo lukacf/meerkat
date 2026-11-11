@@ -156,7 +156,11 @@ fn only_created(request: &IdentityRequest) -> &CreatedSpec {
             [created] => created,
             _ => panic!("one created identity"),
         },
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
@@ -395,7 +399,11 @@ fn created_spec<'a>(request: &'a IdentityRequest, identity: &str) -> &'a Created
             .iter()
             .find(|created| created.spec.identity.as_str() == identity)
             .expect("the identity"),
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
@@ -405,14 +413,22 @@ fn created_spec_mut<'a>(request: &'a mut IdentityRequest, identity: &str) -> &'a
             .iter_mut()
             .find(|created| created.spec.identity.as_str() == identity)
             .expect("the identity"),
-        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+        RequestAction::Update(_)
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("a create request"),
     }
 }
 
 fn updated_mut(request: &mut IdentityRequest) -> &mut UpdatedSpec {
     match &mut request.action {
         RequestAction::Update(updated) => updated,
-        RequestAction::Create { .. } | RequestAction::Remove { .. } => panic!("an update request"),
+        RequestAction::Create { .. }
+        | RequestAction::Remove { .. }
+        | RequestAction::Archive { .. }
+        | RequestAction::Unarchive { .. }
+        | RequestAction::Adopt { .. } => panic!("an update request"),
     }
 }
 

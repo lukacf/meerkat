@@ -195,8 +195,9 @@ pub struct RequestContext<'a> {
 pub struct IdentityEntryFacts {
     /// Its identity.
     pub identity: String,
-    /// The digest of its declared spec, as Meta registers it
-    /// (`registered_spec_digest`): a change names the digest it read.
+    /// The digest of its spec: Core's digest of the spec in its row form
+    /// (`CreatedIdentitySpec::spec_digest`), the one spec digest every
+    /// surface shows. A change names the digest it read.
     pub spec_digest: Sha256Digest,
     /// Its spec revision, for an identity Core's store holds; a roster
     /// declares none.
@@ -854,14 +855,19 @@ fn refused(kind: IdentityRefusalKind, field: impl Into<String>) -> IdentityRefus
 
 /// The name Core's mob holds the identity `name` under: its member id, in
 /// Meta's one encoding of an identity into a member id. `None` for a name
-/// that is no identity name, and for one the encoding maps to another
-/// member id (a name that starts with the reserved `mk--` marker without
-/// being an encoding, or one of a generated runtime alias's shape): the
-/// identity's doors would act on another member than the one the change
-/// names. Normalization refuses such a name `invalid_name`, whoever asks,
-/// and the executor names every identity to Core through here.
+/// that is no identity name; for a name in the reserved member-id
+/// namespace (one that starts with the `mk--` marker), which every public
+/// door refuses, so an identity of that name could never be addressed; and
+/// for a name the encoding maps to another identity (one of a generated
+/// runtime alias's shape), whose doors would act on another member than
+/// the one the change names. Normalization refuses such a name
+/// `invalid_name`, whoever asks, and the executor names every identity to
+/// Core through here.
 pub fn core_member_name(name: &str) -> Option<meerkat_mob::AgentIdentity> {
     AgentIdentity::parse(name).ok()?;
+    if crate::member_comms_id::uses_reserved_roster_marker(name) {
+        return None;
+    }
     let member = crate::member_comms_id::mob_member_id(name);
     (crate::member_comms_id::durable_identity_for_roster_member(member.as_str()) == name)
         .then_some(member)

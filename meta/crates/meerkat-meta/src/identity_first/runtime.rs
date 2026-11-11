@@ -65,6 +65,7 @@ mod build_preparation;
 mod core_views_tests;
 mod created;
 mod declare;
+mod instruction_append;
 mod lifecycle_projection;
 mod records;
 #[cfg(test)]
@@ -74,6 +75,9 @@ mod seat_tests;
 mod tool_grant_seat;
 use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
+pub use instruction_append::{
+    InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
+};
 pub(crate) use records::host_pending_members_before_build;
 
 const MANAGED_PEER_RECONCILE_CONCURRENCY: usize = 64;

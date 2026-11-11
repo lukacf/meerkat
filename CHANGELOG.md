@@ -327,6 +327,19 @@ them.
   neither stays behind to be waited on. A file an earlier release already
   emptied is not restored.
 
+- `meerkat-copilot` (GitHub Copilot device sign-in): an account no longer
+  keeps the model list of an earlier sign-in after a new sign-in whose
+  token exchange is temporarily unavailable. Through 0.9.13 the list the
+  earlier sign-in's token had fetched stayed on the account until an
+  exchange succeeded, so in that window the account's routes resolved from
+  it: which models the account lists, the endpoint that serves each, and
+  what each entry states about the model. No request could be sent in that
+  window (no token serves), and the next successful exchange replaced the
+  list. The account now holds no list until the new sign-in's own token
+  fetches one, and its routes resolve as they do before a first listing.
+  A new sign-in of the same account fetched the same list, so only a
+  sign-in as another account under the same credential was affected.
+
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of

@@ -1070,6 +1070,8 @@ describe("long-term agents in the console", () => {
     // that none came, and that must be seen.
     confirm = await open("archive");
     const yes = within(confirm).getByTestId("identity-confirm-yes") as HTMLButtonElement;
+    // A person's click puts focus on the button it presses.
+    yes.focus();
     fireEvent.click(yes);
     await waitFor(() => expect(yes.disabled).toBe(true), { timeout: 5_000 });
     fireEvent.keyDown(confirm, { key: "Escape" });

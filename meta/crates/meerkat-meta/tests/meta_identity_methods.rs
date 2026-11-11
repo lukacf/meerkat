@@ -1104,6 +1104,64 @@ fn create_refusals_carry_the_kind_and_the_field_and_write_nothing() {
     );
 }
 
+/// An agent without a display name has no `display_name` member on any
+/// read: a list, a get and the directory leave the member out, for an agent
+/// created at run time and for one its host configures, and write it for an
+/// agent that has one.
+#[test]
+fn an_agent_without_a_display_name_has_no_display_name_member() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched(scratch.path(), Some(worker_policy()));
+    let created = gateway.create(
+        "create-1",
+        json!([{"name": "plain", "profile": "worker"},
+               {"name": "named", "profile": "worker", "display_name": "Named One"}]),
+    );
+    assert!(
+        outcome_agent(&created, "plain")
+            .get("display_name")
+            .is_none(),
+        "{created:#}"
+    );
+    let listed = gateway.listed(json!({}));
+    let directory = gateway.ok("meta/identity/directory", json!({}));
+    let peers = directory["peers"].as_array().expect("peers").clone();
+    // Created without one, and configured without one.
+    for name in ["plain", REVIEWER] {
+        assert!(
+            named(&listed, name).get("display_name").is_none(),
+            "list, {name}: {listed:?}"
+        );
+        let record = gateway.get(name);
+        assert!(
+            record.get("display_name").is_none(),
+            "get, {name}: {record:#}"
+        );
+        assert!(
+            named(&peers, name).get("display_name").is_none(),
+            "directory, {name}: {directory:#}"
+        );
+    }
+    // Created with one, and configured with one.
+    for (name, display_name) in [("named", "Named One"), (HOST_A, "Host A")] {
+        assert_eq!(
+            named(&listed, name)["display_name"],
+            json!(display_name),
+            "list, {name}"
+        );
+        assert_eq!(
+            gateway.get(name)["display_name"],
+            json!(display_name),
+            "get, {name}"
+        );
+        assert_eq!(
+            named(&peers, name)["display_name"],
+            json!(display_name),
+            "directory, {name}"
+        );
+    }
+}
+
 /// An update replaces what it names and keeps the rest: one descriptive
 /// label set and another removed keeps every other label; new instructions
 /// and a new display name are in the record at once; the digest moves and
@@ -1549,6 +1607,74 @@ fn a_plan_answers_the_outcome_and_the_rendering_and_writes_nothing() {
     );
     assert_eq!(unnamed["kind"], json!("invalid_request"), "{unnamed:#}");
     assert_eq!(unnamed["field"], json!("change"), "{unnamed:#}");
+}
+
+/// The plan of every change shows, through the launch's own family, the
+/// tool configuration a decision of it would hold: the agents' tools and
+/// the declared configuration of each profile they run on. It guards the
+/// rendering of a create, an update, an archive, an unarchive, a removal
+/// and an adoption alike, so none of them can lose the block unseen.
+#[test]
+fn the_plan_of_every_change_shows_the_tool_configuration_a_decision_would_hold() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched(scratch.path(), Some(worker_policy()));
+    gateway.create(
+        "create-1",
+        json!([{"name": "scout", "profile": "worker"}, {"name": "ledger", "profile": "worker"}]),
+    );
+    let ledger = gateway.digest("ledger");
+    let archived = gateway.ok(
+        "meta/identity/archive",
+        json!({"request_id": "archive-1", "name": "ledger", "expected_spec_digest": ledger}),
+    );
+    assert_eq!(archived["outcome"], json!("done"), "{archived:#}");
+    let scout = gateway.digest("scout");
+    let ledger = gateway.digest("ledger");
+    let host_a = gateway.digest(HOST_A);
+    let plans = [
+        (
+            "create",
+            json!({"agents": [{"name": "other", "profile": "worker"}]}),
+        ),
+        (
+            "update",
+            json!({"name": "scout", "expected_spec_digest": scout,
+                   "set": {"display_name": "Scout"}}),
+        ),
+        (
+            "archive",
+            json!({"name": "scout", "expected_spec_digest": scout}),
+        ),
+        (
+            "unarchive",
+            json!({"name": "ledger", "expected_spec_digest": ledger}),
+        ),
+        (
+            "remove",
+            json!({"name": "scout", "expected_spec_digest": scout}),
+        ),
+        (
+            "adopt",
+            json!({"name": HOST_A, "expected_spec_digest": host_a}),
+        ),
+    ];
+    for (change, body) in plans {
+        let mut params = body;
+        params["change"] = json!(change);
+        params["request_id"] = json!(format!("plan-{change}"));
+        let plan = gateway.ok("meta/identity/plan", params);
+        let rendering = plan["rendering"].as_str().expect("a rendering");
+        assert!(
+            rendering.contains("Agent tools")
+                && rendering.contains("Tool configuration of profile")
+                && rendering.contains("Tool configuration digest"),
+            "the plan of {change} shows the tool configuration: {rendering}"
+        );
+        assert!(
+            !rendering.contains("Expected spec digest"),
+            "no rendering shows a spec digest ({change}): {rendering}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2197,7 +2323,7 @@ async fn launch(
     tokio::sync::mpsc::UnboundedReceiver<String>,
     Arc<FailNextSession>,
 ) {
-    launch_with(state, governed, false).await
+    launch_with(state, &fresh_mob_id(), governed, false).await
 }
 
 /// The approver id the rows' approval rule names.
@@ -2210,6 +2336,7 @@ const OWNER: &str = "U123";
 /// ingress.
 async fn launch_with(
     state: &Path,
+    mob_id: &str,
     governed: bool,
     deciders: bool,
 ) -> (
@@ -2220,7 +2347,7 @@ async fn launch_with(
     let (asked_tx, asked) = tokio::sync::mpsc::unbounded_channel();
     let fail_next_session = Arc::new(FailNextSession::default());
     let mut builder = UnifiedRuntimeBuilder::default()
-        .definition(in_process_definition(&fresh_mob_id()))
+        .definition(in_process_definition(mob_id))
         .persistent_state(state)
         .continuity_from_state_dir(state)
         .await
@@ -2304,6 +2431,27 @@ fn console_decisions(read_only: bool) -> meerkat_meta::RuntimeDecisionState {
 
 /// What `/console/experience` says of changes of agents on `app`.
 async fn experience_identity_changes(app: &axum::Router) -> Value {
+    experience(app).await["identity_changes"].clone()
+}
+
+/// The two identity affordances of the agent `name` on `experience`'s
+/// sidebar: whether a client offers its change, and its removal.
+fn identity_affordances(experience: &Value, name: &str) -> (Value, Value) {
+    let agents = experience["agent_sidebar"]["live_snapshot"]["agents"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the experience lists agents: {experience:#}"));
+    let agent = agents
+        .iter()
+        .find(|agent| agent["identity"] == json!(name))
+        .unwrap_or_else(|| panic!("the experience lists {name}: {agents:?}"));
+    (
+        agent["affordances"]["can_change_identity"].clone(),
+        agent["affordances"]["can_remove_identity"].clone(),
+    )
+}
+
+/// `/console/experience` on `app`.
+async fn experience(app: &axum::Router) -> Value {
     use tower::ServiceExt;
     let response = app
         .clone()
@@ -2324,7 +2472,7 @@ async fn experience_identity_changes(app: &axum::Router) -> Value {
         status.is_success(),
         "GET /console/experience: {status} {value}"
     );
-    value["identity_changes"].clone()
+    value
 }
 
 fn create_of(agents: Value) -> IdentityChangeSpec {
@@ -2483,6 +2631,39 @@ async fn the_family_serves_changes_exactly_when_the_launch_attached_its_policy()
     );
     let read_only = experience_identity_changes(&read_only_console).await;
     assert_eq!(read_only["available"], json!(false), "{read_only:#}");
+
+    // A client is offered a control only for an agent a run-time change
+    // can change: an agent the host configures answers both affordances
+    // false (its change would be refused `owner_read_only`), an agent
+    // created at run time answers them true, and a read-only Console
+    // answers false for both.
+    let created = runtime
+        .identity_family()
+        .expect("the family, with the policy")
+        .change(
+            &runtime.mob_handle(),
+            &host,
+            IdentityChangeCall::new(operation("r-2"), alpha()),
+        )
+        .await;
+    assert_eq!(created.token(), "done", "{created:?}");
+    let offered = experience(&console).await;
+    assert_eq!(
+        identity_affordances(&offered, PLANNER),
+        (json!(false), json!(false)),
+        "an agent the host configures"
+    );
+    assert_eq!(
+        identity_affordances(&offered, "alpha"),
+        (json!(true), json!(true)),
+        "an agent created at run time"
+    );
+    let closed = experience(&read_only_console).await;
+    assert_eq!(
+        identity_affordances(&closed, "alpha"),
+        (json!(false), json!(false)),
+        "a read-only Console"
+    );
     let _ = runtime.shutdown().await;
 }
 
@@ -2637,7 +2818,8 @@ async fn a_held_change_is_carried_out_once_a_person_approved_it() {
     };
 
     let temp = tempfile::tempdir().unwrap();
-    let (runtime, _asked, _fail_next_session) = launch_with(temp.path(), false, true).await;
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
     let policy = IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
@@ -2784,6 +2966,251 @@ async fn a_held_change_is_carried_out_once_a_person_approved_it() {
         .change(&mob, &host, IdentityChangeCall::new(operation, scout()))
         .await;
     assert_eq!(again.token(), "done", "{again:?}");
+    let _ = runtime.shutdown().await;
+}
+
+/// The rules of the rows about held changes: the host creates agents of
+/// the profile `worker` at once, but `scout`, whose create a person
+/// decides, and a person decides every archive and every removal.
+fn held_policy() -> Arc<IdentityCreationPolicy> {
+    let approval = json!({"kind": "require_approval", "approver": {"id": APPROVERS}});
+    Arc::new(
+        IdentityCreationPolicy::parse(&json!({
+            "enabled": true,
+            "approval": {"rules": [
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"profile": ["worker"]}, "outcome": {"kind": "allow"}},
+                {"change": ["create"], "requester": {"kind": "host"},
+                 "target": {"identity": ["scout"]}, "outcome": approval},
+                {"change": ["archive", "remove"], "requester": {"kind": "host"},
+                 "target": {"profile": ["worker"]}, "outcome": approval},
+            ]},
+        }))
+        .expect("the policy parses")
+        .expect("the policy is enabled"),
+    )
+}
+
+/// The held decision of an outcome: its id.
+fn decision_of(outcome: &IdentityOutcome) -> String {
+    assert_eq!(outcome.token(), "pending_decision", "{outcome:?}");
+    outcome.to_json()["decision_id"]
+        .as_str()
+        .expect("a decision id")
+        .to_owned()
+}
+
+/// One request id holds one decision. While a create is held under an id,
+/// another change under the same id never holds a second decision: a
+/// change of an agent the host configures is refused `owner_read_only`
+/// before the holder is asked, a change the rules would hold too is
+/// `operation_reused`, and the operation still reads the one decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_request_id_holds_one_decision_whatever_is_asked_under_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &fresh_mob_id(), false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let ask = |request: &'static str, change: IdentityChangeSpec| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            let operation =
+                OperationId::for_request(&host.recorded(), request).expect("a request id");
+            family
+                .change(&mob, &host, IdentityChangeCall::new(operation, change))
+                .await
+        }
+    };
+    let digest = |name: &'static str| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => record.agent.spec_digest.clone(),
+                other => panic!("a get answers {name}: {other:?}"),
+            }
+        }
+    };
+
+    let made = ask(
+        "r-0",
+        create_of(json!([{"name": "alpha", "profile": "worker"}])),
+    )
+    .await;
+    assert_eq!(made.token(), "done", "{made:?}");
+    let scout = || create_of(json!([{"name": "scout", "profile": "worker"}]));
+    let decision = decision_of(&ask("r-1", scout()).await);
+
+    // An archive of an agent the host configures, under the same id: the
+    // owner's rule answers before anything is held.
+    let configured = ask(
+        "r-1",
+        IdentityChangeSpec::Archive(agent_ref(HOST_A, &digest(HOST_A).await)),
+    )
+    .await;
+    assert_eq!(
+        refusal_of(&configured).0,
+        "owner_read_only",
+        "{configured:?}"
+    );
+    // A removal the rules would hold too, under the same id: it is not the
+    // request the decision holds.
+    let other = ask(
+        "r-1",
+        IdentityChangeSpec::Remove(agent_ref("alpha", &digest("alpha").await)),
+    )
+    .await;
+    assert_eq!(refusal_of(&other).0, "operation_reused", "{other:?}");
+    // Another create under the same id.
+    let reused = ask(
+        "r-1",
+        create_of(json!([{"name": "other", "profile": "worker"}])),
+    )
+    .await;
+    assert_eq!(refusal_of(&reused).0, "operation_reused", "{reused:?}");
+
+    assert_eq!(
+        decision_of(&ask("r-1", scout()).await),
+        decision,
+        "the one decision still holds the operation"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A person's approval is evidence, never authority over the launch's
+/// policy. A create is held and approved; the launch that carries it out
+/// has a policy that denies creates: nothing is created, the decision ends
+/// refused, and the operation's read says the change was denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_change_the_launchs_policy_now_denies_is_not_carried_out() {
+    use meerkat_core::approval::decision::{
+        ApproverId, DecisionId, DecisionReference, PresentationAudience, PresentationRecord,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "held-1").expect("a request id");
+    let scout = || create_of(json!([{"name": "scout", "profile": "worker"}]));
+
+    // The first launch holds the create.
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    assert!(runtime.attach_identity_policy(held_policy(), IdentityFamilyOptions::new()));
+    let held = runtime
+        .identity_family()
+        .expect("the family")
+        .change(
+            &runtime.mob_handle(),
+            &host,
+            IdentityChangeCall::new(operation.clone(), scout()),
+        )
+        .await;
+    let decision_id = decision_of(&held);
+    let _ = runtime.shutdown().await;
+    drop(runtime);
+
+    // A launch without an identity policy carries nothing out: the person
+    // the approver map names approves the decision there.
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    let owner = runtime.durable_decisions().owner().clone();
+    let row = owner
+        .get(&DecisionId::new(decision_id.as_str()).expect("a decision id"))
+        .expect("the decision is read");
+    owner
+        .present(
+            &row.decision_id,
+            &PresentationRecord::complete(
+                PresentationAudience::Approver {
+                    approver_id: ApproverId::new(APPROVERS).expect("approver"),
+                },
+                &row.descriptor.rendering,
+                None,
+                DecisionReference::new("chat:owners").expect("channel"),
+                DecisionReference::new(format!("message-{}", now_ms())).expect("message"),
+                now_ms(),
+            ),
+        )
+        .expect("present");
+    struct NoNotices;
+    #[async_trait]
+    impl meerkat_meta::DecisionNoticeSink for NoNotices {
+        async fn deliver(&self, _line: String) -> bool {
+            true
+        }
+    }
+    let connection = meerkat_meta::StdioDecisionConnection::new(
+        runtime.durable_decisions().realm(),
+        Arc::new(NoNotices) as Arc<dyn meerkat_meta::DecisionNoticeSink>,
+    );
+    let line =
+        json!({"jsonrpc": "2.0", "id": "decide", "method": "meta/decisions/decide", "params": {
+            "decision_id": decision_id,
+            "approve": true,
+            "presented_digest": row.descriptor.subject_digest.to_string(),
+            "attestation": {
+                "ingress": "chat",
+                "subject": OWNER,
+                "scope": "chat-session-1",
+                "event_ref": format!("chat:event:{decision_id}"),
+                "observed_at_ms": now_ms(),
+            },
+        }})
+        .to_string();
+    let answer: Value = serde_json::from_str(
+        &connection
+            .handle_line(&runtime, &line)
+            .await
+            .expect("a decision method answers"),
+    )
+    .expect("answer JSON");
+    assert!(answer["error"].is_null(), "{answer:#}");
+    let _ = runtime.shutdown().await;
+    drop((runtime, owner, connection));
+
+    // The launch that carries it out has a policy with no rule: it denies
+    // every create.
+    let (runtime, _asked, _fail_next_session) =
+        launch_with(temp.path(), &mob_id, false, true).await;
+    let denies = IdentityCreationPolicy::parse(&json!({"enabled": true}))
+        .expect("the policy parses")
+        .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(denies), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    let ended = loop {
+        match family
+            .read(&mob, &host, IdentityRead::Operation(operation.clone()))
+            .await
+        {
+            Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome)))
+                if outcome.token() != "pending_decision" =>
+            {
+                break outcome;
+            }
+            Ok(_) => {}
+            Err(refusal) => panic!("the operation is read: {refusal}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approved create was neither carried out nor refused"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(ended.token(), "refused", "{ended:?}");
+    let said = ended.to_json().to_string();
+    assert!(said.contains("change_denied"), "the read says why: {said}");
+    let created = family
+        .read(&mob, &host, IdentityRead::Get(GetAgent::new("scout")))
+        .await;
+    assert!(created.is_err(), "nothing was created: {created:?}");
     let _ = runtime.shutdown().await;
 }
 

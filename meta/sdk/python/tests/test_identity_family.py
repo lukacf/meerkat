@@ -684,11 +684,17 @@ async def test_a_held_decision_is_an_answer_and_the_operation_is_read_later():
     assert isinstance(await identities.operation(request_id="req-1"), IdentityDone)
 
     identities, _ = make_identities(
-        results={"meta/identity/operation": {"outcome": "unknown"}}
+        results={
+            "meta/identity/operation": {
+                "outcome": "unknown",
+                "operation_id": OPERATION_ID,
+            }
+        }
     )
     unknown = await identities.operation(request_id="req-never-asked")
-    assert unknown == IdentityOperationUnknown()
+    assert unknown == IdentityOperationUnknown(operation_id=OPERATION_ID)
     assert unknown.outcome == "unknown"
+    assert unknown.operation_id == OPERATION_ID
 
     # A refusal an operation ended with is what the read answers: the read
     # itself succeeded, so nothing is raised.
@@ -889,6 +895,7 @@ def test_only_the_family_code_with_a_kind_is_an_identity_refusal():
     from meerkat_meta import IdentityRefusedError
     from meerkat_meta.errors import IDENTITY_REFUSED_CODE
 
+    assert IDENTITY_REFUSED_CODE == -32058
     other_code = _rpc_error_from_payload(
         {"code": -32602, "message": "Invalid params", "data": {"kind": "name_taken"}},
         request_id="1",
@@ -903,6 +910,49 @@ def test_only_the_family_code_with_a_kind_is_an_identity_refusal():
         )
         assert not isinstance(no_kind, IdentityRefusedError)
         assert isinstance(no_kind, RpcError)
+
+
+def test_params_the_gateway_cannot_read_are_the_same_typed_error():
+    """Params that do not parse (an unknown member, a wrong type, a missing
+    ``request_id``) are refused ``invalid_request`` on the family's code,
+    never as JSON-RPC invalid params."""
+    from meerkat_meta import IdentityRefusedError
+
+    error = _rpc_error_from_payload(
+        refusal_error(
+            "invalid_request",
+            field="request_id",
+            retryable=False,
+            detail="A change names its request_id.",
+            problem="malformed",
+        ),
+        request_id="1",
+        method="meta/identity/adopt",
+    )
+    assert isinstance(error, IdentityRefusedError)
+    assert error.kind == "invalid_request"
+    assert error.field == "request_id"
+    assert error.details == {"problem": "malformed"}
+
+
+def test_a_candidate_launch_refuses_a_change_with_the_gateway_wide_error():
+    """A candidate launch refuses every writer before the family is reached,
+    with the gateway-wide ``-32047`` and ``kind`` ``candidate_launch``: it
+    keeps the class the SDK gives that code, and is not the family's error."""
+    from meerkat_meta import AnnouncementRefusedError, IdentityRefusedError
+
+    error = _rpc_error_from_payload(
+        {
+            "code": -32047,
+            "message": "meta/identity/adopt is refused: this gateway is a candidate launch",
+            "data": {"kind": "candidate_launch"},
+        },
+        request_id="1",
+        method="meta/identity/adopt",
+    )
+    assert isinstance(error, AnnouncementRefusedError)
+    assert not isinstance(error, IdentityRefusedError)
+    assert error.kind == "candidate_launch"
 
 
 def test_a_kind_newer_than_this_sdk_is_still_the_typed_error():

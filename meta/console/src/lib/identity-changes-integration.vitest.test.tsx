@@ -489,6 +489,19 @@ describe("long-term agents in the console", () => {
     fireEvent.submit(wardenEdit);
     expect((await find(view, "identity-field-error:profile")).textContent)
       .toBe("The mob has no profile of this name: name one of the mob's profiles.");
+    fireEvent.click(view.getByTestId("identity-cancel"));
+
+    // An agent that is gone when its change is confirmed: the read is
+    // refused, its sentence shows, and no change is sent.
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:archive"));
+    const confirm = await find(view, "identity-confirm:warden:archive");
+    family.agents.delete("warden");
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    const unread = await find(view, "identity-notice");
+    expect(unread.querySelector("[data-outcome='unread']")?.textContent).toBe("No agent has this name: list the agents and name one.");
+    expect(unread.getAttribute("role")).toBe("alert");
+    expect(calls(family, "meta/identity/archive")).toEqual([]);
     view.unmount();
   }, 60_000);
 

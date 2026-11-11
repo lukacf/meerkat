@@ -2802,7 +2802,7 @@
               "request_id",
               "operation_id"
             ],
-            "note": "Withdraws a change whose decision is still held, named by the caller's own request_id or by the operation_id an outcome named (exactly one). Gated on a writable console and agent.view. The stock console withdraws a request from the page that made it, which holds its request_id; a host withdraws with the request_id it sent."
+            "note": "Withdraws a change whose decision is still held, named by the caller's own request_id or by the operation_id an outcome named (exactly one). Gated on a writable console and agent.view, and the signed-in person's who asked for the change: a caller the console could not verify withdraws nothing. The stock console withdraws a request from the page that made it, which holds its request_id; a host withdraws with the request_id it sent."
           },
           "success": {
             "required_fields": [
@@ -2841,7 +2841,7 @@
               "labels",
               "peers"
             ],
-            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), open_operations and context are present when set. The read never wakes the agent."
+            "note": "One agent in full. display_name, spec_revision, provenance {entered, requester_kind, requester, at_ms, consent} (when its record says), open_operations and context are present when set. peers names the peers the caller may view. The read never wakes the agent."
           },
           "errors": [
             {
@@ -2890,7 +2890,7 @@
               "request_id",
               "operation_id"
             ],
-            "note": "Names the caller's own request by request_id, or an operation by the operation_id an outcome named (exactly one). Gated on agent.view."
+            "note": "Names the caller's own request by request_id, or an operation by the operation_id an outcome named (exactly one). Gated on agent.view. It answers the caller's own operations: another requester's operation, named by its operation_id, reads as unknown unless the caller has runtime.admin."
           },
           "success": {
             "required_fields": [
@@ -2981,7 +2981,7 @@
             "optional_fields": [
               "reason"
             ],
-            "note": "Holds or releases the mob's changes of agents: while held, every change is refused the retryable changes_held. Not durable: a host that holds changes holds them again at its next start. Gated on a writable console and runtime.admin, and the hold is the host's alone: a signed-in person is refused kind change_denied. The stock console does not call it."
+            "note": "Holds or releases the mob's changes of agents: while held, every change is refused the retryable changes_held. Not durable: a host that holds changes holds them again at its next start. Gated on a writable console and runtime.admin: a signed-in person who has it holds and releases the mob's changes, and a caller the console could not verify does not. The stock console does not call it."
           },
           "success": {
             "required_fields": [
@@ -3007,7 +3007,7 @@
               "change",
               "request_id"
             ],
-            "note": "The outcome and the rendering a change would get; nothing is held and nothing is written. change is create, update, archive, unarchive, remove or adopt, and the other members are that change's own params. Gated on agent.view. The stock console asks it before a profile change."
+            "note": "The outcome and the rendering a change would get; nothing is held and nothing is written. change is create, update, archive, unarchive, remove or adopt, and the other members are that change's own params. Gated on what the change it plans needs: agent.identity.create for a create, agent.identity.remove on the agent for a removal, agent.identity.manage on the agent for every other change. The stock console asks it before a profile change."
           },
           "success": {
             "required_fields": [

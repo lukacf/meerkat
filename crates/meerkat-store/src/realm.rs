@@ -2059,6 +2059,46 @@ mod tests {
         observe.await.unwrap();
     }
 
+    /// The manifest writer removes its temporary file when the rename onto
+    /// the manifest fails, and returns the rename's error. The rename is
+    /// made to fail while writes work: the manifest path is a directory that
+    /// is not empty. The lease, credential, task file and export writers
+    /// have the same branch in the same shape; this row stands for it.
+    #[tokio::test]
+    async fn a_failed_rename_removes_the_temporary_manifest_and_returns_the_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let paths = realm_paths_in(dir.path(), "team");
+        let occupant = paths.manifest_path.join("occupant");
+        std::fs::create_dir_all(&occupant).expect("a directory in the manifest's place");
+
+        let written = write_manifest_payload_atomically(&paths, b"{}".to_vec()).await;
+
+        assert!(
+            matches!(written, Err(StoreError::Io(_))),
+            "the failed rename is returned: {written:?}"
+        );
+        let mut left: Vec<String> = std::fs::read_dir(&paths.root)
+            .expect("the realm directory")
+            .map(|entry| {
+                entry
+                    .expect("a directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["realm_manifest.json"],
+            "the temporary manifest is removed"
+        );
+        assert!(
+            occupant.is_dir(),
+            "what stood in the manifest's place is untouched"
+        );
+    }
+
     mod first_start_reservation {
         use super::*;
 

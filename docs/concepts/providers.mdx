@@ -229,7 +229,9 @@ input replay. The existing orphan-only compatibility rule remains: replay
 strips reasoning from an assistant message with no replayable text, assistant
 item, or tool output, even if that reasoning is encrypted. An empty identified
 assistant item still counts as output. Provider response and item IDs are
-continuity metadata, never Meerkat session identity.
+continuity metadata, never Meerkat session identity, and are replayed only to
+the service the running process received them from (see
+[Continuity material and the service that issued it](#continuity-material-and-the-service-that-issued-it)).
 `misalignment_policy_violation` is a typed terminal policy stop, not an
 authentication error: Meerkat does not refresh credentials, retry, switch
 providers, or reset the conversation to evade it.
@@ -550,7 +552,11 @@ the same turn, and later turns, still see of it depends on the provider:
   later step can name and search the sources again, but cannot quote what it
   read. The ChatGPT backend, Azure OpenAI and GitHub Copilot Responses wires
   replay the search call without its sources and the answer without its
-  citations.
+  citations. All of this holds for a search the running process received
+  from the service it is calling; see
+  [Continuity material and the service that issued it](#continuity-material-and-the-service-that-issued-it)
+  for a search from an earlier process or another service, of which later
+  steps see only the answer text.
 - **Anthropic**: later steps replay the search results themselves, with their
   encrypted content.
 - **Gemini**: grounding metadata has no place in a request, so later steps see
@@ -561,6 +567,52 @@ params: OpenAI then keeps each response and the next step continues from it
 (`previous_response_id`), which is a retention choice. The Meerkat
 `web_search` fallback tool returns its results as an ordinary tool result,
 which every later step sees.
+
+## Continuity material and the service that issued it
+
+The public OpenAI API, the ChatGPT backend, Azure OpenAI, GitHub Copilot and
+self-hosted OpenAI-compatible servers all speak the Responses grammar. What a
+response carries beyond the conversation (encrypted reasoning, hosted-tool
+call items, item ids, the response id) means something only to the service
+that issued it: another service cannot read the ciphertext and refuses the
+request.
+
+Meerkat replays such material only to the service the running process
+received it from. A service is a kind of backend at an endpoint: the base URL
+requests go to, or the configured self-hosted server
+(`[self_hosted.servers.<id>]`). Two Azure OpenAI resources, two self-hosted
+servers, and the public API behind another base URL are different services.
+
+- A step (one provider response) the process received from the service it is
+  about to call replays exactly as that service returned it.
+- Any other step is sent as the conversation it was: the assistant text as a
+  plain message, each tool call and its output paired by `call_id`, and no
+  reasoning item, hosted-tool item, item id, phase or
+  `previous_response_id`. This is the form a history from another provider
+  family already takes. A step is replayed whole or in this form, never in
+  part.
+
+"Any other step" covers a step another service returned (a session that
+moved from the public OpenAI API to a GitHub Copilot route or to a
+self-hosted server, and a model or route fallback inside one turn) and every
+step the process did not receive itself. Which service issued a step is
+known only to the process that received it and is not stored: after a
+restart, or a resume from the store in a new process, the earlier turns go
+out in the plain form, on the same service too, and the steps of the new
+process replay in full. One request can carry both. The knowledge is shared
+by every session and mob of the process, because the issuer is the service
+and not the session, and a process remembers its most recent 4,096 to 8,192
+responses (fewer when responses carry very many items; a response is always
+remembered whole). The first request after a restart, and the first after
+the process forgets a batch of responses, renders the earlier turns
+differently than the request before it did, so the provider's prompt cache
+misses once from the first such turn on.
+
+The issuer is the service, not the account or organisation: material one
+credential received is still replayed under another credential of the same
+service at the same endpoint inside one process. Anthropic thinking
+signatures and Gemini thought signatures are replayed to every backend of
+their own wire family, as before.
 
 ## Refusals and Content Filters
 

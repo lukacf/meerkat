@@ -900,6 +900,13 @@ def package_size_problems(archives: dict[str, pathlib.Path]) -> list[str]:
     return problems
 
 
+def print_size_problems(problems: list[str]) -> None:
+    """package_size_problems' lines on stderr: FAIL before each crate's line,
+    its entries below it."""
+    for problem in problems:
+        print(problem if problem.startswith(" ") else f"FAIL {problem}", file=sys.stderr)
+
+
 def package_size(root: pathlib.Path, product_name: str, package_dir: pathlib.Path) -> int:
     order = load_product(root, product_name).get("publish_order")
     if not isinstance(order, list) or not order:
@@ -910,8 +917,7 @@ def package_size(root: pathlib.Path, product_name: str, package_dir: pathlib.Pat
         print(f"  {crate:<36}{archive.stat().st_size} bytes "
               f"(allowed {ALLOWED_MAX_CRATE_BYTES}, registry limit {REGISTRY_MAX_CRATE_BYTES})")
     problems = package_size_problems(archives)
-    for problem in problems:
-        print(f"FAIL {problem}", file=sys.stderr)
+    print_size_problems(problems)
     return 1 if problems else 0
 
 
@@ -1375,8 +1381,7 @@ def main(argv: list[str]) -> int:
         crates = crates[k - 1 :: n]
         return census(ROOT, crates, args.out, args.stack, args.allow_dirty)
     except OversizedPackage as err:
-        for problem in err.problems:
-            print(f"FAIL {problem}", file=sys.stderr)
+        print_size_problems(err.problems)
         return 1
     except UsageError as err:
         print(f"published_crates_standalone: {err}", file=sys.stderr)

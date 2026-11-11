@@ -25,8 +25,10 @@ use async_trait::async_trait;
 use meerkat_client::{LlmError, LlmEvent, LlmRequest};
 use meerkat_core::approval::ApprovalConsentDeliveryState;
 use meerkat_core::approval::decision::{
-    ApproverId, DecisionId, DecisionKind, DecisionListFilter, DecisionPhase, DecisionPrincipalKey,
-    DecisionReference, PresentationAudience, PresentationRecord, StoredDecision,
+    ApproverId, DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter,
+    DecisionOperationId, DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer,
+    DecisionRendering, DecisionRequestBody, DecisionSubjectKey, PresentationAudience,
+    PresentationRecord, StoredDecision,
 };
 use meerkat_core::types::StopReason;
 use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId};
@@ -1490,7 +1492,9 @@ async fn host_lines_that_differ_at_execution_refuse_subject_widened() {
 
 /// A host that cannot state its lines when the change is carried out does
 /// not end the decision: the attempt is released, the approval stands, and
-/// the next pass, with the host's lines back, carries the change out.
+/// the next pass, with the host's lines back, carries the change out. A
+/// host that cannot state them when a change is asked refuses it
+/// `consequences_unavailable`, and nothing is held.
 ///
 /// RED before the holder held.
 #[tokio::test(flavor = "multi_thread")]
@@ -1530,6 +1534,14 @@ async fn a_retryable_refusal_releases_and_never_burns_the_approval() {
     );
     assert!(rig.exists("scout"));
     assert_eq!(rig.seam.landed(), 1);
+
+    // The same refusal when a change is asked: the host's lines fail
+    // closed before anything is held.
+    *rig.lines.lock().unwrap() = Err("the ledger service is away".to_owned());
+    let unheld = rig.ask_create(&host_facts(), "retry-2", &["scribe"]).await;
+    assert_eq!(refused(&unheld), "consequences_unavailable");
+    assert!(unheld.refusal().expect("refused").is_retryable());
+    assert_eq!(rig.count(DecisionPhase::Open), 0, "nothing was held");
     rig.shutdown().await;
 }
 
@@ -1946,6 +1958,69 @@ async fn the_driver_is_quiet_on_an_idle_host_and_carries_out_a_decided_change() 
         "with nothing held the driver passes no more"
     );
     driver.shutdown().await;
+    rig.shutdown().await;
+}
+
+/// A decision of an `identity.*` kind that the holder did not write, whose
+/// body is another request than the one its digest binds, is never carried
+/// out: once approved, the executor refuses it `unreadable_request` without
+/// asking the seam, and neither request's agent exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decision_whose_body_is_not_the_request_it_binds_is_never_carried_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let bound = normalized_create(&rig.policy, &facts, &[spec("scout")]).request;
+    let carried = normalized_create(&rig.policy, &facts, &[spec("intruder")]).request;
+    let operation_id = operation(&facts, "forged-1");
+    let mob_id = rig.mob().mob_id().as_str().to_owned();
+    let written = rig
+        .owner()
+        .hold(
+            DecisionHoldRequest::new(
+                DecisionKind::new("identity.create").expect("kind"),
+                DecisionSubjectKey::new(format!("{mob_id}/{operation_id}")).expect("subject"),
+                DecisionOperationId::new(operation_id.as_str()).expect("operation"),
+                meerkat_core::approval::decision::Sha256Digest::new(
+                    bound.request_digest().unwrap().as_str(),
+                )
+                .expect("digest"),
+                DecisionRequestBody::from_value(&json!({
+                    "format": meerkat_meta::identity_creation::HELD_CHANGE_FORMAT,
+                    "mob_id": mob_id,
+                    "request": carried,
+                }))
+                .expect("body"),
+                DecisionPrincipalKey::new(chat_person_key("U900")).expect("requester"),
+                ApproverId::new(APPROVERS).expect("approver"),
+                now_ms() + 60 * 60 * 1000,
+                DecisionRendering::new("Identity request: render-v1\n").expect("rendering"),
+                DecisionRenderer::new("identity.render-v1").expect("renderer"),
+            ),
+            false,
+        )
+        .expect("a decision written past the holder");
+    let decision_id = written.decision_id.to_string();
+    assert!(
+        HeldIdentityChange::of(&written).is_err(),
+        "the body is not the request the decision binds"
+    );
+    rig.approve(&decision_id).await;
+
+    let mut executors = rig.executor_loop();
+    assert_eq!(
+        drive(&mut executors).await,
+        vec![DecisionPassOutcome::ExecutionRefused]
+    );
+    assert_eq!(
+        rig.row(&decision_id)
+            .execution_refusal
+            .as_ref()
+            .map(DecisionReference::as_str),
+        Some("unreadable_request")
+    );
+    assert_eq!(rig.seam.asked(), Vec::new(), "the seam was not asked");
+    assert!(!rig.exists("scout") && !rig.exists("intruder"));
     rig.shutdown().await;
 }
 

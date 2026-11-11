@@ -318,10 +318,10 @@ fn refuse_hosted_runtime(state_dir: &Path) -> Result<(), StorageLayoutError> {
 /// in the list between two calls moves the entry after that boundary out
 /// of the read. A skip only ever hides a holder, so a holder that any read
 /// names counts, and "no other holder" takes every read. Measured under
-/// heavy lock churn, one read missed a held lock up to once in about 160
-/// reads (never on a quiet host), and a read after such a miss, split at
-/// other entries (see [`lock_table_first_call`]), missed it in none of 538
-/// cases.
+/// heavy lock churn, one read missed a held lock in 0.01% to 2% of reads,
+/// from run to run (never on a quiet host), and a read after such a miss,
+/// split at other entries (see [`lock_table_first_call`]), missed it in
+/// none of 538 cases.
 #[cfg(target_os = "linux")]
 const LOCK_TABLE_READS: usize = 3;
 

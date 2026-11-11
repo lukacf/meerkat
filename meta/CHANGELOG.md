@@ -21,15 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when that entry was the other holder's, the check answered that there was
   none. It took both at once: such a same-process start, and a holder that
   does not run this check itself (a release before 0.9.4, or a Core-only
-  tool on the directory). Measured under heavy lock churn, up to one read
-  in about 160 missed a held lock, and none on a quiet host. Meta 0.9.4
-  through 0.9.13. The check now reads the table up to three times, each
-  read split at other entries, and refuses the start as soon as any read
-  names another holder; it admits the start only when no read does. That
-  makes a miss far less likely, not impossible: after a read that missed,
-  the next read named the holder in every measured case (538). Where the
-  table names no holder at all (macOS, Windows, and on Linux btrfs
-  subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
+  tool on the directory). Measured under heavy lock churn, a read missed a
+  held lock in 0.01% to 2% of reads, from run to run, and never on a quiet
+  host. Meta 0.9.4 through 0.9.13. The check now reads the table up to
+  three times, each read split at other entries, and refuses the start as
+  soon as any read names another holder; it admits the start only when no
+  read does. That makes a miss far less likely, not impossible: after a
+  read that missed, the next read named the holder in every measured case
+  (538). Where the table names no holder at all (macOS, Windows, and on
+  Linux btrfs subvolumes and overlayfs, the 0.9.4 known limitation),
+  nothing changes.
 
 ## [0.9.13] - 2026-11-11
 

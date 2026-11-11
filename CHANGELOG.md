@@ -216,6 +216,10 @@ them.
     on the OpenAI realtime and live error paths and in an Anthropic stream
     rate-limit object.
 
+  The cause is provider text. On a client with an authorizer it passes the
+  authorizer's credential redaction, like every other error a stream ends
+  with. No request is changed and nothing is retried in another form.
+
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of

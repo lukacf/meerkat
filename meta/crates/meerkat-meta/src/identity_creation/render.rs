@@ -374,13 +374,10 @@ fn render(
         // the requester read is no part of what is shown, for any action: a
         // spec that moved since is refused `stale_spec` at the commit, and
         // the request digest a decision's permit binds covers it.
-        RequestAction::Archive { identity, .. }
+        RequestAction::Remove { identity, .. }
+        | RequestAction::Archive { identity, .. }
         | RequestAction::Unarchive { identity, .. }
         | RequestAction::Adopt { identity, .. } => {
-            text.field(labels::IDENTITY, &quoted(identity));
-            consequence_blocks(&mut text, &request.consequences, &host_lines);
-        }
-        RequestAction::Remove { identity, .. } => {
             text.field(labels::IDENTITY, &quoted(identity));
             consequence_blocks(&mut text, &request.consequences, &host_lines);
             tool_blocks(&mut text, tools);

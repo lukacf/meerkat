@@ -16,10 +16,11 @@ use super::super::config::PreparationMode;
 use super::super::digest::Sha256Digest;
 use super::super::policy::PreparationRule;
 use super::super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem};
-use super::super::request::{CreatedSpec, EdgeBasis};
+use super::super::request::{CreatedSpec, EdgeBasis, core_member_name};
 use super::{
     AgentAdmission, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor,
-    ExecutorError, core_name, outcome_of_change, refusal_of_error,
+    ExecutorError, committed_receipt, core_name, outcome_of_change, outcome_of_receipt,
+    refusal_of_error,
 };
 
 /// A change of one agent as a whole.
@@ -42,14 +43,55 @@ pub(super) fn committed(
     outcome_of_change(commit.mob, commit.operation_id, change)
 }
 
-/// The answer of a change Core did not commit: its typed refusal, with the
-/// request field it concerns, or the error that is none.
-fn not_committed(
-    commit: &ChangeCommit<'_>,
-    error: meerkat_mob::MobError,
-) -> Result<ChangeCommitted, ExecutorError> {
-    let refusal = refusal_of_error(error)?;
-    Ok(ChangeCommitted::refused(at_request_field(commit, refusal)))
+impl CoreChangeExecutor {
+    /// What a commit answers when Core's call of the change erred. The
+    /// bodies of every change answer a Core error through here.
+    ///
+    /// Core's own refusal of the change says nothing of it was written: it
+    /// is the typed refusal, with the request field it concerns. Any other
+    /// error may follow Core's commit (Core commits a removal, an archive
+    /// and an unarchive, then retires or seats the member, which can fail
+    /// on its own), so Core's receipt is read first: a receipt of this
+    /// request means the change committed, and it is answered as
+    /// committed, with what the receipt says is still to end (`retiring`,
+    /// `archiving`); the instruction step is told of a removal that
+    /// committed this way. A receipt of another request under the
+    /// operation id is `operation_reused`, as Core answers this request at
+    /// its commit: this request committed nothing, and the step is told
+    /// nothing. Without a receipt a member step in flight is the retryable
+    /// `admission_unsettled`, and anything else is the error it was. A
+    /// receipt that cannot be read leaves the commit with no outcome.
+    pub async fn after_core_error(
+        &self,
+        commit: &ChangeCommit<'_>,
+        error: meerkat_mob::MobError,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        if matches!(error, meerkat_mob::MobError::IdentityChangeRefused { .. }) {
+            let refusal = refusal_of_error(error)?;
+            return Ok(ChangeCommitted::refused(at_request_field(commit, refusal)));
+        }
+        let Ok(receipt) = committed_receipt(commit.mob, commit.operation_id).await else {
+            return Err(ExecutorError::Core(Box::new(error)));
+        };
+        let Some(receipt) = receipt else {
+            let refusal = refusal_of_error(error)?;
+            return Ok(ChangeCommitted::refused(at_request_field(commit, refusal)));
+        };
+        let digest = commit
+            .request
+            .request_digest()
+            .map_err(ExecutorError::Request)?;
+        if receipt.request_digest != digest.as_str() {
+            return Ok(ChangeCommitted::refused(IdentityRefusal::new(
+                IdentityRefusalKind::OperationReused,
+            )));
+        }
+        let outcome = outcome_of_receipt(commit.mob, commit.operation_id, &receipt)?;
+        if let super::RequestAction::Remove { identity, .. } = &commit.request.action {
+            self.after_removal(commit.mob, identity).await;
+        }
+        Ok(ChangeCommitted::new(outcome, false))
+    }
 }
 
 /// `refusal`, about the request field it concerns when the request has one
@@ -105,9 +147,8 @@ pub(super) async fn requester_input(
                         .await
                 }
                 AgentAdmission::Recorded => {
-                    let member = match core_name(identity, "requester") {
-                        Ok(member) => member,
-                        Err(refusal) => return Ok(Err(refusal)),
+                    let Some(member) = core_member_name(identity) else {
+                        return Ok(Err(IdentityRefusal::new(IdentityRefusalKind::InvalidName)));
                     };
                     commit
                         .mob
@@ -208,6 +249,7 @@ fn preparation_of(commit: &ChangeCommit<'_>, profile: &str) -> IdentityPreparati
 /// An agent of a profile its host prepares is committed pending its
 /// preparation instead: it has no member until the host settles it.
 pub(super) async fn create(
+    executor: &CoreChangeExecutor,
     commit: &ChangeCommit<'_>,
     operation: IdentityOperation,
     identities: &[CreatedSpec],
@@ -245,7 +287,7 @@ pub(super) async fn create(
         .await
     {
         Ok(created) => committed(commit, &created.change),
-        Err(error) => not_committed(commit, error),
+        Err(error) => executor.after_core_error(commit, error).await,
     }
 }
 
@@ -340,6 +382,6 @@ pub(super) async fn entry_change(
             }
             Ok(committed)
         }
-        Err(error) => not_committed(commit, error),
+        Err(error) => executor.after_core_error(commit, error).await,
     }
 }

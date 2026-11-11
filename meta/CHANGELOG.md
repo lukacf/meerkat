@@ -136,9 +136,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   each change of a decision (`RuntimeDecisions::notify_work`), and a tick
   only while a decision of its kinds waits. A host with no such decision
   makes no further pass.
-
-### Added
-
 - Python SDK (`meerkat-meta`) and TypeScript SDK (`@rkat/meta-sdk`):
   `runtime.identities`, the calls of the long-term agent host methods
   (`meta/identity/*`): `create`, `update`, `archive`, `unarchive`, `remove`,

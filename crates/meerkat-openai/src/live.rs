@@ -160,6 +160,18 @@ impl OpenAiLiveClient {
         }
     }
 
+    /// Redact every text field of `error`, a realtime error or the error of
+    /// a failed response: its message ([`Self::redact_error_message`]) and
+    /// its `code` and `param`, which are provider text too. The fixed codes
+    /// the session decides on hold nothing the redaction replaces and pass
+    /// unchanged.
+    fn redact_server_error(&self, error: &mut OpenAiServerError) {
+        self.redact_error_message(&mut error.message);
+        for field in [&mut error.code, &mut error.param].into_iter().flatten() {
+            self.redact_diagnostic(field);
+        }
+    }
+
     /// The line the opt-in frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
     /// prints for a frame, sent or received: `frame`, the frame as JSON,
     /// redacted as [`Self::redact_diagnostic`] does, so a frame that holds
@@ -181,8 +193,9 @@ impl OpenAiLiveClient {
 }
 
 /// A realtime connection whose provider error text has lost the API key the
-/// connection was opened with: the message of an `error` event, the error
-/// of a failed response, and every error the connection itself returns.
+/// connection was opened with: the message, code and param of an `error`
+/// event, the reason and the error of a failed response, and every error
+/// the connection itself returns.
 /// Everything a session derives from those (its typed errors, a failed
 /// response's details) is built from the redacted text; events that carry
 /// no error pass through as they are.
@@ -218,16 +231,15 @@ impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
             .await
             .map_err(|error| self.client.redacted_error(error))?;
         match &mut event {
-            Some(ServerEvent::Error { error, .. }) => {
-                self.client.redact_error_message(&mut error.message);
-            }
+            Some(ServerEvent::Error { error, .. }) => self.client.redact_server_error(error),
             Some(ServerEvent::ResponseDone { response, .. }) => {
-                if let Some(error) = response
-                    .status_details
-                    .as_mut()
-                    .and_then(|details| details.error.as_mut())
-                {
-                    self.client.redact_diagnostic(&mut error.message);
+                if let Some(details) = response.status_details.as_mut() {
+                    if let Some(reason) = details.reason.as_mut() {
+                        self.client.redact_diagnostic(reason);
+                    }
+                    if let Some(error) = details.error.as_mut() {
+                        self.client.redact_server_error(error);
+                    }
                 }
             }
             _ => {}

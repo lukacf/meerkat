@@ -698,6 +698,69 @@ async fn any_other_type_without_a_code_keeps_the_default_class() {
     }
 }
 
+/// An `error` event or a `response.failed` whose error object names both a
+/// code and a `type`.
+fn typed_error_frames(code: &str, error_type: &str, message: &str) -> [(&'static str, Value); 2] {
+    let error = json!({"code": code, "type": error_type, "message": message});
+    [
+        (
+            "response.failed",
+            json!({"type": "response.failed", "response": {"id": "resp_1", "status": "failed", "error": error}}),
+        ),
+        ("error event", json!({"type": "error", "error": error})),
+    ]
+}
+
+/// A code this client does not know, on an error object whose `type` is the
+/// request-refusal type, is classified by that type: the invalid request,
+/// terminal, the class the same refusal has over HTTP 400, with the code in
+/// the message. With any other type the unknown code stays the retryable
+/// unknown class, and a code the client knows always decides, whatever the
+/// type says.
+#[tokio::test]
+async fn an_unknown_code_on_a_request_refusal_type_is_the_invalid_request() {
+    let code = "a_code_of_a_later_release";
+    for wire in WIRES {
+        for (shape, frame) in typed_error_frames(code, "invalid_request_error", REFUSAL_TEXT) {
+            let case = format!("{}: {shape}", wire.0);
+            let error = terminal_error(*wire, sse(&[frame], false)).await;
+            assert_terminal_refusal(&case, &error, code, REFUSAL_TEXT);
+            assert_eq!(
+                format!("{error:?}"),
+                format!(
+                    "{:?}",
+                    LlmError::InvalidRequest {
+                        message: format!("{code}: {REFUSAL_TEXT}"),
+                    }
+                ),
+                "{case}"
+            );
+        }
+        for other_type in ["api_error", "server_error", "a_type_of_a_later_release"] {
+            for (shape, frame) in typed_error_frames(code, other_type, "try again") {
+                let case = format!("{}: {other_type}: {shape}", wire.0);
+                let error = terminal_error(*wire, sse(&[frame], false)).await;
+                assert!(
+                    matches!(&error, LlmError::Unknown { message }
+                        if message == &format!("{code}: try again")),
+                    "{case}: {error:?}"
+                );
+                assert!(error.is_retryable(), "{case}");
+            }
+        }
+        for (shape, frame) in
+            typed_error_frames("rate_limit_exceeded", "invalid_request_error", "slow down")
+        {
+            let error = terminal_error(*wire, sse(&[frame], false)).await;
+            assert!(
+                matches!(&error, LlmError::RateLimited { .. }),
+                "{}: {shape}: a known code decides: {error:?}",
+                wire.0
+            );
+        }
+    }
+}
+
 /// `model_not_found` is one class whatever carries it: the class an HTTP 404
 /// with that code is, `ModelNotFound` with the service's message. Terminal.
 #[tokio::test]

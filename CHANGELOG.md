@@ -130,6 +130,19 @@ them.
   URL. Anthropic thinking signatures and Gemini thought signatures are still
   replayed to every backend of their wire family.
 
+### Security
+
+- `rustix` is updated from 1.1.5 to 1.1.6 for RUSTSEC-2026-0486, in
+  Cargo.lock and in the example workspaces' lockfiles. `meerkat-core`
+  depends on `rustix` directly, and it is also taken through `fs4`,
+  `tempfile`, `which`, and `xattr` through `tar`. The advisory is about the
+  `getxattr` and `listxattr` functions of `rustix::fs` (with their `l` and
+  `f` forms), which mark bytes they never wrote as initialized when they
+  are given a zero-length buffer. No Meerkat crate calls them. Of the
+  crates Meerkat builds with only `xattr` does, and `tar`, the one crate
+  that uses `xattr`, calls it only to set attributes while unpacking, so
+  Meerkat's own use is not known to be affected.
+
 ### Known limitations
 
 - The issuer of OpenAI-family continuity material is the service (a kind of

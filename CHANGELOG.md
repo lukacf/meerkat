@@ -37,43 +37,58 @@ them.
 
 ### Fixed
 
-- `meerkat-openai`, `meerkat-llm-core` (every backend of the OpenAI
-  Responses client: the OpenAI API, the ChatGPT backend, Azure OpenAI, GitHub
-  Copilot `/responses`, a self-hosted server in Responses mode): a request
-  the service refuses inside an HTTP 200 stream now fails the turn once,
-  with the service's code and message.
-  A backend can report such a refusal as a `response.failed` event whose
-  `error` is null, followed by the cause in an `error` event of its own
-  (`code` and `message` at the top level of the event, or under `error`).
-  The client ended the response at the first event as
-  `ServerError { status: 500, message: "response failed" }`, a retryable
-  class, and never read the cause (0.6.7 through 0.9.13). The codes that
-  name a refused request (`invalid_request_body`,
-  `invalid_encrypted_content`, `invalid_prompt`, `invalid_value`,
-  `invalid_argument`, `unsupported_value`, `unsupported_parameter`,
-  `model_not_found`) were the unknown class as stream codes, which is
-  retried (0.8.25 through 0.9.13). A turn the service would
-  never accept was therefore sent again until the retry policy was used up
-  (four attempts with the default `max_retries = 3`) and ended as `retry
-  exhausted: ... Server error: 500 - response failed`, with no cause, where
-  the same refusal over HTTP 400 fails at once. Now a `response.failed`
-  without an error object decides nothing by itself: the client reads on,
-  under the same stream timeouts, for the cause. The flat and the nested
-  error forms are read into the same error. A refused-request code, or an
-  error object of `type` `invalid_request_error` that names no code, is
-  `LlmError::InvalidRequest` (`provider_error_kind` `invalid_request`,
-  non-retryable), as an HTTP 400 is, and its message is `<code>: <the
-  service's message>`; an `invalid_request_error` stream code already had
-  that class and now carries its code too. If the stream ends with no cause,
-  the response fails as `ServerError { status: 500 }` whose message says so,
-  still retryable. Events between such a `response.failed` and its cause are
-  not read as output. The cause passes the route's credential redaction like
-  every other error a stream ends with. No request is changed and nothing is
-  retried in another form. Also, `usage_limit_reached` (the ChatGPT backend's
-  plan usage limit) is now an exhausted-quota code:
-  `LlmError::QuotaExhausted`, non-retryable, as a stream code, as the `type`
-  of a stream error object without a code, and in an HTTP 429 body, which
-  was retried as a rate limit through 0.9.13.
+- `meerkat-openai`, `meerkat-llm-core` (the Responses stream parser of
+  `OpenAiClient`, which serves the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot `/responses` and a self-hosted server in Responses
+  mode): how the client reads a failure reported inside an HTTP 200 stream.
+  - Given a `response.failed` event without an error object (`error` null,
+    or an object that names no code, type or message), the client ended the
+    response there as `ServerError { status: 500, message: "response
+    failed" }`, a retryable class, and did not read an `error` event after
+    it (0.6.7 through 0.9.13). It now reads on for the cause: an `error`
+    event that carries a code and a message, at the top level of the event
+    or under `error`, or a `response.failed` that carries them. Nothing in
+    between is read as output. When no cause comes (the stream ends, a frame
+    cannot be read, or sixteen other frames follow) the response fails as
+    `ServerError { status: 500 }` with a message that says so, retryable as
+    before. While it waits the client reports no stream liveness, so the
+    stream-inactivity window keeps running. This stream shape was not
+    observed from a live service and its rows are synthetic; a live request
+    that the Copilot route refused was answered with HTTP 400 and the code
+    `invalid_request_body`, which was terminal already.
+  - As stream error codes, `invalid_request_body`,
+    `invalid_encrypted_content`, `invalid_prompt`, `invalid_value`,
+    `invalid_argument`, `unsupported_value`, `unsupported_parameter` and
+    `model_not_found` were the unknown class, which is retried (0.8.25
+    through 0.9.13): a request refused with one of them in a stream `error`
+    or `response.failed` event was sent again until the retry policy was
+    used up (four attempts with the default `max_retries = 3`) and the turn
+    ended as `retry exhausted`, where the same refusal over HTTP fails at
+    once. The first seven, and `invalid_request_error`, which had that class
+    already, are now classified as an HTTP 400 with the same message is:
+    `LlmError::InvalidRequest` (`provider_error_kind` `invalid_request`,
+    non-retryable) with the message `<code>: <the service's message>`, or
+    the context-overflow, oversized-request or exhausted-quota class when
+    the message names one. `model_not_found` is `LlmError::ModelNotFound`
+    (reason `invalid_model`), the class of an HTTP 404 with that code and of
+    the realtime adapter. The turn fails once, on the LLM failure itself and
+    not on used-up retries. A refusal code outside this list is still the
+    unknown class.
+  - An error object that names no `code` is classified by its `type` when
+    the type is `invalid_request_error` or an exhausted-quota code. Any
+    other type decides nothing, as before: a type alone is never a policy
+    stop, a rate limit or a server error.
+  - `usage_limit_reached` (the ChatGPT backend's plan usage limit) is now an
+    exhausted-quota code wherever that list is read:
+    `LlmError::QuotaExhausted`, non-retryable, as a Responses stream code or
+    type, in an HTTP 429 body of any provider (a rate limit, retried,
+    through 0.9.13), in another HTTP 4xx body (an invalid request before),
+    on the OpenAI realtime and live error paths and in an Anthropic stream
+    rate-limit object.
+
+  The cause is provider text. On a client with an authorizer it passes the
+  authorizer's credential redaction, like every other error a stream ends
+  with. No request is changed and nothing is retried in another form.
 
 ## [0.9.12] - 2026-11-10
 

@@ -10,11 +10,11 @@
 //! - a refused native search comes back from the `web_search` executor
 //!   failed, without the refusal as its answer (#1887).
 //!
-//! The same loop pins the other refusal a Responses stream can carry, the
-//! service refusing the request itself inside an HTTP 200 stream (a
-//! `response.failed` with a null error, then the cause in an `error`
-//! event): the run fails after one request on the LLM failure itself, the
-//! service's code and message in what the caller sees.
+//! The same loop pins what happens when an HTTP 200 stream holds a
+//! `response.failed` with a null error and then the cause in an `error`
+//! event (a synthetic stream, not one observed from a service): the run
+//! fails after one request on the LLM failure itself, the code and message
+//! of the cause in what the caller sees.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -189,13 +189,12 @@ async fn openai_refusal_fails_the_run_content_filtered_with_its_text() {
     );
 }
 
-/// The service refuses the request inside an HTTP 200 stream: a
-/// `response.failed` whose error is null, then the cause in a flat `error`
-/// event. The retry loop sends the request once (the refusal is the
-/// terminal invalid-request class, not a server error to retry), nothing is
-/// committed, and the run fails on the LLM failure itself (not on used-up
-/// retries) with the service's code and message in the error and in the
-/// run's failure report.
+/// An HTTP 200 stream that holds a `response.failed` whose error is null,
+/// then the cause in a flat `error` event (a synthetic stream). The retry
+/// loop sends the request once (the cause is the terminal invalid-request
+/// class, not a server error to retry), nothing is committed, and the run
+/// fails on the LLM failure itself (not on used-up retries) with the code
+/// and message of the cause in the error and in the run's failure report.
 #[tokio::test]
 async fn a_request_refused_in_the_stream_fails_the_run_after_one_request_with_its_cause() {
     const CODE: &str = "invalid_request_body";

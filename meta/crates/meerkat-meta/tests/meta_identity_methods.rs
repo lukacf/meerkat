@@ -311,8 +311,7 @@ fn named<'a>(agents: &'a [Value], name: &str) -> &'a Value {
 fn verdict_of(entry: &Value) -> &str {
     entry["verdict"]
         .as_str()
-        .or_else(|| entry["verdict"]["verdict"].as_str())
-        .unwrap_or_else(|| panic!("a directory entry carries a verdict: {entry:#}"))
+        .unwrap_or_else(|| panic!("a directory entry carries its verdict flat: {entry:#}"))
 }
 
 /// A launch without an identity policy, and one whose policy is not
@@ -830,6 +829,71 @@ fn a_policy_naming_a_preparation_is_refused_at_init() {
     assert!(init["error"].is_null(), "{init:#}");
 }
 
+/// A change whose rule says `require_approval` is held: it answers
+/// `pending_decision` with its decision, nothing is created, the operation
+/// reads back as held, the same request asked again answers the same
+/// decision, and another request under its id is `operation_reused`. Its
+/// requester withdraws it: the decision ends, and nothing was written.
+#[test]
+fn a_change_that_needs_approval_is_held_until_it_is_decided_or_withdrawn() {
+    let scratch = tempfile::tempdir().unwrap();
+    let policy = json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "host", "surface": "rpc"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "require_approval", "approver": {"id": "owner"}},
+        }]},
+    });
+    let mut gateway = Gateway::launched(scratch.path(), Some(policy));
+    let request = json!({
+        "request_id": "held-1",
+        "agents": [{"name": "scout", "profile": "worker"}],
+    });
+    let held = gateway.ok("meta/identity/create", request.clone());
+    assert_eq!(held["outcome"], json!("pending_decision"), "{held:#}");
+    let decision = held["decision_id"]
+        .as_str()
+        .expect("a decision id")
+        .to_owned();
+    assert!(held["deadline_ms"].as_u64().is_some(), "{held:#}");
+    assert!(
+        held.get("agents").is_none(),
+        "nothing was created: {held:#}"
+    );
+    let missing = gateway.refused("meta/identity/get", json!({"name": "scout"}));
+    assert_eq!(missing["kind"], json!("identity_unknown"), "{missing:#}");
+
+    let read = gateway.ok("meta/identity/operation", json!({"request_id": "held-1"}));
+    assert_eq!(read["outcome"], json!("pending_decision"), "{read:#}");
+    assert_eq!(read["decision_id"], json!(decision), "{read:#}");
+    let again = gateway.ok("meta/identity/create", request);
+    assert_eq!(
+        again["decision_id"],
+        json!(decision),
+        "one decision: {again:#}"
+    );
+    let reused = gateway.refused(
+        "meta/identity/create",
+        json!({"request_id": "held-1", "agents": [{"name": "other", "profile": "worker"}]}),
+    );
+    assert_eq!(reused["kind"], json!("operation_reused"), "{reused:#}");
+
+    let withdrawn = gateway.ok("meta/identity/withdraw", json!({"request_id": "held-1"}));
+    assert_eq!(withdrawn["decision_id"], json!(decision), "{withdrawn:#}");
+    assert_eq!(
+        withdrawn["operation_id"], held["operation_id"],
+        "{withdrawn:#}"
+    );
+    let closed = gateway.refused("meta/identity/withdraw", json!({"request_id": "held-1"}));
+    assert_eq!(closed["kind"], json!("decision_closed"), "{closed:#}");
+    let nothing = gateway.refused("meta/identity/withdraw", json!({"request_id": "never"}));
+    assert_eq!(nothing["kind"], json!("decision_not_found"), "{nothing:#}");
+    let missing = gateway.refused("meta/identity/get", json!({"name": "scout"}));
+    assert_eq!(missing["kind"], json!("identity_unknown"), "{missing:#}");
+}
+
 // ---------------------------------------------------------------------------
 // Create, update, archive, unarchive, remove
 // ---------------------------------------------------------------------------
@@ -1033,13 +1097,8 @@ fn create_refusals_carry_the_kind_and_the_field_and_write_nothing() {
         json!("invalid_request"),
         "{unknown_member:#}"
     );
-    let names: Vec<String> = gateway
-        .listed(json!({"include_archived": true}))
-        .iter()
-        .filter_map(|agent| agent["name"].as_str().map(str::to_owned))
-        .collect();
     assert_eq!(
-        names,
+        names(&mut gateway),
         [DESK, HOST_A, REVIEWER],
         "no refused create wrote an agent"
     );
@@ -1537,12 +1596,17 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 /// The names a list names, archived agents included.
+/// The names of the mob's agents, archived ones included, in name order
+/// (a list's own order is the mob's, which is another for a name the mob
+/// stores in another form).
 fn names(gateway: &mut Gateway) -> Vec<String> {
-    gateway
+    let mut names: Vec<String> = gateway
         .listed(json!({"include_archived": true}))
         .iter()
         .filter_map(|agent| agent["name"].as_str().map(str::to_owned))
-        .collect()
+        .collect();
+    names.sort_unstable();
+    names
 }
 
 /// A candidate launch changes nothing: it refuses the family's eight
@@ -1765,8 +1829,8 @@ use meerkat_meta::identity_creation::{
     ConsequenceLine, CreateAgents, GetAgent, HookRefusal, IdentityChangeCall, IdentityChangeSpec,
     IdentityCreationPolicy, IdentityFamily, IdentityFamilyOptions, IdentityHostHooks,
     IdentityOutcome, IdentityRead, IdentityReadAnswer, IdentityRequest, InstructionOutcome,
-    InstructionStep, InstructionsChanged, OperationId, PeerVisibility, RequesterKind, Sha256Digest,
-    ValidationRefusal,
+    InstructionStep, InstructionsChanged, OperationId, OperationState, PeerVisibility,
+    RequesterKind, Sha256Digest, ValidationRefusal,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -2133,6 +2197,26 @@ async fn launch(
     tokio::sync::mpsc::UnboundedReceiver<String>,
     Arc<FailNextSession>,
 ) {
+    launch_with(state, governed, false).await
+}
+
+/// The approver id the rows' approval rule names.
+const APPROVERS: &str = "team:owners";
+/// The chat person the approver map lets decide for [`APPROVERS`].
+const OWNER: &str = "U123";
+
+/// [`launch`], and with `deciders` a launch whose approver map lets the
+/// chat person [`OWNER`] decide for [`APPROVERS`] through a declared
+/// ingress.
+async fn launch_with(
+    state: &Path,
+    governed: bool,
+    deciders: bool,
+) -> (
+    UnifiedRuntime,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    Arc<FailNextSession>,
+) {
     let (asked_tx, asked) = tokio::sync::mpsc::unbounded_channel();
     let fail_next_session = Arc::new(FailNextSession::default());
     let mut builder = UnifiedRuntimeBuilder::default()
@@ -2148,10 +2232,40 @@ async fn launch(
     if governed {
         builder = builder.native_grant_work_configuration(governed_configuration());
     }
+    if deciders {
+        let access: meerkat_meta::AccessControlConfig = toml::from_str(
+            r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#,
+        )
+        .expect("the approver map");
+        let ingresses: meerkat_meta::DecisionIngressDeclarations =
+            serde_json::from_value(json!({"ingresses": [
+                {"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000},
+            ]}))
+            .expect("ingress declarations");
+        builder = builder
+            .decision_ingresses(ingresses)
+            .access_controller(meerkat_meta::AccessController::new(access).expect("controller"));
+    }
     let runtime = Box::pin(builder.build())
         .await
         .expect("build the gateway-shaped UnifiedRuntime");
     (runtime, asked, fail_next_session)
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("ms")
 }
 
 /// The decisions of a Console that asks for no sign-in, read-only when
@@ -2509,6 +2623,170 @@ async fn a_peer_the_caller_may_not_see_reads_as_a_name_no_agent_holds() {
     let _ = runtime.shutdown().await;
 }
 
+/// A change that needs approval is held by the family, decided by a person
+/// and carried out by the family's own driver, with nobody asking again:
+/// the create answers `pending_decision` and creates nothing; the person
+/// the approver map names approves it through `meta/decisions/decide`; the
+/// agent then exists, dormant, its record names the consent it committed
+/// under, the identity runtime serves it, and the operation reads `done`.
+/// The requester never committed anything itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_change_is_carried_out_once_a_person_approved_it() {
+    use meerkat_core::approval::decision::{
+        ApproverId, DecisionId, DecisionReference, PresentationAudience, PresentationRecord,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _asked, _fail_next_session) = launch_with(temp.path(), false, true).await;
+    let policy = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "host"},
+            "target": {"profile": ["worker"]},
+            "outcome": {"kind": "require_approval", "approver": {"id": APPROVERS}},
+        }]},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
+    assert!(runtime.attach_identity_policy(Arc::new(policy), IdentityFamilyOptions::new()));
+    let family = runtime.identity_family().expect("the family");
+    let mob = runtime.mob_handle();
+    let host = ChangeRequester::host("ops");
+    let operation = OperationId::for_request(&host.recorded(), "held-1").expect("a request id");
+    let scout = || create_of(json!([{"name": "scout", "profile": "worker"}]));
+
+    let held = family
+        .change(
+            &mob,
+            &host,
+            IdentityChangeCall::new(operation.clone(), scout()),
+        )
+        .await;
+    assert_eq!(held.token(), "pending_decision", "{held:?}");
+    let decision_id = held.to_json()["decision_id"]
+        .as_str()
+        .expect("a decision id")
+        .to_owned();
+    let get = |name: &'static str| {
+        let (family, mob, host) = (Arc::clone(&family), mob.clone(), host.clone());
+        async move {
+            match family
+                .read(&mob, &host, IdentityRead::Get(GetAgent::new(name)))
+                .await
+            {
+                Ok(IdentityReadAnswer::Get(record)) => Some(*record),
+                _ => None,
+            }
+        }
+    };
+    assert!(
+        get("scout").await.is_none(),
+        "nothing is created while it is held"
+    );
+
+    // A host channel shows the decision to its approvers, and the person
+    // the approver map names approves it.
+    let owner = runtime.durable_decisions().owner().clone();
+    let row = owner
+        .get(&DecisionId::new(decision_id.as_str()).expect("a decision id"))
+        .expect("the decision is read");
+    owner
+        .present(
+            &row.decision_id,
+            &PresentationRecord::complete(
+                PresentationAudience::Approver {
+                    approver_id: ApproverId::new(APPROVERS).expect("approver"),
+                },
+                &row.descriptor.rendering,
+                None,
+                DecisionReference::new("chat:owners").expect("channel"),
+                DecisionReference::new(format!("message-{}", now_ms())).expect("message"),
+                now_ms(),
+            ),
+        )
+        .expect("present");
+    struct NoNotices;
+    #[async_trait]
+    impl meerkat_meta::DecisionNoticeSink for NoNotices {
+        async fn deliver(&self, _line: String) -> bool {
+            true
+        }
+    }
+    let connection = meerkat_meta::StdioDecisionConnection::new(
+        runtime.durable_decisions().realm(),
+        Arc::new(NoNotices) as Arc<dyn meerkat_meta::DecisionNoticeSink>,
+    );
+    let line =
+        json!({"jsonrpc": "2.0", "id": "decide", "method": "meta/decisions/decide", "params": {
+            "decision_id": decision_id,
+            "approve": true,
+            "presented_digest": row.descriptor.subject_digest.to_string(),
+            "attestation": {
+                "ingress": "chat",
+                "subject": OWNER,
+                "scope": "chat-session-1",
+                "event_ref": format!("chat:event:{decision_id}"),
+                "observed_at_ms": now_ms(),
+            },
+        }})
+        .to_string();
+    let answer: Value = serde_json::from_str(
+        &connection
+            .handle_line(&runtime, &line)
+            .await
+            .expect("a decision method answers"),
+    )
+    .expect("answer JSON");
+    assert!(answer["error"].is_null(), "{answer:#}");
+
+    // The family's driver carries it out: nobody asks again.
+    let deadline = std::time::Instant::now() + TURN_BOUND;
+    let created = loop {
+        if let Some(record) = get("scout").await {
+            break record;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approved create was not carried out"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        created.agent.readiness,
+        AgentReadiness::Dormant,
+        "{created:?}"
+    );
+    let asked = created.agent.provenance.expect("its record says who asked");
+    assert_eq!(asked.requester_kind, RequesterKind::Host);
+    assert_eq!(asked.requester, "ops");
+    let served = runtime
+        .identity_runtime()
+        .expect("the identity runtime")
+        .registered_spec(&AgentIdentity::parse("scout").unwrap())
+        .await
+        .is_ok();
+    assert!(
+        served,
+        "the identity runtime serves the agent from its record"
+    );
+    match family
+        .read(&mob, &host, IdentityRead::Operation(operation.clone()))
+        .await
+    {
+        Ok(IdentityReadAnswer::Operation(OperationState::Outcome(outcome))) => {
+            assert_eq!(outcome.token(), "done", "{outcome:?}");
+        }
+        other => panic!("the operation reads as carried out: {other:?}"),
+    }
+    // The same request asked again answers what was carried out.
+    let again = family
+        .change(&mob, &host, IdentityChangeCall::new(operation, scout()))
+        .await;
+    assert_eq!(again.token(), "done", "{again:?}");
+    let _ = runtime.shutdown().await;
+}
+
 /// One request id names two operations for two requesters: the host and a
 /// person that both choose `r-1` commit two changes, each requester's retry
 /// answers its own, and each agent's record names who asked for it. A
@@ -2580,7 +2858,8 @@ async fn an_agent_requester_is_judged_by_its_own_profile_and_never_changes_itsel
     assert_eq!(asked.requester_kind, RequesterKind::Agent);
     assert_eq!(asked.requester, PLANNER);
 
-    // An agent without the mob tools holds no grant for any profile.
+    // An agent without the mob tools holds no grant for any profile: asked
+    // for by its recorded identity, Core answers that it holds none.
     let worker = ChangeRequester::agent_recorded(HOST_A);
     let refused = rig
         .change(
@@ -2589,7 +2868,7 @@ async fn an_agent_requester_is_judged_by_its_own_profile_and_never_changes_itsel
             create_of(json!([{"name": "other", "profile": "worker"}])),
         )
         .await;
-    assert_eq!(refusal_of(&refused).0, "profile_not_allowed", "{refused:?}");
+    assert_eq!(refusal_of(&refused).0, "grant_revoked", "{refused:?}");
     assert!(rig.agent("other").await.is_none(), "nothing was created");
 
     // No agent changes itself, whatever the change.

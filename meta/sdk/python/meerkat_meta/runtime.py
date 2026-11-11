@@ -2281,12 +2281,12 @@ class MetaRuntime:
         A live identity moves to a fresh session at once, without a wake. A
         retired identity stays retired and starts on a fresh session at its
         next wake. An identity with no history is left as it is, and an
-        unlisted or retired identity is never made live. An identity a host
+        unlisted or retired identity is never made live. The agent keeps its
+        name and its record: this never removes an agent. An identity a host
         intent declaration manages is refused with
-        :class:`~meerkat_meta.errors.IdentityHostAdoptedError` (-32053), and a
-        store-owned identity (created at runtime, or adopted into store
-        custody) with a plain :class:`~meerkat_meta.errors.RpcError`
-        (-32603, ``data["kind"] == "identity_store_owned"``).
+        :class:`~meerkat_meta.errors.IdentityHostAdoptedError` (-32053). An
+        identity created at run time, or adopted into the mob's identity
+        store, starts over as a configured one does.
         """
         return await self._rpc("meta/delete_identity", {"identity": identity})
 

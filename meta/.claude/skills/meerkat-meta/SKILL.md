@@ -488,6 +488,28 @@ Key files:
 
 Avoid manual runtime ID extraction for ordinary identity-scoped work. Do not assume a registered identity is an active member: read its status, because `dormant` and `broken` identities exist.
 
+## Changing Long-Term Agents At Run Time
+
+`meta/identity/*` creates, updates, archives, unarchives, removes and adopts a mob's long-term agents while it runs. One family (`IdentityFamily`, `src/identity_creation/family.rs`) serves host code and the SDKs (stdio `rpc_gateway`), the Console (`POST /console/rpc`) and the agents' identity tools. Reference: `docs/api/rpc.mdx` ("Agent changes") and `docs/reference/identity-policy.mdx`.
+
+- The family is attached whenever a launch has an identity runtime (`IdentityRuntime::identity_family`, attached in `install_identity_first_context_authority`); the policy is one fact inside it. No change is made without an enabled identity policy: `runtime_options.identity_creation` on a persistent launch, `GatewayHostComposition::identity_creation_policy` for a native host, or `UnifiedRuntime::attach_identity_policy` in Rust.
+- `IdentityRuntime::identity_changes_enabled()` is true exactly when the policy is present and enabled: the agents' identity tools are mounted, `identity_changes.available` is true on a writable Console, and a decision is driven exactly then. No policy, or `enabled: false`: the reads answer, the directory says `not_allowed` for every entry, every change and every `plan` is refused `change_denied` (the detail says the launch gives no identity creation policy), and no method answers `-32601`.
+- The policy is default deny. A rule is `{change, requester, target, outcome}`; an update that touches several change classes is judged per class and the strictest outcome applies. Write every rule with a `target.profile`: an `allow` rule for agent creates without one lets any agent with the mob tools create agents of any profile.
+- `notify`, `review` and a `preparation` other than `none` are refused at init in this release.
+- `require_approval` is held by the gate (`IdentityDecisions`, `src/identity_creation/decided.rs`): `pending_decision`, decided through `meta/decisions/decide`, carried out by a driver the gate keeps alive only while changes are enabled, withdrawn with `meta/identity/withdraw`. The launch's executor (`gate.rs`, `LaunchExecutor`) is the one place that asks `IdentityRuntime::register_from_row` after a commit, whoever committed.
+- A caller names only peers it may see: `IdentityRuntime::identity_family_seen_by(PeerVisibility)` gives the family as one caller sees it (the Console passes its access view). An unseen peer and a private member get no facts, so normalization answers `peer_unknown`, never `peer_not_allowed`.
+- The gate holds the identity runtime as a `Weak` back-edge (the runtime holds the slot that holds the gate); never give it an owning handle of the mob or the runtime.
+- Every refusal is JSON-RPC `-32058` (`IDENTITY_REFUSED_CODE`) with `data = {kind, field?, retryable, detail, ...}`; `kind` is a closed vocabulary (`src/identity_creation/refusal.rs`). Params that do not parse are `invalid_request` under the same code.
+- A change needs `request_id`. The same requester, id and request replay; another request under the id is `operation_reused`; two requesters with one id name two operations (`OperationId::for_request` is the only derivation).
+- One `spec_digest` everywhere: Core's digest of the agent's spec in its record's form. `list`, `get`, an outcome and `stale_spec.current_digest` agree, before and after an adoption.
+- An agent the host configures answers `owner_read_only` to every run-time change but `adopt`, which releases it from configuration and keeps its member, session and history.
+- `meta/delete_identity` gives an agent a fresh life and keeps it; `meta/identity/remove` retires the name for good.
+- A create seats its agents dormant and wakes nothing; a read never wakes. A create whose first message did not start answers `seat: "owed"`; the next change of the family, or the next start, seats it. A governed runtime refuses `first_message` (`unsupported`, `first_message_in_governed_realm`).
+- Requesters: the stdio host is `host` on surface `rpc` (the operator); a Console caller is `human` (a verified person) or `host` on surface `console`; an agent is attributed from the session its tool call ran in, never from arguments. A member private to a person is refused `private_requester`.
+- Console access actions: `agent.identity.create`, `agent.identity.manage`, `agent.identity.remove`; `GET /console/experience` carries `identity_changes` and the per-agent `can_change_identity` / `can_remove_identity` affordances.
+
+Key files: `src/identity_creation/` (`family.rs` the wire, `gate.rs` the family over the policy, `executor.rs` the seam into Core, `policy.rs`, `request.rs`, `refusal.rs`), `src/rpc/identity_methods.rs`, `tests/meta_identity_methods.rs`.
+
 ## Standing Instructions And Forks
 
 - `meta/set_instruction`, `meta/revoke_instruction` and

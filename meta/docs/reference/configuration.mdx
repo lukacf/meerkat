@@ -1663,9 +1663,11 @@ without waiting for the materializations in flight, which the mob finishes
 on its own; a shutdown waits for them.
 
 `meta/status_identity_bootstrap` returns a non-blocking typed snapshot.
-The snapshot is built from the host's roster: an identity created at runtime
-(Core's created entry, which no roster lists) is not in it, though the
-identity runtime serves it.
+The snapshot tracks every identity the runtime serves: the host's roster,
+and the identities whose record is their row in the mob's identity store
+(created at run time, or adopted into the store), which no roster lists. An
+archived identity keeps no member and is not tracked. A background warm
+materializes the tracked identities alike.
 `meta/wait_identity_bootstrap` accepts `target = "materialized"` or
 `"startup_ready"`; terminal broken identities return with `ready = false`
 rather than leaving the barrier pending indefinitely. Provider or restore

@@ -11,12 +11,12 @@
 //!   customizer is prepared with the host's `customize_build`, run with the
 //!   identity runtime's real context; its tools are published into the
 //!   identity's stable customizer tool dispatcher, so the member is built
-//!   with them. A member of an identity created at runtime that Core wakes
-//!   or restores is registered from its row in the mob's identity store,
-//!   whether or not a roster pass or a door registered it yet, and is
-//!   prepared the same way; its build carries the stable dispatcher once the
-//!   identity was registered before Core built it (Meta's spawn customizer
-//!   attaches the dispatcher of a registered identity only);
+//!   with them. A member of an identity whose record is its row in the
+//!   mob's identity store that Core builds (its first build for its
+//!   kickoff, a wake, a restore) is registered from that row, whether or
+//!   not a roster pass or a door registered it yet, and is prepared the
+//!   same way: Meta's spawn customizer attached the stable dispatcher to
+//!   the build, because Core holds the member id as an identity entry;
 //! - before the identity runtime is composed (its roster registered, its
 //!   customizer and runtime services installed), an identity's member is
 //!   answered `HoldUntilReleased`: Core builds it and holds its run starts,
@@ -307,12 +307,15 @@ impl IdentityBuildPreparer {
         // Every other build is held until the roster pass releases it: the
         // composition publishes a registered identity's tools, and the
         // roster pass retires the member of an identity it does not list. A
-        // member of an identity a host adopted is neither, before the
-        // composition or after it: no roster publication or retirement
-        // covers it, so it is not Meta's to hold.
+        // member of an identity a host adopted through an identity intent
+        // row is neither, before the composition or after it: no
+        // publication or retirement covers it, so it is not Meta's to hold.
         match management.await {
-            Ok(meerkat_mob::MemberIdentityManagement::CommandDriven) => {}
-            Ok(_) => return Ok(MemberBuildPrepared::Prepared),
+            Ok(
+                meerkat_mob::MemberIdentityManagement::IntentManaged
+                | meerkat_mob::MemberIdentityManagement::IntentUnreadable,
+            ) => return Ok(MemberBuildPrepared::Prepared),
+            Ok(_) => {}
             Err(error) => {
                 return Err(MemberBuildPreparationRefusal::Retryable {
                     reason: format!("the identity's management could not be read: {error}"),

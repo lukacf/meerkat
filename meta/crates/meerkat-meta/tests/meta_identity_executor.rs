@@ -23,14 +23,13 @@ use meerkat_core::Message;
 use meerkat_core::types::StopReason;
 use meerkat_meta::UnifiedRuntimeBuilder;
 use meerkat_meta::identity_creation::{
-    ADOPT_NOT_BUILT, AdoptIdentitySpec, AgentChangeState, AgentSeat, ArchiveIdentitySpec,
+    AGENT_SPECS_NOT_GIVEN, AdoptIdentitySpec, AgentChangeState, AgentSeat, ArchiveIdentitySpec,
     ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, CreateAgents,
     CreateIdentitySpec, IdentityChangeExecutor, IdentityCreationPolicy, IdentityEntryFacts,
     IdentityOutcome, InstructionOutcome, InstructionStep, InstructionsChanged, NormalizedRequest,
     OperationId, RemoveIdentitySpec, RequestContext, RequestEnvelope, RequesterFacts, Sha256Digest,
-    UPDATE_NOT_BUILT, UnarchiveIdentitySpec, UpdateIdentitySpec, committed_outcome,
-    consent_of_plan, normalize_adopt, normalize_archive, normalize_create, normalize_remove,
-    normalize_unarchive, normalize_update,
+    UnarchiveIdentitySpec, UpdateIdentitySpec, committed_outcome, consent_of_plan, normalize_adopt,
+    normalize_archive, normalize_create, normalize_remove, normalize_unarchive, normalize_update,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -994,8 +993,10 @@ async fn an_agent_requester_is_admitted_by_cores_grant_admission() {
 }
 
 /// A create that names placement is refused `unsupported` at its field
-/// before Core is called, and an update and an adoption answer
-/// `unsupported` with their own features until their bodies are filled.
+/// before Core is called. An update commits through Core. An adoption
+/// reads the spec the agent's host configures: through an executor that
+/// was given nothing to read the mob's agents with it is refused
+/// `unsupported`, and nothing is written.
 #[tokio::test(flavor = "multi_thread")]
 async fn what_the_seam_does_not_carry_yet_is_refused_unsupported() {
     let temp = tempfile::tempdir().unwrap();
@@ -1045,17 +1046,19 @@ async fn what_the_seam_does_not_carry_yet_is_refused_unsupported() {
         &AdoptIdentitySpec::new(CREATED, digest.clone()),
     )
     .expect("the adoption is allowed");
-    for (request_id, request, feature) in [
-        ("update-keeper", &update, UPDATE_NOT_BUILT),
-        ("adopt-keeper", &adopt, ADOPT_NOT_BUILT),
-    ] {
-        let answered = rig.commit(&host(), request_id, request).await;
-        assert_eq!(
-            answered.outcome.refusal().map(|refusal| refusal.to_data()),
-            Some(json!({"kind": "unsupported", "feature": feature})),
-            "{request_id}: {answered:?}"
-        );
-    }
+    let adopted = rig.commit(&host(), "adopt-keeper", &adopt).await;
+    assert_eq!(
+        adopted.outcome.refusal().map(|refusal| refusal.to_data()),
+        Some(json!({"kind": "unsupported", "feature": AGENT_SPECS_NOT_GIVEN})),
+        "{adopted:?}"
+    );
+    let updated = rig.commit(&host(), "update-keeper", &update).await;
+    assert_eq!(updated.outcome.token(), "done", "{updated:?}");
+    assert_eq!(
+        updated.outcome.agents()[0].spec_revision,
+        Some(2),
+        "{updated:?}"
+    );
     rig.shutdown().await;
 }
 

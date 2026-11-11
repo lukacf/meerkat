@@ -2979,11 +2979,12 @@ export class MetaRuntime {
    * its next session starts empty. A live identity moves to a fresh session
    * at once, without a wake; a retired identity stays retired and starts on
    * a fresh session at its next wake; an identity with no history is left
-   * as it is. An unlisted or retired identity is never made live. An
-   * identity a host intent declaration manages is refused with
-   * `IdentityHostAdoptedError` (-32053), and a store-owned identity (created
-   * at runtime, or adopted into store custody) with a plain `RpcError`
-   * (-32603, `data.kind` `"identity_store_owned"`).
+   * as it is. An unlisted or retired identity is never made live. The agent
+   * keeps its name and its record: this never removes an agent. An identity
+   * a host intent declaration manages is refused with
+   * `IdentityHostAdoptedError` (-32053). An identity created at run time, or
+   * adopted into the mob's identity store, starts over as a configured one
+   * does.
    */
   async deleteIdentity(identity: string): Promise<unknown> {
     return this._rpc("meta/delete_identity", { identity });

@@ -16488,8 +16488,8 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// them. They are computed before anything is held and again when the
     /// operation executes, and the same request must give the same lines.
     /// `Err` refuses the request `consequences_unavailable`: it is never
-    /// rendered without them. The default states none. A gateway host
-    /// declares the host callback `identity.consequences` instead.
+    /// rendered without them. The default states none. A host behind an SDK
+    /// supplies none in this release: its decisions render without them.
     fn identity_consequences(
         &self,
         request: &crate::identity_creation::IdentityRequest,
@@ -19938,6 +19938,10 @@ external_addressable = true
     // OnceCell defers the binding without restructuring bootstrap. The
     // roster slot feeds mob-purpose context once restore_flow has run.
     let steward_late_runtime = StewardLateRuntime::default();
+    // The runtime, for the notices of decided identity changes: a back-edge
+    // bound once the runtime is shared, read per notice.
+    let identity_notices_runtime: Arc<std::sync::OnceLock<std::sync::Weak<UnifiedRuntime>>> =
+        Arc::new(std::sync::OnceLock::new());
     let steward_roster_slot: Arc<std::sync::Mutex<Vec<crate::identity_first::DurableAgentSpec>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut agent_memory_steward: Option<Arc<crate::memory::steward::StewardEngine>> = None;
@@ -20410,7 +20414,19 @@ external_addressable = true
         // policy keeps the family its identity install attached: the reads
         // are served and every change is refused.
         if let Some(policy) = identity_creation.clone() {
-            let mut options = crate::identity_creation::IdentityFamilyOptions::new();
+            // An agent that asked for a change a person decided is told by
+            // a keyed send to its own name. The route reads the runtime
+            // when a notice is delivered and keeps nothing of it.
+            let notices_runtime = identity_notices_runtime.clone();
+            let mut options = crate::identity_creation::IdentityFamilyOptions::new()
+                .with_decision_notices(Arc::new(crate::identity_creation::KeyedSendNotices::new(
+                    move || {
+                        notices_runtime
+                            .get()
+                            .and_then(std::sync::Weak::upgrade)
+                            .and_then(|runtime| runtime.identity_runtime())
+                    },
+                )));
             if let Some(host) = host {
                 options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
             }
@@ -20727,6 +20743,7 @@ external_addressable = true
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
     steward_late_runtime.bind(runtime.clone());
+    let _ = identity_notices_runtime.set(Arc::downgrade(&runtime));
     runtime
         .set_gating_escalation_routes(gateway_options.gating.escalation.clone())
         .await;

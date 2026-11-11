@@ -376,11 +376,16 @@ impl Rig {
     /// Send the identity a probe turn and answer the gated tool's result
     /// text from that turn.
     async fn probe(&mut self) -> String {
+        self.probe_as(IDENTITY).await
+    }
+
+    /// [`Self::probe`] for the identity `identity`.
+    async fn probe_as(&mut self, identity: &str) -> String {
         self.probe_turns += 1;
         let sent = self
             .rpc(
                 "meta/send",
-                json!({"identity": IDENTITY, "content": format!("{PROBE} {}", self.probe_turns)}),
+                json!({"identity": identity, "content": format!("{PROBE} {}", self.probe_turns)}),
             )
             .await;
         assert!(sent["error"].is_null(), "the probe is admitted: {sent:#?}");
@@ -936,16 +941,21 @@ async fn meta_tool_grant_refusals_are_typed() {
     rig.shutdown().await;
 }
 
-/// An identity created at runtime is store-owned (its record is its row in
-/// the mob's identity store) and Meta's grant methods do not act on it yet:
-/// a grant to it is `subject_unknown`, although the identity runtime serves
-/// it and Core's roster holds its member.
+/// A store-owned identity takes a scoped tool grant as a configured one
+/// does: its gated tool is closed before the grant, the grant names it as
+/// its subject and opens the tool at its next turn, list shows the grant,
+/// and the revoke closes the tool again.
+///
+/// RED before grants served store-owned identities: the grant was refused
+/// `subject_unknown`.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_are_grantable() {
+async fn a_store_owned_identity_takes_a_scoped_tool_grant() {
+    const KEEPER: &str = "keeper";
     let temp = tempfile::tempdir().unwrap();
-    let rig = boot(temp.path(), &fresh_mob_id()).await;
-    let handle = rig.runtime.mob_handle();
-    let created = handle
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let created = rig
+        .runtime
+        .mob_handle()
         .create_store_owned_identities(
             meerkat_mob::StoreOwnedIdentityCreate::new(
                 meerkat_mob::IdentityOperation::new(
@@ -954,7 +964,7 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
                 ),
                 meerkat_mob::IdentityChangeRequesterInput::host("console"),
                 vec![meerkat_mob::CreatedIdentityRequest::new(
-                    meerkat_mob::CreatedIdentitySpec::new("keeper", "worker"),
+                    meerkat_mob::CreatedIdentitySpec::new(KEEPER, "worker"),
                 )],
             ),
             meerkat_mob::IdentityChangeConsentInput::Policy(
@@ -970,43 +980,52 @@ async fn a_store_owned_identity_is_subject_unknown_until_store_owned_identities_
         ),
         "{created:?}"
     );
-    let keeper = meerkat_mob::AgentIdentity::from("keeper");
-    match handle.identity_entry(&keeper) {
-        Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => assert_eq!(
-            entry.origin,
-            meerkat_mob::IdentityEntryOrigin::Created,
-            "the created identity is store-owned"
-        ),
-        other => panic!("the created identity is an entry: {other:?}"),
-    }
-    // The host's roster lists the created identity too, so the identity
-    // runtime serves it and the registration check passes: the store-owned
-    // origin is what refuses the grant.
-    let identities = rig.runtime.identity_runtime().expect("identity runtime");
-    let keeper_spec = DurableAgentSpec {
-        identity: AgentIdentity::parse("keeper").unwrap(),
-        ..spec()
-    };
-    let registered = identities.register(keeper_spec).await;
-    assert!(
-        registered.is_ok(),
-        "Core answers the registration: {registered:?}"
-    );
-    assert!(
-        identities
-            .registered_spec(&AgentIdentity::parse("keeper").unwrap())
-            .await
-            .is_ok(),
-        "the identity runtime serves keeper"
-    );
 
-    let refused = rig
-        .rpc(
-            "meta/tool_grants/grant",
-            json!({"identity": "keeper", "target": tool_target(), "duration_ms": TEN_MINUTES_MS}),
-        )
+    let closed = rig.probe_as(KEEPER).await;
+    assert_eq!(
+        grant_refusal(&closed),
+        Some("tool_grant_required"),
+        "the gated tool is closed before a grant: {closed}"
+    );
+    let granted = rig
+        .grant(json!({
+            "identity": KEEPER,
+            "target": tool_target(),
+            "duration_ms": TEN_MINUTES_MS,
+        }))
         .await;
-    assert_eq!(refusal_kind(&refused), "subject_unknown");
+    let grant = &granted["grant"];
+    assert_eq!(grant["status"], json!("active"), "{granted:#?}");
+    assert_eq!(
+        (&grant["subject"]["kind"], &grant["subject"]["identity"]),
+        (&json!("identity"), &json!(KEEPER)),
+        "{granted:#?}"
+    );
+    let grant_id = grant["grant_id"].as_str().expect("grant id").to_string();
+    let open = rig.probe_as(KEEPER).await;
+    assert_eq!(
+        grant_refusal(&open),
+        None,
+        "the grant opens the tool at the next turn: {open}"
+    );
+    let listed = rig
+        .rpc("meta/tool_grants/list", json!({"identity": KEEPER}))
+        .await;
+    assert_eq!(
+        listed["result"]["grants"][0]["grant_id"],
+        json!(grant_id),
+        "{listed:#?}"
+    );
+    let revoked = rig
+        .rpc("meta/tool_grants/revoke", json!({"grant_id": grant_id}))
+        .await;
+    assert!(revoked["error"].is_null(), "{revoked:#?}");
+    let closed_again = rig.probe_as(KEEPER).await;
+    assert_eq!(
+        grant_refusal(&closed_again),
+        Some("tool_grant_revoked"),
+        "the revoke closes the tool: {closed_again}"
+    );
     rig.shutdown().await;
 }
 

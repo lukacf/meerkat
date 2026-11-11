@@ -364,13 +364,22 @@ fn run_turn(roots: &Roots, extra: &[&str]) -> Finished {
     rkat(roots, &args)
 }
 
-/// The last JSON document on stdout: the whole of stdout when it is one
-/// document, otherwise the pretty-printed object that follows streamed text.
+/// The JSON document on stdout of a run that streams no text: the whole of
+/// stdout is exactly one JSON value. A second document, or a run result
+/// followed by a failure document, fails here.
 fn last_document(finished: &Finished) -> serde_json::Value {
+    serde_json::from_str(finished.stdout.trim()).unwrap_or_else(|error| {
+        panic!(
+            "stdout ends with no JSON document, or holds more than one ({error}); stdout:\n{}\nstderr:\n{}",
+            finished.stdout, finished.stderr
+        )
+    })
+}
+
+/// The last JSON document on stdout of a run that streamed text first: the
+/// pretty-printed object that follows the text.
+fn document_after_streamed_text(finished: &Finished) -> serde_json::Value {
     let stdout = finished.stdout.trim_end();
-    if let Ok(document) = serde_json::from_str::<serde_json::Value>(stdout.trim_start()) {
-        return document;
-    }
     let start = stdout
         .rfind("\n{\n")
         .map(|index| index + 1)
@@ -432,8 +441,8 @@ fn assert_untyped_failure_document(finished: &Finished) {
 }
 
 /// A turn that fails on a transient provider answer (503, past the retries)
-/// says so in typed fields: the provider error code and the
-/// `retry_exhausted` kind. The exit status stays 1.
+/// says so in typed fields: the provider error code, the `retry_exhausted`
+/// kind and `retryable: true`. The exit status stays 1.
 #[test]
 fn cli_failed_turn_document_carries_typed_retryability() {
     let roots = roots(start_loopback(unavailable()));
@@ -446,12 +455,17 @@ fn cli_failed_turn_document_carries_typed_retryability() {
         document["error"]["details"]["error"]["kind"], "retry_exhausted",
         "{document}"
     );
+    assert_eq!(
+        document["error"]["details"]["error"]["retryable"], true,
+        "{document}"
+    );
 }
 
-/// The typed turn error of a retry-exhausted turn as it is today: its kind,
-/// that it is terminal, its outcome and a diagnostic, and no `retryable`,
-/// `provider` or `reason`. A turn error that gains those fields changes this
-/// row on purpose.
+/// The typed turn error of a retry-exhausted turn: its kind, that it is
+/// terminal, its outcome and a diagnostic, and the facts of the attempt that
+/// ended the retries: the provider, `retryable: true` and the typed reason
+/// (here a 503, the overloaded provider error kind). A turn error that gains
+/// or loses a field changes this row on purpose.
 #[test]
 fn a_retry_exhausted_turn_error_has_its_current_fields() {
     let roots = roots(start_loopback(unavailable()));
@@ -464,12 +478,32 @@ fn a_retry_exhausted_turn_error_has_its_current_fields() {
     fields.sort_unstable();
     assert_eq!(
         fields,
-        ["detail", "kind", "outcome", "terminal"],
+        [
+            "detail",
+            "kind",
+            "outcome",
+            "provider",
+            "reason",
+            "retryable",
+            "terminal"
+        ],
         "{document}"
     );
     assert_eq!(turn_error["kind"], "retry_exhausted", "{document}");
     assert_eq!(turn_error["terminal"], true, "{document}");
     assert_eq!(turn_error["outcome"], "failed", "{document}");
+    assert_eq!(turn_error["provider"], "self_hosted", "{document}");
+    assert_eq!(turn_error["retryable"], true, "{document}");
+    let reason = &turn_error["reason"];
+    assert_eq!(reason["reason_type"], "llm_provider_error", "{document}");
+    assert_eq!(
+        reason["provider_error_kind"], "server_overloaded",
+        "{document}"
+    );
+    assert_eq!(
+        reason["provider_error_retryability"], "retryable",
+        "{document}"
+    );
 }
 
 /// A turn that fails on a permanent provider answer (400) is not retryable.
@@ -548,7 +582,7 @@ fn streamed_text_precedes_the_failure_document() {
         .rfind("\n{\n")
         .unwrap_or_else(|| panic!("no document after streamed text: {}", finished.stdout));
     assert!(text_at < document_at, "{}", finished.stdout);
-    let document = last_document(&finished);
+    let document = document_after_streamed_text(&finished);
     assert_eq!(document["error"]["code"], "PROVIDER_ERROR", "{document}");
     assert!(
         finished.stdout.trim_end().ends_with('}'),

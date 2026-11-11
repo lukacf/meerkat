@@ -533,11 +533,11 @@ parses that key itself and lowers it to `additional_instructions`.
 
 A member's session records the instruction sections it was built with in its
 durable build state, and keeps them through every rebuild: a restart, a wake
-and a fork child's seating resume the session and name no sections, so they
-leave the record alone (a fork child records its source's sections).
-`MobHandle::member_build_instructions(identity)` (Rust hosts) reads them from
-the session's committed state without waking the member or reading its
-transcript:
+and a fork child's seating resume the session, name no sections and write no
+prompt, so they leave the record alone (a fork child records its source's
+sections). `MobHandle::member_build_instructions(identity)` (Rust hosts)
+reads them from the session's committed state without waking the member or
+decoding its transcript:
 
 | Answer | Meaning |
 | --- | --- |
@@ -547,11 +547,22 @@ transcript:
 
 A seat no build has created yet answers the sections it carries to its first
 build. That build may append the sections the host's spawn customizer adds,
-so afterwards the session records the seat's sections followed by those. A
-host whose session service is a decorator forwards
-`MobSessionService::recorded_build_instructions` to the service it wraps;
-the trait default answers the same from the persisted session, which loads
-its transcript.
+so afterwards the session records the seat's sections followed by those.
+
+The read has limits. It asks this process's session service, so a member
+whose session another host keeps, and a member of a mob whose session service
+keeps no committed sessions, answer `None` once a build has created their
+session. It takes no caller principal: a surface that serves it admits its
+caller first. On a persistent session service it still answers an archived
+session's record.
+
+`PersistentSessionService` answers from the session's committed metadata
+(the committed head on a HeadCanonical store; on a WholeBlob store the
+committed body is fetched and verified, and its rows are skipped), and Core's
+RPC and CLI hosts forward the read to it. A host whose session service is
+its own decorator forwards `MobSessionService::recorded_build_instructions`
+to the service it wraps: the trait default answers the same for a session
+that is not archived, from the persisted session, which loads its transcript.
 
 There is no `system_prompt` key on a profile. Loading a TOML definition whose
 `[profiles.<name>]` table carries `system_prompt` (or its aliases `prompt` and

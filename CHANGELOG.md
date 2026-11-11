@@ -41,7 +41,7 @@ them.
   instruction sections a member's session was built with
   (`additional_instructions`), from the session's committed build state. It
   sends no command to the mob actor, never wakes or materializes the member,
-  and reads no transcript row. `Ok(Some(sections))` is what the session
+  and decodes no transcript row. `Ok(Some(sections))` is what the session
   records, and `Ok(Some(vec![]))` is a session built with none. `Ok(None)`
   means the sections are not known: the identity is not a member, no
   committed session exists, or the session's record does not say (a session
@@ -49,15 +49,24 @@ them.
   Fixed). A seat no build has created yet answers the sections it carries to
   its first build; that build may append the host's spawn customizer's
   sections, so the session then records the seat's sections followed by
-  those. The read asks the session service through the new provided method
+  those. The read asks this process's session service: a member whose
+  session another host keeps, and a member of a mob whose session service
+  keeps no committed sessions, answer `None` once a build has created their
+  session. It takes no caller principal: it is a Rust host API, and a
+  surface that serves it admits its caller first. The read goes through the
+  new provided method
   `MobSessionService::recorded_build_instructions(session_id)`, which
   `PersistentSessionService` answers from the committed metadata alone
   (`PersistentSessionService::load_authoritative_session_build_state`;
   `meerkat_core::try_session_build_state_from_map` and
-  `SessionMetadataDocument::try_build_state` decode it). The trait default
-  answers the same from the persisted session, which loads its transcript:
-  a decorator over a durable session service forwards the method to keep
-  the read transcript-free.
+  `SessionMetadataDocument::try_build_state` decode it): the committed head
+  on a HeadCanonical store, and on a WholeBlob store the committed body,
+  fetched and verified, with its rows skipped. It still answers an archived
+  session's record. Core's RPC and CLI hosts forward the method to that
+  service. The trait default answers the same for a session that is not
+  archived, from the persisted session, which loads its transcript: a
+  host's own decorator over a durable session service forwards the method
+  to keep the read from loading it.
 
 ### Fixed
 
@@ -72,17 +81,20 @@ them.
   rendered once, into the first build's system prompt row, which stays in
   the transcript and is what every later request, live channel and recovered
   session reads. Only the record was lost, so a host could not read what a
-  member had been built with. A build that names no sections now keeps the
-  recorded ones; a build that names sections records those, as before, and
-  an empty list clears them. A first build that names no sections records
-  an empty list (`"additional_instructions": []` in the stored build state,
-  the value a build given an empty list already stored), so an absent record
-  means "not known" and nothing else. Sessions written by earlier releases
-  load unchanged and a resume leaves their stored build state as it is; a
-  record an earlier release erased stays absent. A resumed build that sets
-  an explicit system prompt and names no sections still writes that prompt
-  without the recorded sections (only the MCP server's `meerkat_resume`
-  with `system_prompt` and direct `AgentFactory` embedders build that way).
+  member had been built with. The record now states the sections of the
+  newest prompt the session's builds wrote. A build that names sections
+  records those, as before, and an empty list clears them. A build that
+  names none and writes no prompt (every resume that is given no system
+  prompt) keeps the recorded ones. A build that names none and writes a
+  prompt records an empty list (`"additional_instructions": []` in the
+  stored build state, the value a build given an empty list already
+  stored): a first build, and a resume that is given an explicit system
+  prompt, whose new prompt row holds no sections (only the MCP server's
+  `meerkat_resume` with `system_prompt` and direct `AgentFactory` embedders
+  build that way). An absent record therefore means "not known" and nothing
+  else. Sessions written by earlier releases load unchanged and a resume
+  that writes no prompt leaves their stored build state as it is; a record
+  an earlier release erased stays absent.
 
 ## [0.9.13] - 2026-11-11
 

@@ -2453,9 +2453,11 @@ pub trait MobSessionService:
     /// so every service answers it, at the cost of loading the persisted
     /// session with its transcript; that read answers an archived session as
     /// absent. Persistent services override it with the metadata-only
-    /// authoritative read, which reads no transcript row and still answers
-    /// an archived session's record. A wrapper over such a service forwards
-    /// it to keep the read transcript-free.
+    /// authoritative read, which decodes no transcript row (the committed
+    /// head on a HeadCanonical store; on a WholeBlob store the committed
+    /// body is fetched and verified, and its rows are skipped) and still
+    /// answers an archived session's record. A wrapper over such a service
+    /// forwards it to keep the read from loading the transcript.
     async fn recorded_build_instructions(
         &self,
         session_id: &SessionId,

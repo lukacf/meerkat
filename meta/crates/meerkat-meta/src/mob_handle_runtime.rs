@@ -5078,6 +5078,16 @@ macro_rules! delegate_mob_session_service {
             ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
                 self.inner.load_retained_session_metadata(session_id).await
             }
+            // The instruction sections a session's build state records. The
+            // trait default loads the persisted session with its transcript;
+            // forwarded, the persistent service answers from the session's
+            // committed metadata alone.
+            async fn recorded_build_instructions(
+                &self,
+                session_id: &meerkat_core::types::SessionId,
+            ) -> Result<Option<Vec<String>>, SessionError> {
+                self.inner.recorded_build_instructions(session_id).await
+            }
             // meerkat 0.9.7: the recorded (realm-stamped) form of a named auth
             // binding. The trait default answers `Ok(None)`, so unforwarded the
             // live-actor binding check matches the named form alone and refuses
@@ -6501,6 +6511,14 @@ impl MobSessionService for AfterCreateMobSessionService {
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<Option<meerkat_core::PersistedSessionMetadataView>, SessionError> {
         self.inner.load_retained_session_metadata(session_id).await
+    }
+    // Forwarded, as in `delegate_mob_session_service!`: the trait default
+    // loads the persisted session with its transcript.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<Vec<String>>, SessionError> {
+        self.inner.recorded_build_instructions(session_id).await
     }
     // Forwarded, as in `delegate_mob_session_service!`: the trait default
     // answers `Ok(None)`, so the live-actor binding check would refuse a live

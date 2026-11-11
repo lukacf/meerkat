@@ -153,6 +153,16 @@ impl RosterAuthority {
         self.roster.next_build(identity)
     }
 
+    /// What `identity`'s session carries to its first build while no build
+    /// has created it ([`Roster::seat_build`]): the seat's own inputs, never
+    /// the build of an incarnation on a session a build created.
+    pub(crate) fn seat_build(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<std::sync::Arc<crate::runtime::SeatBuild>> {
+        self.roster.seat_build(identity)
+    }
+
     /// Set the descriptive inputs a store-owned identity's unborn seat
     /// carries to its first build ([`Roster::set_store_owned_seat_inputs`]).
     pub(crate) fn set_store_owned_seat_inputs(

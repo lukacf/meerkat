@@ -242,17 +242,31 @@ impl MobHandle {
     /// sections the host's spawn customizer adds, so afterwards the session
     /// records the seat's sections followed by those.
     ///
-    /// A resume names no sections and keeps the recorded ones, so the answer
-    /// is stable across restarts, wakes and rebuilds; a fork child answers
-    /// its source's sections.
+    /// A resume that writes no prompt names no sections and keeps the
+    /// recorded ones, so the answer is stable across restarts, wakes and
+    /// rebuilds; a fork child answers its source's sections. The record is
+    /// durable configuration of the session's build
+    /// (`SessionBuildState::additional_instructions`), not a lifecycle fact:
+    /// the one lifecycle fact this read uses, whether the session is
+    /// unborn, is MobMachine's.
     ///
     /// Read from the machine state the actor last published and the roster,
     /// then one read of the session service
     /// ([`MobSessionService::recorded_build_instructions`](crate::MobSessionService::recorded_build_instructions)).
     /// It sends no command to the actor and never wakes or materializes the
     /// member. On a persistent session service it reads the session's
-    /// committed metadata alone, no transcript row; a wrapper that does not
-    /// forward that method answers the same from the persisted session.
+    /// committed metadata alone and decodes no transcript row, and it still
+    /// answers an archived session's record. A wrapper that does not forward
+    /// that method answers the same for a session that is not archived, from
+    /// the persisted session, which loads its transcript.
+    ///
+    /// Limits. The read asks this process's session service: a member whose
+    /// session another host keeps (a member placed on a member host), and a
+    /// member of a mob whose session service keeps no committed sessions,
+    /// answer `Ok(None)` once a build has created their session. The read
+    /// takes no caller principal and admits no control scope: it is a Rust
+    /// host API that returns host-authored section text, and a surface that
+    /// serves it admits its caller first.
     ///
     /// # Errors
     ///
@@ -271,7 +285,7 @@ impl MobHandle {
                 .roster
                 .read()
                 .await
-                .next_build(identity)
+                .seat_build(identity)
                 .and_then(|build| build.inputs.additional_instructions.clone());
             if let Some(sections) = carried {
                 return Ok(Some(sections));

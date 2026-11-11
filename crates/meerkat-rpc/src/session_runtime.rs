@@ -2656,6 +2656,21 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    // The instruction sections a session's build state records. Forwarded:
+    // the persistent service answers from the committed metadata alone,
+    // where the trait default loads the persisted session with its
+    // transcript.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<String>>, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::recorded_build_instructions(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     async fn controller_route_under_runtime_turn_boundary(
         &self,

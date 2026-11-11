@@ -10783,9 +10783,10 @@ impl AgentFactory {
             extra_sections.push(section.as_str());
         }
         // Append additional instructions after skills, before tool
-        // instructions. These are canonical build-state and must survive into
-        // persisted recovery / realtime reconstruction, so prompt assembly may
-        // read them but must not consume them.
+        // instructions. They are the session's build configuration: the
+        // build state records them below, and session recovery feeds the
+        // record into its next build, so prompt assembly reads them and
+        // must not consume them.
         let additional_instruction_storage: Vec<String> = build_config
             .additional_instructions
             .clone()
@@ -10925,20 +10926,24 @@ impl AgentFactory {
                 )
             })
             .unwrap_or_default();
-        // The instruction sections are session-owned too. A build that names
-        // sections records those (an empty list clears them). A build that
-        // names none keeps what the session records: a resume authors
-        // nothing, so it names none, and writing that absence would erase
-        // what the first build recorded. A first build that names none
-        // records an empty list, so an absent record only ever means that
-        // the sections are not known (a session built before this record
-        // was kept across resumes, or one whose record such a resume
-        // erased).
+        // The instruction sections are session-owned too: durable
+        // configuration of the session's build, kept in this record, not a
+        // lifecycle fact that a machine owns. The record states the
+        // sections of the newest prompt the session's builds wrote. A build
+        // that names sections records those (an empty list clears them). A
+        // build that names none and writes a prompt (a first build, or a
+        // resume that is given an explicit prompt) wrote none into it, and
+        // records an empty list. A build that names none and writes no
+        // prompt keeps what the session records: such a resume authors
+        // nothing, and writing that absence would erase what the first
+        // build recorded. So an absent record only ever means that the
+        // sections are not known (a session built before this record was
+        // kept across resumes, or one whose record such a resume erased).
         let recorded_instruction_sections = build_config
             .additional_instructions
             .clone()
-            .or(recorded_instruction_sections)
-            .or_else(|| fresh_build.then(Vec::new));
+            .or_else(|| should_apply_system_prompt.then(Vec::new))
+            .or(recorded_instruction_sections);
         let persisted_build_state = meerkat_core::SessionBuildState {
             output_schema: build_config.output_schema.clone(),
             hooks_override: build_config.hooks_override.clone(),

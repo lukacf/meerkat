@@ -18653,6 +18653,21 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    // The instruction sections a session's build state records. Forwarded:
+    // the persistent service answers from the committed metadata alone,
+    // where the trait default loads the persisted session with its
+    // transcript.
+    async fn recorded_build_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<String>>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::recorded_build_instructions(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn session_known_to_archive_authority(
         &self,
         session_id: &SessionId,

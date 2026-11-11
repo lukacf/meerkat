@@ -508,7 +508,9 @@ jobs:
       # What a floor build would see now, without building: the declared
       # versions re-resolved against crates.io (the resolved lock's digest),
       # and the Meta crates packaged as publication will package them. A
-      # failure here only means no reuse.
+      # failure here only means no reuse: a crate file the registry would
+      # refuse for its size gets no checksum, so the floor builds, and that
+      # build fails on the size before it compiles anything.
       - name: Re-resolve the packaged Meta crates against crates.io without building
         if: steps.record.outputs.present == 'true'
         continue-on-error: true
@@ -524,6 +526,7 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
+          python3 scripts/published_crates_standalone.py package-size --product meta --package-dir "${CARGO_TARGET_DIR}/package"
           for pair in "extension_sha256:meta-extension-state" "meta_sha256:meerkat-meta"; do
             output="${pair%%:*}"; crate="${pair##*:}"
             echo "${output}=$(sha256sum "${CARGO_TARGET_DIR}/package/${crate}-${RELEASE_VERSION}.crate" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
@@ -1133,6 +1136,10 @@ jobs:
           VERSION: ${{ needs.resolve_release.outputs.version }}
         run: |
           set -euo pipefail
+          # These are the bytes the publisher uploads: no checksum, so no
+          # record and no publication, for a crate file the registry would
+          # refuse for its size.
+          python3 scripts/published_crates_standalone.py package-size --product meta --package-dir "${CARGO_TARGET_DIR}/package"
           for pair in "extension_sha256:meta-extension-state" "meta_sha256:meerkat-meta"; do
             output="${pair%%:*}"; crate="${pair##*:}"
             sum="$(sha256sum "${CARGO_TARGET_DIR}/package/${crate}-${VERSION}.crate" | cut -d' ' -f1)"

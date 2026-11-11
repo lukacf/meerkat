@@ -47,8 +47,10 @@ import {
 
 type FieldErrors = Partial<Record<IdentityFormField, string>>;
 
-/** What the notice under a form or a confirmation shows. */
-type ShownResult = IdentityChangeResult | { kind: "withdrawn" } | { kind: "note"; message: string };
+/** What the notice under a form or a confirmation shows. A note is the
+ * console's own word: that nothing is changed yet, or (an alert) that the
+ * agent's record could not be read. */
+type ShownResult = IdentityChangeResult | { kind: "withdrawn" } | { kind: "note"; message: string; alert?: boolean };
 
 /** A field of a form: its label, its control, a hint, and the refusal that
  * names it. */
@@ -223,7 +225,11 @@ export function IdentityResultNotice({
   onReload?: () => void;
 }): React.JSX.Element {
   if (result.kind === "note") {
-    return <Notice tone="neutral" role="status" testId="identity-notice" className="identity-notice">{result.message}</Notice>;
+    return (
+      <Notice tone={result.alert ? "crit" : "neutral"} role={result.alert ? "alert" : "status"} testId="identity-notice" className="identity-notice">
+        <span data-outcome={result.alert ? "unread" : "note"} className="identity-notice__title">{result.message}</span>
+      </Notice>
+    );
   }
   if (result.kind === "withdrawn") {
     return (
@@ -740,7 +746,9 @@ export function AgentChangeConfirm({
       try {
         request.current = agentRefRequest(await api.loadRecord(name));
       } catch (error) {
-        sender.setResult({ kind: "note", message: refusalMessage(error) });
+        // The record could not be read, so no change was sent: the
+        // gateway's sentence when it refused the read.
+        sender.setResult({ kind: "note", message: refusalMessage(error), alert: true });
         return;
       } finally {
         setReading(false);

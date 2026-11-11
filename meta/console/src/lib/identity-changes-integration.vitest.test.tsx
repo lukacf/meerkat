@@ -261,6 +261,9 @@ describe("long-term agents in the console", () => {
       name: "courier", display_name: "The courier", profile: "worker",
       provenance: { entered: "adopted", requester_kind: "human", requester: key, at_ms: 1_762_000_000_000, consent: { form: "decided" } },
     });
+    // Two agents without a display name, one of them archived.
+    family.seed({ name: "night-desk", profile: "worker" });
+    family.seed({ name: "old-desk", profile: "worker", archived: true });
     const { view } = await openRoster(family);
     await find(view, "roster-row:warden");
 
@@ -302,6 +305,14 @@ describe("long-term agents in the console", () => {
     // A change's outcome names the agent as people know it; ids stay in
     // Technical details.
     const form = await openNewAgent(view);
+    // An agent without a display name reads by its name in words, in the
+    // roster, among the peers and among the archived agents alike; the name
+    // itself is a tooltip.
+    expect(view.getByTestId("roster-row:night-desk").querySelector(".cc-entity__title")?.textContent).toBe("Night desk");
+    const peer = within(form).getByTestId("identity-peer:night-desk").closest("label");
+    expect(peer?.querySelector(".identity-form__option-name")?.textContent).toBe("Night desk");
+    expect(peer?.querySelector("[title='night-desk']")).not.toBeNull();
+    expect((await find(view, "roster-archived:old-desk")).querySelector(".identity-archived__name")?.textContent).toBe("Old desk");
     fireEvent.click(within(form).getByTestId("identity-profile:worker"));
     setField(form, "identity-field:name", "scout");
     setField(form, "identity-field:display_name", "Scout");

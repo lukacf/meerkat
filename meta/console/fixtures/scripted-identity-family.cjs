@@ -128,7 +128,9 @@ function createScriptedIdentityFamily(options = {}) {
   function summary(agent) {
     return {
       name: agent.name,
-      ...(agent.display_name ? { display_name: agent.display_name } : {}),
+      // An agent without a display name is written with its name in that
+      // member, as the gateway writes it.
+      display_name: agent.display_name || agent.name,
       profile: agent.profile,
       spec_digest: digestOf(agent),
       spec_revision: agent.spec_revision,
@@ -366,7 +368,7 @@ function createScriptedIdentityFamily(options = {}) {
           .filter(agent => !agent.archived)
           .map(agent => ({
             name: agent.name,
-            ...(agent.display_name ? { display_name: agent.display_name } : {}),
+            display_name: agent.display_name || agent.name,
             profile: agent.profile,
             verdict: "allowed",
           }));

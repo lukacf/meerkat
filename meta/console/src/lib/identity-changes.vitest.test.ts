@@ -8,12 +8,14 @@ import { describe, expect, it } from "vitest";
 
 import { createScriptedIdentityFamily } from "../../fixtures/scripted-identity-family.cjs";
 import { accessActionLabel, isKnownAccessAction } from "./access-actions";
+import { agentDisplayTitle } from "./agents";
 import { familiesFor } from "../panels/access-model";
 import {
   IDENTITY_REFUSED_CODE,
   agentChangeConfirmWords,
   agentIdentityControls,
   agentRefRequest,
+  agentShownName,
   archivedAgentControls,
   consentWords,
   createAgentsRequest,
@@ -415,6 +417,16 @@ describe("an outcome in words", () => {
     expect(consentWords("allowed")).toBe("Allowed by the host's rules");
     expect(consentWords("decided")).toBe("Decided by a person");
     expect(consentWords("later_form")).toBe("later_form");
+  });
+
+  it("shows an agent by its display name, or by its name in words where it has none", () => {
+    expect(agentShownName({ name: "warden", displayName: "The warden" })).toBe("The warden");
+    // The gateway writes the name where an agent has no display name: the
+    // console then names the agent as the roster does, never by the raw name.
+    expect(agentShownName({ name: "night-desk", displayName: "night-desk" })).toBe("Night desk");
+    expect(agentShownName({ name: "night-desk" })).toBe("Night desk");
+    expect(agentShownName({ name: "router:main", displayName: "router:main" }))
+      .toBe(agentDisplayTitle({ label: "router:main", identity: "router:main", member_id: "router:main", agent_id: "router:main" }));
   });
 
   it("asks before a change of the whole agent, and says a removal is for good", () => {

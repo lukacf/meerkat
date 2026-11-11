@@ -387,6 +387,12 @@ impl AgentLlmClient for TaintObservingLlmClient {
         self.inner.controller_model_facts()
     }
 
+    // The wrapped client's reasoning route. The trait default reports none,
+    // which would hide the route of every member this observer decorates.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
         self.inner.prepare_controller_credential().await
     }

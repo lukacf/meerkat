@@ -608,6 +608,12 @@ impl LlmClient for ProviderAgnosticLlmClient {
         self.inner.controller_model_selection()
     }
 
+    // The wrapped client's reasoning route. The trait default reports none,
+    // which would hide the route of every member built on this wrapper.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
+    }
+
     fn plain_model_route(
         &self,
         logical_model: &str,
@@ -731,6 +737,12 @@ impl meerkat_core::AgentLlmClient for ReplaySanitizingAgentLlmClient {
         &self,
     ) -> Result<meerkat_core::ControllerModelFacts, meerkat_core::ControllerFactsUnavailable> {
         self.inner.controller_model_facts()
+    }
+
+    // The wrapped client's reasoning route. The trait default reports none,
+    // which would hide the route of every member built on this wrapper.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
@@ -937,6 +949,12 @@ impl LlmClient for ReplaySanitizingLlmClient {
 
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         self.inner.controller_model_selection()
+    }
+
+    // The wrapped client's reasoning route. The trait default reports none,
+    // which would hide the route of every member built on this wrapper.
+    fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+        self.inner.reasoning_route()
     }
 
     fn plain_model_route(

@@ -70,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   member whose params carry it has its turns refused before any provider
   request.
 
+- A member's LLM client reports the reasoning route of the provider client
+  it is built on (`AgentLlmClient::reasoning_route()` and
+  `LlmClient::reasoning_route()`, new in Meerkat; see its changelog). Meta's
+  client wrappers (the mob-wide default client, the two replay sanitizers
+  and the dispatch taint observer) now forward the call. A wrapper that kept
+  the default would report no route for the members it decorates, whatever
+  the provider client states.
+
 ### Changed
 
 - A `GatingResolutionObserver` now also receives cause `withdrawn` with

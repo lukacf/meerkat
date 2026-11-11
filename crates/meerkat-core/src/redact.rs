@@ -940,7 +940,7 @@ mod tests {
         let alphabet: Vec<u8> = (b'A'..=b'Z')
             .chain(b'a'..=b'z')
             .chain(b'0'..=b'9')
-            .chain([b'+', b'/'])
+            .chain(*b"+/")
             .collect();
         let mut state: u64 = 0x2545_f491_4f6c_dd1d;
         (0..len)
@@ -1167,9 +1167,7 @@ mod tests {
         };
         let mut changed = 0;
         for _ in 0..40_000 {
-            let text: String = (0..1 + next(12))
-                .map(|_| atoms[next(atoms.len())])
-                .collect();
+            let text: String = (0..=next(12)).map(|_| atoms[next(atoms.len())]).collect();
             let mut once = text.clone();
             redact_credentials(&mut once, |visit| visit(&named));
             assert!(!once.contains(&named), "{text:?} -> {once:?}");

@@ -106,7 +106,9 @@ them.
 - `meerkat-copilot`: Meerkat reads the reasoning effort levels a GitHub
   Copilot account's model list states per model
   (`capabilities.supports.reasoning_effort`). `CopilotModelSupports` keeps
-  the statement as the list words it in `reasoning_effort`, and
+  the statement in `reasoning_effort` in one stored form (each word once,
+  the level words from `none` to `max`, then the words that name no level
+  in ascending order), and
   `CopilotModelSupports::stated_effort_levels` returns it as `EffortLevel`s:
   `None` when the entry states none, otherwise the stated levels, each once,
   from `none` to `max`; a word that names no level is left out. The read is
@@ -116,7 +118,9 @@ them.
   and the account capability gate does not check them. The levels are part
   of what a Copilot route compares, so when a refreshed list states other
   levels for a session's model, the session's prepared route is rebuilt, as
-  it already is when the list changes another capability of the model.
+  it already is when the list changes another capability of the model. A
+  list that only writes the same levels in another order, or writes one
+  twice, states nothing new and changes no route.
 
 ### Changed
 

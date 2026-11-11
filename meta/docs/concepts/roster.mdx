@@ -381,9 +381,11 @@ What to know:
   never inside a run.
 - **A fresh conversation needs nothing.** `meta/reset` and a new agent build
   their first prompt from the current text.
-- **Removing an agent** revokes its record. Archiving it keeps the record:
-  the agent comes back on its conversation with its instructions as they
-  were.
+- **Removing an agent** revokes its record. A removal the gateway stopped
+  right after, before the record was revoked, is completed at the next
+  start: the record of every removed agent is revoked then. Archiving an
+  agent keeps the record: the agent comes back on its conversation with its
+  instructions as they were.
 - **Models that take a system instruction only ahead of the conversation**
   (in today's model catalog: every Gemini model, the GPT Live models,
   `claude-opus-4-7`, `claude-opus-4-5`, `claude-sonnet-5`,

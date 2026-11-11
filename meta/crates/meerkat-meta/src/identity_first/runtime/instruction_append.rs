@@ -47,7 +47,9 @@
 //! yet needs no record: its first build takes the current text.
 //!
 //! The removal of an agent revokes its record
-//! ([`IdentityRuntime::after_removal`]). An archive keeps it.
+//! ([`IdentityRuntime::after_removal`]). An archive keeps it. A removal
+//! whose step never ran is completed at the next start: the start check
+//! revokes the record of every agent the mob holds as removed.
 
 use meerkat_core::{
     InstructionContentDigest, InstructionEffect, InstructionKey, InstructionLowering,
@@ -580,7 +582,8 @@ impl IdentityRuntime {
     /// Per agent it reads the mob's record of the agent from the mob's
     /// state and, for an agent with no record whose session a build
     /// created, the sections that session's build state records. No
-    /// transcript is read, and nothing is woken.
+    /// transcript is read, and nothing is woken. Then the records of
+    /// removed agents are revoked (`revoke_records_of_removed_agents`).
     pub(crate) fn append_changed_instructions_at_start(
         &self,
         generation: u64,
@@ -609,7 +612,65 @@ impl IdentityRuntime {
                 )
                 .await;
             }
+            self.revoke_records_of_removed_agents(&mob).await;
         })
+    }
+
+    /// The other half of the start check, from what the mob holds: every
+    /// record of the platform's namespace whose agent the mob holds as
+    /// removed is revoked, as [`Self::after_removal`] revokes it. So a
+    /// removal that committed while the step after it never ran (the
+    /// process stopped in between; a replayed removal is answered from the
+    /// mob's receipt and does not repeat the step) still ends with its
+    /// record revoked. An archived agent is not removed: its record stays.
+    /// A record revoked already is left as it is, so a later start writes
+    /// nothing. One read of the mob's records and one read of the mob's
+    /// state per active record; no session is read.
+    async fn revoke_records_of_removed_agents(&self, mob: &MobHandle) {
+        let Ok(namespace) = InstructionNamespace::new(INSTRUCTIONS_NAMESPACE) else {
+            return;
+        };
+        let records = match mob
+            .operator_instruction_status(OperatorInstructionStatusQuery {
+                namespace: Some(namespace),
+                key: None,
+                agent_identity: None,
+                profile: None,
+                offset: usize::MAX,
+                limit: Some(1),
+            })
+            .await
+        {
+            Ok(page) => page.desired,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "the mob's instruction records could not be read; the records of removed \
+                     agents are revoked at the next start"
+                );
+                return;
+            }
+        };
+        for record in records {
+            if record.effect != InstructionEffect::Active {
+                continue;
+            }
+            let OperatorInstructionTarget::Member {
+                agent_identity: member,
+            } = &record.target
+            else {
+                continue;
+            };
+            if !matches!(
+                mob.identity_entry(member),
+                Ok(meerkat_mob::IdentityEntryRead::Removed)
+            ) {
+                continue;
+            }
+            let identity =
+                crate::member_comms_id::durable_identity_for_roster_member(member.as_str());
+            self.after_removal(mob, &identity).await;
+        }
     }
 }
 

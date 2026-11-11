@@ -33,12 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on a host that does not keep council records across a restart. Other
   nested members are listed and served as before. Frames a console stored
   for participants before this release stay in its console store, unserved.
-  Affected: 0.8.27 through 0.9.12.
+  Affected: 0.8.27 through 0.9.13.
 
-## [0.9.12] - 2026-11-10
+## [0.9.13] - 2026-11-11
 
-Meta 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12 and Connect
-0.9.12, released together) and pins Core `=0.9.12`.
+Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect
+0.9.13, released together) and pins Core `=0.9.13`.
+
+Meta 0.9.13 holds every change of Meta 0.9.12 and one fix: the `meerkat-meta`
+crate fits the crates.io upload limit. Meta 0.9.12 was released in part,
+without that crate. See Fixed and Upgrade.
 
 Meta serves identities created at runtime: a send by name, a dispatch, a
 member mutation or a schedule fire to one goes through the identity's door
@@ -117,6 +121,14 @@ starts a fresh setup team on its first start. See Upgrade and Changed.
   not through a member.
 
 ### Upgrade
+
+- Meta 0.9.12 was released in part, and 0.9.13 replaces it. The GitHub release
+  `meta-v0.9.12` (gateways for Linux x86_64, Linux arm64 and Apple silicon
+  macOS), the Python SDK `meerkat-meta` 0.9.12 on PyPI, the TypeScript SDK
+  `@rkat/meta-sdk` 0.9.12 on npm and the `meta-extension-state` 0.9.12 crate
+  exist. The `meerkat-meta` 0.9.12 crate does not: crates.io refused it, so a
+  Rust host moves from `meerkat-meta` 0.9.11 to 0.9.13. Move a 0.9.12 gateway
+  or SDK to 0.9.13 as well: Meta 0.9.13 pins Core `=0.9.13`.
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
   from, so an existing Forge folder starts a fresh setup team in its
@@ -205,6 +217,13 @@ starts a fresh setup team on its first start. See Upgrade and Changed.
   names it in each of its profiles, which Core's mob profiles apply.
 
 ### Fixed
+
+- The `meerkat-meta` crate is published without its integration test
+  directory (`tests/`), which brings the package back under the registry's
+  10 MiB limit (8.4 MiB). Meta 0.9.12's crate was 44 KB over that limit, the
+  registry refused it, and `meerkat-meta` 0.9.12 was never published on
+  crates.io. The pull request and release checks now fail when a packaged
+  crate exceeds 9.5 MiB.
 
 - Meta's grant answers report `applies` and the member's gate, as Meerkat's
   own `tool_grants/grant` and `tool_grants/list` report them:
@@ -399,7 +418,7 @@ starts a fresh setup team on its first start. See Upgrade and Changed.
   trait's default; the stock gateway policy does not), a temporary council's
   participants are listed as members, and their stored history holds a copy of
   the source member's earlier turns: a caller denied the source can read them
-  through a participant. Affects 0.8.27 through 0.9.12. Keep the stock policy,
+  through a participant. Affects 0.8.27 through 0.9.13. Keep the stock policy,
   or deny the participants by name (`council-p0`, ...). The next release no
   longer lists them.
 
@@ -408,6 +427,14 @@ starts a fresh setup team on its first start. See Upgrade and Changed.
   whose console visibility policy lists nested mobs can then show that
   mob's members to people the private member itself is hidden from. The
   stock console lists no nested mob, so it does not show them.
+
+## [0.9.12] - 2026-11-10
+
+Meta 0.9.12 was released in part: the GitHub release `meta-v0.9.12`, the
+Python SDK `meerkat-meta` 0.9.12 (PyPI), the TypeScript SDK `@rkat/meta-sdk`
+0.9.12 (npm) and the `meta-extension-state` 0.9.12 crate exist; the
+`meerkat-meta` 0.9.12 crate does not (crates.io refused it as larger than its
+upload limit). Its changes are listed under 0.9.13, which replaces it.
 
 ## [0.9.11] - 2026-11-09
 

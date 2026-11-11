@@ -16,7 +16,7 @@ use super::super::config::PreparationMode;
 use super::super::digest::Sha256Digest;
 use super::super::policy::PreparationRule;
 use super::super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem};
-use super::super::request::{CreatedSpec, EdgeBasis};
+use super::super::request::{CreatedSpec, EdgeBasis, core_member_name};
 use super::{
     AgentAdmission, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor,
     ExecutorError, committed_outcome, core_name, outcome_of_change, refusal_of_error,
@@ -135,9 +135,8 @@ pub(super) async fn requester_input(
                         .await
                 }
                 AgentAdmission::Recorded => {
-                    let member = match core_name(identity, "requester") {
-                        Ok(member) => member,
-                        Err(refusal) => return Ok(Err(refusal)),
+                    let Some(member) = core_member_name(identity) else {
+                        return Ok(Err(IdentityRefusal::new(IdentityRefusalKind::InvalidName)));
                     };
                     commit
                         .mob

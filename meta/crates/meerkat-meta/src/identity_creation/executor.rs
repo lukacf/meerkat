@@ -13,7 +13,7 @@
 //!
 //! Before Core is called the seam refuses, for every requester:
 //! - a requester that is not the one the request records
-//!   (`invalid_request`);
+//!   (`invalid_request`, of no field);
 //! - a member private to a person (`private_requester`);
 //! - a change, other than an adoption, of an agent its host configures
 //!   (`owner_read_only`).
@@ -518,12 +518,12 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
 /// What the seam refuses before Core is called, for every requester.
 fn refused_before_core(commit: &ChangeCommit<'_>) -> Option<IdentityRefusal> {
     if commit.request.requester != commit.requester.recorded() {
-        return Some(
-            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Conflicting,
-            })
-            .at("requester"),
-        );
+        // The requester is no field of a request as written: a surface
+        // that attributes another requester than the request records has
+        // a defect, and the refusal names no field.
+        return Some(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+            problem: RequestProblem::Conflicting,
+        }));
     }
     if commit.requester.is_private_member() {
         return Some(IdentityRefusal::new(IdentityRefusalKind::PrivateRequester));
@@ -704,6 +704,10 @@ fn entry_standing(
     }
 }
 
+/// The correlation of an `admission_unsettled` that answers a member step
+/// in flight.
+const MEMBER_STEP: &str = "member_step";
+
 /// The typed refusal of an error of Core's change path: a refusal of the
 /// change under its own kind ([`refusal_of_core`]), and a member step in
 /// flight as the retryable `admission_unsettled`. Any other error is no
@@ -711,9 +715,11 @@ fn entry_standing(
 pub fn refusal_of_error(error: MobError) -> Result<IdentityRefusal, ExecutorError> {
     match error {
         MobError::IdentityChangeRefused { refusal } => Ok(refusal_of_core(&refusal)),
-        MobError::LifecycleOperationPending { intent } => Ok(IdentityRefusal::new(
+        // Core's sentence for the step in flight is Core's own and stays
+        // off the wire: the correlation names what kind of step it is.
+        MobError::LifecycleOperationPending { .. } => Ok(IdentityRefusal::new(
             IdentityRefusalKind::AdmissionUnsettled {
-                correlation: intent,
+                correlation: MEMBER_STEP.to_owned(),
             },
         )),
         other => Err(ExecutorError::Core(Box::new(other))),
@@ -721,19 +727,18 @@ pub fn refusal_of_error(error: MobError) -> Result<IdentityRefusal, ExecutorErro
 }
 
 /// A refusal of Core's change path in the closed vocabulary, under Core's
-/// own kind token. Its detail is the kind's own sentence: Core's text may
-/// say where an agent's record lives, which no surface does. A malformed
-/// request keeps Core's words for what is malformed.
+/// own kind token. Its detail is the kind's own sentence, for every kind:
+/// Core's text may say where an agent's record lives, which no surface
+/// does, so none of Core's words is written.
 pub fn refusal_of_core(refusal: &IdentityChangeRefusal) -> IdentityRefusal {
     use IdentityChangeRefusal as Core;
     use IdentityRefusalKind as Kind;
     let kind = match refusal {
-        Core::InvalidRequest { problem } => {
-            return IdentityRefusal::new(Kind::InvalidRequest {
-                problem: RequestProblem::Malformed,
-            })
-            .with_detail(format!("The request is malformed: {problem}."));
-        }
+        // Core's words for what is malformed are Core's: they can say
+        // where a record lives, so the kind's own sentence is answered.
+        Core::InvalidRequest { .. } => Kind::InvalidRequest {
+            problem: RequestProblem::Malformed,
+        },
         Core::BatchTooLarge { max } => Kind::BatchTooLarge { max: *max as u64 },
         Core::ProfileUnknown { profile } => Kind::ProfileUnknown {
             profile: profile.as_str().to_owned(),

@@ -27,8 +27,9 @@ interface Harness extends MetaConsoleTransport {
 
 /** A console transport over the scripted family: the experience read
  * carries its agents, its section and their affordances, and each command
- * of the family is answered as the console RPC answers it. */
-function transport(family: Family): Harness {
+ * of the family is answered as the console RPC answers it. With
+ * `serveFamily` false the gateway serves no method of the family. */
+function transport(family: Family, { serveFamily = true }: { serveFamily?: boolean } = {}): Harness {
   const harness: Harness = {
     commands: [],
     loadExperience: async () => ({
@@ -45,7 +46,9 @@ function transport(family: Family): Harness {
     loadModules: async () => ({ modules: [] }) as never,
     capabilities: async () => ({
       version: "test",
-      methods: [...new Set([...Object.values(CONSOLE_RPC_METHODS), ...family.methods])],
+      methods: serveFamily
+        ? [...new Set([...Object.values(CONSOLE_RPC_METHODS), ...family.methods])]
+        : Object.values(CONSOLE_RPC_METHODS).filter((method) => !method.startsWith("meta/identity/")),
     }) as never,
     queryTimeline: async () => ({ frames: [], available: true }) as never,
     subscribeTimeline: () => () => undefined,
@@ -54,6 +57,10 @@ function transport(family: Family): Harness {
       const method = consoleCommandMethod(input.command);
       const params = (input.params || {}) as Record<string, unknown>;
       harness.commands.push({ command: input.command, method, params });
+      // The requester's own held changes, as the decisions read lists them.
+      if (method === CONSOLE_RPC_METHODS.decisionsList) {
+        return { command: input.command, accepted: true, result: { decisions: [], statuses: family.decisionStatuses(), unreadable: [] } } as never;
+      }
       const answer = family.handle(method, params);
       if (!answer) return { command: input.command, accepted: true, result: {} } as never;
       if (answer.lost) throw new Error(`${method} request timed out`);
@@ -77,9 +84,9 @@ function seedDock(target: Record<string, unknown>): void {
 
 const ROSTER = { id: "roster", kind: "roster", title: "Roster" };
 
-async function openRoster(family: Family): Promise<{ view: View; harness: Harness }> {
+async function openRoster(family: Family, options?: { serveFamily?: boolean }): Promise<{ view: View; harness: Harness }> {
   seedDock(ROSTER);
-  const harness = transport(family);
+  const harness = transport(family, options);
   const view = render(<ConsoleApp baseUrl="" transport={harness} />);
   await view.findByTestId("roster-panel", undefined, { timeout: 5_000 });
   return { view, harness };
@@ -371,18 +378,33 @@ describe("long-term agents in the console", () => {
       entry.apply(family);
       const { view } = await openRoster(family);
       await selectAgent(view, "warden");
-      if (entry.off === "identity_changes.available") await settle(300);
-      else await find(view, "roster-archived:oldhand");
+      await find(view, "roster-archived:oldhand");
       const shown = all.filter((control) => present(view, CONTROLS[control]));
       expect({ off: entry.off, shown }).toEqual({ off: entry.off, shown: all.filter((control) => !entry.hidden.includes(control)) });
-      // Without the section the console reads nothing of the family.
+      // Where no change is offered the archived agents are still listed:
+      // the console reads, and sends no change.
       if (entry.off === "identity_changes.available") {
-        expect(present(view, "roster-archived")).toBe(false);
-        expect(family.calls).toEqual([]);
+        expect(view.getByTestId("roster-archived:oldhand").textContent).toContain("Old hand");
+        expect(family.calls.map((call: { method: string }) => call.method).every((method: string) =>
+          method === "meta/identity/list" || method === "meta/identity/get" || method === "meta/identity/operation")).toBe(true);
       }
       view.unmount();
       cleanup();
     }
+
+    // A gateway that serves no method of the family: the console reads
+    // nothing of it and shows nothing of it, whatever the section says.
+    window.localStorage.clear();
+    const unserved = createScriptedIdentityFamily();
+    unserved.seed({ name: "oldhand", display_name: "Old hand", archived: true });
+    unserved.flags.available = false;
+    const { view } = await openRoster(unserved, { serveFamily: false });
+    await selectAgent(view, "warden");
+    await settle(300);
+    expect(all.filter((control) => present(view, CONTROLS[control]))).toEqual([]);
+    expect(present(view, "roster-archived")).toBe(false);
+    expect(unserved.calls).toEqual([]);
+    view.unmount();
   }, 120_000);
 
   it("a_refusal_is_shown_at_its_field_with_its_sentence", async () => {
@@ -509,18 +531,67 @@ describe("long-term agents in the console", () => {
     view.unmount();
     cleanup();
 
-    // An agent the viewer may not change offers no change in its menu.
-    window.localStorage.clear();
-    const refused = createScriptedIdentityFamily();
-    refused.setAffordances("warden", { can_change_identity: false, can_remove_identity: false });
-    seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });
-    const closed = render(<ConsoleApp baseUrl="" transport={transport(refused)} />);
-    await find(closed, "inspect-record:warden");
-    fireEvent.click(closed.getByTestId("inspect-menu:warden"));
-    for (const change of ["edit", "archive", "remove"]) {
-      expect(present(closed, `inspect-action:warden:${change}`)).toBe(false);
+    // An agent the viewer may not change offers no change in its menu, and
+    // neither does a console that offers no change at all; the record of
+    // who asked is read either way.
+    for (const apply of [
+      (family: Family) => family.setAffordances("warden", { can_change_identity: false, can_remove_identity: false }),
+      (family: Family) => { family.flags.available = false; },
+    ]) {
+      window.localStorage.clear();
+      const refused = createScriptedIdentityFamily();
+      apply(refused);
+      seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });
+      const closed = render(<ConsoleApp baseUrl="" transport={transport(refused)} />);
+      expect((await find(closed, "inspect-record:warden")).textContent).toContain("Asked for by");
+      fireEvent.click(closed.getByTestId("inspect-menu:warden"));
+      for (const change of ["edit", "archive", "remove"]) {
+        expect(present(closed, `inspect-action:warden:${change}`)).toBe(false);
+      }
+      closed.unmount();
+      cleanup();
     }
-    closed.unmount();
+  }, 60_000);
+
+  it("the_requesters_own_decision_card_offers_withdraw_and_no_approve", async () => {
+    const family = createScriptedIdentityFamily();
+    const { view } = await openRoster(family);
+    const form = await openNewAgent(view);
+    fireEvent.click(within(form).getByTestId("identity-profile:reviewer"));
+    setField(form, "identity-field:name", "auditor");
+    setField(form, "identity-field:display_name", "The auditor");
+    fireEvent.submit(form);
+    await find(view, "identity-notice");
+    const requestId = calls(family, "meta/identity/create")[0].request_id;
+
+    // The approvals view lists the decision the request waits for. The
+    // card is the requester's own: it says so, offers no approval, and
+    // offers the withdrawal.
+    fireEvent.click(await find(view, "nav:gating"));
+    const card = await find(view, "decision-card:decision-1");
+    expect(card.querySelector(".cc-approval__title")?.textContent).toBe("New long-term agent");
+    expect(card.textContent).toContain("You asked for this change");
+    expect(card.textContent).toContain("a person cannot approve their own request");
+    // Its one control is the withdrawal (the technical details keep their copy buttons).
+    expect(Array.from(card.querySelectorAll("button"))
+      .filter((button) => button.closest(".cc-approval__details") === null)
+      .map((button) => button.textContent))
+      .toEqual(["Withdraw request"]);
+    expect(card.textContent).not.toMatch(/\bapprove\b(?! their own request)/i);
+
+    // A withdrawal the gateway refuses shows its sentence on the card.
+    family.scriptNext("meta/identity/withdraw", {
+      refuse: { kind: "decision_closed", state: "approved", detail: "The decision is closed: it was approved." },
+    });
+    fireEvent.click(within(card).getByTestId("decision-card-withdraw"));
+    expect((await find(view, "decision-card-withdraw-refused")).textContent).toBe("The decision is closed: it was approved.");
+
+    // The withdrawal names the person's own request, and the card goes.
+    fireEvent.click(within(card).getByTestId("decision-card-withdraw"));
+    await gone(view, "decision-card:decision-1");
+    expect(calls(family, "meta/identity/withdraw")).toEqual([{ request_id: requestId }, { request_id: requestId }]);
+    expect(family.agents.has("auditor")).toBe(false);
+    view.unmount();
   }, 60_000);
 
   it("a_pending_decision_is_shown_and_can_be_withdrawn", async () => {

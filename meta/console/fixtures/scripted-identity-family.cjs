@@ -299,8 +299,9 @@ function createScriptedIdentityFamily(options = {}) {
     if (done.hold) {
       decisions += 1;
       const decisionId = `decision-${decisions}`;
-      outcome = { outcome: "pending_decision", operation_id: id, decision_id: decisionId, deadline_ms: now() + 3_600_000 };
-      held.set(id, { decisionId, commit: done.hold });
+      const deadlineMs = now() + 3_600_000;
+      outcome = { outcome: "pending_decision", operation_id: id, decision_id: decisionId, deadline_ms: deadlineMs };
+      held.set(id, { decisionId, deadlineMs, kind: `identity.${method.slice("meta/identity/".length)}`, commit: done.hold });
     } else if (done.preparation) {
       outcome = { outcome: "pending_preparation", operation_id: id, agents: done.preparation };
     } else {
@@ -410,6 +411,19 @@ function createScriptedIdentityFamily(options = {}) {
         return true;
       }
       return false;
+    },
+    /**
+     * The held changes as `meta/decisions/list` answers them to their
+     * requester: a status row each (where the decision stands, never what
+     * it holds).
+     */
+    decisionStatuses() {
+      return [...held.values()].map(decision => ({
+        decision_id: decision.decisionId,
+        kind: decision.kind,
+        phase: "open",
+        deadline_at_ms: decision.deadlineMs,
+      }));
     },
     /**
      * One call, as the console RPC answers it: `{result}`, `{error: {code,

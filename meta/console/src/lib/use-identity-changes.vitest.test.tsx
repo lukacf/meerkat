@@ -12,7 +12,7 @@ import { useIdentityChanges, type IdentityCommand } from "./use-identity-changes
 
 const ALL = { available: true, canCreate: true, canChange: true, canRemove: true };
 
-function setup(flags = ALL) {
+function setup(flags = ALL, readable = false) {
   const family = createScriptedIdentityFamily();
   const onChanged = vi.fn();
   const run = async (command: IdentityCommand, params: Record<string, unknown>) => {
@@ -21,19 +21,29 @@ function setup(flags = ALL) {
     if (answer.error) throw Object.assign(new Error(answer.error.message), { rpcError: answer.error });
     return answer.result;
   };
-  const hook = renderHook((props: { flags: typeof ALL }) => useIdentityChanges({ flags: props.flags, run, onChanged }), { initialProps: { flags } });
+  const hook = renderHook(
+    (props: { flags: typeof ALL; readable: boolean }) => useIdentityChanges({ flags: props.flags, readable: props.readable, run, onChanged }),
+    { initialProps: { flags, readable } },
+  );
   return { family, onChanged, hook };
 }
 
+const NONE = { available: false, canCreate: false, canChange: false, canRemove: false };
+
 describe("the console's changes of long-term agents", () => {
-  it("is offered only where the gateway serves the changes", () => {
-    expect(setup({ ...ALL, available: false }).hook.result.current).toBeNull();
+  it("is offered where the gateway serves the changes or the reads", () => {
+    // Neither the changes nor the reads: nothing of the family.
+    expect(setup(NONE).hook.result.current).toBeNull();
     const { hook } = setup();
     expect(hook.result.current?.flags).toEqual(ALL);
     // The same flags keep the same object: a panel reads again only on a change.
     const first = hook.result.current;
-    hook.rerender({ flags: { ...ALL } });
+    hook.rerender({ flags: { ...ALL }, readable: false });
     expect(hook.result.current).toBe(first);
+    // The reads without the changes: the archived agents can be listed, and
+    // the flags offer no control.
+    const reads = setup(NONE, true).hook.result.current;
+    expect(reads?.flags).toEqual(NONE);
   });
 
   it("keeps a request that waits for a decision until it is decided", async () => {
@@ -45,7 +55,7 @@ describe("the console's changes of long-term agents", () => {
       result = await api().change("create", { agents: [{ name: "auditor", profile: "reviewer" }] }, requestId, "The auditor");
     });
     expect(result).toMatchObject({ kind: "outcome", outcome: { outcome: "pending_decision", decisionId: "decision-1" } });
-    expect(api().pending).toEqual([{ requestId, change: "create", name: "The auditor", deadlineMs: expect.any(Number) }]);
+    expect(api().pending).toEqual([{ requestId, decisionId: "decision-1", change: "create", name: "The auditor", deadlineMs: expect.any(Number) }]);
     // Nothing changed yet, so nothing is read again.
     expect(onChanged).not.toHaveBeenCalled();
 
@@ -121,7 +131,7 @@ describe("the console's changes of long-term agents", () => {
     family.seed({ name: "relic", archived: true });
     const run = async (command: IdentityCommand, params: Record<string, unknown>) =>
       family.handle(consoleCommandMethod(CONSOLE_COMMAND_NAMES[command]), params).result;
-    const { result } = renderHook(() => useIdentityChanges({ flags: ALL, run, onChanged: () => {} }));
+    const { result } = renderHook(() => useIdentityChanges({ flags: ALL, readable: true, run, onChanged: () => {} }));
     const directory = await result.current!.loadDirectory();
     expect(directory.profiles.map((entry) => entry.profile)).toEqual(["worker", "reviewer", "operator"]);
     expect(directory.peers.map((entry) => entry.name)).toEqual(["helper", "warden"]);

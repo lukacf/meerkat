@@ -31,6 +31,7 @@ import {
 import type { IdentityChangeResult, IdentityChangesApi, IdentityDirectory, IdentityPlanResult } from "../lib/use-identity-changes";
 import { errorMessage } from "../lib/errors";
 import { principalName } from "./decision-cards";
+import { useConfirmDialog } from "./LifecycleConfirm";
 import {
   AgentName,
   Button,
@@ -810,14 +811,27 @@ export function AgentChangeConfirm({
   };
   const busy = reading || sender.busy;
   const open = keepsForm(sender.result);
+  // The dialog of a lifecycle confirmation: focus on the safe choice, Tab
+  // kept inside, Escape and a click outside leave it (not while the change
+  // is being sent: its answer must be seen), focus back to what opened it.
+  const { rootRef, cancelRef, onKeyDown } = useConfirmDialog(onClose, busy);
+  // When the question gives way to the outcome its Confirm button is gone:
+  // focus moves to the one control left.
+  React.useEffect(() => {
+    if (!open) cancelRef.current?.focus({ preventScroll: true });
+  }, [open, cancelRef]);
   return (
     <div
+      ref={rootRef}
       role="alertdialog"
-      aria-labelledby={questionId}
-      aria-describedby={consequenceId}
+      aria-modal="true"
+      aria-labelledby={open ? questionId : undefined}
+      aria-describedby={open ? consequenceId : undefined}
+      aria-label={open ? undefined : `${CHANGE_WORDS[change]} ${displayName}`}
       className="lifecycle-confirm identity-confirm"
       data-action={change}
       data-testid={`identity-confirm:${name}:${change}`}
+      onKeyDown={onKeyDown}
     >
       {open ? (
         <>
@@ -848,7 +862,7 @@ export function AgentChangeConfirm({
         {open && change === "remove" && onArchiveInstead ? (
           <Button size="sm" disabled={busy} onClick={onArchiveInstead} data-testid="identity-confirm-archive-instead">Archive instead</Button>
         ) : null}
-        <Button size="sm" variant={open ? "default" : "ghost"} onClick={onClose} data-testid="identity-confirm-cancel">{open ? "Cancel" : "Close"}</Button>
+        <Button ref={cancelRef} size="sm" variant={open ? "default" : "ghost"} onClick={onClose} data-testid="identity-confirm-cancel">{open ? "Cancel" : "Close"}</Button>
       </div>
     </div>
   );

@@ -569,6 +569,9 @@ export function RosterPanel({
       subtitle={AGENT_CHANGE_WORDS[agentChange.change]}
       onClose={() => setAgentChange(null)}
       closeTestId="roster-change-close"
+      // A confirmation is a dialog of its own and takes focus on its safe
+      // choice; a form leaves it on the drawer's heading.
+      autoFocus={agentChange.change === "edit"}
     >
       <AgentChangePanel
         api={identityChanges}

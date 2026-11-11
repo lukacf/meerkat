@@ -802,6 +802,89 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
+  it("a_confirmation_takes_focus_and_is_left_by_escape_or_a_click_outside", async () => {
+    const family = createScriptedIdentityFamily();
+    seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });
+    const harness = transport(family);
+    // The archive's answer waits until the row lets it go.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const execute = harness.executeCommand!;
+    harness.executeCommand = async (input) => {
+      if (consoleCommandMethod(input.command) === "meta/identity/archive") await held;
+      return execute(input);
+    };
+    const view = render(<ConsoleApp baseUrl="" transport={harness} />);
+    await find(view, "inspect-record:warden");
+    const open = async (change: string): Promise<HTMLElement> => {
+      const menu = view.getByTestId("inspect-menu:warden");
+      menu.focus();
+      fireEvent.click(menu);
+      fireEvent.click(view.getByTestId(`inspect-action:warden:${change}`));
+      return find(view, `identity-confirm:warden:${change}`);
+    };
+
+    // The confirmation of a removal is a dialog of its own: named by its
+    // question, described by what happens, with focus on the safe choice.
+    let confirm = await open("remove");
+    expect(confirm.getAttribute("role")).toBe("alertdialog");
+    expect(confirm.getAttribute("aria-modal")).toBe("true");
+    expect(document.getElementById(confirm.getAttribute("aria-labelledby") || "")?.textContent).toContain("Remove The warden for good?");
+    expect(document.getElementById(confirm.getAttribute("aria-describedby") || "")?.textContent).toContain("can never be used again");
+    const cancel = within(confirm).getByTestId("identity-confirm-cancel");
+    expect(document.activeElement).toBe(cancel);
+    // Tab stays inside it: from its last control to its first, and back.
+    fireEvent.keyDown(cancel, { key: "Tab" });
+    expect(document.activeElement).toBe(within(confirm).getByTestId("identity-confirm-yes"));
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(cancel);
+    // Escape cancels, and focus goes back to the control that asked.
+    fireEvent.keyDown(confirm, { key: "Escape" });
+    await gone(view, "identity-confirm:warden:remove");
+    expect(document.activeElement).toBe(view.getByTestId("inspect-menu:warden"));
+
+    // So does a click anywhere outside it; a click inside it does not.
+    confirm = await open("remove");
+    fireEvent.pointerDown(within(confirm).getByTestId("identity-confirm-yes"));
+    expect(present(view, "identity-confirm:warden:remove")).toBe(true);
+    fireEvent.pointerDown(view.getByTestId("inspect-record:warden"));
+    await gone(view, "identity-confirm:warden:remove");
+    expect(calls(family, "meta/identity/remove")).toEqual([]);
+
+    // While the change is being sent neither leaves it: its answer may be
+    // that none came, and that must be seen.
+    confirm = await open("archive");
+    const yes = within(confirm).getByTestId("identity-confirm-yes") as HTMLButtonElement;
+    fireEvent.click(yes);
+    await waitFor(() => expect(yes.disabled).toBe(true), { timeout: 5_000 });
+    fireEvent.keyDown(confirm, { key: "Escape" });
+    fireEvent.pointerDown(view.getByTestId("inspect-record:warden"));
+    expect(present(view, "identity-confirm:warden:archive")).toBe(true);
+    await act(async () => { release(); });
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("The warden is archived"), { timeout: 5_000 });
+    // The outcome keeps the dialog named, and focus is on its one control.
+    confirm = view.getByTestId("identity-confirm:warden:archive");
+    expect(confirm.getAttribute("aria-labelledby")).toBeNull();
+    expect(confirm.getAttribute("aria-label")).toBe("Archive The warden");
+    expect(document.activeElement).toBe(within(confirm).getByTestId("identity-confirm-cancel"));
+    fireEvent.keyDown(confirm, { key: "Escape" });
+    await gone(view, "identity-confirm:warden:archive");
+    expect(calls(family, "meta/identity/archive")).toHaveLength(1);
+    view.unmount();
+    cleanup();
+
+    // The roster's confirmation is the same dialog.
+    window.localStorage.clear();
+    const roster = await openRoster(createScriptedIdentityFamily());
+    await selectAgent(roster.view, "warden");
+    fireEvent.click(roster.view.getByTestId("roster-action:warden:remove"));
+    const asked = await find(roster.view, "identity-confirm:warden:remove");
+    await waitFor(() => expect(document.activeElement).toBe(within(asked).getByTestId("identity-confirm-cancel")), { timeout: 5_000 });
+    fireEvent.keyDown(asked, { key: "Escape" });
+    await gone(roster.view, "identity-confirm:warden:remove");
+    roster.view.unmount();
+  }, 60_000);
+
   it("an_answer_that_refuses_is_shown_as_a_refusal_never_as_no_answer", async () => {
     // An archived agent's Unarchive is offered by the section's flag; the
     // gateway judges the agent when the change is sent, and may say no.

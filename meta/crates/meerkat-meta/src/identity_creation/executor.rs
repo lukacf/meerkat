@@ -30,6 +30,7 @@
 //! archive calls nothing: an archived agent keeps what the step holds, so
 //! its unarchive resumes on its current instructions.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -47,6 +48,7 @@ use super::outcome::{
     AgentChangeState, AgentOutcome, AgentSeat, IdentityOutcome, InstructionOutcome,
     InstructionsChanged,
 };
+use super::policy::PreparationRule;
 use super::refusal::{
     IdentityRefusal, IdentityRefusalKind, NameTakenBy, NotAdoptableReason, RequestProblem,
 };
@@ -216,6 +218,14 @@ pub struct ChangeCommit<'a> {
     /// run-time change of it, other than its adoption, is refused
     /// `owner_read_only` before Core is called. Never set for a create.
     pub configured_target: bool,
+    /// How the host prepares an agent of each profile before its first use,
+    /// by profile, from its policy (`IdentityCreationPolicy::preparations`).
+    /// A create commits each agent with its profile's mode: an agent of a
+    /// profile the host prepares is committed pending its preparation, has
+    /// no member and is not usable until the host settles it, and the
+    /// create answers `pending_preparation`. `None`, and a profile the map
+    /// lacks, prepare nothing.
+    pub preparations: Option<&'a BTreeMap<String, PreparationRule>>,
 }
 
 impl std::fmt::Debug for ChangeCommit<'_> {
@@ -228,6 +238,7 @@ impl std::fmt::Debug for ChangeCommit<'_> {
             .field("consent", &self.consent)
             .field("request", &self.request)
             .field("configured_target", &self.configured_target)
+            .field("preparations", &self.preparations)
             .finish()
     }
 }
@@ -249,7 +260,19 @@ impl<'a> ChangeCommit<'a> {
             consent,
             request,
             configured_target: false,
+            preparations: None,
         }
+    }
+
+    /// This commit, with how the host prepares an agent of each profile
+    /// before its first use (`IdentityCreationPolicy::preparations`).
+    #[must_use]
+    pub fn with_preparations(
+        mut self,
+        preparations: &'a BTreeMap<String, PreparationRule>,
+    ) -> Self {
+        self.preparations = Some(preparations);
+        self
     }
 
     /// This commit, of an agent its host configures when `configured`.

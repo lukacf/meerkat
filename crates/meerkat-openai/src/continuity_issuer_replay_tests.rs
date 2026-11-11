@@ -725,6 +725,202 @@ async fn a_transcript_stored_by_0_9_12_resumes_on_every_service() {
 }
 
 // ---------------------------------------------------------------------------
+// Hosted-tool items
+// ---------------------------------------------------------------------------
+
+/// The item a service returned for a web search it ran itself. Its `id` is
+/// issued by the service and lives inside the item, not in provider
+/// metadata.
+fn web_search_call() -> Value {
+    json!({
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "weather in Oslo"}
+    })
+}
+
+/// One step that reasoned, searched the web on the service's side and
+/// answered, then the next question.
+fn hosted_search_then_question(issuer: Option<&Value>) -> Vec<Message> {
+    let mut search = serde_json::to_value(AssistantBlock::ServerToolContent {
+        id: Some("ws_1".to_string()),
+        kind: meerkat_core::ServerToolKind::WebSearch,
+        content: web_search_call(),
+        meta: None,
+    })
+    .expect("block serializes");
+    search["data"]["meta"] = meta(
+        json!({"provider": "open_ai_response", "response_id": "resp_w"}),
+        issuer,
+    );
+    vec![
+        user("What is the weather in Oslo?"),
+        Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![
+                block(json!({"block_type": "reasoning", "data": {
+                    "text": "",
+                    "meta": meta(json!({
+                        "provider": "open_ai",
+                        "id": "rs_w",
+                        "encrypted_content": "ciphertext-w",
+                        "response_id": "resp_w"
+                    }), issuer)
+                }})),
+                block(search),
+                block(json!({"block_type": "text", "data": {
+                    "text": "The forecast says 4 C.",
+                    "meta": meta(json!({
+                        "provider": "open_ai_assistant_message",
+                        "id": "msg_w",
+                        "response_id": "resp_w"
+                    }), issuer)
+                }})),
+            ],
+            StopReason::EndTurn,
+        )),
+        user("And tomorrow?"),
+    ]
+}
+
+/// A hosted-tool item carries an id its service issued and is paired with
+/// that step's reasoning item. Another issuer's, or an unknown issuer's, is
+/// not replayed, and its id reaches the wire nowhere: the model keeps the
+/// answer text of the step.
+#[tokio::test]
+async fn a_hosted_tool_item_of_another_or_unknown_issuer_is_not_replayed() {
+    for target in Service::ALL {
+        let foreign = Service::ALL
+            .into_iter()
+            .find(|service| *service != target)
+            .map(|service| service.stored_issuer());
+        for issuer in [None, foreign] {
+            let case = format!("{issuer:?} -> {target:?}, hosted web search");
+            let body = body_on_the_wire(
+                |base| target.client(base),
+                hosted_search_then_question(issuer.as_ref()),
+            )
+            .await;
+            assert_carries_no_provider_continuity(&case, &body);
+            let text = body.to_string();
+            for opaque in ["ws_1", "web_search_call", "msg_w"] {
+                assert!(
+                    !text.contains(opaque),
+                    "{case}: `{opaque}` reached the wire: {text}"
+                );
+            }
+            assert_eq!(
+                body["input"],
+                json!([
+                    user_item("What is the weather in Oslo?"),
+                    {"type": "message", "role": "assistant", "content": "The forecast says 4 C."},
+                    user_item("And tomorrow?"),
+                ]),
+                "{case}"
+            );
+        }
+    }
+}
+
+/// The issuer's own hosted-tool item replays as the service returned it,
+/// between its reasoning item and its answer.
+#[tokio::test]
+async fn a_hosted_tool_item_of_the_same_issuer_replays_unchanged() {
+    for service in Service::ALL {
+        let body = body_on_the_wire(
+            |base| service.client(base),
+            hosted_search_then_question(Some(&service.stored_issuer())),
+        )
+        .await;
+        assert_eq!(
+            body["input"],
+            json!([
+                user_item("What is the weather in Oslo?"),
+                {"type": "reasoning", "id": "rs_w", "summary": [], "encrypted_content": "ciphertext-w"},
+                web_search_call(),
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "msg_w",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "The forecast says 4 C.", "annotations": []}
+                    ]
+                },
+                user_item("And tomorrow?"),
+            ]),
+            "{service:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A fallback target, and another wire protocol
+// ---------------------------------------------------------------------------
+
+/// A request prepared for one service and then sent by the client of
+/// another (a model or route fallback): the sending client applies the rule
+/// again for itself, so material the first service admitted does not reach
+/// the second.
+#[tokio::test]
+async fn a_request_prepared_for_one_service_is_not_replayed_by_another() {
+    for prepared_for in Service::ALL {
+        let sender = Service::ALL
+            .into_iter()
+            .find(|service| *service != prepared_for)
+            .expect("another service");
+        let case = format!("prepared for {prepared_for:?}, sent by {sender:?}");
+        let prepared = prepared_for
+            .client("http://127.0.0.1:9".to_string())
+            .project_replay_messages(&finished_turn_then_question(Some(
+                &prepared_for.stored_issuer(),
+            )))
+            .expect("the first service's projection");
+        let body = body_on_the_wire(|base| sender.client(base), prepared).await;
+        assert_carries_no_provider_continuity(&case, &body);
+        assert_eq!(body["input"], dropped_input(), "{case}");
+    }
+}
+
+/// Responses continuity material never reaches a Chat Completions wire,
+/// whoever issued it: the protocol is a guard of its own, beside the issuer.
+/// A self-hosted server's own Responses material, sent to that server's
+/// Chat Completions endpoint, is left out.
+#[test]
+fn responses_material_never_reaches_a_chat_completions_wire() {
+    let issuer = OpenAiContinuityIssuer::SelfHosted {
+        server: "local-a".to_string(),
+    };
+    let client = OpenAiCompatibleClient::new_with_options(
+        OpenAiCompatibleMode::ChatCompletions,
+        SELF_HOSTED_REMOTE_MODEL.to_string(),
+        "http://127.0.0.1:9/v1".to_string(),
+        None,
+        crate::OpenAiCompatibleClientOptions {
+            supports_temperature: true,
+            supports_thinking: true,
+            supports_reasoning: true,
+            supports_image_tool_results: false,
+        },
+    )
+    .with_continuity_issuer(issuer);
+    let transcript = finished_turn_then_question(Some(&Service::SelfHostedA.stored_issuer()));
+    let projected = client
+        .project_replay_messages(&transcript)
+        .expect("chat completions projection");
+    let body = client
+        .build_chat_completions_body(&LlmRequest::new(SELF_HOSTED_REMOTE_MODEL, projected))
+        .expect("chat completions body");
+    let text = body.to_string();
+    for opaque in ["ciphertext", "rs_", "msg_1", "resp_", "encrypted_content"] {
+        assert!(
+            !text.contains(opaque),
+            "`{opaque}` reached a Chat Completions wire: {text}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Response ids
 // ---------------------------------------------------------------------------
 

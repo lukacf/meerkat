@@ -1052,19 +1052,30 @@ async fn copilot_live_operator_token_routes() {
 // - `resume-copilot`: a new process. The stored Copilot turn resumes on
 //   Copilot (mixed request), and the stored search step on both services.
 //
+// Two phases need no other service than Copilot:
+//
+// - `copilot-mint`: a tool step and its answer on Copilot. Writes
+//   `copilot-loop.json` (the tool loop before its answer) and
+//   `copilot-turn.json` (the whole turn).
+// - `copilot-resume`: a new process. The stored tool loop resumes (a tool
+//   loop cut by a restart), a further tool turn makes the request mixed,
+//   and the stored whole turn takes a new turn (a cold load, then a new
+//   turn).
+//
 // Each phase stops at the first 401 or 429.
 
 mod continuity_live {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use futures::StreamExt;
-    use meerkat_client::{LlmClient, LlmError, LlmEvent, LlmRequest, OpenAiClient};
+    use meerkat_client::{LlmClient, LlmClientAdapter, OpenAiClient};
+    use meerkat_core::error::LlmFailureReason;
     use meerkat_core::lifecycle::run_primitive::{
-        OpaqueProviderBody, OpenAiProviderTag, ProviderTag, ToolChoice,
+        OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag, ToolChoice,
     };
     use meerkat_core::{
-        AssistantBlock, BlockAssistantMessage, Message, SessionLlmIdentity, StopReason, UserMessage,
+        AgentError, AgentLlmClient, AssistantBlock, BlockAssistantMessage, Message,
+        SessionLlmIdentity, UserMessage,
     };
     use serde_json::json;
 
@@ -1180,12 +1191,19 @@ mod continuity_live {
     }
 
     /// The class of a refusal, without the provider's text beyond its code.
-    fn refusal_class(error: &LlmError) -> String {
+    fn refusal_class(error: &AgentError) -> String {
         let text = error.to_string();
         let class = match error {
-            LlmError::InvalidRequest { .. } => "invalid_request",
-            LlmError::AuthenticationFailed { .. } => "authentication_failed",
-            LlmError::RateLimited { .. } => "rate_limited",
+            AgentError::Llm {
+                reason: LlmFailureReason::AuthError,
+                ..
+            } => "authentication_failed",
+            AgentError::Llm {
+                reason: LlmFailureReason::RateLimited { .. },
+                ..
+            } => "rate_limited",
+            AgentError::Llm { .. } if text.contains("Invalid request") => "invalid_request",
+            AgentError::Llm { .. } => "provider_error",
             _ => "other",
         };
         let code = [
@@ -1222,42 +1240,25 @@ mod continuity_live {
                 .project_replay_messages(history)
                 .map(|projected| shape(&projected))
                 .unwrap_or_else(|error| format!("projection refused: {error}"));
-            let mut request = LlmRequest::new(&self.model, history.to_vec());
-            request.max_tokens = MAX_TOKENS;
-            request.tools = vec![weather_tool()];
-            request.tool_choice = tool_choice;
-            request.provider_params = provider_params;
+            // One provider step the way a session sends it: the adapter
+            // projects the history through the client, prepares the request
+            // with what the projection decided, measures it and sends the
+            // prepared request.
+            let adapter = LlmClientAdapter::new(Arc::clone(client), self.model.clone());
+            let params = ProviderParamsOverride {
+                tool_choice: Some(tool_choice),
+                provider_tag: provider_params,
+                ..Default::default()
+            };
             self.requests.set(self.requests.get() + 1);
-            let mut stream = client.stream(&request);
-            let mut blocks = None;
-            let mut stop_reason = StopReason::EndTurn;
-            let mut refusal = None;
-            while let Some(event) = stream.next().await {
-                match event {
-                    Ok(LlmEvent::AssistantOutput { blocks: output, .. }) => blocks = Some(output),
-                    Ok(LlmEvent::Done {
-                        outcome:
-                            meerkat_client::LlmDoneOutcome::Success {
-                                stop_reason: stop, ..
-                            },
-                    }) => stop_reason = stop,
-                    Ok(LlmEvent::Done {
-                        outcome: meerkat_client::LlmDoneOutcome::Error { error },
-                    })
-                    | Err(error) => {
-                        refusal = Some(error);
-                        break;
-                    }
-                    Ok(_) => {}
-                }
-            }
-            drop(stream);
-            let outcome = match (refusal, blocks) {
-                (Some(error), _) => Outcome::Refused(refusal_class(&error)),
-                (None, Some(blocks)) => Outcome::Accepted(Box::new(Message::BlockAssistant(
-                    BlockAssistantMessage::new(blocks, stop_reason),
+            let outcome = match adapter
+                .stream_response(history, &[weather_tool()], MAX_TOKENS, None, Some(&params))
+                .await
+            {
+                Ok(step) => Outcome::Accepted(Box::new(Message::BlockAssistant(
+                    BlockAssistantMessage::new(step.blocks().to_vec(), step.stop_reason()),
                 ))),
-                (None, None) => Outcome::Refused("no committed output".to_string()),
+                Err(error) => Outcome::Refused(refusal_class(&error)),
             };
             let result = match &outcome {
                 Outcome::Accepted(step) => {
@@ -1633,6 +1634,97 @@ async fn copilot_live_openai_continuity_across_services() {
             } else {
                 eprintln!("RI-LIVE no stored hosted search step: rows skipped");
             }
+        }
+        "copilot-mint" => {
+            let mut transcript = vec![user(question)];
+            let step = probe
+                .accepted(
+                    "mint-tool-step",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            store("copilot-loop.json", &transcript);
+            let answer = probe
+                .accepted(
+                    "same-process-inside-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            store("copilot-turn.json", &transcript);
+        }
+        "copilot-resume" => {
+            // A tool loop cut by a restart: the stored call and its output
+            // go out in the plain form and the answer comes back.
+            let stored =
+                load("copilot-loop.json").expect("phase copilot-mint wrote copilot-loop.json");
+            let answer = probe
+                .accepted(
+                    "cold-resume-in-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &stored,
+                    ToolChoice::Auto,
+                )
+                .await;
+            // A further tool turn: the stored step in the plain form, the
+            // steps of this process as the service returned them.
+            let mut transcript = stored;
+            transcript.push(answer);
+            transcript.push(user("Do the same for Bergen."));
+            let step = probe
+                .accepted(
+                    "mixed-new-tool-step",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Required,
+                )
+                .await;
+            transcript.push(step.clone());
+            transcript.push(tool_outputs(&step));
+            let answer = probe
+                .accepted(
+                    "mixed-inside-new-tool-loop",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            transcript.push(answer);
+            transcript.push(user("Which of the two is colder?"));
+            probe
+                .accepted(
+                    "mixed-further-turn",
+                    "copilot",
+                    &probe.copilot,
+                    &transcript,
+                    ToolChoice::Auto,
+                )
+                .await;
+            // A cold load, then a new turn: the whole stored turn in the
+            // plain form, and one new question.
+            let mut stored =
+                load("copilot-turn.json").expect("phase copilot-mint wrote copilot-turn.json");
+            stored.push(user("Which city was that?"));
+            probe
+                .accepted(
+                    "cold-load-then-new-turn",
+                    "copilot",
+                    &probe.copilot,
+                    &stored,
+                    ToolChoice::Auto,
+                )
+                .await;
         }
         other => panic!("unknown MEERKAT_CONTINUITY_LIVE_PHASE {other}"),
     }

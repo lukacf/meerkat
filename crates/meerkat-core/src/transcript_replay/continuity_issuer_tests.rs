@@ -173,6 +173,10 @@ fn a_ledger_knows_what_it_received_and_from_whom() {
         !ledger.received_step_from(&server("local-b"), &local),
         "one self-hosted server is not another"
     );
+    // Both issuers are known to the ledger now, each for its own response:
+    // neither returned the other's.
+    assert!(!ledger.received_step_from(&server("local-a"), &step));
+    assert!(!ledger.received_step_from(&public_api(), &local));
 }
 
 /// The entry is the material, not its id: the same item id with another

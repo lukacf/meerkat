@@ -75568,7 +75568,6 @@ function verdictWords(entry) {
 }
 var CONSENT_WORDS = {
   allowed: "Allowed by the host's rules",
-  notified: "Allowed by the host's rules, and an approver was told",
   decided: "Decided by a person",
   imported: "Decided outside this team and carried in by its host"
 };
@@ -76248,6 +76247,7 @@ function AgentChangeButtons({
 }
 function ArchivedAgents({
   api,
+  roster,
   onOpen
 }) {
   const [agents, setAgents] = import_react81.default.useState([]);
@@ -76262,7 +76262,7 @@ function ArchivedAgents({
     return () => {
       active = false;
     };
-  }, [api.revision]);
+  }, [api.revision, roster]);
   const controls = archivedAgentControls(api.flags);
   if (agents.length === 0) return null;
   return /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("section", { className: "identity-archived", "aria-label": "Archived agents", "data-testid": "roster-archived", children: [
@@ -76915,6 +76915,7 @@ function RosterPanel({
             ArchivedAgents,
             {
               api: identityChanges,
+              roster: agents,
               onOpen: (agent, change) => {
                 setCreating(false);
                 setAgentChange({ name: agent.name, displayName: agent.displayName || agent.name, change, controls: { archive: false } });

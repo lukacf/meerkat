@@ -79,7 +79,9 @@ use crate::identity_first::{AgentIdentity, DurableAgentSpec, IdentityRuntime};
 use super::approval::{PlanRequest, PlanTarget, PlannedOutcome, plan_approval};
 use super::config::{ChangeClass, RequesterKind};
 use super::consequences::{ConsequenceHook, ConsequenceLine, HookRefusal, host_consequences_of};
-use super::decided::{HeldChangeHost, HeldTarget, IdentityDecisionNotices, IdentityDecisions};
+use super::decided::{
+    HeldChangeHost, HeldIdentityChange, HeldTarget, IdentityDecisionNotices, IdentityDecisions,
+};
 use super::digest::Sha256Digest;
 use super::executor::{
     AgentSpecs, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, ExecutorError,
@@ -278,6 +280,8 @@ pub(crate) struct IdentityGate {
     /// The driver that carries out the changes a person approved. It ends
     /// with the family: when the mob stops, or the runtime is dropped.
     _driver: Option<Arc<DecisionExecutorDriver>>,
+    /// The runtime's decisions, to read the request a decision holds.
+    decision_rows: Option<meerkat_runtime::decision::DurableDecisionService>,
 }
 
 impl std::fmt::Debug for IdentityGate {
@@ -576,6 +580,7 @@ impl IdentityGate {
             seen: None,
             decisions: None,
             _driver: None,
+            decision_rows: None,
         }
     }
 
@@ -586,10 +591,36 @@ impl IdentityGate {
         mut self,
         decisions: IdentityDecisions,
         driver: Option<DecisionExecutorDriver>,
+        rows: meerkat_runtime::decision::DurableDecisionService,
     ) -> Self {
         self.decisions = Some(decisions);
         self._driver = driver.map(Arc::new);
+        self.decision_rows = Some(rows);
         self
+    }
+
+    /// Whether `request` is the request the decision behind `state` holds.
+    /// A decision that still waits is compared by its request's digest; one
+    /// that ended is the answer of its operation for good, whatever is
+    /// asked under it.
+    fn same_as_held(
+        &self,
+        state: &IdentityOutcome,
+        request: &IdentityRequest,
+    ) -> Result<(), IdentityRefusal> {
+        let IdentityOutcome::PendingDecision { decision_id, .. } = state else {
+            return Ok(());
+        };
+        let reused = || IdentityRefusal::new(IdentityRefusalKind::OperationReused);
+        let rows = self.decision_rows.as_ref().ok_or_else(reused)?;
+        let id = meerkat_core::approval::decision::DecisionId::new(decision_id.as_str())
+            .map_err(|_| reused())?;
+        let row = rows.get(&id).map_err(|_| reused())?;
+        let held = HeldIdentityChange::of(&row).map_err(|_| reused())?;
+        match (request.request_digest(), held.request.request_digest()) {
+            (Ok(asked), Ok(holds)) if asked == holds => Ok(()),
+            _ => Err(reused()),
+        }
     }
 
     /// This family as a caller that sees the agents `seen` admits calls it.
@@ -1154,10 +1185,12 @@ impl IdentityGate {
             return self.replayed(mob, policy, requester, call, &receipt).await;
         }
         // An operation a decision holds, or held, goes through every check
-        // below like any request. What differs: a request that no longer
-        // normalizes because the agent moved since it was held is the same
-        // request asked again, and answers the decision as it stands; and
-        // the operation is never committed beside its decision.
+        // below like any request, and is then only compared: the request
+        // the decision holds answers the decision as it stands, and any
+        // other request under the operation, of whatever change kind, is
+        // `operation_reused`. Nothing is held or committed beside the
+        // decision. A request that no longer normalizes because the agent
+        // moved since it was held is the same request asked again.
         let held = match &self.decisions {
             Some(decisions) => decisions.held(mob, &call.operation_id).await?,
             None => None,
@@ -1190,11 +1223,13 @@ impl IdentityGate {
         if let Some(hooks) = &self.hooks {
             hooks.validate(request)?;
         }
+        if let Some(state) = held {
+            self.same_as_held(&state, request)?;
+            return Ok(state);
+        }
         let Some(consent) = consent_of_plan(&judged.normalized.plan) else {
             // A person decides: the change is held, and nothing is written
-            // but its decision. The holder answers the same request with
-            // the decision as it stands, and another request under the
-            // operation `operation_reused`.
+            // but its decision.
             return match &self.decisions {
                 Some(decisions) => Ok(decisions
                     .hold(mob, &call.operation_id, &judged.normalized)
@@ -1204,11 +1239,6 @@ impl IdentityGate {
                 )),
             };
         };
-        // The rules allow the request now, and a decision holds its
-        // operation: it answers that decision, and commits nothing itself.
-        if let Some(state) = held {
-            return Ok(state);
-        }
         let commit = ChangeCommit::new(mob, &call.operation_id, requester, consent, request)
             .of_configured_target(judged.configured_target)
             .with_preparations(policy.preparations());
@@ -1790,7 +1820,7 @@ impl crate::UnifiedRuntime {
                 );
                 None
             };
-            gate = gate.with_decisions(decisions, driver);
+            gate = gate.with_decisions(decisions, driver, self.durable_decisions().owner().clone());
         }
         identities.attach_identity_gate(Arc::new(gate), changes_enabled);
     }

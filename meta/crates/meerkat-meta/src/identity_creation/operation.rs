@@ -97,14 +97,17 @@ impl OperationId {
     }
 
     /// The operation id of a tool call by `requester` that gave no request
-    /// id, derived from where the call ran: the same call derives the same
-    /// id, so its retry replays.
+    /// id, derived from where the call ran (its mob, session, run, round
+    /// and call id): the same call derives the same id, so its retry
+    /// replays, and the same call id in another round of the run is
+    /// another operation.
     pub fn for_tool_call(requester: &Requester, origin: &ToolCallOrigin<'_>) -> Self {
         let derived = canonical_digest(&json!({
             "format": FORMAT_TOOL_CALL,
             "mob_id": origin.mob_id,
             "session_id": origin.session_id,
             "run_id": origin.run_id,
+            "round": origin.round,
             "tool_call_id": origin.tool_call_id,
         }));
         let hex = derived

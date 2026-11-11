@@ -15849,6 +15849,91 @@ mod tests {
             }
         }
 
+        /// An empty statement says the model takes no level, on every
+        /// endpoint, the Messages endpoint with `adaptive_thinking: false`
+        /// included: the account said so, and a level asked for there is
+        /// refused as unsupported. A statement made only of words this
+        /// binary does not know as levels says something it cannot read, so
+        /// the entry is reported as stating none and a level asked for
+        /// there is refused as unknown, not as unsupported with an empty
+        /// list. A statement that mixes known and unknown words states the
+        /// known ones.
+        #[tokio::test]
+        async fn an_empty_statement_and_unreadable_words_are_told_apart() {
+            let account = ObservedAccount::new([
+                token_response("derived"),
+                listing(serde_json::json!([
+                    entry(
+                        "responses-unreadable",
+                        "/responses",
+                        serde_json::json!({"reasoning_effort": ["ultra", "hyper"]}),
+                    ),
+                    entry(
+                        "responses-mixed",
+                        "/responses",
+                        serde_json::json!({"reasoning_effort": ["ultra", "low"]}),
+                    ),
+                    entry(
+                        "messages-empty",
+                        "/v1/messages",
+                        serde_json::json!({"reasoning_effort": []}),
+                    ),
+                    entry(
+                        "messages-empty-refusing",
+                        "/v1/messages",
+                        serde_json::json!({"adaptive_thinking": false, "reasoning_effort": []}),
+                    ),
+                    entry(
+                        "messages-unreadable-refusing",
+                        "/v1/messages",
+                        serde_json::json!({
+                            "adaptive_thinking": false,
+                            "reasoning_effort": ["ultra"]
+                        }),
+                    ),
+                ])),
+            ])
+            .await;
+            for (provider, model, api, account_statement) in [
+                (
+                    Provider::OpenAI,
+                    "responses-unreadable",
+                    ModelApi::Responses,
+                    AccountLevelStatement::NotStated,
+                ),
+                (
+                    Provider::OpenAI,
+                    "responses-mixed",
+                    ModelApi::Responses,
+                    stated(&[EffortLevel::Low]),
+                ),
+                (
+                    Provider::Anthropic,
+                    "messages-empty",
+                    ModelApi::Messages,
+                    stated(&[]),
+                ),
+                (
+                    Provider::Anthropic,
+                    "messages-empty-refusing",
+                    ModelApi::Messages,
+                    stated(&[]),
+                ),
+                (
+                    Provider::Anthropic,
+                    "messages-unreadable-refusing",
+                    ModelApi::Messages,
+                    AccountLevelStatement::NotStated,
+                ),
+            ] {
+                assert_eq!(
+                    account.observed(provider, model).await,
+                    observation(provider, api, account_statement),
+                    "{model}"
+                );
+            }
+        }
+
         /// The account capability gate stands in front of a route's adapter
         /// and does not hide what the adapter reports.
         #[test]

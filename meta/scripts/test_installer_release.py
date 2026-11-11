@@ -465,9 +465,9 @@ class WorkflowShapeTests(unittest.TestCase):
         shard recorded."""
         source = text(FORGE_CI)
         self.assertEqual(re.findall(r"(?m)^  ([A-Za-z_][A-Za-z0-9_-]*):$", source.split("\njobs:\n", 1)[1]),
-                         ["frontend", "agent-team-live", "backend-shard", "backend"])
+                         ["frontend", "agent-team-live", "cli-team-live", "backend-shard", "backend"])
         shard, backend = job_block("backend-shard", FORGE_CI), job_block("backend", FORGE_CI)
-        self.assertIn("\n    needs: [backend-shard, agent-team-live]\n", backend)
+        self.assertIn("\n    needs: [backend-shard, agent-team-live, cli-team-live]\n", backend)
         self.assertNotRegex(backend, r"(?m)^    if:")
         legs = [int(leg) for leg in re.search(r"(?m)^        shard: \[([0-9, ]+)\]$", shard).group(1).split(", ")]
         self.assertEqual(legs, list(range(len(legs))))

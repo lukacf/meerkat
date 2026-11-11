@@ -49,8 +49,10 @@ def _published(version):
     raise DistributionError("The published runtime version is unsupported.")
 
 
-TOP_LEVEL = {"start.sh", "README.md", "GETTING_STARTED.md", "FRONTEND_INTEGRATION.md",
+TOP_LEVEL = {"start.sh", "meta-forge", "README.md", "GETTING_STARTED.md", "FRONTEND_INTEGRATION.md",
     "pyproject.toml", "requirements-standalone.txt"}
+# Launchers run directly (./meta-forge) as well as through bash.
+EXECUTABLE = {"start.sh", "meta-forge"}
 REQUIRED = (TOP_LEVEL - {"GETTING_STARTED.md", "FRONTEND_INTEGRATION.md"}) | {"launchkit/distribution.py", "launchkit/server.py",
     "launchkit/bootstrap.py", "launchkit/generator.py",
     "web/freeform-animation.mjs", "web/dist/index.html", "web/dist/app.js", "web/dist/app.css"}
@@ -273,7 +275,7 @@ def package(root, wheel, output):
         for name, content in sorted(files.items()):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = (stat.S_IFREG | dom_modes.get(name, 0o755 if name == "start.sh" else 0o644)) << 16
+            info.external_attr = (stat.S_IFREG | dom_modes.get(name, 0o755 if name in EXECUTABLE else 0o644)) << 16
             archive.writestr(info, content)
     return {"archive": str(output), "sha256": _digest(output.read_bytes()), "files": len(files),
         "sdk_wheel_sha256": manifest["files"][wheel_name], "sdk_version": version, "native_executed": False}

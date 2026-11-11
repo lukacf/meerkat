@@ -91,6 +91,9 @@ same folder when you return. `MOBKIT_LAUNCH_PORT` and `MOBKIT_LAUNCH_HOME` remai
 compatibility aliases. If both names are set, the corresponding `META_FORGE_*`
 setting takes precedence.
 
+To take this journey from a terminal instead, for example over SSH, see
+[Work from a terminal](#work-from-a-terminal).
+
 At **What would you like to get done?**, describe one job, project or recurring task
 in the idea box. Forge helps you create your own team of AI agents around that
 need. A rough sentence is enough. Above the composer, two starting routes stay
@@ -937,3 +940,52 @@ reviews your edits against the current proposal. If review is disabled, choose
 
 Continue with the [full reference](README.md) for exported packages, credentials,
 connection checks, background operation and supported update/recovery controls.
+
+## Work from a terminal
+
+`meta-forge`, beside `start.sh` in the Forge folder, takes the same journey for
+an agent team from a terminal on the same computer, for example over SSH. It
+uses the same local API as the browser, so your setups, approvals and
+installations are the ones the browser shows. Forge is for a single person on
+their own computer or server account: other local users on the same machine
+can reach its local port.
+
+Start Forge in one terminal:
+
+```bash
+./meta-forge serve
+```
+
+In a second terminal in the same folder:
+
+```bash
+./meta-forge provider status
+./meta-forge chat --new
+```
+
+`provider status` shows whether Forge's own agents have a model provider. The
+key itself is entered only in **Guide settings** in a browser: over SSH, forward
+the port first with `ssh -L 8787:127.0.0.1:8787 HOST` and open
+`http://127.0.0.1:8787` on your own computer. `meta-forge` never asks for a key
+and never shows one.
+
+In the chat, answer each question with an option number or your own words.
+`/plan` shows the proposed team, `/accept` shows what you are accepting and asks
+you to confirm, and `/quit` leaves with the setup saved; `./meta-forge chat last`
+continues it. Then install the agent team into a new, empty folder:
+
+```bash
+./meta-forge install last --team --folder ~/agents/research --reuse-forge-keys
+./meta-forge installation open last
+```
+
+`install` shows what it installs, where, on which port and with which settings,
+and asks before it changes anything. `--reuse-forge-keys` lets Forge copy its
+own saved provider keys into the installation's private settings. When a package
+needs another secret, such as a connection's token, `install` stops and names
+it; enter it in the installation form in the browser. Afterwards,
+`installation status`, `stop`, `start` and `log` operate the installation, and
+`./meta-forge --help` lists every command. Scripts use `--json` and add
+`--approve` with the digest of the review the command printed; the
+[Forge reference](https://docs.rkat.ai/meta/forge/reference#terminal-commands)
+describes the commands, the JSON output and the exit codes.

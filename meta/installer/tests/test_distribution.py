@@ -21,6 +21,7 @@ def bundle_source(tmp_path, monkeypatch):
     root = repo / "installer"
     contents = {
         "start.sh": Path(__file__).parents[1].joinpath("start.sh").read_text(),
+        "meta-forge": Path(__file__).parents[1].joinpath("meta-forge").read_text(),
         "README.md": "Public startup instructions. See [the setup walkthrough](GETTING_STARTED.md) and [frontend integration](FRONTEND_INTEGRATION.md).\n",
         "GETTING_STARTED.md": "Public novice setup walkthrough.\n\nReturn to [the reference](README.md).\n",
         "FRONTEND_INTEGRATION.md": "Public frontend integration instructions.\n\nReturn to [the reference](README.md).\n",
@@ -451,6 +452,18 @@ def test_bundle_is_deterministic_public_and_self_contained(bundle_source, tmp_pa
     assert (copied / "GETTING_STARTED.md").read_bytes() == walkthrough
     assert (copied / "FRONTEND_INTEGRATION.md").read_bytes() == frontend_integration
     assert (copied / "checker-dependencies/node_modules/jsdom/package.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_both_launchers_are_packaged_executable(bundle_source, tmp_path):
+    root, wheel, _ = bundle_source
+    output = tmp_path / "launchers.zip"
+    distribution.package(root, wheel, output)
+    with zipfile.ZipFile(output) as archive:
+        modes = {name: archive.getinfo(name).external_attr >> 16 & 0o777
+                 for name in ("start.sh", "meta-forge", "README.md")}
+        assert archive.read("meta-forge") == (root / "meta-forge").read_bytes()
+    assert modes == {"start.sh": 0o755, "meta-forge": 0o755, "README.md": 0o644}
+    assert {"start.sh", "meta-forge"} <= distribution.REQUIRED
 
 
 def test_legacy_standalone_v1_without_walkthrough_still_verifies(bundle_source, tmp_path):

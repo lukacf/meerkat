@@ -75,6 +75,41 @@ actual controls from describing a job to trying the installed application.
 A prepared package's generated README takes precedence for its artifact and
 platform selection; a retained handoff note does not select a new runtime.
 
+### From a terminal
+
+`meta-forge`, beside `start.sh`, drives the running Forge from a terminal on the
+same computer, for example over SSH. It uses the same local API as the browser,
+with the same saved setups, version checks and approvals, and it never takes or
+shows a secret value: provider keys and other private settings stay in Forge's
+protected forms. Forge is for a single person on their own computer or server
+account: other local users on the same machine can reach its local port.
+
+Start Forge in one terminal:
+
+```bash
+./meta-forge serve
+```
+
+Then work in a second terminal in the same folder:
+
+```bash
+./meta-forge doctor
+./meta-forge chat --new
+./meta-forge install last --team --folder ~/agents/research --reuse-forge-keys
+./meta-forge installation status last
+```
+
+`serve` runs `start.sh` without the provider keys or tokens of the calling
+shell; add `--inherit-provider-env` to forward them, or enter keys in
+**Guide settings** in a browser (over SSH, forward the port first:
+`ssh -L 8787:127.0.0.1:8787 HOST`). Do not forward them where other people
+have accounts on the computer: they can reach Forge's local port and use the
+keys through it. Accepting a plan, installing and starting
+show a review first: at a terminal you confirm it, and a script adds
+`--approve` with the review's digest. `./meta-forge --help` lists every command;
+the [Forge reference](https://docs.rkat.ai/meta/forge/reference#terminal-commands)
+describes the commands, the JSON output and the exit codes.
+
 ### Maintainer preparation
 
 The Meta 0.9 source launcher stops before dependency preparation when the

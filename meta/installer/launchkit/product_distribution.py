@@ -146,6 +146,8 @@ Follow the printed local address. Keep the terminal open while using Forge.
 Press Ctrl+C to stop it. Your conversation and installed applications use their
 own retained state; keep their folders when returning or restarting.
 
+To work from a terminal instead, over SSH too, run `./meta-forge --help` here.
+
 For dependency and artifact preparation without starting Forge or native agents:
 
 ```sh
@@ -369,7 +371,7 @@ def package(root, target, guide, output, *, guide_wheel, ordinary_gateway=None, 
             file_records[name] = {"sha256": hashed, "bytes": size}
             modes[name] = dom_files.get(name, 0o700 if name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY}
                 or any(name == _native_paths(role)["executable"] for role in NATIVE_PROGRAMS) else
-                0o755 if name == "start.sh" else 0o600 if name.startswith(("vendor/product/", "vendor/native/")) else 0o644)
+                0o755 if name in legacy.EXECUTABLE else 0o600 if name.startswith(("vendor/product/", "vendor/native/")) else 0o644)
             total += size
         if len(source_files) > MAX_FILES or total > MAX_TOTAL:
             raise legacy.DistributionError("The product distribution exceeds its bounds.")

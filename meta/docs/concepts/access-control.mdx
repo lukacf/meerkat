@@ -74,6 +74,8 @@ Lineage is **runtime-derived only**: `spawned_by` and `via_tool` come from the s
 
 In a multi-runtime Console, member rows and the identity list calls (`GET /console/identities`, `meta/console/list_identities`) name each member's spawner with its runtime's prefix, as they name the member: a rule on the prefixed spawner (`b/ops-lead`) reaches the rows of the members it spawned, and a rule on the bare name (`ops-lead`) does not reach the members another runtime's agent of that name spawned.
 
+The participants of a temporary council (the `council` tool) are not Console members. A participant is a fork of its source member, seated in the council's own temporary mob: its history begins with a copy of the source's earlier turns, and no lineage links it to its source, so no rule on the source would reach it. On every visibility policy the Console lists no participant, answers every member action by a participant's name (send, inspect, retire, blobs, timeline) as for an agent that does not exist, reads none of its history, and serves no timeline frame recorded for one. The council's outcome reaches its convener as the tool's result.
+
 ### Side chats
 
 A Console **side chat** (`meta/fork_member`) is decided as the agent it was forked from: its `side_chat_of` label names that agent, and agent checks evaluate the side chat, then the agent and the agent's own ancestors. Every decision on a side chat is the agent's:

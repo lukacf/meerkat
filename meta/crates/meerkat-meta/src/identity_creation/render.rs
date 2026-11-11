@@ -38,19 +38,31 @@
 //! instructions, initial message, context), quoted line by line. A keyword
 //! of the declared spec renders as a word whose parts a hyphen joins
 //! (`internal-only`, `turn-driven`), since an underscore is markup.
+//!
+//! A rendering a decision holds ([`render_held_v1`]) carries, between the
+//! host's consequence lines and the free text, the tool configuration: one
+//! line for each agent the request names (the profile it runs on after the
+//! change and the digest of that profile's declared tool configuration),
+//! then one block for each of those profiles with what it declares. So
+//! what the host says and what the agents may do with tools are read before
+//! anything the requester wrote, and the subject digest covers both. The
+//! tool configuration is what the profile declares: no agent is built to
+//! render it, and no agent's record of the tools a build gave it is read.
+//! An MCP server is shown by its name; its configuration, which can hold a
+//! credential, is never rendered and is inside the digest only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
 use meerkat_core::ContentInput;
-use meerkat_mob::{MobBackendKind, MobRuntimeMode};
+use meerkat_mob::{MobBackendKind, MobRuntimeMode, ProfileBinding, ToolConfig};
 use serde::Serialize;
 
 use crate::identity_first::{AgentAddressability, DisplayName, DurableAgentSpec};
 
 use super::config::ChangeClass;
 use super::consequences::{ConsequenceHook, ConsequenceLine};
-use super::digest::{Sha256Digest, canonical_json_pretty};
+use super::digest::{Sha256Digest, canonical_digest, canonical_json_pretty};
 use super::escape::{escaped_line, quoted};
 use super::parts::{CanonicalPart, canonical_parts};
 use super::presentation::{CardError, StructuredCard};
@@ -147,6 +159,29 @@ pub mod labels {
     pub const INITIAL_MESSAGE_BLOCKS: &str = "Initial message blocks";
     /// The context, as canonical pretty JSON.
     pub const CONTEXT: &str = "Context";
+    /// The agents a held request names, each with the profile it runs on
+    /// and the digest of that profile's declared tool configuration.
+    pub const AGENT_TOOLS: &str = "Agent tools";
+    /// The heading of one profile's declared tool configuration.
+    pub const TOOL_CONFIGURATION: &str = "Tool configuration of profile";
+    /// The digest of a profile's declared tool configuration.
+    pub const TOOL_CONFIGURATION_DIGEST: &str = "Tool configuration digest";
+    /// The realm profile a profile of the mob refers to.
+    pub const REALM_PROFILE: &str = "Realm profile";
+    /// The tool families a profile turns on.
+    pub const TOOL_FAMILIES: &str = "Tool families";
+    /// Whether a profile is read-only: `yes` or `no`.
+    pub const READ_ONLY: &str = "Read only";
+    /// The tools a profile denies.
+    pub const DENIED_TOOLS: &str = "Denied tools";
+    /// The MCP servers a profile connects to, by name.
+    pub const MCP_SERVERS: &str = "MCP servers";
+    /// The tool bundles a profile names.
+    pub const TOOL_BUNDLES: &str = "Tool bundles";
+    /// The tool bundles a profile opted into.
+    pub const OPTED_TOOL_BUNDLES: &str = "Opted tool bundles";
+    /// What a profile mounts closed until a tool grant opens it.
+    pub const GRANT_GATED: &str = "Grant gated";
     /// The word of an absent value.
     pub const NONE: &str = "none";
     /// The word of an update field that does not change.
@@ -267,6 +302,27 @@ pub fn render_v1(
     request: &IdentityRequest,
     hook: Option<&dyn ConsequenceHook>,
 ) -> Result<Rendering, IdentityRefusal> {
+    render(request, hook, None)
+}
+
+/// Render `request` as a decision holds it: [`render_v1`] with the tool
+/// configuration `tools` between the host's consequence lines and the free
+/// text. `tools` names each agent of the request and the declared tool
+/// configuration of each profile they run on
+/// ([`ToolConfigurations::of_request`] checks that it does).
+pub fn render_held_v1(
+    request: &IdentityRequest,
+    hook: Option<&dyn ConsequenceHook>,
+    tools: &ToolConfigurations,
+) -> Result<Rendering, IdentityRefusal> {
+    render(request, hook, Some(tools))
+}
+
+fn render(
+    request: &IdentityRequest,
+    hook: Option<&dyn ConsequenceHook>,
+    tools: Option<&ToolConfigurations>,
+) -> Result<Rendering, IdentityRefusal> {
     let host_lines = host_consequences(request, hook)?;
     let mut text = Text::default();
     text.field(labels::TITLE, labels::VERSION);
@@ -297,6 +353,7 @@ pub fn render_v1(
                 created_fields(&mut text, position + 1, count, created)?;
             }
             consequence_blocks(&mut text, &request.consequences, &host_lines);
+            tool_blocks(&mut text, tools);
             for (position, created) in identities.iter().enumerate() {
                 text.block();
                 created_text(&mut text, position + 1, count, &created.spec)?;
@@ -307,6 +364,7 @@ pub fn render_v1(
             text.block();
             update_fields(&mut text, update);
             consequence_blocks(&mut text, &request.consequences, &host_lines);
+            tool_blocks(&mut text, tools);
             text.block();
             update_text(&mut text, update);
         }
@@ -331,6 +389,7 @@ pub fn render_v1(
             text.field(labels::IDENTITY, &quoted(identity));
             text.field(labels::EXPECTED_SPEC_DIGEST, expected_spec_digest.as_str());
             consequence_blocks(&mut text, &request.consequences, &host_lines);
+            tool_blocks(&mut text, tools);
         }
     }
     let rendered = text.out;
@@ -676,4 +735,280 @@ fn consequence_item(consequence: &Consequence) -> String {
             quoted(value)
         ),
     }
+}
+
+const FORMAT_TOOL_CONFIGURATION: &str = "meerkat.identity.tool_configuration.v1";
+
+/// What one profile of a mob declares for the tools of its agents, as a
+/// held request's rendering shows it, and the digest of the declaration.
+///
+/// The digest covers the whole declaration, the configuration of each MCP
+/// server included. The rendering shows an MCP server by its name only: a
+/// server's configuration can hold a credential, and a rendering is held,
+/// shown and served whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileTools {
+    digest: Sha256Digest,
+    declared: DeclaredTools,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeclaredTools {
+    /// The profile is the mob definition's own.
+    Inline {
+        families: Vec<&'static str>,
+        read_only: bool,
+        denied: Vec<String>,
+        mcp_servers: Vec<String>,
+        bundles: Vec<String>,
+        opted_bundles: Vec<String>,
+        grant_gated: Vec<String>,
+    },
+    /// The profile refers to a profile of the realm, whose declaration is
+    /// the realm's: the reference is what the mob declares.
+    Realm { name: String },
+}
+
+impl ProfileTools {
+    /// What `binding`, a profile of a mob definition, declares.
+    pub fn declared(binding: &ProfileBinding) -> Result<Self, serde_json::Error> {
+        match binding {
+            ProfileBinding::Inline(profile) => Self::of_tools(&profile.tools),
+            ProfileBinding::RealmRef { realm_profile } => Ok(Self {
+                digest: canonical_digest(&serde_json::json!({
+                    "format": FORMAT_TOOL_CONFIGURATION,
+                    "realm_profile": realm_profile,
+                })),
+                declared: DeclaredTools::Realm {
+                    name: realm_profile.clone(),
+                },
+            }),
+        }
+    }
+
+    /// What the tool configuration `tools` declares.
+    pub fn of_tools(tools: &ToolConfig) -> Result<Self, serde_json::Error> {
+        let digest = canonical_digest(&serde_json::json!({
+            "format": FORMAT_TOOL_CONFIGURATION,
+            "tools": serde_json::to_value(tools)?,
+        }));
+        // Every member is named: a member the configuration gains stops
+        // this from compiling until the rendering shows it.
+        let ToolConfig {
+            builtins,
+            shell,
+            comms,
+            memory,
+            workgraph,
+            mob,
+            schedule,
+            image_generation,
+            read_only,
+            deny,
+            mcp,
+            mcp_servers,
+            rust_bundles,
+            bundles,
+            grant_gated,
+        } = tools;
+        let families = [
+            (*builtins, "builtins"),
+            (*shell, "shell"),
+            (*comms, "comms"),
+            (*memory, "memory"),
+            (*workgraph, "workgraph"),
+            (*mob, "mob"),
+            (*schedule, "schedule"),
+            (*image_generation, "image-generation"),
+        ]
+        .into_iter()
+        .filter_map(|(on, family)| on.then_some(family))
+        .collect();
+        let sorted = |names: &mut Vec<String>| {
+            names.sort();
+            names.dedup();
+        };
+        let mut denied = deny.clone();
+        sorted(&mut denied);
+        let mut servers: Vec<String> = mcp
+            .iter()
+            .cloned()
+            .chain(mcp_servers.iter().map(|server| server.name.clone()))
+            .collect();
+        sorted(&mut servers);
+        let mut named_bundles = rust_bundles.clone();
+        sorted(&mut named_bundles);
+        let mut opted_bundles = bundles.clone();
+        sorted(&mut opted_bundles);
+        let mut gated: Vec<String> = grant_gated
+            .families
+            .iter()
+            .map(|family| format!("family {}", quoted(family)))
+            .chain(
+                grant_gated
+                    .tools
+                    .0
+                    .iter()
+                    .map(|tool| format!("tool {}", quoted(tool.as_str()))),
+            )
+            .chain(
+                grant_gated
+                    .mcp_servers
+                    .iter()
+                    .map(|server| format!("server {}", quoted(server))),
+            )
+            .collect();
+        if grant_gated.unconfigured_mcp_servers {
+            gated.push("every-unconfigured-server".to_owned());
+        }
+        sorted(&mut gated);
+        Ok(Self {
+            digest,
+            declared: DeclaredTools::Inline {
+                families,
+                read_only: *read_only,
+                denied,
+                mcp_servers: servers,
+                bundles: named_bundles,
+                opted_bundles,
+                grant_gated: gated,
+            },
+        })
+    }
+
+    /// The digest of the declaration.
+    pub fn digest(&self) -> &Sha256Digest {
+        &self.digest
+    }
+}
+
+/// One agent a held request names, as its tool line shows it: its name
+/// and the profile it runs on after the change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTools {
+    name: String,
+    profile: String,
+}
+
+impl AgentTools {
+    /// The agent `name`, which runs on `profile` after the change.
+    pub fn new(name: impl Into<String>, profile: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            profile: profile.into(),
+        }
+    }
+
+    /// The agent's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The profile the agent runs on after the change.
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+}
+
+/// The tool configuration of a held request: each agent it names with the
+/// profile it runs on, and what each of those profiles declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolConfigurations {
+    agents: Vec<AgentTools>,
+    profiles: BTreeMap<String, ProfileTools>,
+}
+
+impl ToolConfigurations {
+    /// The tool configuration of `request`: `agents`, one for each agent
+    /// the request names and in its order, and `profiles`, what each
+    /// profile an agent runs on declares. Refused `invalid_request` when
+    /// the agents are not the request's, and `profile_unknown` for an
+    /// agent's profile with no declaration.
+    pub fn of_request(
+        request: &IdentityRequest,
+        agents: Vec<AgentTools>,
+        profiles: BTreeMap<String, ProfileTools>,
+    ) -> Result<Self, IdentityRefusal> {
+        let named = request.action.identities();
+        let same = named.len() == agents.len()
+            && named
+                .iter()
+                .zip(&agents)
+                .all(|(name, agent)| *name == agent.name);
+        if !same {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Conflicting,
+            }));
+        }
+        let used: BTreeSet<&str> = agents.iter().map(|agent| agent.profile.as_str()).collect();
+        if let Some(missing) = used
+            .iter()
+            .find(|profile| !profiles.contains_key(**profile))
+        {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::ProfileUnknown {
+                profile: (*missing).to_owned(),
+            }));
+        }
+        let profiles = profiles
+            .into_iter()
+            .filter(|(profile, _)| used.contains(profile.as_str()))
+            .collect();
+        Ok(Self { agents, profiles })
+    }
+}
+
+/// The tool configuration of a held request, after its consequence blocks:
+/// the agents, then one block for each profile, in byte order.
+fn tool_blocks(text: &mut Text, tools: Option<&ToolConfigurations>) {
+    let Some(tools) = tools else {
+        return;
+    };
+    text.block();
+    let agents: Vec<String> = tools
+        .agents
+        .iter()
+        .map(|agent| {
+            let digest = tools
+                .profiles
+                .get(&agent.profile)
+                .map_or(labels::NONE, |profile| profile.digest.as_str());
+            format!(
+                "{} profile {} tools {digest}",
+                quoted(&agent.name),
+                quoted(&agent.profile)
+            )
+        })
+        .collect();
+    text.list(labels::AGENT_TOOLS, &agents);
+    for (name, profile) in &tools.profiles {
+        text.block();
+        text.field(labels::TOOL_CONFIGURATION, &quoted(name));
+        text.field(labels::TOOL_CONFIGURATION_DIGEST, profile.digest.as_str());
+        match &profile.declared {
+            DeclaredTools::Realm { name } => text.field(labels::REALM_PROFILE, &quoted(name)),
+            DeclaredTools::Inline {
+                families,
+                read_only,
+                denied,
+                mcp_servers,
+                bundles,
+                opted_bundles,
+                grant_gated,
+            } => {
+                let families: Vec<String> =
+                    families.iter().map(|family| (*family).to_owned()).collect();
+                text.list(labels::TOOL_FAMILIES, &families);
+                text.field(labels::READ_ONLY, if *read_only { "yes" } else { "no" });
+                text.list(labels::DENIED_TOOLS, &quoted_names(denied));
+                text.list(labels::MCP_SERVERS, &quoted_names(mcp_servers));
+                text.list(labels::TOOL_BUNDLES, &quoted_names(bundles));
+                text.list(labels::OPTED_TOOL_BUNDLES, &quoted_names(opted_bundles));
+                text.list(labels::GRANT_GATED, grant_gated);
+            }
+        }
+    }
+}
+
+fn quoted_names(names: &[String]) -> Vec<String> {
+    names.iter().map(|name| quoted(name)).collect()
 }

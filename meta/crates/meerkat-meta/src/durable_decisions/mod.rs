@@ -14,16 +14,25 @@
 //!   as holders;
 //! - the approver currentness Core asks for when a decision executes,
 //!   answered from the live approver map
-//!   ([`crate::UnifiedRuntime::decision_approver_currentness`]).
+//!   ([`crate::UnifiedRuntime::decision_approver_currentness`]);
+//! - the executors of the decision kinds the runtime owns, driven for it
+//!   ([`DecisionExecutorDriver`]): the `identity.*` kinds, one per change of
+//!   an agent (`identity.create`, `identity.update`, `identity.archive`,
+//!   `identity.unarchive`, `identity.remove`, `identity.adopt`), whose held
+//!   requests [`crate::identity_creation::IdentityDecisions`] holds and
+//!   carries out.
 //!
 //! The approver map is the access configuration's `approvers`, the one
 //! source of who may decide for an approver id: Console subjects and groups,
 //! the people a declared ingress attests (`ingress_subjects`), the stdio
 //! operator (`{ ingress = "operator" }`), and people whose identities span
-//! ingresses (`people`).
+//! ingresses (`people`). A person never decides their own request: a decide
+//! by the decision's requester, or by an identity the map links with the
+//! requester in one person, is refused `self_approval`.
 
 mod approvers;
 pub(crate) mod console;
+mod executors;
 mod ingress;
 mod owner;
 mod stdio;
@@ -31,6 +40,7 @@ mod wire;
 
 pub use approvers::INGRESS_TRUST_DOMAIN_PREFIX;
 pub(crate) use approvers::MapApproverCurrentness;
+pub use executors::DecisionExecutorDriver;
 pub use ingress::{
     DecisionIngressDeclaration, DecisionIngressDeclarations, DecisionIngressError,
     check_approver_ingresses,

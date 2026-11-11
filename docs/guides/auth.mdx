@@ -848,9 +848,10 @@ OpenAI, OpenAI-compatible, Anthropic and Gemini clients therefore remove the
 credential that signed a request from what they read from its response (a
 rejection body, a stream error event, a data line that does not parse, an
 OpenAI or Gemini image request's failure, the provider error fields they
-log) before it reaches a caller or a log. An OpenAI realtime session does
-the same for the text of its errors, and the Google Code Assist setup
-requests for the body of a refusal.
+log) before it reaches a caller or a log. The OpenAI realtime clients (the
+text client for realtime-capable models and a live session, its opt-in
+frame trace included) do the same for the text of their errors, and the
+Google Code Assist setup requests for the body of a refusal.
 
 - With an authorizer, through `HttpAuthorizer::redact_response_diagnostic`.
   Its default removes every value the authorizer names through
@@ -885,9 +886,14 @@ What this does not remove:
   of a `Basic` pair, a copy cut short or masked.
 - A secret no route names, outside the second step's positions. That step
   is a second line only: it also leaves a value made of letters only and
-  shorter than 32 bytes, a quoted header dump without a `Bearer` or `Basic`
-  scheme (`{"authorization":"<value>"}`) and JSON nested inside a JSON
-  string.
+  shorter than 32 bytes, a JSON web token directly followed by `.`, `/`,
+  `+` or `=`, a quoted header dump without a `Bearer` or `Basic` scheme
+  (`{"authorization":"<value>"}`) and JSON nested inside a JSON string.
+- URL userinfo that reads as a quoted host: text that quotes a URL closes
+  it, so the second step ends a URL at a quoting byte (`'`, `"`, `\`, `<`
+  or `>`) when what stands before it is a bare host (no `:`, or `:` and
+  then digits only) and a second quoting byte follows before the `@`.
+  Userinfo of that shape (`app:1234're'st@db`) is left.
 - On a SigV4 route, the `Signature=` of a request older than the two most
   recent ones (the session token is removed; a signature is bound to its
   request and expires in minutes).

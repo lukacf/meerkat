@@ -57,15 +57,19 @@ them.
 ### Changed
 
 - Provider error text (see Security): in the errors of the OpenAI
-  Responses, OpenAI-compatible, Anthropic and Gemini clients, of OpenAI
-  realtime sessions and of the Google Code Assist setup requests (GitHub
-  Copilot routes keep their error text as before), a value that looks like
-  a credential (at least 8 credential characters with a digit among them,
-  or at least 32) is now replaced by `[REDACTED]` where it follows `Bearer`
-  or `Basic`, is the value of an `authorization` header, or is assigned to
-  a secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are tokens
+  Responses, OpenAI-compatible, Anthropic and Gemini clients, of the OpenAI
+  realtime clients (the text client for realtime-capable models and live
+  sessions) and of the Google Code Assist setup requests (GitHub Copilot
+  routes keep their error text as before), a value that looks like a
+  credential (at least 8 credential characters with a digit among them, or
+  at least 32) is now replaced by `[REDACTED]` where it follows `Bearer` or
+  `Basic`, is the value of an `authorization` header, or is assigned to a
+  secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are tokens
   with a well-known prefix (`sk-`, `ghp_`, `AKIA` and similar), JSON web
-  tokens, URL userinfo and PEM private-key blocks.
+  tokens, URL userinfo and PEM private-key blocks. A JSON web token is
+  replaced where it ends at a separator; one directly followed by `.`, `/`,
+  `+` or `=` (the full stop of a sentence, a path) is not, which is how the
+  rule already read a process's stderr.
   The value is replaced and the text around it is kept, with two
   exceptions: a private-key block goes with its lines, so a block inside a
   one-line body takes that line, and in a SigV4 `Authorization` value the
@@ -99,12 +103,15 @@ them.
   static-header, AWS, Azure AD, Google and managed OAuth authorizers (with
   the last four values of a token that refreshes); the failure of an
   OpenAI or Gemini image request, the Gemini Files API registration
-  included; the Google Code Assist setup requests; and the errors of an
-  OpenAI realtime session. The value is matched as sent, without its
-  `Bearer` or `Basic` scheme, and as an encoder rewrites it: `/` as `\/`,
-  a character as its JSON `\u00XX` escape, or percent-encoded (`%XX`),
-  alone or mixed. A second step then replaces values that look like
-  credentials in known positions (see Changed).
+  included; the Google Code Assist setup requests; and the OpenAI realtime
+  clients: the errors of the text client for realtime-capable models and,
+  for a live session, an error's message, code and param, a failed
+  response's reason and error, and the opt-in frame trace. The value is
+  matched as sent, without its `Bearer` or `Basic` scheme, and as an
+  encoder rewrites it: `/` as `\/`, a character as its JSON `\u00XX`
+  escape, or percent-encoded (`%XX`), alone or mixed. A second step then
+  replaces values that look like credentials in known positions (see
+  Changed).
 
   What is not removed:
 
@@ -117,10 +124,17 @@ them.
     masked, an HTML entity, a doubly escaped copy.
   - The second step is a second line only. It leaves a secret no route
     names when the secret stands outside the positions listed under
-    Changed, is made of letters only and shorter than 32 bytes, stands in a
+    Changed, is made of letters only and shorter than 32 bytes, is a JSON
+    web token directly followed by `.`, `/`, `+` or `=`, stands in a
     quoted header dump without a `Bearer` or `Basic` scheme
     (`{"authorization":"<value>"}`, `"authorization":"Token <value>"`), or
     stands in JSON nested inside a JSON string (`{\"api_key\":\"<value>\"}`).
+  - URL userinfo is replaced up to the `@` of its URL. Text that quotes a
+    URL closes it, so in a response the second step reads a quoting byte
+    (`'`, `"`, `\`, `<` or `>`) as the end of a URL when what stands before
+    it is a bare host (no `:`, or `:` and then digits only) and a second
+    quoting byte follows before the `@`. Userinfo of that shape, such as
+    `app:1234're'st@db`, is left.
   - A static-header route names the value of `authorization`,
     `proxy-authorization` and `cookie`, and of a header whose name contains
     `key`, `token`, `secret`, `auth`, `password`, `credential`, `signature`

@@ -1,0 +1,1968 @@
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+//! The identity tools: what an agent calls to create and change long-term
+//! agents (`identity_create`, `identity_update`, `identity_archive`,
+//! `identity_unarchive`, `identity_remove`, `identity_list`,
+//! `identity_directory`).
+//!
+//! The tools are one surface of the identity family and decide nothing: a
+//! tool parses its arguments into the family's wire request, attributes the
+//! requester from the session its call ran in, names the operation and
+//! calls the family. So these rows run on a scripted family that records
+//! what it was called with and answers what the row scripts; what the
+//! host's rules and Core's change path do with a request is the family's
+//! own suite.
+//!
+//! Each row boots the gateway's runtime composition on a temporary state
+//! directory (persistent stores, a roster provider that declares two
+//! agents) with a model that calls the tool its turn's message names, and
+//! reads back what the model was offered, what the family was called with
+//! and what the tool answered.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use meerkat_client::{LlmError, LlmEvent, LlmRequest};
+use meerkat_core::Message;
+use meerkat_core::types::{ContentInput, HandlingMode, StopReason, text_content};
+use meerkat_meta::UnifiedRuntimeBuilder;
+use meerkat_meta::identity_creation::{
+    AgentChangeState, AgentEntered, AgentOutcome, AgentPage, AgentProvenance, AgentReadiness,
+    AgentRef, AgentSet, AgentSpec, AgentSummary, ChangeRequester, ChangesHold, ChangesHoldRequest,
+    ConsentSummary, CreateAgents, DirectoryPage, DirectoryPeer, DirectoryProfile, DirectoryVerdict,
+    IDENTITY_ARCHIVE, IDENTITY_CREATE, IDENTITY_DIRECTORY, IDENTITY_LIST, IDENTITY_REMOVE,
+    IDENTITY_TOOLS, IDENTITY_UNARCHIVE, IDENTITY_UPDATE, IdentityAgentTools, IdentityChangeCall,
+    IdentityChangeSpec, IdentityFamily, IdentityOutcome, IdentityRead, IdentityReadAnswer,
+    IdentityRefusal, IdentityRefusalKind, IdentityToolAnswer, IdentityToolCallSite,
+    IdentityToolCaller, InstructionOutcome, ListAgents, OperationId, ReadDirectory, Requester,
+    RequesterKind, Sha256Digest, UpdateAgent, WithdrawRequest, Withdrawn, core_member_name,
+    identity_tool_catalog, identity_tool_defs, is_identity_tool,
+};
+use meerkat_meta::identity_first::contracts::RosterProvider;
+use meerkat_meta::identity_first::{
+    AgentAddressability, AgentIdentity, DurableAgentSpec, MutableRosterProvider, RosterContext,
+    RosterError,
+};
+use meerkat_mob::{MobDefinition, MobHandle, ProfileName, SpawnMemberSpec};
+use serde_json::{Value, json};
+
+#[path = "support/llm_usage.rs"]
+mod llm_usage;
+
+/// The declared agent whose profile has mob tools: its spawn grant.
+const LEAD: &str = "lead-a";
+/// The declared agent whose profile has no mob tools.
+const PLAIN: &str = "plain-a";
+/// The profile with mob tools.
+const MAKER: &str = "maker";
+/// The profile without them.
+const WORKER: &str = "worker";
+/// The label that makes a member private to a person.
+const PRIVATE_TO: &str = "console.private_to";
+/// Bounds a failure only; a passing row never waits for it.
+const TURN_BOUND: Duration = Duration::from_secs(90);
+
+static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
+
+fn definition(mob_id: &str) -> MobDefinition {
+    MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "{mob_id}"
+
+[profiles.{MAKER}]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.{MAKER}.tools]
+comms = true
+mob = true
+
+[profiles.{WORKER}]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+
+[profiles.{WORKER}.tools]
+comms = true
+"#
+    ))
+    .expect("parse the definition")
+}
+
+fn fresh_mob_id() -> String {
+    format!(
+        "meta-identity-agent-tools-{}-{}",
+        std::process::id(),
+        NEXT_MOB.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn declared(name: &str, profile: &str) -> DurableAgentSpec {
+    DurableAgentSpec {
+        identity: AgentIdentity::parse(name).unwrap(),
+        profile: ProfileName::from(profile),
+        addressability: AgentAddressability::Addressable,
+        display_name: None,
+        labels: BTreeMap::new(),
+        context: None,
+        additional_instructions: Vec::new(),
+        initial_message: None,
+        runtime_mode_override: None,
+        backend: None,
+        binding: None,
+        placement: None,
+    }
+}
+
+fn roster() -> Vec<DurableAgentSpec> {
+    vec![declared(LEAD, MAKER), declared(PLAIN, WORKER)]
+}
+
+/// The host's roster: [`LEAD`] and [`PLAIN`].
+struct DeclaredRoster;
+
+#[async_trait]
+impl RosterProvider for DeclaredRoster {
+    async fn roster(&self, _context: &RosterContext) -> Result<Vec<DurableAgentSpec>, RosterError> {
+        Ok(roster())
+    }
+}
+
+fn controller() -> meerkat_core::ControllerModelSelection {
+    meerkat_core::ControllerModelSelection::new(
+        meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.5".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        },
+        serde_json::from_value(
+            serde_json::json!({"realm": "meta-identity-agent-tools", "account": "scripted"}),
+        )
+        .expect("nonsecret identity of the fixture transport"),
+        "scripted-profile".into(),
+        "scripted-transport".into(),
+    )
+}
+
+/// One tool result as a model request carried it.
+#[derive(Debug, Clone, PartialEq)]
+struct ToolAnswer {
+    content: Value,
+    is_error: bool,
+}
+
+/// One model request: what it was offered and asked.
+#[derive(Debug, Clone)]
+struct Asked {
+    /// The names of the tools the request offers.
+    tools: Vec<String>,
+    /// The text of the newest user message.
+    text: String,
+    /// The tool results that follow that message, in order.
+    answers: Vec<ToolAnswer>,
+    /// Whether the model ended the turn on this request.
+    ended: bool,
+}
+
+/// A call the turn's message asks the model to make: `[[call N TOOL]]ARGS
+/// [[end]]` makes the model call `TOOL` with `ARGS`, `N` times, each in a
+/// round of its own.
+struct Directive {
+    times: usize,
+    tool: String,
+    arguments: Value,
+}
+
+fn directive(text: &str) -> Option<Directive> {
+    let (_, rest) = text.split_once("[[call ")?;
+    let (head, rest) = rest.split_once("]]")?;
+    let (times, tool) = head.split_once(' ')?;
+    let (arguments, _) = rest.split_once("[[end]]")?;
+    Some(Directive {
+        times: times.parse().ok()?,
+        tool: tool.to_owned(),
+        arguments: serde_json::from_str(arguments).ok()?,
+    })
+}
+
+/// The message that makes the model call `tool` with `arguments`, `times`
+/// times, marked `mark`.
+fn call_message(mark: &str, times: usize, tool: &str, arguments: &Value) -> String {
+    format!("{mark} [[call {times} {tool}]]{arguments}[[end]]")
+}
+
+/// The members' model. It makes the calls its turn's message names, each
+/// with the call id `fc_0`, as a provider that numbers a response's calls
+/// from zero does, and records every request.
+#[derive(Clone, Default)]
+struct ScriptedModel {
+    asked: Arc<Mutex<Vec<Asked>>>,
+}
+
+impl meerkat_client::LlmClient for ScriptedModel {
+    fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+        Some(controller())
+    }
+
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let mut text = String::new();
+        let mut answers = Vec::new();
+        for message in &request.messages {
+            match message {
+                Message::User(user) => {
+                    text = text_content(&user.content);
+                    answers.clear();
+                }
+                Message::ToolResults { results, .. } => {
+                    answers.extend(results.iter().map(|result| {
+                        ToolAnswer {
+                            content: serde_json::from_str(&result.text_content())
+                                .unwrap_or_else(|_| Value::String(result.text_content())),
+                            is_error: result.is_error,
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+        let call = directive(&text).filter(|directive| answers.len() < directive.times);
+        self.asked.lock().unwrap().push(Asked {
+            tools: request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect(),
+            text,
+            answers,
+            ended: call.is_none(),
+        });
+        let (lead, stop) = match call {
+            Some(directive) => (
+                LlmEvent::ToolCallComplete {
+                    id: "fc_0".to_string(),
+                    name: directive.tool,
+                    args: directive.arguments,
+                    meta: None,
+                },
+                StopReason::ToolUse,
+            ),
+            None => (
+                LlmEvent::TextDelta {
+                    delta: "noted".to_string(),
+                    meta: None,
+                },
+                StopReason::EndTurn,
+            ),
+        };
+        let [usage, done] = llm_usage::usage_then_done(request, meerkat::Provider::OpenAI, stop);
+        Box::pin(async_stream::stream! {
+            yield Ok(lead);
+            yield Ok(usage);
+            yield Ok(done);
+        })
+    }
+
+    fn provider(&self) -> meerkat::Provider {
+        meerkat::Provider::OpenAI
+    }
+
+    fn health_check<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), LlmError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// What the scripted family was called with.
+#[derive(Debug, Clone, PartialEq)]
+enum Seen {
+    Change {
+        requester: ChangeRequester,
+        operation_id: String,
+        change: IdentityChangeSpec,
+    },
+    Read {
+        requester: ChangeRequester,
+        read: IdentityRead,
+    },
+}
+
+/// A family that decides nothing: it records each call and answers what the
+/// row scripted, or `done` for the agents the change names.
+#[derive(Default)]
+struct ScriptedFamily {
+    seen: Mutex<Vec<Seen>>,
+    outcome: Mutex<Option<IdentityOutcome>>,
+    refuse_reads: Mutex<Option<IdentityRefusal>>,
+}
+
+impl ScriptedFamily {
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn forget(&self) {
+        self.seen.lock().unwrap().clear();
+    }
+
+    /// Answer every later change with `outcome`.
+    fn answer(&self, outcome: IdentityOutcome) {
+        *self.outcome.lock().unwrap() = Some(outcome);
+    }
+
+    fn operations(&self) -> Vec<String> {
+        self.seen()
+            .into_iter()
+            .filter_map(|seen| match seen {
+                Seen::Change { operation_id, .. } => Some(operation_id),
+                Seen::Read { .. } => None,
+            })
+            .collect()
+    }
+}
+
+fn names_of(change: &IdentityChangeSpec) -> Vec<String> {
+    match change {
+        IdentityChangeSpec::Create(create) => create
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect(),
+        IdentityChangeSpec::Update(update) => vec![update.name.clone()],
+        IdentityChangeSpec::Archive(agent)
+        | IdentityChangeSpec::Unarchive(agent)
+        | IdentityChangeSpec::Remove(agent)
+        | IdentityChangeSpec::Adopt(agent) => vec![agent.name.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn done(operation_id: &OperationId, names: &[String]) -> IdentityOutcome {
+    IdentityOutcome::Done {
+        operation_id: operation_id.clone(),
+        agents: names
+            .iter()
+            .map(|name| AgentOutcome::new(name.clone(), AgentChangeState::Committed))
+            .collect(),
+    }
+}
+
+#[async_trait]
+impl IdentityFamily for ScriptedFamily {
+    async fn change(
+        &self,
+        _mob: &MobHandle,
+        requester: &ChangeRequester,
+        call: IdentityChangeCall,
+    ) -> IdentityOutcome {
+        self.seen.lock().unwrap().push(Seen::Change {
+            requester: requester.clone(),
+            operation_id: call.operation_id.as_str().to_owned(),
+            change: call.change.clone(),
+        });
+        match self.outcome.lock().unwrap().clone() {
+            Some(outcome) => outcome,
+            None => done(&call.operation_id, &names_of(&call.change)),
+        }
+    }
+
+    async fn withdraw(
+        &self,
+        _mob: &MobHandle,
+        _requester: &ChangeRequester,
+        _request: WithdrawRequest,
+    ) -> Result<Withdrawn, IdentityRefusal> {
+        Err(IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound))
+    }
+
+    async fn changes_hold(
+        &self,
+        _mob: &MobHandle,
+        _requester: &ChangeRequester,
+        _request: ChangesHoldRequest,
+    ) -> Result<ChangesHold, IdentityRefusal> {
+        Ok(ChangesHold::new(false))
+    }
+
+    async fn read(
+        &self,
+        _mob: &MobHandle,
+        requester: &ChangeRequester,
+        read: IdentityRead,
+    ) -> Result<IdentityReadAnswer, IdentityRefusal> {
+        self.seen.lock().unwrap().push(Seen::Read {
+            requester: requester.clone(),
+            read: read.clone(),
+        });
+        if let Some(refusal) = self.refuse_reads.lock().unwrap().clone() {
+            return Err(refusal);
+        }
+        match read {
+            // The host's own read of the mob's agents: one agent another
+            // agent asked for, with its provenance.
+            IdentityRead::List(_) => {
+                let mut agent =
+                    AgentSummary::new("scout", WORKER, sha("scout"), AgentReadiness::Unseated);
+                agent.display_name = Some("Scout".to_owned());
+                agent.spec_revision = Some(3);
+                agent.archived = true;
+                agent.provenance = Some(AgentProvenance::new(
+                    AgentEntered::Created,
+                    RequesterKind::Agent,
+                    "another-agent",
+                    1_700_000_000_000,
+                    ConsentSummary::Decided,
+                ));
+                let mut page = AgentPage::default();
+                page.agents = vec![agent];
+                page.next = Some("next-agent".to_owned());
+                Ok(IdentityReadAnswer::List(page))
+            }
+            _ => {
+                let mut page = DirectoryPage::default();
+                page.profiles = vec![
+                    DirectoryProfile::new(WORKER, DirectoryVerdict::Allowed),
+                    DirectoryProfile::new(
+                        MAKER,
+                        DirectoryVerdict::NeedsDecision {
+                            lines: vec!["Creates an agent that can create agents.".to_owned()],
+                        },
+                    ),
+                ];
+                page.peers = vec![DirectoryPeer::new(
+                    PLAIN,
+                    WORKER,
+                    DirectoryVerdict::NotAllowed {
+                        reason: Some("outside your team".to_owned()),
+                    },
+                )];
+                page.next = Some("next-entry".to_owned());
+                Ok(IdentityReadAnswer::Directory(page))
+            }
+        }
+    }
+}
+
+/// One booted gateway runtime, its members' model and the scripted family.
+struct Rig {
+    runtime: meerkat_meta::UnifiedRuntime,
+    model: ScriptedModel,
+    family: Arc<ScriptedFamily>,
+}
+
+/// Boot the gateway's runtime composition on `state` for the mob `mob_id`.
+/// No identity family is attached: the launch has no identity policy.
+async fn boot(state: &Path, mob_id: &str) -> Rig {
+    let model = ScriptedModel::default();
+    let runtime = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(definition(mob_id))
+            .persistent_state(state)
+            .continuity_from_state_dir(state)
+            .await
+            .expect("open the state-dir identity substrate")
+            .roster_provider(Arc::new(DeclaredRoster))
+            .identity_runtime_instance_id("meta-identity-agent-tools")
+            .default_llm_client(Arc::new(model.clone()))
+            .build(),
+    )
+    .await
+    .expect("build the gateway-shaped UnifiedRuntime");
+    Rig {
+        runtime,
+        model,
+        family: Arc::new(ScriptedFamily::default()),
+    }
+}
+
+/// [`boot`], with the scripted family attached as a launch with an identity
+/// policy attaches its family.
+async fn boot_with_family(state: &Path, mob_id: &str) -> Rig {
+    let rig = boot(state, mob_id).await;
+    rig.attach_family();
+    rig
+}
+
+fn sha(text: &str) -> Sha256Digest {
+    Sha256Digest::of(text.as_bytes())
+}
+
+fn has_identity_tools(asked: &Asked) -> bool {
+    IDENTITY_TOOLS
+        .iter()
+        .all(|tool| asked.tools.iter().any(|offered| offered == tool))
+}
+
+fn has_no_identity_tool(asked: &Asked) -> bool {
+    !asked.tools.iter().any(|offered| is_identity_tool(offered))
+}
+
+impl Rig {
+    /// Attach the scripted family as a launch whose identity policy is
+    /// present and enabled attaches its family.
+    fn attach_family(&self) {
+        self.runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .attach_identity_family(self.family.clone());
+    }
+
+    /// Attach the scripted family as a launch without an enabled identity
+    /// policy attaches its family: it serves reads and refuses every
+    /// change.
+    fn attach_reads(&self) {
+        self.runtime
+            .identity_runtime()
+            .expect("identity runtime installed")
+            .attach_identity_reads(self.family.clone());
+    }
+
+    /// One JSON-RPC call through the dispatcher the stdio gateway serves.
+    async fn rpc(&self, method: &str, params: Value) -> Value {
+        let ctx = meerkat_meta::rpc::IdentityFirstContext {
+            runtime: self
+                .runtime
+                .identity_runtime()
+                .expect("identity runtime installed"),
+            roster_provider: Arc::new(MutableRosterProvider::new(roster())),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: None,
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+        let raw = meerkat_meta::handle_unified_rpc_json(
+            &self.runtime,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string(),
+            Duration::from_mins(1),
+            None,
+            Some(&ctx),
+        )
+        .await;
+        serde_json::from_str(&raw).expect("json-rpc response")
+    }
+
+    /// The model requests whose turn's message carries `mark`, once that
+    /// turn ended.
+    async fn turn(&self, mark: &str) -> Vec<Asked> {
+        tokio::time::timeout(TURN_BOUND, async {
+            loop {
+                let asked: Vec<Asked> = self
+                    .model
+                    .asked
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|asked| asked.text.contains(mark))
+                    .cloned()
+                    .collect();
+                if asked.last().is_some_and(|asked| asked.ended) {
+                    return asked;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the turn marked {mark} ends"))
+    }
+
+    /// Send `content` to the agent `identity` by name, and answer its
+    /// turn's model requests.
+    async fn send(&self, identity: &str, mark: &str, content: &str) -> Vec<Asked> {
+        let sent = self
+            .rpc(
+                "meta/send",
+                json!({"identity": identity, "content": content}),
+            )
+            .await;
+        assert!(
+            sent["error"].is_null(),
+            "the send to {identity} is taken: {sent:#}"
+        );
+        self.turn(mark).await
+    }
+
+    /// Have `identity` call `tool` with `arguments` once, and answer what
+    /// the tool answered.
+    async fn tool(&self, identity: &str, mark: &str, tool: &str, arguments: Value) -> ToolAnswer {
+        let asked = self
+            .send(identity, mark, &call_message(mark, 1, tool, &arguments))
+            .await;
+        let last = asked.last().expect("the turn asked the model");
+        assert_eq!(
+            last.answers.len(),
+            1,
+            "the call of {tool} answered once: {last:?}"
+        );
+        last.answers[0].clone()
+    }
+
+    /// The session of the agent `identity`'s member.
+    async fn session_of(&self, identity: &str) -> meerkat_core::types::SessionId {
+        let member = core_member_name(identity).expect("an agent name");
+        self.runtime
+            .mob_handle()
+            .get_member(&member)
+            .await
+            .expect("the roster reads")
+            .unwrap_or_else(|| panic!("{identity} is a member"))
+            .bridge_session_id()
+            .cloned()
+            .unwrap_or_else(|| panic!("{identity} has a session"))
+    }
+
+    /// The identity tools over the scripted family, called directly.
+    fn tools(&self) -> IdentityAgentTools {
+        IdentityAgentTools::new(self.family.clone(), self.runtime.mob_handle())
+    }
+
+    /// Create the agent `name` of `profile` through Core's own create, as a
+    /// family would: Core seats it dormant.
+    async fn create(&self, name: &str, profile: &str) {
+        let created = self
+            .runtime
+            .mob_handle()
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    meerkat_mob::IdentityOperation::new(
+                        format!("create-{name}"),
+                        meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes())
+                            .as_str(),
+                    ),
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        meerkat_mob::CreatedIdentitySpec::new(name, profile),
+                    )],
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "Core creates {name}: {created:?}"
+        );
+    }
+
+    /// Spawn the worker member `name` of `profile` with `labels`, run one
+    /// turn on it and answer that turn's model requests.
+    async fn worker_turn(
+        &self,
+        name: &str,
+        profile: &str,
+        labels: &[(&str, &str)],
+        mark: &str,
+    ) -> Vec<Asked> {
+        let identity = meerkat_mob::AgentIdentity::from(name);
+        let labels = labels
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<BTreeMap<_, _>>();
+        Box::pin(
+            self.runtime
+                .mob_handle()
+                .spawn_spec(SpawnMemberSpec::new(profile, identity.clone()).with_labels(labels)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name} is spawned: {error}"));
+        let member = self
+            .runtime
+            .mob_handle()
+            .member(&identity)
+            .await
+            .expect("the member's handle");
+        let turn = member
+            .start_turn(
+                ContentInput::Text(mark.to_string()),
+                HandlingMode::Queue,
+                meerkat_mob::MemberTurnOptions::new(),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name} takes a turn: {error}"));
+        turn.wait()
+            .await
+            .unwrap_or_else(|error| panic!("{name}'s turn ends: {error}"));
+        self.turn(mark).await
+    }
+
+    async fn shutdown(self) {
+        let _ = self.runtime.shutdown().await;
+    }
+
+    /// Shut down before a reopen over the same state directory in this
+    /// process, until the durable child root is released.
+    async fn shutdown_for_reopen(self) {
+        let released = |outcome: &meerkat_meta::ChildMobStandDownOutcome| {
+            matches!(
+                outcome,
+                meerkat_meta::ChildMobStandDownOutcome::Released { .. }
+                    | meerkat_meta::ChildMobStandDownOutcome::NotConfigured
+            )
+        };
+        let mut outcome = self.runtime.shutdown().await.child_mob_stand_down;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !released(&outcome) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            outcome = self
+                .runtime
+                .mob_runtime()
+                .stand_down_child_mobs(deadline)
+                .await;
+        }
+        assert!(
+            released(&outcome),
+            "the durable child root is released before the reopen: {outcome:?}"
+        );
+    }
+}
+
+/// The caller the rows call the tools directly as: [`LEAD`], from its
+/// member's session.
+async fn lead(rig: &Rig) -> IdentityToolCaller {
+    IdentityToolCaller::new(LEAD, rig.session_of(LEAD).await)
+}
+
+const RUN: &str = "run-1";
+
+async fn call(rig: &Rig, tool: &str, arguments: Value) -> IdentityToolAnswer {
+    rig.tools()
+        .call(
+            &lead(rig).await,
+            &IdentityToolCallSite::in_round(RUN, 0, "fc_0"),
+            tool,
+            &arguments.to_string(),
+        )
+        .await
+        .unwrap_or_else(|fault| panic!("{tool} answers: {fault}"))
+}
+
+/// The identity tools are in an agent's tool list exactly while the mob's
+/// identity family takes changes (its launch has an identity policy, and
+/// the policy is enabled) and the agent's profile has mob tools (its spawn
+/// grant). Otherwise they are absent: not listed and then refused. A launch
+/// without an enabled policy still has a family, which serves reads to the
+/// host and refuses every change: its agents are offered no identity tool.
+/// A family that comes to take changes after an agent was built reaches
+/// that agent's next request.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_tools_mount_with_a_policy_and_a_spawn_grant_and_not_without() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot(state.path(), &fresh_mob_id()).await;
+
+    let asked = rig.send(LEAD, "no-family", "no-family").await;
+    assert!(
+        has_no_identity_tool(&asked[0]),
+        "with no identity family an agent with mob tools is offered no identity tool: {:?}",
+        asked[0].tools
+    );
+    assert!(
+        asked[0].tools.iter().any(|tool| tool == "mob_spawn_member"),
+        "the agent has its mob tools: {:?}",
+        asked[0].tools
+    );
+
+    rig.attach_reads();
+    let asked = rig.send(LEAD, "no-policy", "no-policy").await;
+    assert!(
+        has_no_identity_tool(&asked[0]),
+        "a family that serves reads only (no policy, or one not enabled) mounts no identity \
+         tool: {:?}",
+        asked[0].tools
+    );
+
+    rig.attach_family();
+    let asked = rig.send(LEAD, "with-policy", "with-policy").await;
+    assert!(
+        has_identity_tools(&asked[0]),
+        "with a policy an agent with mob tools is offered the seven tools: {:?}",
+        asked[0].tools
+    );
+    let offered: Vec<&str> = asked[0]
+        .tools
+        .iter()
+        .map(String::as_str)
+        .filter(|tool| is_identity_tool(tool))
+        .collect();
+    assert_eq!(offered, IDENTITY_TOOLS, "each once, in their order");
+
+    let asked = rig.send(PLAIN, "no-grant", "no-grant").await;
+    assert!(
+        has_no_identity_tool(&asked[0]),
+        "an agent whose profile has no mob tools holds no spawn grant and is offered none: {:?}",
+        asked[0].tools
+    );
+    rig.shutdown().await;
+}
+
+/// A member private to a person is offered no identity tool, whatever its
+/// profile: it would carry that person's conversation into a shared agent's
+/// instructions or first message. A member of the same profile that is
+/// private to no one is offered them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_private_to_a_person_is_offered_no_identity_tools() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+
+    let asked = rig
+        .worker_turn("side", MAKER, &[(PRIVATE_TO, "alice")], "private-turn")
+        .await;
+    assert!(
+        has_no_identity_tool(&asked[0]),
+        "a private member is offered no identity tool: {:?}",
+        asked[0].tools
+    );
+    assert!(
+        asked[0].tools.iter().any(|tool| tool == "mob_spawn_member"),
+        "the private member has its mob tools: {:?}",
+        asked[0].tools
+    );
+
+    let asked = rig.worker_turn("shared", MAKER, &[], "shared-turn").await;
+    assert!(
+        has_identity_tools(&asked[0]),
+        "a member of the same profile private to no one is offered them: {:?}",
+        asked[0].tools
+    );
+    rig.shutdown().await;
+}
+
+/// The tools are in the FIRST request of an agent's first run: after a wake
+/// of a dormant agent, of a newly created one, and after a restart restored
+/// the mob. A tool list that changed under an agent in mid conversation
+/// would not be acceptable as the ordinary path.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_request_of_a_run_offers_the_identity_tools_after_a_wake_and_a_restore() {
+    let state = tempfile::tempdir().unwrap();
+    let mob_id = fresh_mob_id();
+    let rig = boot_with_family(state.path(), &mob_id).await;
+
+    let asked = rig.send(LEAD, "first-wake", "first-wake").await;
+    assert!(
+        has_identity_tools(&asked[0]),
+        "the first request after a declared agent's first wake: {:?}",
+        asked[0].tools
+    );
+
+    rig.create("keeper", MAKER).await;
+    let asked = rig.send("keeper", "created-wake", "created-wake").await;
+    assert!(
+        has_identity_tools(&asked[0]),
+        "the first request of a newly created agent's first run: {:?}",
+        asked[0].tools
+    );
+    rig.shutdown_for_reopen().await;
+
+    let rig = boot_with_family(state.path(), &mob_id).await;
+    for (agent, mark) in [(LEAD, "restored-lead"), ("keeper", "restored-keeper")] {
+        let asked = rig.send(agent, mark, mark).await;
+        assert!(
+            has_identity_tools(&asked[0]),
+            "the first request of {agent} after the restart: {:?}",
+            asked[0].tools
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// Each tool, called by an agent's model in a real turn, reaches the family
+/// with the wire request its arguments spell, as the member whose session
+/// made the call, and answers the family's outcome verbatim.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_identity_tool_reaches_the_family_with_its_wire_request() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    let digest = sha("spec-of-scout");
+
+    let mut scout = AgentSpec::new("scout", WORKER);
+    scout.display_name = Some("Scout".to_owned());
+    scout.instructions = vec!["Find the open questions.".to_owned()];
+    scout.context = Some(json!({"topic": "tides"}));
+    scout.labels = BTreeMap::from([("area".to_owned(), "research".to_owned())]);
+    scout.first_message = Some(ContentInput::Text("Start with the tide tables.".to_owned()));
+    scout.peers = vec![LEAD.to_owned(), "mapper".to_owned()];
+    let mut create = CreateAgents::new(vec![scout, AgentSpec::new("mapper", WORKER)]);
+    create.request_id = Some("team-1".to_owned());
+
+    let mut set = AgentSet::default();
+    set.display_name = Some("Scout II".to_owned());
+    set.instructions = Some(vec!["Find the open questions, then rank them.".to_owned()]);
+    set.context = Some(json!({"topic": "currents"}));
+    set.labels = Some(BTreeMap::from([("area".to_owned(), "field".to_owned())]));
+    set.labels_remove = vec!["draft".to_owned()];
+    set.profile = Some(MAKER.to_owned());
+    let mut update = UpdateAgent::new("scout", digest.clone());
+    update.set = set;
+    update.peers_add = vec!["mapper".to_owned()];
+    update.peers_remove = vec![LEAD.to_owned()];
+    let one = AgentRef::new("scout", digest.clone());
+
+    let changes = [
+        (
+            IDENTITY_CREATE,
+            json!({
+                "request_id": "team-1",
+                "agents": [
+                    {
+                        "name": "scout",
+                        "profile": WORKER,
+                        "display_name": "Scout",
+                        "instructions": ["Find the open questions."],
+                        "context": {"topic": "tides"},
+                        "labels": {"area": "research"},
+                        "first_message": "Start with the tide tables.",
+                        "peers": [LEAD, "mapper"],
+                    },
+                    {"name": "mapper", "profile": WORKER},
+                ],
+            }),
+            IdentityChangeSpec::Create(create),
+        ),
+        (
+            IDENTITY_UPDATE,
+            json!({
+                "name": "scout",
+                "expected_spec_digest": digest.as_str(),
+                "set": {
+                    "display_name": "Scout II",
+                    "instructions": ["Find the open questions, then rank them."],
+                    "context": {"topic": "currents"},
+                    "labels": {"area": "field"},
+                    "labels_remove": ["draft"],
+                    "profile": MAKER,
+                },
+                "peers_add": ["mapper"],
+                "peers_remove": [LEAD],
+            }),
+            IdentityChangeSpec::Update(update),
+        ),
+        (
+            IDENTITY_ARCHIVE,
+            json!({"name": "scout", "expected_spec_digest": digest.as_str()}),
+            IdentityChangeSpec::Archive(one.clone()),
+        ),
+        (
+            IDENTITY_UNARCHIVE,
+            json!({"name": "scout", "expected_spec_digest": digest.as_str()}),
+            IdentityChangeSpec::Unarchive(one.clone()),
+        ),
+        (
+            IDENTITY_REMOVE,
+            json!({"name": "scout", "expected_spec_digest": digest.as_str()}),
+            IdentityChangeSpec::Remove(one),
+        ),
+    ];
+    let session = {
+        // The agent's member is seated dormant with its session bound.
+        rig.send(LEAD, "seat-lead", "seat-lead").await;
+        rig.session_of(LEAD).await
+    };
+    let expected_requester = ChangeRequester::agent_session(LEAD, session);
+
+    for (tool, arguments, expected) in changes {
+        rig.family.forget();
+        let answer = rig
+            .tool(LEAD, &format!("turn-{tool}"), tool, arguments)
+            .await;
+        let seen = rig.family.seen();
+        let [
+            Seen::Change {
+                requester,
+                operation_id,
+                change,
+            },
+        ] = seen.as_slice()
+        else {
+            panic!("{tool} called the family's change once: {seen:?}");
+        };
+        assert_eq!(
+            change, &expected,
+            "{tool} hands the family its wire request"
+        );
+        assert_eq!(
+            requester, &expected_requester,
+            "{tool} asks as the member whose session made the call"
+        );
+        let names = names_of(&expected);
+        let operation = OperationId::from_recorded(operation_id).expect("an operation id");
+        assert_eq!(
+            answer.content,
+            done(&operation, &names).to_json(),
+            "{tool} answers the family's outcome verbatim"
+        );
+        assert!(!answer.is_error, "a done outcome is no error result");
+    }
+
+    for (tool, arguments, expected) in [
+        (
+            IDENTITY_LIST,
+            json!({"profile": WORKER, "include_archived": true, "after": "mapper"}),
+            IdentityRead::List({
+                let mut list = ListAgents::default();
+                list.profile = Some(WORKER.to_owned());
+                list.include_archived = true;
+                list.after = Some("mapper".to_owned());
+                list
+            }),
+        ),
+        (
+            IDENTITY_DIRECTORY,
+            json!({"query": "sco", "after": "mapper"}),
+            IdentityRead::Directory({
+                let mut directory = ReadDirectory::default();
+                directory.query = Some("sco".to_owned());
+                directory.after = Some("mapper".to_owned());
+                directory
+            }),
+        ),
+    ] {
+        rig.family.forget();
+        let answer = rig
+            .tool(LEAD, &format!("turn-{tool}"), tool, arguments)
+            .await;
+        assert_eq!(
+            rig.family.seen(),
+            vec![Seen::Read {
+                requester: expected_requester.clone(),
+                read: expected,
+            }],
+            "{tool} hands the family its read, as the calling member"
+        );
+        let expected_answer = if tool == IDENTITY_LIST {
+            // The family's page, without the agent's provenance.
+            json!({
+                "agents": [{
+                    "name": "scout",
+                    "display_name": "Scout",
+                    "profile": WORKER,
+                    "spec_digest": sha("scout").as_str(),
+                    "spec_revision": 3,
+                    "archived": true,
+                    "readiness": "unseated",
+                }],
+                "next": "next-agent",
+            })
+        } else {
+            // Each entry carries its verdict flat, beside its own members.
+            json!({
+                "profiles": [
+                    {"profile": WORKER, "verdict": "allowed"},
+                    {
+                        "profile": MAKER,
+                        "verdict": "needs_decision",
+                        "lines": ["Creates an agent that can create agents."],
+                    },
+                ],
+                "peers": [{
+                    "name": PLAIN,
+                    "profile": WORKER,
+                    "verdict": "not_allowed",
+                    "reason": "outside your team",
+                }],
+                "next": "next-entry",
+            })
+        };
+        assert_eq!(answer.content, expected_answer, "{tool} answers the page");
+        assert!(!answer.is_error);
+    }
+
+    // An agent that lists the mob's agents is not shown who asked for
+    // another agent, when, or under which consent: the host's read keeps
+    // that.
+    let listed = call(&rig, IDENTITY_LIST, json!({})).await.text();
+    for hidden in ["provenance", "another-agent", "consent", "at_ms", "decided"] {
+        assert!(
+            !listed.contains(hidden),
+            "identity_list names no `{hidden}`: {listed}"
+        );
+    }
+    rig.shutdown().await;
+}
+
+/// Who asks is the member whose session made the call, never an argument.
+/// The arguments are closed: a requester, a member only the host plane
+/// writes, and every parameter that is not in this release are refused as
+/// unknown, naming the argument, and the family is never called.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_requester_is_the_calling_session_and_an_argument_naming_one_is_refused() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    rig.send(LEAD, "seat-lead", "seat-lead").await;
+    let digest = sha("spec");
+    let agent = json!({"name": "scout", "profile": WORKER});
+    let one = json!({"name": "scout", "expected_spec_digest": digest.as_str()});
+    let with = |base: &Value, path: &[&str], member: &str, value: Value| {
+        let mut arguments = base.clone();
+        let mut at = &mut arguments;
+        for step in path {
+            at = match step.parse::<usize>() {
+                Ok(index) => &mut at[index],
+                Err(_) => &mut at[*step],
+            };
+        }
+        at[member] = value;
+        arguments
+    };
+    let create = json!({"agents": [agent]});
+    let update = with(&one, &[], "set", json!({}));
+
+    let forged = with(
+        &create,
+        &[],
+        "requester",
+        json!({"kind": "agent", "identity": PLAIN}),
+    );
+    let answer = rig.tool(LEAD, "forged", IDENTITY_CREATE, forged).await;
+    assert_eq!(answer.content["outcome"], "refused");
+    assert_eq!(answer.content["kind"], "invalid_request");
+    assert_eq!(answer.content["problem"], "malformed");
+    assert_eq!(answer.content["field"], "requester");
+    assert_eq!(answer.content["retryable"], false);
+    assert!(answer.is_error, "a refusal is an error result");
+    assert!(
+        rig.family.seen().is_empty(),
+        "a call with a forged requester never reaches the family"
+    );
+
+    for (tool, arguments, field) in [
+        (
+            IDENTITY_CREATE,
+            with(&create, &[], "proposer", json!("ops")),
+            "proposer",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(
+                &create,
+                &[],
+                "source_evidence",
+                json!({"attestor": "a", "subject": "b", "source_ref": "c", "observed_at_ms": 1}),
+            ),
+            "source_evidence",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(&create, &[], "mob_id", json!("other")),
+            "mob_id",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(&create, &["agents", "0"], "grants", json!([])),
+            "agents[0].grants",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(&create, &["agents", "0"], "schedules", json!([])),
+            "agents[0].schedules",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(
+                &create,
+                &["agents", "0"],
+                "fork_from",
+                json!({"name": LEAD}),
+            ),
+            "agents[0].fork_from",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(&create, &["agents", "0"], "placement", json!({})),
+            "agents[0].placement",
+        ),
+        (
+            IDENTITY_CREATE,
+            with(&create, &["agents", "0"], "tools", json!(["shell"])),
+            "agents[0].tools",
+        ),
+        (
+            IDENTITY_UPDATE,
+            with(&update, &["set"], "grants_add", json!([])),
+            "set.grants_add",
+        ),
+        (
+            IDENTITY_UPDATE,
+            with(
+                &update,
+                &["set"],
+                "runtime_mode_override",
+                json!("turn_driven"),
+            ),
+            "set.runtime_mode_override",
+        ),
+        (
+            IDENTITY_UPDATE,
+            with(&update, &[], "proposer", json!("ops")),
+            "proposer",
+        ),
+        (
+            IDENTITY_ARCHIVE,
+            with(&one, &[], "source_evidence", json!({})),
+            "source_evidence",
+        ),
+        (
+            IDENTITY_UNARCHIVE,
+            with(&one, &[], "requester", json!(PLAIN)),
+            "requester",
+        ),
+        (
+            IDENTITY_REMOVE,
+            with(&one, &[], "mob_id", json!("m")),
+            "mob_id",
+        ),
+        (IDENTITY_LIST, json!({"mob_id": "m"}), "mob_id"),
+        (IDENTITY_DIRECTORY, json!({"requester": PLAIN}), "requester"),
+        (IDENTITY_CREATE, json!({}), "agents"),
+        (
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "scout"}]}),
+            "agents[0].profile",
+        ),
+        (
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "scout", "profile": WORKER, "instructions": "one"}]}),
+            "agents[0].instructions",
+        ),
+        (
+            IDENTITY_CREATE,
+            json!({"agents": [{"name": "scout", "profile": WORKER, "peers": [7]}]}),
+            "agents[0].peers[0]",
+        ),
+        (
+            IDENTITY_UPDATE,
+            json!({"name": "scout"}),
+            "expected_spec_digest",
+        ),
+        (
+            IDENTITY_ARCHIVE,
+            json!({"name": "scout", "expected_spec_digest": "sha256:short"}),
+            "expected_spec_digest",
+        ),
+        (
+            IDENTITY_LIST,
+            json!({"include_archived": "yes"}),
+            "include_archived",
+        ),
+    ] {
+        let answer = call(&rig, tool, arguments.clone()).await;
+        assert_eq!(
+            (
+                answer.content["outcome"].as_str(),
+                answer.content["kind"].as_str(),
+                answer.content["field"].as_str(),
+            ),
+            (Some("refused"), Some("invalid_request"), Some(field)),
+            "{tool} with {arguments}: {}",
+            answer.content
+        );
+        assert!(answer.refused);
+        assert!(
+            answer.content["detail"]
+                .as_str()
+                .is_some_and(|detail| !detail.is_empty()),
+            "the refusal says what to send instead"
+        );
+    }
+    assert!(
+        rig.family.seen().is_empty(),
+        "no refused call reached the family: {:?}",
+        rig.family.seen()
+    );
+
+    // A null member is a member left out, at every depth.
+    let answer = call(
+        &rig,
+        IDENTITY_CREATE,
+        json!({
+            "request_id": null,
+            "agents": [{"name": "scout", "profile": WORKER, "display_name": null, "peers": null}],
+        }),
+    )
+    .await;
+    assert_eq!(answer.content["outcome"], "done", "{}", answer.content);
+    rig.shutdown().await;
+}
+
+/// A call that gives no `request_id` gets its operation from where it ran:
+/// its mob, session, run, and its round and call id within the run. The
+/// same call dispatched again names the same operation; another round of
+/// the same run, another run and another session name others, though the
+/// provider's call id is the same in all of them. A `request_id` names the
+/// operation by the requester alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_without_a_request_id_derives_its_operation_from_where_it_ran() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    let arguments = json!({"agents": [{"name": "scout", "profile": WORKER}]});
+
+    // In a real run: two rounds of one run, then another run, each call
+    // with the provider's call id `fc_0`.
+    rig.send(
+        LEAD,
+        "two-rounds",
+        &call_message("two-rounds", 2, IDENTITY_CREATE, &arguments),
+    )
+    .await;
+    rig.send(
+        LEAD,
+        "next-run",
+        &call_message("next-run", 1, IDENTITY_CREATE, &arguments),
+    )
+    .await;
+    let operations = rig.family.operations();
+    assert_eq!(operations.len(), 3, "three calls reached the family");
+    assert_eq!(
+        operations.iter().collect::<BTreeSet<_>>().len(),
+        3,
+        "two rounds of one run and a later run are three operations, with one call id: \
+         {operations:?}"
+    );
+    for operation in &operations {
+        let derived = operation
+            .strip_prefix("agent.")
+            .and_then(|rest| rest.split_once(".call-"));
+        assert!(
+            derived.is_some_and(|(requester, call)| requester.len() == 32 && call.len() == 64),
+            "a derived operation id is the requester's, with a derived request id: {operation}"
+        );
+    }
+
+    // Called directly, with the place of the call given.
+    rig.family.forget();
+    let caller = lead(&rig).await;
+    let tools = rig.tools();
+    let at = |site: IdentityToolCallSite<'static>, caller: IdentityToolCaller| {
+        let tools = tools.clone();
+        let arguments = arguments.to_string();
+        async move {
+            tools
+                .call(&caller, &site, IDENTITY_CREATE, &arguments)
+                .await
+                .expect("the tool answers")
+        }
+    };
+    let first = at(
+        IdentityToolCallSite::in_round(RUN, 0, "fc_0"),
+        caller.clone(),
+    )
+    .await;
+    let again = at(
+        IdentityToolCallSite::in_round(RUN, 0, "fc_0"),
+        caller.clone(),
+    )
+    .await;
+    assert_eq!(
+        first, again,
+        "the same call dispatched again reads the same state"
+    );
+    at(
+        IdentityToolCallSite::in_round(RUN, 1, "fc_0"),
+        caller.clone(),
+    )
+    .await;
+    at(
+        IdentityToolCallSite::in_round("run-2", 0, "fc_0"),
+        caller.clone(),
+    )
+    .await;
+    at(
+        IdentityToolCallSite::in_round(RUN, 0, "fc_1"),
+        caller.clone(),
+    )
+    .await;
+    at(
+        IdentityToolCallSite::in_round(RUN, 0, "fc_0"),
+        IdentityToolCaller::new(LEAD, meerkat_core::types::SessionId::new()),
+    )
+    .await;
+    let operations = rig.family.operations();
+    assert_eq!(operations[0], operations[1], "one operation for one call");
+    assert_eq!(
+        operations.iter().collect::<BTreeSet<_>>().len(),
+        5,
+        "another round, another run, another call id and another session are other \
+         operations: {operations:?}"
+    );
+
+    // With a request id the operation is the requester's request, wherever
+    // the call ran.
+    rig.family.forget();
+    let named = json!({"request_id": "team-1", "agents": [{"name": "scout", "profile": WORKER}]});
+    for site in [
+        IdentityToolCallSite::in_round(RUN, 0, "fc_0"),
+        IdentityToolCallSite::in_round("run-9", 4, "fc_3"),
+        IdentityToolCallSite::outside_a_run("host-call"),
+    ] {
+        tools
+            .call(&caller, &site, IDENTITY_CREATE, &named.to_string())
+            .await
+            .expect("the tool answers");
+    }
+    let expected = OperationId::for_request(
+        &Requester::Agent {
+            identity: LEAD.to_owned(),
+        },
+        "team-1",
+    )
+    .expect("a request id");
+    assert_eq!(
+        rig.family.operations(),
+        vec![expected.as_str().to_owned(); 3],
+        "a request id names the operation by the requester"
+    );
+
+    // Outside a run there is no place to derive from: the call must give a
+    // request id, and nothing reaches the family.
+    rig.family.forget();
+    let answer = tools
+        .call(
+            &caller,
+            &IdentityToolCallSite::outside_a_run("host-call"),
+            IDENTITY_CREATE,
+            &arguments.to_string(),
+        )
+        .await
+        .expect("the tool answers");
+    assert_eq!(
+        (
+            answer.content["kind"].as_str(),
+            answer.content["field"].as_str()
+        ),
+        (Some("invalid_request"), Some("request_id")),
+        "{}",
+        answer.content
+    );
+    assert!(rig.family.seen().is_empty());
+    rig.shutdown().await;
+}
+
+/// The family's outcome is the tool's answer, verbatim: a held decision, a
+/// pending preparation, an update's instruction outcome and a refusal with
+/// its kind's details. Only a refusal is an error result. An agent that
+/// names itself reaches the family as requester and target alike, and the
+/// family's `self_change_refused` is what the tool answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_familys_outcome_is_the_tools_answer_verbatim() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    rig.send(LEAD, "seat-lead", "seat-lead").await;
+    let digest = sha("read");
+    let current = sha("current");
+    let operation = OperationId::for_request(
+        &Requester::Agent {
+            identity: LEAD.to_owned(),
+        },
+        "r-1",
+    )
+    .unwrap();
+    let update = json!({
+        "request_id": "r-1",
+        "name": "scout",
+        "expected_spec_digest": digest.as_str(),
+        "set": {"instructions": ["Rank them."]},
+    });
+
+    let held = IdentityOutcome::PendingDecision {
+        operation_id: operation.clone(),
+        decision_id: "decision-7".to_owned(),
+        deadline_ms: 1_800_000_000_000,
+    };
+    rig.family.answer(held.clone());
+    let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
+    assert_eq!(answer.content, held.to_json());
+    assert_eq!(
+        answer.content,
+        json!({
+            "outcome": "pending_decision",
+            "operation_id": operation.as_str(),
+            "decision_id": "decision-7",
+            "deadline_ms": 1_800_000_000_000_u64,
+        })
+    );
+    assert!(!answer.refused, "a held decision is no error result");
+
+    let preparing = IdentityOutcome::PendingPreparation {
+        operation_id: operation.clone(),
+        agents: vec![AgentOutcome::new(
+            "scout",
+            AgentChangeState::PendingPreparation,
+        )],
+    };
+    rig.family.answer(preparing.clone());
+    let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
+    assert_eq!(answer.content, preparing.to_json());
+    assert_eq!(answer.content["outcome"], "pending_preparation");
+    assert!(!answer.refused);
+
+    let mut agent = AgentOutcome::new("scout", AgentChangeState::Committed);
+    agent.spec_digest = Some(current.clone());
+    agent.spec_revision = Some(2);
+    let updated = IdentityOutcome::Done {
+        operation_id: operation.clone(),
+        agents: vec![agent],
+    }
+    .with_instruction_outcome("scout", InstructionOutcome::AppliesAtNextRun);
+    rig.family.answer(updated.clone());
+    let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
+    assert_eq!(answer.content, updated.to_json());
+    assert_eq!(
+        answer.content["agents"][0]["instructions"],
+        json!({"kind": "applies_at_next_run"}),
+        "an update that changed the instructions carries the typed instruction outcome"
+    );
+    assert_eq!(answer.content["agents"][0]["spec_digest"], current.as_str());
+
+    let stale = IdentityRefusal::new(IdentityRefusalKind::StaleSpec {
+        current_digest: current.clone(),
+        current_revision: Some(2),
+    })
+    .at("expected_spec_digest");
+    rig.family.answer(IdentityOutcome::Refused(stale.clone()));
+    let answer = call(&rig, IDENTITY_UPDATE, update.clone()).await;
+    let mut expected = stale.to_refused();
+    expected["outcome"] = json!("refused");
+    assert_eq!(
+        answer.content, expected,
+        "a refusal goes through to_refused"
+    );
+    assert_eq!(answer.content["kind"], "stale_spec");
+    assert_eq!(answer.content["current_digest"], current.as_str());
+    assert_eq!(answer.content["field"], "expected_spec_digest");
+    assert_eq!(answer.content["retryable"], false);
+    assert!(answer.refused, "a refusal is an error result");
+
+    // A refusal that names an argument keeps its path: a first message in
+    // a governed realm, which the family refuses before anything commits.
+    let governed = IdentityRefusal::new(IdentityRefusalKind::Unsupported {
+        feature: "a first message in a governed realm".to_owned(),
+    })
+    .at("agents[0].first_message");
+    rig.family
+        .answer(IdentityOutcome::Refused(governed.clone()));
+    let answer = call(
+        &rig,
+        IDENTITY_CREATE,
+        json!({"agents": [{"name": "scout", "profile": WORKER, "first_message": "Begin."}]}),
+    )
+    .await;
+    let mut expected = governed.to_refused();
+    expected["outcome"] = json!("refused");
+    assert_eq!(answer.content, expected);
+    assert_eq!(answer.content["kind"], "unsupported");
+    assert_eq!(answer.content["field"], "agents[0].first_message");
+    assert!(answer.refused);
+
+    // An agent naming itself: the tool hands the family the calling
+    // session's identity as requester, so the family's own refusal is the
+    // answer for every change of one agent.
+    let own = IdentityRefusal::new(IdentityRefusalKind::SelfChangeRefused).at("name");
+    rig.family.answer(IdentityOutcome::Refused(own.clone()));
+    for tool in [
+        IDENTITY_UPDATE,
+        IDENTITY_ARCHIVE,
+        IDENTITY_UNARCHIVE,
+        IDENTITY_REMOVE,
+    ] {
+        rig.family.forget();
+        let answer = call(
+            &rig,
+            tool,
+            json!({"name": LEAD, "expected_spec_digest": digest.as_str()}),
+        )
+        .await;
+        let seen = rig.family.seen();
+        let [
+            Seen::Change {
+                requester, change, ..
+            },
+        ] = seen.as_slice()
+        else {
+            panic!("{tool} called the family once: {seen:?}");
+        };
+        assert_eq!(
+            requester.recorded().agent_identity(),
+            Some(LEAD),
+            "{tool}: the requester is the calling agent"
+        );
+        assert_eq!(
+            names_of(change),
+            vec![LEAD.to_owned()],
+            "{tool}: so is the target"
+        );
+        assert_eq!(answer.content["kind"], "self_change_refused", "{tool}");
+        assert_eq!(answer.content["field"], "name", "{tool}");
+        assert!(answer.refused);
+    }
+
+    // A refused read is a refused outcome.
+    *rig.family.refuse_reads.lock().unwrap() = Some(IdentityRefusal::new(
+        IdentityRefusalKind::ProfileNotAllowed {
+            profile: WORKER.to_owned(),
+        },
+    ));
+    let answer = call(&rig, IDENTITY_LIST, json!({"profile": WORKER})).await;
+    assert_eq!(answer.content["outcome"], "refused");
+    assert_eq!(answer.content["kind"], "profile_not_allowed");
+    assert!(answer.refused);
+    rig.shutdown().await;
+}
+
+/// The reads never wake an agent: after `identity_list` and
+/// `identity_directory`, called in a real turn, a dormant agent the mob
+/// holds has still built nothing, and its model was asked nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_list_and_identity_directory_wake_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let rig = boot_with_family(state.path(), &fresh_mob_id()).await;
+    rig.create("keeper", WORKER).await;
+    let keeper = rig.session_of("keeper").await;
+    let unborn = |rig: &Rig| rig.runtime.mob_handle().session_unborn(&keeper);
+    assert!(
+        unborn(&rig),
+        "a created agent is seated dormant: nothing is built"
+    );
+
+    for tool in [IDENTITY_LIST, IDENTITY_DIRECTORY] {
+        let answer = rig
+            .tool(LEAD, &format!("read-{tool}"), tool, json!({}))
+            .await;
+        assert!(!answer.is_error, "{tool} answers: {answer:?}");
+    }
+    assert!(
+        unborn(&rig),
+        "after both reads the dormant agent has still built nothing"
+    );
+    let asked = rig.model.asked.lock().unwrap().clone();
+    assert!(
+        asked
+            .iter()
+            .all(|asked| asked.text.contains("read-identity_")),
+        "only the reading agent's model was asked anything: {asked:?}"
+    );
+    rig.shutdown().await;
+}
+
+/// The identity tools declare themselves as tools that may wait behind the
+/// deferred catalog, under one source, so a session with an exact catalog
+/// carries their definitions only once it loaded them.
+#[test]
+fn the_identity_tools_may_wait_behind_the_deferred_catalog() {
+    let catalog = identity_tool_catalog();
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|entry| entry.tool.name.to_string())
+            .collect::<Vec<_>>(),
+        IDENTITY_TOOLS
+    );
+    for entry in &catalog {
+        assert_eq!(entry.plane, meerkat_core::ToolPlaneClass::Session);
+        assert!(entry.callability.is_callable());
+        let meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { provenance } =
+            &entry.deferred_eligibility
+        else {
+            panic!("{} may wait behind the deferred catalog", entry.tool.name);
+        };
+        assert_eq!(provenance.kind, meerkat_core::types::ToolSourceKind::Mob);
+        assert_eq!(provenance.source_id.to_string(), "identity");
+        assert_eq!(entry.tool.provenance.as_ref(), Some(provenance));
+    }
+    assert_eq!(
+        meerkat_core::select_catalog_mode_from_snapshot(true, &catalog, &[]),
+        meerkat_core::ToolCatalogMode::Deferred,
+        "in a session whose catalog is exact, the seven tools alone are deferred"
+    );
+}
+
+fn schema_of(tool: &str) -> Value {
+    identity_tool_defs()
+        .iter()
+        .find(|def| def.name == tool)
+        .unwrap_or_else(|| panic!("{tool} is defined"))
+        .input_schema
+        .clone()
+}
+
+fn property_names(schema: &Value) -> BTreeSet<String> {
+    schema["properties"]
+        .as_object()
+        .expect("an object schema")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn member_names(value: &impl serde::Serialize) -> BTreeSet<String> {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_object()
+        .expect("an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// Every schema is the family's wire request, member for member, without
+/// the two members only the host plane writes, and closed at every depth:
+/// a member added to a wire type fails this row until the tool names it or
+/// is told to leave it out.
+#[test]
+fn every_schema_names_the_wire_request_without_the_host_plane() {
+    let host_plane: BTreeSet<String> = ["proposer", "source_evidence"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let evidence = meerkat_meta::identity_creation::SourceEvidence::new("a", "b", "c", 1);
+    let digest = sha("spec");
+
+    let mut agent = AgentSpec::new("scout", WORKER);
+    agent.display_name = Some("Scout".to_owned());
+    agent.instructions = vec!["brief".to_owned()];
+    agent.context = Some(json!({}));
+    agent.labels = BTreeMap::from([("k".to_owned(), "v".to_owned())]);
+    agent.first_message = Some(ContentInput::Text("go".to_owned()));
+    agent.peers = vec![LEAD.to_owned()];
+    let mut create = CreateAgents::new(vec![agent.clone()]);
+    create.request_id = Some("r".to_owned());
+    create.proposer = Some("p".to_owned());
+    create.source_evidence = Some(evidence.clone());
+    let schema = schema_of(IDENTITY_CREATE);
+    assert_eq!(
+        &property_names(&schema) | &host_plane,
+        member_names(&create),
+        "identity_create"
+    );
+    assert_eq!(
+        property_names(&schema["properties"]["agents"]["items"]),
+        member_names(&agent),
+        "an agent of identity_create"
+    );
+
+    let mut set = AgentSet::default();
+    set.display_name = Some("Scout".to_owned());
+    set.instructions = Some(vec!["brief".to_owned()]);
+    set.context = Some(json!({}));
+    set.labels = Some(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
+    set.labels_remove = vec!["k".to_owned()];
+    set.profile = Some(WORKER.to_owned());
+    let mut update = UpdateAgent::new("scout", digest.clone());
+    update.request_id = Some("r".to_owned());
+    update.set = set.clone();
+    update.peers_add = vec![LEAD.to_owned()];
+    update.peers_remove = vec![PLAIN.to_owned()];
+    update.proposer = Some("p".to_owned());
+    update.source_evidence = Some(evidence.clone());
+    let schema = schema_of(IDENTITY_UPDATE);
+    assert_eq!(
+        &property_names(&schema) | &host_plane,
+        member_names(&update),
+        "identity_update"
+    );
+    assert_eq!(
+        property_names(&schema["properties"]["set"]),
+        member_names(&set),
+        "the set of identity_update"
+    );
+
+    let mut one = AgentRef::new("scout", digest);
+    one.request_id = Some("r".to_owned());
+    one.proposer = Some("p".to_owned());
+    one.source_evidence = Some(evidence);
+    for tool in [IDENTITY_ARCHIVE, IDENTITY_UNARCHIVE, IDENTITY_REMOVE] {
+        assert_eq!(
+            &property_names(&schema_of(tool)) | &host_plane,
+            member_names(&one),
+            "{tool}"
+        );
+    }
+
+    let mut list = ListAgents::default();
+    list.profile = Some(WORKER.to_owned());
+    list.after = Some("a".to_owned());
+    assert_eq!(
+        property_names(&schema_of(IDENTITY_LIST)),
+        member_names(&list),
+        "identity_list"
+    );
+    let mut directory = ReadDirectory::default();
+    directory.query = Some("q".to_owned());
+    directory.after = Some("a".to_owned());
+    assert_eq!(
+        property_names(&schema_of(IDENTITY_DIRECTORY)),
+        member_names(&directory),
+        "identity_directory"
+    );
+
+    fn closed(schema: &Value, at: &str) {
+        if schema["type"] == "object" && schema.get("properties").is_some() {
+            assert_eq!(
+                schema["additionalProperties"],
+                json!(false),
+                "{at} is closed"
+            );
+            for (name, member) in schema["properties"].as_object().unwrap() {
+                assert!(
+                    member["description"]
+                        .as_str()
+                        .is_some_and(|doc| !doc.is_empty()),
+                    "{at}.{name} says what it is"
+                );
+                closed(member, &format!("{at}.{name}"));
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            closed(items, &format!("{at}[]"));
+        }
+    }
+    for tool in IDENTITY_TOOLS {
+        closed(&schema_of(tool), tool);
+    }
+}
+
+/// What a model must be told, in the words the product settled on: these
+/// sentences are in the descriptions, and no description says what is not
+/// in this release.
+#[test]
+fn the_descriptions_say_what_a_model_must_know() {
+    let text = |tool: &str| {
+        identity_tool_defs()
+            .iter()
+            .find(|def| def.name == tool)
+            .unwrap_or_else(|| panic!("{tool} is defined"))
+            .description
+            .clone()
+    };
+    let create = text(IDENTITY_CREATE);
+    for sentence in [
+        "is the same kind of agent as one the host configured",
+        "You are recorded as who asked for it. You do not own it, it does not report to you, \
+         and it is not limited to your tools.",
+        "a `profile` of the mob, which gives its model, tools and skills",
+        "nothing is wired to you unless you list your own name",
+        "a kickoff with no requester",
+        "That turn has the same tools as any other turn of the agent.",
+        "In a governed realm an agent is created without a first message: a create that gives \
+         one is refused, and the agent's first input comes through the host's own ingress.",
+        "created together or not at all",
+        "Do not repeat the call with new arguments",
+        "If you are a long-term agent yourself, a notice reaches you when it is decided; in \
+         every case the identical call with the same `request_id` returns the current state.",
+        "A name that was removed is never available again",
+        "`pending_preparation`",
+        "`refused`",
+    ] {
+        assert!(
+            create.contains(sentence),
+            "identity_create says: {sentence}"
+        );
+    }
+    let update = text(IDENTITY_UPDATE);
+    for sentence in [
+        "It reaches the agent at its next run; a run that starts within moments of the change \
+         may still use the earlier instructions; earlier instructions are never rewritten.",
+        "`applies_at_next_run`",
+        "`applies_after_compaction`",
+        "`applies_at_next_session`",
+        "`unchanged`",
+        "You cannot change yourself",
+        "`stale_spec` with `current_digest`",
+    ] {
+        assert!(
+            update.contains(sentence),
+            "identity_update says: {sentence}"
+        );
+    }
+    assert!(text(IDENTITY_ARCHIVE).contains("identity_unarchive brings it back"));
+    assert!(text(IDENTITY_ARCHIVE).contains("You cannot archive yourself"));
+    assert!(text(IDENTITY_UNARCHIVE).contains("You cannot unarchive yourself"));
+    assert!(text(IDENTITY_REMOVE).contains("its name can never be used again"));
+    assert!(text(IDENTITY_REMOVE).contains("use identity_archive when the agent may be needed"));
+    assert!(text(IDENTITY_LIST).contains("it never wakes an agent"));
+    assert!(text(IDENTITY_DIRECTORY).contains("it never wakes an agent"));
+    for tool in IDENTITY_TOOLS {
+        let all = format!("{} {}", text(tool), schema_of(tool)).to_lowercase();
+        for absent in [
+            "grants",
+            "schedule",
+            "fork_from",
+            "mob_id",
+            "identity_reset",
+            "review",
+            "retire ",
+            "provenance",
+            "next turn",
+        ] {
+            assert!(!all.contains(absent), "{tool} does not say `{absent}`");
+        }
+    }
+}
+
+/// The pinned text of every tool: its description and its argument schema,
+/// as a model reads them. They are product text, read and settled like
+/// product text, so a change here is deliberate: run the row with
+/// `UPDATE_IDENTITY_TOOL_GOLDENS=1` to print the new pins and paste them
+/// into `identity_tool_goldens.rs`.
+#[test]
+fn every_identity_tool_text_is_pinned() {
+    let defs = identity_tool_defs();
+    assert_eq!(
+        defs.iter()
+            .map(|def| def.name.to_string())
+            .collect::<Vec<_>>(),
+        IDENTITY_TOOLS
+    );
+    if std::env::var_os("UPDATE_IDENTITY_TOOL_GOLDENS").is_some() {
+        for def in defs.iter() {
+            println!("=== {} description\n{}", def.name, def.description);
+            println!(
+                "=== {} schema\n{}",
+                def.name,
+                serde_json::to_string_pretty(&def.input_schema).unwrap()
+            );
+        }
+        println!("=== end");
+        return;
+    }
+    assert_eq!(goldens::PINS.len(), defs.len());
+    for (def, (name, description, schema)) in defs.iter().zip(goldens::PINS) {
+        assert_eq!(def.name, *name);
+        assert_eq!(
+            def.description, *description,
+            "the description of {name} changed"
+        );
+        assert_eq!(
+            serde_json::to_string_pretty(&def.input_schema).unwrap(),
+            *schema,
+            "the argument schema of {name} changed"
+        );
+    }
+}
+
+#[path = "support/identity_tool_goldens.rs"]
+mod goldens;

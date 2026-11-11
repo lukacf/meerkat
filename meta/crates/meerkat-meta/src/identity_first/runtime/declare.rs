@@ -1648,8 +1648,9 @@ impl IdentityRuntime {
 
     /// The refusal Core's identity management of an identity answers: an
     /// identity a host adopted (Core holds its identity intent row) is
-    /// read-only to every Meta verb, and a row this build cannot read, or a
-    /// kind it does not know, refuses too.
+    /// read-only to every Meta verb, and so is a store-owned identity (Core
+    /// holds its created entry's row, and its MobMachine drives it); a row
+    /// this build cannot read, or a kind it does not know, refuses too.
     pub(super) fn host_adoption_refusal(
         management: meerkat_mob::MemberIdentityManagement,
         identity: &AgentIdentity,
@@ -1658,6 +1659,11 @@ impl IdentityRuntime {
             meerkat_mob::MemberIdentityManagement::CommandDriven => Ok(()),
             meerkat_mob::MemberIdentityManagement::IntentManaged => {
                 Err(IdentityRuntimeError::IdentityHostAdopted {
+                    identity: identity.clone(),
+                })
+            }
+            meerkat_mob::MemberIdentityManagement::CreatedEntry => {
+                Err(IdentityRuntimeError::IdentityStoreOwned {
                     identity: identity.clone(),
                 })
             }

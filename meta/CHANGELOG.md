@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-11-10
+
+Meta 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12 and Connect
+0.9.12, released together) and pins Core `=0.9.12`.
+
+Meta serves identities created at runtime: a send by name, a dispatch, a
+member mutation or a schedule fire to one goes through the identity's door
+instead of answering `-32001`. See Breaking, Fixed and Known limitations.
+
+`meta_gateway` with persistent sessions keeps its metadata and its console
+log across a restart, and a retirement's harvest and distillation wait out a
+busy agent memory budget instead of ending failed. See Fixed.
+
+Forge runs the Meerkat release it is built from. An existing Forge folder
+starts a fresh setup team on its first start. See Upgrade and Changed.
+
 ### Breaking
 
 - Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
@@ -16,15 +32,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   LifecycleEffectFailureCause::Failed`, and one that destructures it without
   `..` names the field.
 
+- `IdentityRuntimeError` gains `IdentityStoreOwned { identity }` and
+  `IdentityArchived { identity }`. A lifecycle verb (reload, retire,
+  respawn, reset, delete, materialize) of a store-owned identity (one
+  created at runtime, or one a host adopted into store custody), whose
+  lifecycle Core's MobMachine drives, answers `-32603` with the new kind
+  `identity_store_owned`, and a delivery to an identity created at runtime
+  that Core archived answers `-32603` with the new kind `identity_archived`
+  (see Fixed). The enum is exhaustive, so a downstream exhaustive match
+  needs the new arms, or a wildcard arm.
+
+- `SessionBridge` has two new methods, `created_identities` and
+  `created_identity`: the identities Core holds as created entries, each
+  with the spec its row in the mob's identity store holds, which the
+  identity runtime registers. Their defaults answer
+  `BridgeError::Unsupported`: over a bridge that does not implement them the
+  identity runtime serves no identity created at runtime, as before. A
+  host's own wrapper of a session bridge forwards them to the bridge it
+  wraps.
+
+- Rust: `meta_extension_state::SqliteExtensionDocumentStore::from_connection`
+  and `meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
+  take a rusqlite 0.41 `Connection`, no longer a rusqlite 0.37 one. A host
+  that opens that connection with its own rusqlite moves to rusqlite 0.41
+  with Meta (see Upgrade). The semver gate does not measure which version of
+  a dependency's type a signature names.
+
+### Security
+
+- RUSTSEC-2026-0462 (rmcp before 3.9.0, unbounded response bodies in rmcp's
+  built-in Streamable HTTP clients) does not affect Meta: Meta reaches rmcp
+  only through Meerkat Core's MCP client, which no longer builds rmcp's
+  reqwest client and bounds every response body and SSE event at 64 MiB
+  itself. cargo-deny matches rmcp 1.8 by version alone, so `meta/deny.toml`
+  ignores the advisory until Core moves to rmcp 3.9 or later.
+
+- The bundled SQLite is 3.54.1 (RUSTSEC-2026-0459): `meerkat-meta` and
+  `meta-extension-state` require rusqlite 0.41.1 (libsqlite3-sys 0.39.1).
+  SQLite before 3.54.0 can return uninitialized page-cache memory to
+  ordinary queries when it opens a database together with a write-ahead log
+  of a different page size. Stored values keep their encoding: rusqlite's
+  `fallible_uint` feature keeps the u64 and usize conversions that rusqlite
+  0.37 had.
+
+- A member's file tools (`apply_patch`, `blob_save_file`) can no longer
+  write `<workspace>/.rkat/`, which holds the gateway's Meerkat host config
+  (`meerkat_config_path` defaults to `<workspace>/.rkat/config.toml`) and the
+  comms identity keys: Meerkat's in-process file tools now refuse a `.rkat`
+  directory at the project root and in any directory under it, so a member's
+  patch cannot rewrite the config every agent of its gateway starts from.
+  The call returns an invalid-arguments tool error and writes nothing. Every
+  other workspace file is written as before, the gateway's state directory
+  included, and a member that has the shell tool is not restricted by this.
+  The gateway declares no further paths, so a symbolic link inside `.rkat`
+  that leads elsewhere is not covered. Change the gateway's config yourself,
+  not through a member.
+
 ### Upgrade
 
 - Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
-  from (0.9.11), so an existing Forge folder starts a fresh setup team in its
+  from, so an existing Forge folder starts a fresh setup team in its
   state directory on its first start. Saved setups, proposals, provider
   settings and installed applications stay, and the previous setup team's
   state is kept unchanged, but the new team does not recall earlier
   conversations. To carry them over, follow the installer README's "Work with
   the setup team" before that first start.
+
+- A Rust host that depends on rusqlite (or libsqlite3-sys) itself moves to
+  rusqlite 0.41 (libsqlite3-sys 0.39) together with Meta: libsqlite3-sys
+  links one SQLite per build (`links = "sqlite3"`), so Cargo refuses a
+  graph that holds rusqlite 0.37 next to rusqlite 0.41.
 
 ### Added
 
@@ -61,6 +138,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   identity runtime's records in its runtime's metadata store, as both stock
   gateways and `UnifiedRuntimeBuilder` keep them.
 
+- `CoreIdentityEntry::is_created_entry`: whether Core holds a name as an
+  identity entry created at runtime.
+
+- `CoreIdentityEntry::unseated` and `CoreIdentityEntry::with_unseated`: why
+  no member holds an identity entry (Core's `UnseatedEntryCause`: its seat
+  owed, hosted on its first use, its held creation, its host's preparation,
+  or archived), from Core's entry of its name.
+
+- `IdentityResetRefusal::IdentityStoreOwned` (kind `identity_store_owned`):
+  the offline identity reset refuses a store-owned identity by name.
+
+- `meta/reset_all` reports the store-owned identities in their own
+  `store_owned` list, `{identity, kind, error}` with the kind
+  `identity_store_owned` (see Fixed).
+
 ### Changed
 
 - A `GatingResolutionObserver` now also receives cause `withdrawn` with
@@ -70,9 +162,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   timeout.
 
 - Forge runs the Meerkat release it is built from instead of older pinned
-  releases. Its Guide runs that release's Meta and Core (0.9.11; until now
+  releases. Its Guide runs that release's Meta and Core (until now
   Meta 0.9.3 with Core 0.9.3), compiled agent teams install that release's
-  published Meta from the monorepo's `meta-v` release (0.9.11; until now the
+  published Meta from the monorepo's `meta-v` release (until now the
   standalone repository's 0.9.6), and the protected application receiver
   selects that release (until now Meta 0.9.7 with Core 0.9.8). A source
   checkout installs its own `sdk/python` for the Guide, and a packaged Forge
@@ -150,13 +242,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   persistent. A store that does not open refuses `meta/init` with `-32014`.
   The first start after the upgrade begins with both stores empty, as every
   start of an earlier release did. A launch without persistent sessions
-  keeps both in memory, as before.
+  keeps both in memory, as before. With persistent sessions, the two 0.9.11
+  known limitations on `meta_gateway`'s metadata and console log no longer
+  apply.
 
 - Forge: **Rebuild with updated runtime** on an application built without a
   selected product runtime (an ordinary application an earlier Forge built)
   compiled a new package for MobKit 0.8.47. It now rebuilds the application on
   the Meta runtime Forge started with, keeping its application source, and a
   Forge without a selected Meta runtime refuses the rebuild and says so.
+
+- Meta serves identities created at runtime (Core's created entries, whose
+  records are their rows in the mob's identity store). Each roster pass
+  registers the created entries Core holds that the host's roster does not
+  list, with the spec each row holds, after a restart too, and forgets one
+  Core no longer holds; the roster context a roster provider receives
+  (`RosterContext.previous_identities`) carries these registrations too. A
+  door that names one created since the last pass registers it from its row
+  first: a send, a dispatch, a governed input, a member mutation, a schedule
+  fire, and the reads of its status, member health, events and delivery
+  scope, at the RPC doors and at the Rust `IdentityRuntime` doors alike
+  (`send_governed_with_turn_ticket` and `dispatch_governed_with_turn_ticket`
+  included). A send by name, a dispatch or a schedule fire to one now
+  reaches its member through the identity's door while Core holds one, where
+  it was refused `-32001` (unknown identity) and nothing reached the member.
+  A send, a dispatch and a governed input read a registered one's row again
+  (one store read), so Core's change of its addressability, labels, profile
+  or context is served at once (one Core made internal only is refused
+  `-32002` by the external doors at once), and a removal answers `-32001` at
+  once. A truly unknown name still answers `-32001`.
+
+- A delivery to an identity created at runtime that Core holds no member of
+  is answered from Core's entry. Archived: final, `-32603` with
+  `{kind: "identity_archived", remedy: "unarchive_identity"}`, until Core's
+  `unarchive_identity` seats it again (a schedule fire to it ends rejected,
+  naming the archive). Awaiting its host's preparation, its held creation
+  or the seat Core owes it: retryable, `-32052` (`identity_wake_retryable`;
+  a schedule fire to it stays reclaimable). Each answered a final `-32603`
+  "in state Dormant" before, after a restart too.
+
+- Core's MobMachine drives a store-owned identity's lifecycle (created at
+  runtime, or adopted into store custody), so Meta's lifecycle verbs refuse
+  it before anything acts (`identity_store_owned`, final), and so does the
+  offline identity reset. An identity adopted into store custody answered
+  these verbs the retryable `-32052` before ("an identity management kind
+  this build does not know"), and the offline identity reset refused it as
+  one too. Its status reads `intent_managed: true`, as a host-adopted
+  identity's does: the field means that Core drives the identity itself.
+
+- `meta/reset_all` no longer fails the whole call (`-32000`) on a mob that
+  holds a store-owned identity: it lists each one under `store_owned` with
+  its kind, resets the others, and a host-adopted identity is still under
+  `failed`.
+
+- A member of an identity created at runtime is built with the host
+  customizer's tools, as a roster identity's member is, once a roster pass
+  or a door registered the identity: the registration keeps the identity's
+  customizer tool dispatcher, which every later build of its member
+  carries, and Meta's member build preparer publishes the tools into it
+  before Core provisions a woken or restored member. Before, the first build
+  of such a member in a process carried none. The preparer also registers
+  the identity from its row when Core builds its member before a pass or a
+  door did, without waiting on the identity's lifecycle lock.
+
+- The managed topology never prunes a live edge of an identity created at
+  runtime that it did not wire (its row's owned edges and the definition's
+  wiring are Core's); an edge this process's topology wired to one is
+  managed and unwired as any managed edge.
+
+- The roster pass skips, with a warning, a created entry whose name the
+  member-id encoding maps to another member id (a name that is no comms name
+  component, or one that starts with the reserved `mk--` marker without
+  being an encoding), where it registered it under an identity whose doors
+  would act on that other member id.
+
+- A dispatch, and a read of one identity, by a name this runtime has not
+  registered answers the identity door's typed refusal, as a send does: a
+  declared entry before this process's roster pass, and a read of Core's
+  entry Core could not serve, `-32052`; a name whose record Core cannot
+  read, `-32014`. `IdentityRuntime::dispatch` answered every such name
+  `-32001`, and so did `status`, `member_health`, `subscribe` and the
+  delivery scope capture.
+
+### Known limitations
+
+- Meta's lifecycle verbs refuse a store-owned identity (`meta/reload_member`,
+  `meta/retire` and `meta/retire_member`, `meta/respawn` and
+  `meta/respawn_member`, `meta/reset`, `meta/delete_identity`, a
+  materialization, and the offline identity reset), and `meta/reset_all`
+  lists it under `store_owned`. Change one through Core's store-owned
+  changes instead: `update_store_owned_identity` for its spec,
+  `archive_identity` and `unarchive_identity` to retire it and seat it again
+  on its session, and `remove_identity` to remove it. A reset, and a
+  delete's fresh start, have no store-owned equivalent yet.
+
+- A topology provider never sees an identity created at runtime: its input
+  is the host's roster, which never lists one. Such an identity's edges are
+  the owned edges its create's `peers` list (and an update's `peers_add` and
+  `peers_remove`), and the managed topology never prunes a live one of them.
+
+- Meta's tool grant methods answer `subject_unknown` for a store-owned
+  identity, as before.
+
+- An identity created at runtime that is placed on a host or bound to an
+  external runtime is hosted on its first use by its host, not through
+  Meta: until its host created its member, a delivery to it answers
+  `-32603` ("in state Dormant"), and a governed input to it is refused as
+  unsupported.
+
+- A member of an identity created at runtime that Core builds before Meta
+  registered the identity is built without the host customizer's tools,
+  until its next build: the member Core starts at the identity's create to
+  run its initial message, a member Core wakes on its own before a roster
+  pass or a door named the identity, and a member the mob's start restores
+  before the identity runtime is bound (one that owes work). Core asks
+  Meta's build preparer before it wakes or restores a member, not before
+  the member it starts at a create, and Meta attaches its tool dispatcher
+  to the builds of a registered identity's member only.
+
+- The realm's agent memory background budget still admits at most
+  `runtime_options.agent_memory.distiller.runs_per_hour` runs an hour (12
+  by default): in a burst of retirements past it, the harvests and
+  distillations that no run frees up for within their wait end unrun
+  (`budget_busy`), and their discards stay in the session's memory scope.
+  Raise `runs_per_hour`, or spread the retirements out.
+
+- On a console whose visibility policy includes nested mob members (the policy
+  trait's default; the stock gateway policy does not), a temporary council's
+  participants are listed as members, and their stored history holds a copy of
+  the source member's earlier turns: a caller denied the source can read them
+  through a participant. Affects 0.8.27 through 0.9.12. Keep the stock policy,
+  or deny the participants by name (`council-p0`, ...). The next release no
+  longer lists them.
+
+- A mob that a member private to one person created with the agent mob
+  tools is recorded as private to no one once the process restarts. A host
+  whose console visibility policy lists nested mobs can then show that
+  mob's members to people the private member itself is hidden from. The
+  stock console lists no nested mob, so it does not show them.
 
 ## [0.9.11] - 2026-11-09
 

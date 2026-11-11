@@ -74,6 +74,18 @@ pub(crate) fn stage_refusal_after_row_write(
     owner_session_id: &SessionId,
     run_id: &RunId,
 ) -> OperationId {
+    try_stage_refusal_after_row_write(audit, row_input_id, owner_session_id, run_id)
+        .expect("the bound sink stages the refusal on the live row")
+}
+
+/// [`stage_refusal_after_row_write`] returning the sink's answer to the
+/// append instead of expecting it accepted.
+pub(crate) fn try_stage_refusal_after_row_write(
+    audit: &InputAuthorizationAudit,
+    row_input_id: &InputId,
+    owner_session_id: &SessionId,
+    run_id: &RunId,
+) -> Result<OperationId, OperationObservationError> {
     let mut governed = crate::input_authority::tests::input("late-observation-requester");
     governed.header_mut().id = row_input_id.clone();
     let original = RetainedInputAuthority::from_input(&governed)
@@ -113,9 +125,8 @@ pub(crate) fn stage_refusal_after_row_write(
             reason: OperationRefusalKind::MalformedFacts,
             read: None,
         },
-    })
-    .expect("the bound sink stages the refusal on the live row");
-    operation_id
+    })?;
+    Ok(operation_id)
 }
 
 /// The operation ids of a stored row's audit, in order.
@@ -127,6 +138,17 @@ pub(crate) fn audit_operation_ids(audit: &InputAuthorizationAudit) -> Vec<Operat
     .into_iter()
     .map(|record| record.observation.operation_id)
     .collect()
+}
+
+/// Whether another holder has `audit`'s live buffer locked right now: an
+/// archive hold, or an append in progress. A frozen payload has no buffer.
+pub(crate) fn audit_buffer_is_held(audit: &InputAuthorizationAudit) -> bool {
+    match &audit.0 {
+        AuditPayload::Pending(records) => {
+            matches!(records.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+        }
+        AuditPayload::Frozen(_) => false,
+    }
 }
 
 #[test]
@@ -230,6 +252,111 @@ fn committed_image_is_only_the_stored_prefix_of_the_live_records() {
 }
 
 #[test]
+fn same_records_compares_every_record_in_order() {
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let stored = live.freeze_for_persistence().unwrap();
+    // A live buffer and a frozen copy of it hold the same records.
+    assert!(live.has_same_records(&stored).unwrap());
+    assert!(stored.has_same_records(&live).unwrap());
+    // A record one side lacks is a difference, in either direction,
+    sink.append(event(&sink)).unwrap();
+    assert!(!live.has_same_records(&stored).unwrap());
+    assert!(!stored.has_same_records(&live).unwrap());
+    // and so are different records of the same count.
+    let (other, other_sink) = fixture();
+    other_sink.append(event(&other_sink)).unwrap();
+    assert!(!other.has_same_records(&stored).unwrap());
+    // Neither side changes.
+    assert_eq!(count(&live), 2);
+    assert_eq!(count(&stored), 1);
+    assert_eq!(count(&other), 1);
+}
+
+#[test]
+fn an_archive_hold_checks_the_committed_records_and_closes_the_buffer() {
+    let (live, sink) = fixture();
+    sink.append(event(&sink)).unwrap();
+    let committed = live.freeze_for_persistence().unwrap();
+    // Records that ran ahead of the committed ones fail the last check,
+    // which leaves the buffer open.
+    sink.append(event(&sink)).unwrap();
+    assert!(
+        !live
+            .hold_for_archive()
+            .unwrap()
+            .holds_only(&committed)
+            .unwrap()
+    );
+    let committed = live.freeze_for_persistence().unwrap();
+    {
+        let mut held = live.hold_for_archive().unwrap();
+        assert!(held.holds_only(&committed).unwrap());
+        // A live payload is refused as the committed side: it could be this
+        // very buffer, already held.
+        assert!(held.holds_only(&live).is_err());
+        held.close();
+    }
+    // A closed buffer refuses every later append and keeps its records.
+    assert_eq!(sink.append(event(&sink)), Err(OperationObservationError));
+    assert_eq!(count(&live), 2);
+    assert_eq!(
+        serde_json::to_vec(&live).unwrap(),
+        serde_json::to_vec(&committed).unwrap()
+    );
+    // A frozen payload holds no buffer: nothing to close.
+    let mut frozen = committed.hold_for_archive().unwrap();
+    assert!(frozen.holds_only(&committed).unwrap());
+    frozen.close();
+}
+
+/// An append from another thread while an archive hold is live waits for the
+/// hold, so the held check cannot miss it. Once the hold is dropped the
+/// append is accepted if the hold left the buffer open, and refused if the
+/// hold closed it.
+#[test]
+fn an_append_during_an_archive_hold_waits_and_is_refused_once_the_hold_closed_the_buffer() {
+    for closes in [false, true] {
+        let (live, sink) = fixture();
+        sink.append(event(&sink)).unwrap();
+        let committed = live.freeze_for_persistence().unwrap();
+        let late = event(&sink);
+        let (started, on_start) = std::sync::mpsc::channel();
+        let (answered, answer) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            let mut held = live.hold_for_archive().unwrap();
+            assert!(audit_buffer_is_held(&live));
+            threads.spawn(|| {
+                started.send(()).unwrap();
+                answered.send(sink.append(late)).unwrap();
+            });
+            on_start.recv().unwrap();
+            assert_eq!(
+                answer.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "the append waits while the hold is live"
+            );
+            // The held records are still exactly the committed ones.
+            assert!(held.holds_only(&committed).unwrap());
+            if closes {
+                held.close();
+            }
+            drop(held);
+            let appended = answer
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the append returns once the hold is dropped");
+            if closes {
+                assert_eq!(appended, Err(OperationObservationError));
+            } else {
+                assert_eq!(appended, Ok(()));
+            }
+        });
+        assert!(!audit_buffer_is_held(&live));
+        assert_eq!(count(&live), if closes { 1 } else { 2 });
+    }
+}
+
+#[test]
 fn restored_payload_is_data_and_frozen_store_candidates_cannot_gain_live_sink() {
     let (audit, sink) = fixture();
     sink.append(event(&sink)).unwrap();
@@ -241,6 +368,7 @@ fn restored_payload_is_data_and_frozen_store_candidates_cannot_gain_live_sink() 
     records
         .lock()
         .unwrap()
+        .records
         .push(StoredAuthorizationAuditObservation {
             contributors: Arc::clone(&sink.contributors),
             observation: event(&sink),
@@ -538,7 +666,7 @@ fn observation_infrastructure_native_poison_after_entry_preserves_frozen_prefix(
         .lock()
         .expect_err("the same pending mutex remains poisoned");
     assert_eq!(
-        serde_json::to_vec(&**poisoned.get_ref()).unwrap(),
+        serde_json::to_vec(&poisoned.get_ref().records).unwrap(),
         prefix,
         "the failed outcome cannot append an Outcome, Refused, or replacement Entry"
     );

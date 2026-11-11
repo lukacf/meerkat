@@ -4558,6 +4558,12 @@ fn identity_runtime_error_to_console_send_error(
         crate::identity_first::IdentityRuntimeError::InvalidState { .. } => {
             ConsoleSendError::Retired(identity.to_string())
         }
+        // An archived identity created at runtime has no member until its
+        // unarchive: the Console answers it as any identity it holds no
+        // member of.
+        crate::identity_first::IdentityRuntimeError::IdentityArchived { .. } => {
+            ConsoleSendError::Retired(identity.to_string())
+        }
         crate::identity_first::IdentityRuntimeError::ActorAdmissionTimeout {
             operation,
             waited,
@@ -18701,6 +18707,11 @@ async fn reset_all_live_console_agents(
     let mut retired_delegate_details = Vec::new();
     let mut reset_details = Vec::new();
     let mut failures = Vec::new();
+    // The store-owned identities (created at runtime, or adopted into store
+    // custody): Core's MobMachine drives them, so Meta's reset refuses each
+    // before anything acts, and none fails the call. Each is reported with
+    // its kind; Core's own changes reset nothing of them.
+    let mut store_owned = Vec::new();
     // Kept in the body for shape stability. Nothing on the reset path warns
     // today: a registered identity resets through Core's rotation, which
     // retires the current incarnation and seats the fresh one in one step,
@@ -18861,6 +18872,7 @@ async fn reset_all_live_console_agents(
             "retired_delegate_details": retired_delegate_details,
             "warnings": warnings,
             "failed": failures,
+            "store_owned": store_owned,
             "startup_history": Value::Null,
         }));
     }
@@ -19112,6 +19124,13 @@ async fn reset_all_live_console_agents(
                             .await;
                     }
                 }
+                Err(
+                    err @ crate::identity_first::IdentityRuntimeError::IdentityStoreOwned { .. },
+                ) => store_owned.push(json!({
+                    "identity": identity,
+                    "kind": "identity_store_owned",
+                    "error": err.to_string(),
+                })),
                 Err(err) => failures.push(json!({
                     "identity": identity,
                     "error": err.to_string(),
@@ -19235,6 +19254,7 @@ async fn reset_all_live_console_agents(
         "retired_delegate_details": retired_delegate_details,
         "warnings": warnings,
         "failed": failures,
+        "store_owned": store_owned,
         "startup_history": startup_history,
     }))
 }
@@ -27398,13 +27418,15 @@ message = "review"
 
     /// A console member mutation of a name no roster pass of this runtime
     /// will ever register is refused for good, typed, and nothing is
-    /// retired: an identity created at runtime (Core holds it as a created
-    /// entry, whose record the mob's identity store owns) and a removed
-    /// identity are unknown to this runtime (`-32001`), and a name whose
-    /// record Core cannot read needs a repair or an upgrade (`-32014`,
-    /// `identity_name_unreadable`). A read of Core's entry that Core could
-    /// not serve refuses the mutation retryable (`-32052`,
-    /// `identity_history_unavailable`), never as an unknown identity.
+    /// retired: a removed identity is unknown to this runtime (`-32001`), and
+    /// a name whose record Core cannot read needs a repair or an upgrade
+    /// (`-32014`, `identity_name_unreadable`). A read of Core's entry that
+    /// Core could not serve refuses the mutation retryable (`-32052`,
+    /// `identity_history_unavailable`), never as an unknown identity. An
+    /// identity created at runtime (Core holds it as a created entry, whose
+    /// record the mob's identity store owns) is registered from its row and
+    /// goes through its door, which refuses the mutation: Core drives a
+    /// store-owned identity.
     ///
     /// RED before the door told them apart: `meta/retire_member` answered
     /// each of them with an untyped `-32000`.
@@ -27431,7 +27453,7 @@ message = "review"
             1,
             Some(meerkat_core::types::SessionId::new()),
         )?;
-        core_bridge.hold_created(&created);
+        core_bridge.hold_created(&created, "worker");
         core_bridge.hold_removed(&AgentIdentity::parse("console-removed")?);
         core_bridge.hold_unreadable(&AgentIdentity::parse("console-unreadable")?);
         let retire = |member_id: &str| {
@@ -27458,7 +27480,6 @@ message = "review"
         };
 
         for (name, code, data) in [
-            ("console-created", json!(-32001), Value::Null),
             ("console-removed", json!(-32001), Value::Null),
             (
                 "console-unreadable",
@@ -27479,6 +27500,22 @@ message = "review"
                 "{name}: the typed, final refusal: {response:#?}"
             );
         }
+        // The identity created at runtime goes through its door, which
+        // refuses the retire: Core drives a store-owned identity.
+        let response = retire("console-created").await;
+        assert!(response["result"].is_null(), "{response:#?}");
+        assert_eq!(response["error"]["code"], json!(-32000), "{response:#?}");
+        let detail = response["error"]["data"]["detail"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            detail.contains("retire_member (identity)") && detail.contains("store-owned"),
+            "the identity's door refused the retire: {response:#?}"
+        );
+        assert!(
+            identity_runtime.contains(&created).await,
+            "the door registered the identity created at runtime from its row"
+        );
         assert!(
             core_bridge.releases().is_empty(),
             "a refused mutation releases nothing"
@@ -27505,6 +27542,91 @@ message = "review"
             ),
             "the read fault's typed, retryable refusal: {response:#?}"
         );
+        Ok(())
+    }
+
+    /// `meta/reset_all` does not fail on a store-owned identity (created at
+    /// runtime, or adopted into store custody): Meta's reset refuses it
+    /// before anything acts, as Core's MobMachine drives it, and the call
+    /// reports it in its own `store_owned` list with its kind
+    /// (`identity_store_owned`), not under `failed`. Nothing of it is reset.
+    ///
+    /// RED before the list: the call failed `-32000` "reset_all failed for
+    /// one or more identities", with the store-owned identity under `failed`.
+    #[tokio::test]
+    async fn reset_all_reports_a_store_owned_identity_apart_and_does_not_fail()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-reset-all-store-owned").await?;
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "console-reset-all-store-owned".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let created = AgentIdentity::parse("console-store-owned")?;
+        crate::identity_first::core_test_bridge::bind_live(
+            &core_bridge.core,
+            &created,
+            &ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )?;
+        core_bridge.hold_created(&created, "worker");
+        // A door registered the identity created at runtime from its row.
+        assert!(
+            identity_runtime
+                .admit_unregistered_name(&created)
+                .await
+                .map_err(|error| error.to_string())?,
+            "the door registers the created identity"
+        );
+
+        let response = Box::pin(handle_console_runtime_rpc(
+            &runtime,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(identity_runtime.clone()),
+            None,
+            None,
+            rpc_request("meta/reset_all"),
+            true,
+        ))
+        .await;
+        assert!(
+            response.get("error").is_none_or(Value::is_null),
+            "a store-owned identity does not fail the call: {response:#?}"
+        );
+        let result = &response["result"];
+        assert_eq!(result["failed"], json!([]), "{response:#?}");
+        assert_eq!(result["reset"], json!([]), "{response:#?}");
+        let store_owned = result["store_owned"]
+            .as_array()
+            .ok_or_else(|| format!("reset_all lists its store-owned identities: {response:#?}"))?;
+        assert_eq!(
+            store_owned
+                .iter()
+                .map(|row| (row["identity"].clone(), row["kind"].clone()))
+                .collect::<Vec<_>>(),
+            vec![(json!("console-store-owned"), json!("identity_store_owned"))],
+            "{response:#?}"
+        );
+        assert!(
+            core_bridge.releases().is_empty(),
+            "nothing of the store-owned identity is reset"
+        );
+        assert!(
+            core_bridge.core.live_member(&created)?.is_some(),
+            "Core's member of the store-owned identity is untouched"
+        );
+        let _ = runtime.handle().stop().await;
         Ok(())
     }
 

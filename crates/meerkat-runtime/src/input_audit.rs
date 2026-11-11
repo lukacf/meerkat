@@ -5,8 +5,17 @@
 //! Store candidates freeze an independent immutable prefix. No drain, accepted
 //! flag, settlement state, permission lookup, or additional commit exists here.
 //! Only the existing native transaction makes its exact row snapshot durable.
+//!
+//! A live buffer carries one closed mark. The native archive sets it under
+//! the buffer's lock, together with its last check that the stored row holds
+//! every record, in the synchronous step where the generated archive removes
+//! the row; an archive the machine defers leaves it unset. The mark mirrors
+//! that archive, a fact the machine decides, as the ledger removal does, and
+//! decides nothing. A closed buffer refuses every later append, so an
+//! operation that records after its row was archived is refused as
+//! observation unavailable instead of leaving a record no row will write.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use meerkat_authorization_contracts::audit::{
     AuthorizationAuditObservation, AuthorizationAuditSink, NativeAuditContributor,
@@ -21,9 +30,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::input_authority::RetainedInputAuthority;
 
+/// A live buffer's records, and the closed mark the native archive sets.
+/// The records' `Debug` is redacted.
+#[derive(Debug, Default)]
+struct PendingRecords {
+    records: Vec<StoredAuthorizationAuditObservation>,
+    closed: bool,
+}
+
+impl PendingRecords {
+    fn open(records: Vec<StoredAuthorizationAuditObservation>) -> Self {
+        Self {
+            records,
+            closed: false,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum AuditPayload {
-    Pending(Arc<Mutex<Vec<StoredAuthorizationAuditObservation>>>),
+    Pending(Arc<Mutex<PendingRecords>>),
     Frozen(Arc<[StoredAuthorizationAuditObservation]>),
 }
 
@@ -34,7 +60,9 @@ pub struct InputAuthorizationAudit(AuditPayload);
 
 impl Default for InputAuthorizationAudit {
     fn default() -> Self {
-        Self(AuditPayload::Pending(Arc::new(Mutex::new(Vec::new()))))
+        Self(AuditPayload::Pending(Arc::new(Mutex::new(
+            PendingRecords::default(),
+        ))))
     }
 }
 
@@ -47,9 +75,9 @@ impl std::fmt::Debug for InputAuthorizationAudit {
 impl InputAuthorizationAudit {
     pub(crate) fn is_empty(&self) -> bool {
         match &self.0 {
-            AuditPayload::Pending(records) => {
-                records.lock().is_ok_and(|records| records.is_empty())
-            }
+            AuditPayload::Pending(records) => records
+                .lock()
+                .is_ok_and(|pending| pending.records.is_empty()),
             AuditPayload::Frozen(records) => records.is_empty(),
         }
     }
@@ -66,7 +94,7 @@ impl InputAuthorizationAudit {
         match &self.0 {
             AuditPayload::Pending(records) => records
                 .lock()
-                .is_ok_and(|records| records.iter().any(is_withholding)),
+                .is_ok_and(|pending| pending.records.iter().any(is_withholding)),
             AuditPayload::Frozen(records) => records.iter().any(is_withholding),
         }
     }
@@ -89,7 +117,7 @@ impl InputAuthorizationAudit {
         match &self.0 {
             AuditPayload::Pending(records) => records
                 .lock()
-                .is_ok_and(|records| records.iter().any(carries_read)),
+                .is_ok_and(|pending| pending.records.iter().any(carries_read)),
             AuditPayload::Frozen(records) => records.iter().any(carries_read),
         }
     }
@@ -101,8 +129,8 @@ impl InputAuthorizationAudit {
         match &self.0 {
             AuditPayload::Frozen(records) => Ok(Self(AuditPayload::Frozen(Arc::clone(records)))),
             AuditPayload::Pending(records) => {
-                let records = records.lock().map_err(|_| OperationObservationError)?;
-                Ok(Self(AuditPayload::Frozen(records.clone().into())))
+                let pending = records.lock().map_err(|_| OperationObservationError)?;
+                Ok(Self(AuditPayload::Frozen(pending.records.clone().into())))
             }
         }
     }
@@ -114,7 +142,7 @@ impl InputAuthorizationAudit {
         match &self.0 {
             AuditPayload::Pending(_) => Ok(self.clone()),
             AuditPayload::Frozen(records) => Ok(Self(AuditPayload::Pending(Arc::new(Mutex::new(
-                records.to_vec(),
+                PendingRecords::open(records.to_vec()),
             ))))),
         }
     }
@@ -139,11 +167,12 @@ impl InputAuthorizationAudit {
         let AuditPayload::Frozen(committed) = &frozen.0 else {
             return Err(OperationObservationError);
         };
-        let mut records = live.lock().map_err(|_| OperationObservationError)?;
+        let mut pending = live.lock().map_err(|_| OperationObservationError)?;
+        let records = &mut pending.records;
         if records.starts_with(committed) {
             return Ok(self.clone());
         }
-        if !committed.starts_with(&records) {
+        if !committed.starts_with(records) {
             return Err(OperationObservationError);
         }
         let previous = records.len();
@@ -196,6 +225,34 @@ impl InputAuthorizationAudit {
             )));
         }
         Ok(live)
+    }
+
+    /// Whether this payload and `other` hold the same records in the same
+    /// order. Pure: it neither drains nor acknowledges either side.
+    pub(crate) fn has_same_records(&self, other: &Self) -> Result<bool, OperationObservationError> {
+        let left = self.freeze_for_persistence()?;
+        let right = other.freeze_for_persistence()?;
+        let (AuditPayload::Frozen(left), AuditPayload::Frozen(right)) = (&left.0, &right.0) else {
+            return Err(OperationObservationError);
+        };
+        Ok(left == right)
+    }
+
+    /// Hold this payload for a native archive's last check: a live buffer
+    /// stays locked, so no record can be appended, until the hold is
+    /// dropped. A frozen payload has no buffer to hold.
+    pub(crate) fn hold_for_archive(
+        &self,
+    ) -> Result<HeldInputAuthorizationAudit<'_>, OperationObservationError> {
+        match &self.0 {
+            AuditPayload::Pending(records) => records
+                .lock()
+                .map(|pending| HeldInputAuthorizationAudit(HeldPayload::Pending(pending)))
+                .map_err(|_| OperationObservationError),
+            AuditPayload::Frozen(records) => {
+                Ok(HeldInputAuthorizationAudit(HeldPayload::Frozen(records)))
+            }
+        }
     }
 
     /// Derive a sink from this actual admitted row, never from an input-id map
@@ -265,12 +322,50 @@ impl<'de> Deserialize<'de> for InputAuthorizationAudit {
         let records = Vec::<StoredAuthorizationAuditObservation>::deserialize(deserializer)?;
         // Loading historical observations does not acknowledge a live pending
         // buffer, infer completion, authorize recovery, or mint a sink.
-        Ok(Self(AuditPayload::Pending(Arc::new(Mutex::new(records)))))
+        Ok(Self(AuditPayload::Pending(Arc::new(Mutex::new(
+            PendingRecords::open(records),
+        )))))
+    }
+}
+
+/// A row's audit payload held for a native archive's last check (see
+/// [`InputAuthorizationAudit::hold_for_archive`]).
+pub(crate) struct HeldInputAuthorizationAudit<'a>(HeldPayload<'a>);
+
+enum HeldPayload<'a> {
+    Pending(MutexGuard<'a, PendingRecords>),
+    Frozen(&'a [StoredAuthorizationAuditObservation]),
+}
+
+impl HeldInputAuthorizationAudit<'_> {
+    /// Whether the held records are exactly `committed`'s, in order:
+    /// whether the stored row holds every record. `committed` is a frozen
+    /// payload (records read from or written to the stored row); a live one
+    /// is refused, as it could be this very buffer.
+    pub(crate) fn holds_only(
+        &self,
+        committed: &InputAuthorizationAudit,
+    ) -> Result<bool, OperationObservationError> {
+        let AuditPayload::Frozen(committed) = &committed.0 else {
+            return Err(OperationObservationError);
+        };
+        Ok(match &self.0 {
+            HeldPayload::Pending(pending) => pending.records.as_slice() == &committed[..],
+            HeldPayload::Frozen(records) => *records == &committed[..],
+        })
+    }
+
+    /// Mark the held buffer closed, as the native archive removes its row:
+    /// every later append is refused. A frozen payload has no buffer.
+    pub(crate) fn close(&mut self) {
+        if let HeldPayload::Pending(pending) = &mut self.0 {
+            pending.closed = true;
+        }
     }
 }
 
 struct NativeInputAuditSink {
-    records: Arc<Mutex<Vec<StoredAuthorizationAuditObservation>>>,
+    records: Arc<Mutex<PendingRecords>>,
     execution_scope: OperationExecutionScope,
     run_id: RunId,
     contributors: Arc<[NativeAuditContributor]>,
@@ -286,11 +381,16 @@ impl AuthorizationAuditSink for NativeInputAuditSink {
         {
             return Err(OperationObservationError);
         }
-        let mut records = self.records.lock().map_err(|_| OperationObservationError)?;
-        records
+        let mut pending = self.records.lock().map_err(|_| OperationObservationError)?;
+        // The row was archived: no write of it would ever carry the record.
+        if pending.closed {
+            return Err(OperationObservationError);
+        }
+        pending
+            .records
             .try_reserve(1)
             .map_err(|_| OperationObservationError)?;
-        records.push(StoredAuthorizationAuditObservation {
+        pending.records.push(StoredAuthorizationAuditObservation {
             contributors: Arc::clone(&self.contributors),
             observation,
         });

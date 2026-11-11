@@ -12,11 +12,13 @@ use crate::transport::streamable_http::{
     RequestDispatch, RequestDisposition, ReqwestStreamableHttpClient, SessionExpiryRecorder,
 };
 use rmcp::model::{CallToolRequest, CallToolRequestParams, NumberOrString};
-use rmcp::transport::streamable_http_client::{StreamableHttpClient, StreamableHttpError};
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
+};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 const KEY: &str = "io.example/private";
 const SECRET: &str = "transport-private-sentinel";
@@ -243,6 +245,157 @@ async fn outgoing_http_frame_bound_is_checked_before_sending() {
             if error.to_string() == "invalid or oversized MCP JSON-RPC frame"));
     }
     assert_eq!(received.load(Ordering::SeqCst), 2);
+}
+
+/// Length of each streamed oversized response body: three frame bounds, past
+/// what loopback socket buffers hold once the client stops reading, so a
+/// client that stops at the bound never lets the server finish.
+const STREAMED_BODY_BYTES: usize = 3 * MAX_FRAME_BYTES;
+
+/// Reads one request: its head and, when it names one, its body.
+async fn read_request(stream: &mut tokio::net::TcpStream) {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        request.extend_from_slice(&buffer[..read]);
+        let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+        let body = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|length| length.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if request.len() >= end + 4 + body {
+            return;
+        }
+    }
+}
+
+/// Answers the first request on `listener` with a chunked `content_type`
+/// body of [`STREAMED_BODY_BYTES`] made of `block` repeated, written while it
+/// is generated: the fixture never holds the body. The task returns how many
+/// body bytes the server handed over before its client stopped reading.
+fn serve_streamed_body(
+    listener: tokio::net::TcpListener,
+    content_type: &'static str,
+    block: Vec<u8>,
+) -> tokio::task::JoinHandle<usize> {
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return 0;
+        };
+        read_request(&mut stream).await;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\
+             transfer-encoding: chunked\r\nconnection: close\r\n\r\n"
+        );
+        if stream.write_all(head.as_bytes()).await.is_err() {
+            return 0;
+        }
+        let mut sent = 0;
+        while sent < STREAMED_BODY_BYTES {
+            let chunk = &block[..block.len().min(STREAMED_BODY_BYTES - sent)];
+            let written = async {
+                stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await?;
+                stream.write_all(chunk).await?;
+                stream.write_all(b"\r\n").await
+            }
+            .await;
+            if written.is_err() {
+                return sent;
+            }
+            sent += chunk.len();
+        }
+        let _ = stream.write_all(b"0\r\n\r\n").await;
+        sent
+    })
+}
+
+/// The body bytes the streaming server handed over, once it ended.
+async fn body_bytes_sent(server: tokio::task::JoinHandle<usize>) -> usize {
+    tokio::time::timeout(Duration::from_mins(2), server)
+        .await
+        .expect("the body server ends once its client stops reading")
+        .unwrap()
+}
+
+/// The client read the body up to the frame bound and stopped there: it
+/// never read, let alone held, the whole body.
+fn assert_read_stopped_at_the_frame_bound(sent: usize) {
+    assert!(
+        sent < STREAMED_BODY_BYTES,
+        "the client read the whole {STREAMED_BODY_BYTES}-byte body ({sent} bytes sent)"
+    );
+    assert!(
+        sent >= MAX_FRAME_BYTES - 1024 * 1024,
+        "the read stopped after {sent} bytes, before the {MAX_FRAME_BYTES}-byte frame bound"
+    );
+}
+
+/// GUARD: a JSON response body past the frame bound is refused while it
+/// streams: the read stops at the bound instead of buffering the body.
+#[tokio::test]
+async fn json_response_past_the_frame_bound_is_refused_at_the_bound() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    // Whitespace never completes a JSON-RPC message.
+    let server = serve_streamed_body(listener, "application/json", vec![b' '; 64 * 1024]);
+    let http = ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
+
+    let error = http
+        .post_message(url.into(), message(false), None, None, Default::default())
+        .await
+        .err()
+        .unwrap();
+
+    assert_read_stopped_at_the_frame_bound(body_bytes_sent(server).await);
+    assert!(
+        matches!(&error, StreamableHttpError::UnexpectedServerResponse(message)
+            if message == "invalid or oversized MCP response"),
+        "{error:?}"
+    );
+}
+
+/// GUARD: an SSE event past the frame bound is refused while it streams:
+/// the read stops at the bound instead of buffering the event.
+#[tokio::test]
+async fn sse_event_past_the_frame_bound_is_refused_at_the_bound() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    // `data:` lines of one event that never ends: no blank line follows.
+    let mut line = b"data: ".to_vec();
+    line.resize(64 * 1024 - 1, b'x');
+    line.push(b'\n');
+    let server = serve_streamed_body(listener, "text/event-stream", line);
+    let http = ReqwestStreamableHttpClient::with_client(reqwest::Client::new(), Default::default());
+
+    let response = http
+        .post_message(url.into(), message(false), None, None, Default::default())
+        .await
+        .unwrap();
+    let StreamableHttpPostResponse::Sse(mut events, _) = response else {
+        panic!("expected an SSE response")
+    };
+    let first = tokio::time::timeout(Duration::from_mins(2), events.next())
+        .await
+        .unwrap();
+    drop(events);
+
+    assert_read_stopped_at_the_frame_bound(body_bytes_sent(server).await);
+    let Some(Err(sse_stream::Error::Body(error))) = first else {
+        panic!("expected the frame bound refusal, got {first:?}")
+    };
+    let error = error.downcast::<std::io::Error>().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(error.to_string(), "invalid or oversized MCP JSON-RPC frame");
 }
 
 #[tokio::test]

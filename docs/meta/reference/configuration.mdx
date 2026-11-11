@@ -4,7 +4,7 @@ description: "Configuration reference for Meta: module definitions, runtime opti
 icon: "gear"
 ---
 
-*Mirrored from Meerkat Meta main at [c655094aaabf](https://github.com/lukacf/meerkat/commit/c655094aaabf0430af174de2986036a0a568b95e) on 2026-11-10; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [9af8b0788d62](https://github.com/lukacf/meerkat/commit/9af8b0788d62008cedc358d7d9d71721cedf8762) on 2026-11-10; Meta version 0.9.11 at that commit.*
 
 Meta is configured through Rust types passed at startup. This page documents every configuration surface.
 
@@ -1665,6 +1665,9 @@ without waiting for the materializations in flight, which the mob finishes
 on its own; a shutdown waits for them.
 
 `meta/status_identity_bootstrap` returns a non-blocking typed snapshot.
+The snapshot is built from the host's roster: an identity created at runtime
+(Core's created entry, which no roster lists) is not in it, though the
+identity runtime serves it.
 `meta/wait_identity_bootstrap` accepts `target = "materialized"` or
 `"startup_ready"`; terminal broken identities return with `ready = false`
 rather than leaving the barrier pending indefinitely. Provider or restore

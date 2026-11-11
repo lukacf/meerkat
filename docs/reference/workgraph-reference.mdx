@@ -50,12 +50,27 @@ supplying filter fields.
 |--------|---------|
 | `open` | Created and not currently claimed |
 | `in_progress` | Claimed or actively being worked |
-| `blocked` | Not ready because a block exists or machine state is blocked |
+| `blocked` | Set by `workgraph_block`. Not ready and not claimable. There is currently no transition back to `open`: an update keeps the item `blocked`. It leaves `blocked` only by closing: through `workgraph_close`, or automatically when it is a parent whose `failed_child_join_policy` or `cancelled_child_join_policy` is `propagate` and a child has failed or been cancelled. Then the next claim attempt or trusted readiness observation on the parent closes it as `failed` or `cancelled` (child-join propagation). A dependency (a `blocks` edge) does not set this status; see below |
 | `completed` | Terminal success |
 | `cancelled` | Terminal cancellation |
 | `failed` | Terminal failure |
 
-Terminal items cannot be claimed.
+Terminal items cannot be claimed. A claim is admitted only from `open`, or from
+`in_progress` whose lease has expired. A `blocked` item cannot be claimed.
+
+A dependency and the `blocked` status are different things. An item that a
+`blocks` edge points at stays `open`; it is simply not ready until its blocker is
+`completed`. Only `workgraph_block` sets the `blocked` status. Readiness is decided
+by the machine (`workgraph_ready`): having zero edges or a past due date does not by
+itself make an item ready.
+
+Contract tests: `manually_blocked_items_cannot_be_claimed_and_an_update_keeps_them_blocked`,
+`blocked_items_are_never_ready`, `readiness_is_decided_by_machine_matching_claim_guards`
+and `terminal_items_cannot_be_claimed` in `crates/meerkat-workgraph/src/machine.rs`;
+`blocked_dependencies_are_not_ready_until_completed` in
+`crates/meerkat-workgraph/src/service.rs`; the `ClaimOpen` and
+`ClaimExpiredInProgress` guards in
+`crates/meerkat-machine-schema/src/catalog/dsl/workgraph_lifecycle.rs`.
 
 ## Completion Policies
 
@@ -291,7 +306,7 @@ launched under an older binding digest.
 | `workgraph_claim` | Claim an item with CAS revision |
 | `workgraph_release` | Release an active claim |
 | `workgraph_update` | Update mutable item fields |
-| `workgraph_block` | Put an item into blocked state |
+| `workgraph_block` | Put an item into blocked state (there is no unblock; see Statuses) |
 | `workgraph_close` | Close as `completed`, `cancelled`, or `failed` |
 | `workgraph_link` | Add a graph edge |
 | `workgraph_add_evidence` | Add an evidence reference |

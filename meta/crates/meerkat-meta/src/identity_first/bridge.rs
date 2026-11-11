@@ -4973,7 +4973,8 @@ impl MemberStanding {
 /// What Core's MobMachine records for one identity's name
 /// ([`SessionBridge::identity_entry`], `MobHandle::identity_entry`): how
 /// Core holds the name, the member that holds it, the host preparation its
-/// entry owes and the session its last member's retirement archived. Read
+/// entry owes, the session its last member's retirement archived and why no
+/// member holds the entry. Read
 /// from the machine state the mob's actor last published: no store read, no
 /// actor command, and it never wakes a member. The identity runtime builds
 /// every view of an identity's lifecycle from it. Build one with its
@@ -4997,6 +4998,11 @@ pub struct CoreIdentityEntry {
     /// The session Core archived the entry's last member on, while no member
     /// holds the entry: the entry's next seat revives it.
     pub archived_session: Option<meerkat_core::types::SessionId>,
+    /// Why no member holds the entry, while none does: Core owes it its
+    /// seat, its host creates it on its first use or holds its creation, it
+    /// awaits its host's preparation, or it is archived. `None` for an entry
+    /// a member holds, and for a name that is no entry.
+    pub unseated: Option<meerkat_mob::UnseatedEntryCause>,
 }
 
 impl CoreIdentityEntry {
@@ -5031,6 +5037,7 @@ impl CoreIdentityEntry {
             member: None,
             host_preparation: None,
             archived_session: None,
+            unseated: None,
         }
     }
 
@@ -5063,14 +5070,30 @@ impl CoreIdentityEntry {
         self
     }
 
-    /// Whether Core holds the name as an identity entry a host declared:
-    /// the one kind of name a roster pass registers with this runtime. A
-    /// created entry (the mob's identity store owns its record), a name Core
-    /// reserves and a removed identity's name are never registered by a
-    /// roster pass.
+    /// The read, with why no member holds the entry.
+    #[must_use]
+    pub fn with_unseated(mut self, cause: meerkat_mob::UnseatedEntryCause) -> Self {
+        self.unseated = Some(cause);
+        self
+    }
+
+    /// Whether Core holds the name as an identity entry a host declared,
+    /// which a roster pass registers with this runtime from the host's
+    /// roster. A created entry ([`Self::is_created_entry`]) is registered
+    /// from its row in the mob's identity store instead; a name Core reserves
+    /// and a removed identity's name are never registered.
     pub fn is_declared_entry(&self) -> bool {
         self.kind == CoreNameKind::Entry
             && self.origin == Some(meerkat_mob::IdentityEntryOrigin::Declared)
+    }
+
+    /// Whether Core holds the name as an identity entry created at runtime
+    /// (an identity a host adopted into store custody included): its record
+    /// is its row in the mob's identity store, which this runtime registers
+    /// it from ([`SessionBridge::created_identity`]).
+    pub fn is_created_entry(&self) -> bool {
+        self.kind == CoreNameKind::Entry
+            && self.origin == Some(meerkat_mob::IdentityEntryOrigin::Created)
     }
 
     /// The member's role move Core holds: the host's roster moved the
@@ -5440,6 +5463,9 @@ fn core_identity_entry_of(
             let mut entry = CoreIdentityEntry::entry().with_origin(view.origin);
             if let Some(member) = member_of(&view.standing, view.broken.as_ref())? {
                 entry = entry.with_member(member);
+            }
+            if let meerkat_mob::EntryStanding::Unseated(cause) = &view.standing {
+                entry = entry.with_unseated(*cause);
             }
             if let Some(cause) = view.host_preparation {
                 entry = entry.with_host_preparation(cause);
@@ -6027,6 +6053,45 @@ pub trait SessionBridge: Send + Sync {
     ) -> Result<CoreIdentityEntry, BridgeError> {
         Err(BridgeError::Unsupported {
             operation: "identity_entry",
+        })
+    }
+
+    /// The identities Core holds as created entries (created at runtime, or
+    /// adopted into store custody), each with the spec its row in the mob's
+    /// identity store holds, in identity order: the entries of Core's
+    /// identity entry pages (`MobHandle::identity_entries`) whose origin is
+    /// [`meerkat_mob::IdentityEntryOrigin::Created`], with their rows
+    /// (`MobHandle::identity_record`). Reads of the machine state the mob's
+    /// actor last published and of the identity store: no actor command, and
+    /// they never wake a member. A created entry whose row records its
+    /// removal, carries no spec or cannot be read is left out, and so is one
+    /// whose member id names no identity of this runtime, or whose name the
+    /// member-id encoding maps to another member id (skipped with a
+    /// warning).
+    ///
+    /// The identity runtime's roster pass registers each one the host's
+    /// roster does not list. The default answers [`BridgeError::Unsupported`]:
+    /// the identity runtime then registers no created identity, and serves
+    /// none. A bridge that wraps another forwards it.
+    async fn created_identities(&self) -> Result<Vec<DurableAgentSpec>, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "created_identities",
+        })
+    }
+
+    /// [`Self::created_identities`] for one name: the spec of `identity`'s
+    /// row in the mob's identity store while Core holds it as a created
+    /// entry; `None` when Core holds no created entry of the name, or its row
+    /// records its removal or carries no spec. A door of the identity runtime
+    /// registers such an identity from it the first time it names one. The
+    /// default answers [`BridgeError::Unsupported`]. A bridge that wraps
+    /// another forwards it.
+    async fn created_identity(
+        &self,
+        _identity: &AgentIdentity,
+    ) -> Result<Option<DurableAgentSpec>, BridgeError> {
+        Err(BridgeError::Unsupported {
+            operation: "created_identity",
         })
     }
 
@@ -8516,6 +8581,51 @@ impl MobSessionBridge {
                 if view.origin == meerkat_mob::IdentityEntryOrigin::Declared
         )
     }
+
+    /// The registered row of the created entry `member` from its row in the
+    /// mob's identity store ([`SessionBridge::created_identity`]): `None`
+    /// when the store holds no row of it this build reads, when the row
+    /// records its removal or carries no spec, or when `member` names no
+    /// identity of this runtime. A name the member-id encoding maps to
+    /// another member id (a name that is no comms name component, or one
+    /// that starts with the reserved `mk--` marker without being an
+    /// encoding) is skipped with a warning: this runtime's doors would act
+    /// on another member than Core's entry.
+    async fn created_identity_of_member(
+        &self,
+        member: &MobAgentIdentity,
+    ) -> Result<Option<DurableAgentSpec>, BridgeError> {
+        let observation = self
+            .handle
+            .identity_record(member)
+            .await
+            .map_err(|error| created_identity_read_error("created_identity", error))?;
+        let Some(meerkat_mob::CreatedIdentityObservation::Created(record)) = observation else {
+            return Ok(None);
+        };
+        if record.presence == meerkat_mob::CreatedIdentityPresence::Removed {
+            return Ok(None);
+        }
+        let (Some(identity), Some(spec)) = (identity_of_member(member), record.spec) else {
+            tracing::warn!(
+                %member,
+                "a created entry's row carries no spec, or its member id names no identity: \
+                 the identity runtime does not serve it"
+            );
+            return Ok(None);
+        };
+        if member_id_for_identity(&identity) != *member {
+            tracing::warn!(
+                %member,
+                %identity,
+                "the member-id encoding maps a created entry's name to another member id \
+                 (it is no comms name component, or it starts with the reserved mk-- marker \
+                 without being an encoding): the identity runtime does not serve it"
+            );
+            return Ok(None);
+        }
+        Ok(Some(durable_spec_of_created(identity, spec)))
+    }
 }
 
 /// The spawn spec of `spec`'s lifecycle facts only
@@ -8551,6 +8661,59 @@ fn identity_of_member(member: &MobAgentIdentity) -> Option<AgentIdentity> {
         member.as_str(),
     ))
     .ok()
+}
+
+/// The registered row of an identity created at runtime: the spec of its row
+/// in the mob's identity store, field for field (the row's spec is a roster
+/// row's, under the same names), for the Meta identity `identity` its member
+/// id names. An addressability this build does not know is read as internal
+/// only: no send by name reaches an identity the row may not open to them.
+fn durable_spec_of_created(
+    identity: AgentIdentity,
+    spec: meerkat_mob::CreatedIdentitySpec,
+) -> DurableAgentSpec {
+    DurableAgentSpec {
+        identity,
+        profile: spec.profile,
+        addressability: match spec.addressability {
+            meerkat_mob::IdentityAddressability::Addressable => {
+                super::types::AgentAddressability::Addressable
+            }
+            _ => super::types::AgentAddressability::InternalOnly,
+        },
+        display_name: spec
+            .display_name
+            .and_then(|name| super::types::DisplayName::parse(&name).ok()),
+        labels: spec.labels,
+        context: spec.context,
+        additional_instructions: spec.additional_instructions,
+        initial_message: spec.initial_message,
+        runtime_mode_override: spec.runtime_mode_override,
+        backend: spec.backend,
+        binding: spec.binding,
+        placement: spec.placement,
+    }
+}
+
+/// A read of Core's created identities that failed, in the bridge's
+/// vocabulary: a handle whose principal may not list the mob's members
+/// cannot read them, now or later.
+fn created_identity_read_error(
+    operation: &'static str,
+    error: meerkat_mob::MobError,
+) -> BridgeError {
+    match error {
+        meerkat_mob::MobError::ScopeDenied(denial) => {
+            tracing::warn!(
+                ?denial,
+                "the session bridge's mob handle may not read Core's identities created at runtime"
+            );
+            BridgeError::Unsupported { operation }
+        }
+        error => BridgeError::Mob(format!(
+            "reading Core's identities created at runtime: {error}"
+        )),
+    }
 }
 
 /// Whether an answer ends the member's incarnation the bridge may have
@@ -10474,6 +10637,52 @@ impl SessionBridge for MobSessionBridge {
         Ok(entry)
     }
 
+    async fn created_identities(&self) -> Result<Vec<DurableAgentSpec>, BridgeError> {
+        let mut specs = Vec::new();
+        let mut after: Option<MobAgentIdentity> = None;
+        loop {
+            let page = self
+                .handle
+                .identity_entries(after.as_ref(), meerkat_mob::IDENTITY_ENTRY_PAGE_MAX)
+                .map_err(|error| created_identity_read_error("created_identities", error))?;
+            for view in page
+                .entries
+                .iter()
+                .filter(|view| view.origin == meerkat_mob::IdentityEntryOrigin::Created)
+            {
+                if let Some(spec) = self.created_identity_of_member(&view.identity).await? {
+                    specs.push(spec);
+                }
+            }
+            match page.next {
+                None => return Ok(specs),
+                Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                    after = Some(next);
+                }
+                Some(_) => {
+                    return Err(BridgeError::Mob(
+                        "Core's identity entry pages returned a cursor that does not advance"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn created_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<DurableAgentSpec>, BridgeError> {
+        let member = member_id_for_identity(identity);
+        match self.handle.identity_entry(&member) {
+            Ok(meerkat_mob::IdentityEntryRead::Entry(view))
+                if view.origin == meerkat_mob::IdentityEntryOrigin::Created => {}
+            Ok(_) => return Ok(None),
+            Err(error) => return Err(created_identity_read_error("created_identity", error)),
+        }
+        self.created_identity_of_member(&member).await
+    }
+
     async fn identity_management(
         &self,
         identity: &AgentIdentity,
@@ -11679,6 +11888,17 @@ impl SessionBridge for super::PublicSessionBridge {
         identity: &AgentIdentity,
     ) -> Result<CoreIdentityEntry, BridgeError> {
         self.bridge.identity_entry(identity).await
+    }
+
+    async fn created_identities(&self) -> Result<Vec<DurableAgentSpec>, BridgeError> {
+        self.bridge.created_identities().await
+    }
+
+    async fn created_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<DurableAgentSpec>, BridgeError> {
+        self.bridge.created_identity(identity).await
     }
 
     async fn identity_management(

@@ -1796,8 +1796,15 @@ async fn completed_peer_run_refuses_its_prepared_model_check_without_revoking_gr
         assert_eq!(settled_source.final_association, record.final_association);
         // Currentness must fail because the actual owning run completed, while
         // the runtime, source and durable grants remain present and current.
-        assert!(matches!(prepared.current(), Err(meerkat_core::OperationAuthorizationError::Refused(error))
-            if error.kind() == OperationRefusalKind::MalformedFacts));
+        // The run fence refuses the check, and the check records its refusal
+        // on the input's row. The terminal receipt awaited above is delivered
+        // after the row's archive, which closed the row's audit buffer: the
+        // record is refused, so the check answers observation unavailable
+        // and not the run fence's own refusal kind. It fails closed either
+        // way: no decision is returned.
+        let late = prepared.current().err();
+        assert!(matches!(late, Some(meerkat_core::OperationAuthorizationError::ObservationUnavailable(_))),
+            "a prepared check used after its run's terminal archive is refused as observation unavailable: {late:?}");
         assert_eq!(fixture.source.store.get(&settled_row.key).await.unwrap(), Some(settled_row));
         assert_eq!(fixture.policy.member_class_admission(&instance(ADDED).member.member).unwrap(), Some(admission.clone()));
         for target in targets {
@@ -2184,12 +2191,16 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
         let (settled_row, settled, _) = source_row(&fixture, &terminal, &[]).await;
         assert_eq!(settled.final_association.as_ref(), Some(&association));
         // Its first and only enter is now. This checks the composed native
-        // path refuses late Recorder entry, not one specific run fence.
-        // After a publication change, re-preparation can also reject archived
-        // input bindings as MalformedFacts. Isolated run-fence coverage belongs
-        // to Core; keep the effect and unchanged-grant assertions here.
-        assert!(matches!(ticket.enter(), Err(meerkat_core::ToolError::AuthorizationRefused { refusal })
-            if refusal.kind() == OperationRefusalKind::MalformedFacts));
+        // path refuses late Recorder entry, not one specific run fence:
+        // isolated run-fence coverage belongs to Core. The entry's check is
+        // refused for the completed run and records that refusal on the
+        // input's row, whose audit buffer the terminal archive closed before
+        // the receipt awaited above was delivered. The record is refused, so
+        // the entry answers observation unavailable and enters nothing. Keep
+        // the effect and unchanged-grant assertions here.
+        let entered = ticket.enter();
+        assert!(matches!(&entered, Err(meerkat_core::ToolError::OperationObservationUnavailable)),
+            "an entry ticket used after its run's terminal archive is refused as observation unavailable: {entered:?}");
         assert_eq!(memory.recall(query).await.unwrap(), before);
         assert_eq!(capture.outcomes.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.source.store.get(&settled_row.key).await.unwrap(), Some(settled_row));

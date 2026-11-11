@@ -732,6 +732,45 @@ pub struct CopilotModelSnapshot {
     models: BTreeMap<String, CopilotModelOffering>,
 }
 
+/// Whether `left` and `right` name the same model on a GitHub Copilot
+/// account: they are equal once every `.` is read as `-`. An account lists
+/// some models under an id that differs from the model catalog's only in its
+/// separators (`claude-opus-5.5` for the catalog's `claude-opus-5-5`); this
+/// is the one rule that matches the two, for the account's model list and
+/// for a build that picks the catalog row of an id the account names.
+#[must_use]
+pub fn same_account_model_id(left: &str, right: &str) -> bool {
+    fn separators_folded(id: &str) -> impl Iterator<Item = u8> + '_ {
+        id.bytes()
+            .map(|byte| if byte == b'.' { b'-' } else { byte })
+    }
+    left.len() == right.len() && separators_folded(left).eq(separators_folded(right))
+}
+
+/// What an account's model list holds for a requested model id
+/// ([`CopilotModelSnapshot::resolve`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CopilotModelMatch<'a> {
+    /// One entry: the one listed under the requested id, or else the only
+    /// one whose id names the same model ([`same_account_model_id`]). `id`
+    /// is the account's own id for it, the id a request to the account
+    /// names.
+    Listed {
+        // Read by the routes, which only a native `oauth` build compiles.
+        #[cfg_attr(
+            not(all(feature = "oauth", not(target_arch = "wasm32"))),
+            allow(dead_code)
+        )]
+        id: &'a str,
+        offering: &'a CopilotModelOffering,
+    },
+    /// No entry is listed under the requested id and more than one names the
+    /// same model: the account's ids for them.
+    Ambiguous(Vec<&'a str>),
+    /// No entry names the requested model.
+    Absent,
+}
+
 impl CopilotModelSnapshot {
     pub fn from_models(models: Vec<CopilotModel>) -> Result<Self, CopilotProtocolError> {
         let mut indexed = BTreeMap::new();
@@ -762,8 +801,40 @@ impl CopilotModelSnapshot {
         Ok(Self { models: indexed })
     }
 
+    /// The entry the account lists under exactly `id`.
     pub fn model(&self, id: &str) -> Option<&CopilotModelOffering> {
         self.models.get(id)
+    }
+
+    /// The entry of the account's list that `id` names: the entry listed
+    /// under exactly `id`, which always wins, or else the single entry whose
+    /// id names the same model ([`same_account_model_id`]). Every lookup of
+    /// a requested model goes through here: the routes, their refusal texts
+    /// and [`Self::account_model`].
+    pub(crate) fn resolve(&self, id: &str) -> CopilotModelMatch<'_> {
+        if let Some((listed, offering)) = self.models.get_key_value(id) {
+            return CopilotModelMatch::Listed {
+                id: listed,
+                offering,
+            };
+        }
+        let mut same = self
+            .models
+            .iter()
+            .filter(|(listed, _)| same_account_model_id(listed, id));
+        match (same.next(), same.next()) {
+            (Some((listed, offering)), None) => CopilotModelMatch::Listed {
+                id: listed,
+                offering,
+            },
+            (Some((first, _)), Some((second, _))) => CopilotModelMatch::Ambiguous(
+                [first.as_str(), second.as_str()]
+                    .into_iter()
+                    .chain(same.map(|(listed, _)| listed.as_str()))
+                    .collect(),
+            ),
+            (None, _) => CopilotModelMatch::Absent,
+        }
     }
 
     pub fn models(&self) -> impl Iterator<Item = &CopilotModelOffering> {
@@ -787,23 +858,37 @@ impl CopilotModelSnapshot {
     /// What this model list states about `model`, which the model registry
     /// does not define: the model's registry definition when the account
     /// offers it on a protocol Meerkat speaks
-    /// ([`CopilotModelOffering::registry_definition`]). A model the list does
-    /// not name is refused as not offered, naming the ids the account
-    /// offers; a model whose policy state is not `enabled` is refused naming
-    /// the state; a model listed with an empty endpoint list is refused as
-    /// having none; a model offered only on endpoints Meerkat does not speak
-    /// is refused as such. `credential` names the account in a refusal.
+    /// ([`CopilotModelOffering::registry_definition`]). The entry is the one
+    /// `model` names: the one listed under exactly that id, or else the only
+    /// one whose id names the same model ([`same_account_model_id`]). A
+    /// model the list does not name is
+    /// refused as not offered, naming the ids the account offers; a model
+    /// that more than one entry names and none exactly is refused the same
+    /// way, naming those entries; a model whose policy
+    /// state is not `enabled` is refused naming the state; a model listed
+    /// with an empty endpoint list is refused as having none; a model
+    /// offered only on endpoints Meerkat does not speak is refused as such.
+    /// `credential` names the account in a refusal.
     pub fn account_model(
         &self,
         credential: &AuthCredentialIdentity,
         model: &str,
     ) -> AccountModelLookup {
-        let Some(offering) = self.model(model) else {
-            return AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+        let not_offered = |available: Vec<String>| {
+            AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
                 credential: credential.clone(),
                 model: model.to_string(),
-                available: self.offered_model_ids().map(str::to_string).collect(),
-            });
+                available,
+            })
+        };
+        let offering = match self.resolve(model) {
+            CopilotModelMatch::Listed { offering, .. } => offering,
+            CopilotModelMatch::Ambiguous(candidates) => {
+                return not_offered(candidates.into_iter().map(str::to_string).collect());
+            }
+            CopilotModelMatch::Absent => {
+                return not_offered(self.offered_model_ids().map(str::to_string).collect());
+            }
         };
         if let Some(state) = offering.refusing_policy_state() {
             return AccountModelLookup::Refused(AccountModelRefusal::PolicyNotEnabled {

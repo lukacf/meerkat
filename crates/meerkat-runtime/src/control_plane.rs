@@ -171,8 +171,13 @@ async fn await_runless_terminal_handoff(
 /// bundle after compacting its durable outbox to `Published`.
 ///
 /// The task takes locks in the existing driver -> completion-registry order and
-/// retains both across the receipt CAS. After that awaited CAS returns there is
-/// no cancellation point before the synchronous waiter handoff.
+/// retains both across the receipt CAS and the archive that follows it, which
+/// archives every row of the terminal-completion batch. That archive first
+/// awaits the commit of any authorization audit records staged on the rows, so
+/// the receipt CAS and the synchronous waiter handoff are not adjacent. The task
+/// is owned, so a dropped caller cancels neither, and a refused or failed
+/// archive marks the session for a cold reload and still returns, so it cannot
+/// stop the waiter handoff.
 fn spawn_published_runless_terminal_handoff(
     driver: SharedDriver,
     completions: Option<SharedCompletionRegistry>,

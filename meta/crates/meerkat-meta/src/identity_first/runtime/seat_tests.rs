@@ -7032,6 +7032,36 @@ fn keeping_errors(
     })
 }
 
+/// The `lifecycle_effect_failed` events the error hook kept in `errors`,
+/// once it kept one, waiting at most 10 s: the runtime calls the hook on a
+/// task of its own (`IdentityRuntime::emit_error`), which may run after the
+/// lifecycle projection settled.
+async fn reported_effect_failures(
+    errors: &StdMutex<Vec<crate::unified_runtime::types::ErrorEvent>>,
+) -> Vec<crate::unified_runtime::types::ErrorEvent> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let reported = lock(errors)
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !reported.is_empty() {
+            return reported;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no lifecycle_effect_failed reached the error hook within 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Start a distiller run that holds the realm's background budget: a harvest
 /// of the budget holder's session, inside its model call until `model`'s
 /// gate opens. Answers once the run holds the budget.
@@ -7224,16 +7254,9 @@ async fn a_harvest_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_cause
             && unrun.error.contains("concurrency ceiling reached"),
         "{unrun:?}"
     );
-    let reported = lock(&errors)
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    // The error hook hears of it on a task of its own, which may run after
+    // the settle answered: its report is waited for.
+    let reported = reported_effect_failures(&errors).await;
     assert_eq!(reported.len(), 1, "{reported:?}");
     let wire = serde_json::to_value(&reported[0]).expect("the event serializes");
     assert_eq!(wire["cause"], "budget_busy", "{wire}");
@@ -7520,14 +7543,11 @@ async fn a_distillation_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_
         ),
         "{unrun:?}"
     );
-    let reported = lock(&errors)
+    // The error hook hears of it on a task of its own, which may run after
+    // the settle answered: its report is waited for.
+    let reported = reported_effect_failures(&errors)
+        .await
         .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
-            )
-        })
         .map(|event| serde_json::to_value(event).expect("the event serializes"))
         .collect::<Vec<_>>();
     assert_eq!(reported.len(), 1, "{reported:?}");

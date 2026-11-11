@@ -30,8 +30,26 @@ use crate::store::{
 use crate::traits::{DestroyReport, RecoveryReport, RuntimeDriver, RuntimeDriverError};
 
 use super::ephemeral::{
-    EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver, SharedIngressDslAuthority,
+    CommittedAuditArchive, EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver,
+    SharedIngressDslAuthority,
 };
+
+/// What stopped the archive that follows a native commit which made rows
+/// terminal ([`PersistentRuntimeDriver::archive_terminal_inputs_with_staged_audit`]).
+enum TerminalArchiveFailure {
+    /// The commit of the rows' staged audit records failed or was refused.
+    AuditCommit(RuntimeDriverError),
+    /// The archive itself failed.
+    Archive(RuntimeDriverError),
+}
+
+impl TerminalArchiveFailure {
+    fn into_error(self) -> RuntimeDriverError {
+        match self {
+            Self::AuditCommit(error) | Self::Archive(error) => error,
+        }
+    }
+}
 
 /// Persistent runtime driver — durable InputState via RuntimeStore.
 pub struct PersistentRuntimeDriver {
@@ -869,6 +887,13 @@ impl PersistentRuntimeDriver {
             .await
     }
 
+    /// The exact CAS of every terminal rewrite of input rows. Each row is
+    /// expected as it was last written (`committed_input_row_images`). A
+    /// stale outcome gets one more compare, from the replacements as a store
+    /// that committed them already holds them after operations staged more
+    /// observations (`committed_replacement_images`): such a stored row is
+    /// the committed rewrite, so the CAS writes the replacement over it,
+    /// which commits those observations. Any other difference stays stale.
     pub(crate) async fn compare_and_swap_interaction_terminal_outbox_replacements(
         &self,
         expected: &[StoredInputState],
@@ -876,7 +901,28 @@ impl PersistentRuntimeDriver {
     ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
         let expected = self.committed_input_row_images(expected).await?;
-        let expected = expected.as_slice();
+        let outcome = self
+            .compare_and_swap_input_state_batch(&expected, replacements)
+            .await?;
+        if outcome != InputStateBatchCasOutcome::Stale {
+            return Ok(outcome);
+        }
+        match self.committed_replacement_images(replacements).await? {
+            Some(committed) => {
+                self.compare_and_swap_input_state_batch(&committed, replacements)
+                    .await
+            }
+            None => Ok(outcome),
+        }
+    }
+
+    /// One exact compare-and-swap of input-state rows through the store's
+    /// realization profile.
+    async fn compare_and_swap_input_state_batch(
+        &self,
+        expected: &[StoredInputState],
+        replacements: &[crate::input_state::InputStatePersistenceRecord],
+    ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
         match self.store.input_state_batch_cas_implementation_profile() {
             InputStateBatchCasImplementationProfile::MultiWriter => self
                 .store
@@ -969,16 +1015,8 @@ impl PersistentRuntimeDriver {
                 })?;
             if !image.state.authorization_audit.is_empty() {
                 let stored = self
-                    .store
-                    .load_input_state(&self.runtime_id, &live.state.input_id)
-                    .await
-                    .map_err(|error| RuntimeDriverError::RecoveryBackoff {
-                        reason: format!(
-                            "terminal input compare-and-swap could not read the stored row of \
-                             input {}: {error}",
-                            live.state.input_id
-                        ),
-                    })?;
+                    .stored_input_row_for_terminal_cas(&live.state.input_id)
+                    .await?;
                 if let Some(stored) = stored {
                     image.state.authorization_audit = image
                         .state
@@ -994,11 +1032,76 @@ impl PersistentRuntimeDriver {
         Ok(images)
     }
 
+    /// The replacements of a terminal input-state CAS as a store that
+    /// already committed them holds them once operations staged more
+    /// observations: each with its audit cut to the stored strict prefix
+    /// (the same `InputAuthorizationAudit::committed_image` rule). A caller
+    /// dropped after the store committed its CAS leaves the stored rows at
+    /// the replacement and the shell at the rows it replaced. The retry
+    /// rebuilds the replacement from the shell, so it also carries every
+    /// observation staged on the live rows since; the stored row is then
+    /// neither the retry's pre-image nor its replacement, only this image of
+    /// it. `None` when no stored audit cuts a replacement: the store has
+    /// compared each row with its replacement already.
+    async fn committed_replacement_images(
+        &self,
+        replacements: &[crate::input_state::InputStatePersistenceRecord],
+    ) -> Result<Option<Vec<StoredInputState>>, RuntimeDriverError> {
+        let mut images = Vec::with_capacity(replacements.len());
+        let mut cut = false;
+        for replacement in replacements {
+            let mut image = replacement.clone_stored();
+            if !image.state.authorization_audit.is_empty()
+                && let Some(stored) = self
+                    .stored_input_row_for_terminal_cas(&image.state.input_id)
+                    .await?
+            {
+                let committed = image
+                    .state
+                    .authorization_audit
+                    .committed_image(&stored.state.authorization_audit)
+                    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    })?;
+                if !committed
+                    .has_same_records(&image.state.authorization_audit)
+                    .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                        reason: error.to_string(),
+                    })?
+                {
+                    cut = true;
+                    image.state.authorization_audit = committed;
+                }
+            }
+            images.push(image);
+        }
+        Ok(cut.then_some(images))
+    }
+
+    /// The stored row of `input_id`, read to choose a terminal input-state
+    /// CAS's expected bytes. A failed read changes nothing durable.
+    async fn stored_input_row_for_terminal_cas(
+        &self,
+        input_id: &InputId,
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+        self.store
+            .load_input_state(&self.runtime_id, input_id)
+            .await
+            .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                reason: format!(
+                    "terminal input compare-and-swap could not read the stored row of input \
+                     {input_id}: {error}"
+                ),
+            })
+    }
+
     /// Release terminal live state after its exact completion/publication CAS
     /// has committed. The ephemeral helper rechecks that every named row is
     /// terminal and carries no open durable obligation; any archive mismatch
     /// degrades the shared shell rather than continuing with split authority.
-    pub(crate) fn archive_terminal_inputs_after_durable_obligations(
+    /// The audit records operations staged on the rows since their last
+    /// write are committed first (`archive_terminal_inputs_with_staged_audit`).
+    pub(crate) async fn archive_terminal_inputs_after_durable_obligations(
         &mut self,
         input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
@@ -1024,17 +1127,199 @@ impl PersistentRuntimeDriver {
                 ));
             }
         };
-        if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&archivable)
+        match self
+            .archive_terminal_inputs_with_staged_audit(&archivable)
+            .await
         {
-            return Err(self.post_transition_failure(
+            Ok(()) => Ok(()),
+            Err(TerminalArchiveFailure::AuditCommit(error)) => Err(error),
+            Err(TerminalArchiveFailure::Archive(error)) => Err(self.post_transition_failure(
                 None,
                 "terminal_obligation_archive",
                 error.to_string(),
-            ));
+            )),
+        }
+    }
+
+    /// [`Self::archive_terminal_inputs_after_durable_obligations`] for rows
+    /// whose terminal receipt is durable and realized. The receipt is final,
+    /// so the archive cannot fail its caller: a failure, a refused or failed
+    /// commit of the rows' staged audit records included, marks this session
+    /// for a cold reload with its reason and leaves the rows live and
+    /// unarchived until that reload. Nothing more is written, and no row is
+    /// archived over a refusal.
+    pub(crate) async fn archive_terminal_inputs_after_durable_receipt(
+        &mut self,
+        input_ids: &[InputId],
+    ) {
+        if let Err(error) = self
+            .archive_terminal_inputs_after_durable_obligations(input_ids)
+            .await
+        {
+            tracing::error!(
+                %error,
+                "terminal inputs stay live after their durable receipt: their archive failed"
+            );
+            self.mark_durability_reload_required("terminal_receipt_archive", error.to_string());
+        }
+    }
+
+    /// Archive `archivable`, terminal rows with no open durable obligation,
+    /// after committing every authorization audit record an operation staged
+    /// on them since their last durable write: such a record waits on the
+    /// live row for the row's next write, and an archived row has none. Each
+    /// row's stored audit is read once (a row whose live snapshot holds no
+    /// record needs no read). Then the archive's last check, the generated
+    /// archive and the closed mark on each archived row's audit buffer run in
+    /// one synchronous step
+    /// ([`EphemeralRuntimeDriver::archive_terminal_inputs_with_committed_audit`]),
+    /// so no record can be appended between that check and the archive, nor
+    /// after it; a row whose live records ran ahead is first rewritten
+    /// through the terminal input CAS with its live records, every other byte
+    /// as stored (the exact compare refuses any other difference), and the
+    /// step runs again.
+    async fn archive_terminal_inputs_with_staged_audit(
+        &mut self,
+        archivable: &[InputId],
+    ) -> Result<(), TerminalArchiveFailure> {
+        if archivable.is_empty() {
+            return Ok(());
+        }
+        let mut committed = self
+            .stored_terminal_audits(archivable)
+            .await
+            .map_err(TerminalArchiveFailure::AuditCommit)?;
+        loop {
+            match self
+                .inner
+                .archive_terminal_inputs_with_committed_audit(&committed)
+                .map_err(TerminalArchiveFailure::Archive)?
+            {
+                CommittedAuditArchive::Archived => return Ok(()),
+                CommittedAuditArchive::AuditAhead => self
+                    .commit_staged_audit(&mut committed)
+                    .await
+                    .map_err(TerminalArchiveFailure::AuditCommit)?,
+            }
+        }
+    }
+
+    /// The archive that follows a native commit which made rows terminal:
+    /// the archivable rows among `input_ids`
+    /// ([`EphemeralRuntimeDriver::archivable_terminal_input_ids_in`]),
+    /// archived after their staged audit records are committed
+    /// ([`Self::archive_terminal_inputs_with_staged_audit`]).
+    async fn archive_archivable_terminal_inputs_with_staged_audit(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let archivable = self.inner.archivable_terminal_input_ids_in(input_ids)?;
+        self.archive_terminal_inputs_with_staged_audit(&archivable)
+            .await
+            .map_err(TerminalArchiveFailure::into_error)
+    }
+
+    /// Each row of `input_ids` with the audit records its stored row holds,
+    /// frozen; a row whose live snapshot holds no record cannot be ahead of
+    /// its stored row and keeps that empty snapshot, unread.
+    async fn stored_terminal_audits(
+        &self,
+        input_ids: &[InputId],
+    ) -> Result<Vec<(InputId, crate::input_audit::InputAuthorizationAudit)>, RuntimeDriverError>
+    {
+        let audit_corruption = |error: meerkat_core::authorization::OperationObservationError| {
+            RuntimeDriverError::RecoveryCorruption {
+                reason: error.to_string(),
+            }
+        };
+        let mut committed = Vec::with_capacity(input_ids.len());
+        for input_id in input_ids {
+            let live = self
+                .terminal_archive_live_row(input_id)?
+                .state
+                .authorization_audit
+                .freeze_for_persistence()
+                .map_err(audit_corruption)?;
+            let stored = if live.is_empty() {
+                live
+            } else {
+                self.stored_input_row_for_terminal_cas(input_id)
+                    .await?
+                    .map(|stored| stored.state.authorization_audit)
+                    .unwrap_or_default()
+                    .freeze_for_persistence()
+                    .map_err(audit_corruption)?
+            };
+            committed.push((input_id.clone(), stored));
+        }
+        Ok(committed)
+    }
+
+    /// Rewrite every row of `committed` whose live records differ from its
+    /// committed ones through the terminal input CAS, with its live records
+    /// and every other byte as stored; `committed` then names the records
+    /// written. A stale CAS writes nothing and refuses.
+    async fn commit_staged_audit(
+        &self,
+        committed: &mut [(InputId, crate::input_audit::InputAuthorizationAudit)],
+    ) -> Result<(), RuntimeDriverError> {
+        let mut expected = Vec::new();
+        let mut replacements = Vec::new();
+        for (input_id, stored) in committed.iter() {
+            let live = self.terminal_archive_live_row(input_id)?;
+            if live
+                .state
+                .authorization_audit
+                .has_same_records(stored)
+                .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                    reason: error.to_string(),
+                })?
+            {
+                continue;
+            }
+            replacements.push(
+                crate::input_state::InputStatePersistenceRecord::from_machine_snapshot(
+                    live.clone(),
+                )
+                .map_err(RuntimeDriverError::Internal)?,
+            );
+            expected.push(live);
+        }
+        if expected.is_empty() {
+            return Ok(());
+        }
+        if self
+            .compare_and_swap_interaction_terminal_outbox_replacements(&expected, &replacements)
+            .await?
+            == InputStateBatchCasOutcome::Stale
+        {
+            return Err(RuntimeDriverError::StaleAuthority {
+                reason: "terminal input archive lost the exact durable CAS of its staged \
+                         audit records"
+                    .to_string(),
+            });
+        }
+        for replacement in &replacements {
+            let written = &replacement.as_stored().state;
+            if let Some((_, stored)) = committed
+                .iter_mut()
+                .find(|(input_id, _)| *input_id == written.input_id)
+            {
+                stored.clone_from(&written.authorization_audit);
+            }
         }
         Ok(())
+    }
+
+    fn terminal_archive_live_row(
+        &self,
+        input_id: &InputId,
+    ) -> Result<StoredInputState, RuntimeDriverError> {
+        self.inner.stored_input_state(input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "terminal input archive references missing live input {input_id}"
+            ))
+        })
     }
 
     pub(crate) async fn committed_session_snapshot_for_terminal_recovery(
@@ -2365,8 +2650,8 @@ impl PersistentRuntimeDriver {
             }
         };
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&terminal_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(&terminal_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -2586,8 +2871,8 @@ impl PersistentRuntimeDriver {
             return Err(error);
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&changed_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(&changed_input_ids)
+            .await
         {
             let error = self.post_transition_failure(
                 None,
@@ -2723,8 +3008,8 @@ impl PersistentRuntimeDriver {
             ));
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&changed_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(&changed_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -2771,8 +3056,8 @@ impl PersistentRuntimeDriver {
             ));
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -2875,7 +3160,10 @@ impl PersistentRuntimeDriver {
                 format!("tracked input cancel persist failed: {error}"),
             ));
         }
-        if let Err(error) = self.archive_queued_abandonment_after_durable_commit(input_id) {
+        if let Err(error) = self
+            .archive_queued_abandonment_after_durable_commit(input_id)
+            .await
+        {
             return Err(self.post_transition_failure(
                 None,
                 "abandon_queued_input_archive",
@@ -2966,8 +3254,8 @@ impl PersistentRuntimeDriver {
             ));
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&abandoned)
+            .archive_archivable_terminal_inputs_with_staged_audit(&abandoned)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -2980,7 +3268,7 @@ impl PersistentRuntimeDriver {
 
     /// The archival that follows the durable commit of
     /// [`Self::abandon_queued_input`].
-    fn archive_queued_abandonment_after_durable_commit(
+    async fn archive_queued_abandonment_after_durable_commit(
         &mut self,
         input_id: &meerkat_core::lifecycle::InputId,
     ) -> Result<(), RuntimeDriverError> {
@@ -2990,8 +3278,8 @@ impl PersistentRuntimeDriver {
                 "forced terminal-input archive failure after the durable commit".to_string(),
             ));
         }
-        self.inner
-            .archive_archivable_terminal_inputs_after_durable_commit(std::slice::from_ref(input_id))
+        self.archive_archivable_terminal_inputs_with_staged_audit(std::slice::from_ref(input_id))
+            .await
     }
 
     /// Recycle the in-memory driver shell while preserving canonical pending
@@ -3090,8 +3378,8 @@ impl PersistentRuntimeDriver {
             runless_terminal.owe();
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&changed_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(&changed_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -3146,8 +3434,8 @@ impl PersistentRuntimeDriver {
             runless_terminal.owe();
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&changed_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(&changed_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -3203,8 +3491,8 @@ impl PersistentRuntimeDriver {
         self.commit_lifecycle_with_rollback(checkpoint, &changed_input_ids, target_state, "stop")
             .await?;
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(&changed_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(&changed_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -3504,8 +3792,8 @@ impl PersistentRuntimeDriver {
             ));
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(changed)
+            .archive_archivable_terminal_inputs_with_staged_audit(changed)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -3618,10 +3906,8 @@ impl PersistentRuntimeDriver {
                 )
             })?;
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(
-                &receipt.contributing_input_ids,
-            )
+            .archive_archivable_terminal_inputs_with_staged_audit(&receipt.contributing_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,
@@ -3695,8 +3981,8 @@ impl PersistentRuntimeDriver {
         match persist_result {
             Ok(result) => {
                 if let Err(error) = self
-                    .inner
-                    .archive_archivable_terminal_inputs_after_durable_commit(&terminal_input_ids)
+                    .archive_archivable_terminal_inputs_with_staged_audit(&terminal_input_ids)
+                    .await
                 {
                     return Err(self.post_transition_failure(
                         None,
@@ -3753,8 +4039,8 @@ impl PersistentRuntimeDriver {
             ));
         }
         if let Err(error) = self
-            .inner
-            .archive_archivable_terminal_inputs_after_durable_commit(contributing_input_ids)
+            .archive_archivable_terminal_inputs_with_staged_audit(contributing_input_ids)
+            .await
         {
             return Err(self.post_transition_failure(
                 None,

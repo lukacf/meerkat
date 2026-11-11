@@ -6145,7 +6145,10 @@ pub trait SessionBridge: Send + Sync {
     /// member, and a mob restarted in between finishes it itself. The
     /// successor is seated with `spec`'s profile, runtime mode and labels
     /// (the identity's current record), and keeps the member's conversation;
-    /// under the member's own profile it keeps its wiring too. Nothing is
+    /// under the member's own profile it keeps its wiring too. A
+    /// `compaction_floor` change seats it with that auto-compact floor
+    /// (`Some(None)` removes one an earlier successor was seated with;
+    /// `None` keeps what the member builds with). Nothing is
     /// materialized: the caller wakes the successor. The identity runtime
     /// asks it for an identity whose record is its row in the mob's identity
     /// store, which no declaration seats again.
@@ -6156,6 +6159,7 @@ pub trait SessionBridge: Send + Sync {
         &self,
         identity: &AgentIdentity,
         _spec: &DurableAgentSpec,
+        _compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         Err(BridgeError::InvalidInput(format!(
             "this SessionBridge does not implement the same-session successor, so identity \
@@ -10906,6 +10910,7 @@ impl SessionBridge for MobSessionBridge {
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
+        compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         let member = member_id_for_identity(identity);
         let mut request = meerkat_mob::MemberRespawn::new()
@@ -10913,6 +10918,9 @@ impl SessionBridge for MobSessionBridge {
             .with_labels(spec.labels.clone());
         if let Some(runtime_mode) = spec.runtime_mode_override {
             request = request.with_runtime_mode(runtime_mode);
+        }
+        if let Some(floor) = compaction_floor {
+            request = request.with_compaction_floor(floor);
         }
         self.handle
             .respawn_member(member.clone(), request)
@@ -12173,9 +12181,10 @@ impl SessionBridge for super::PublicSessionBridge {
         &self,
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
+        compaction_floor: Option<Option<std::num::NonZeroU64>>,
     ) -> Result<(), BridgeError> {
         self.bridge
-            .respawn_member_on_own_session(identity, spec)
+            .respawn_member_on_own_session(identity, spec, compaction_floor)
             .await
     }
 

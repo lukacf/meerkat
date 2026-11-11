@@ -48,6 +48,7 @@ use std::collections::BTreeSet;
 use tokio::sync::broadcast;
 
 use super::super::bridge::{BridgeError, MemberRuntimeBinding};
+use super::super::first_boot_manifest::{FirstBootRow, FirstBootRowState};
 use super::super::types::{AgentIdentity, DurableAgentSpec};
 use super::{
     IDENTITY_EVENT_CHANNEL_CAPACITY, IdentityEntry, IdentityRuntime, IdentityRuntimeError,
@@ -70,9 +71,22 @@ pub(super) enum SuccessorCause {
     Respawn,
     /// A reload over a bridge that has no registration reload.
     Reload,
-    /// A maintenance rebuild that changes the member's compaction floor,
-    /// which only a build this runtime lowers carries.
-    CompactionFloor,
+    /// A maintenance rebuild that changes the member's compaction floor to
+    /// the one it names (`None` removes it): the roster's declaration lowers
+    /// it into the build it seats, and Core's same-session successor is
+    /// seated with it.
+    CompactionFloor(Option<std::num::NonZeroU64>),
+}
+
+impl SuccessorCause {
+    /// The compaction floor change the successor's seat carries, if the
+    /// cause is one.
+    fn compaction_floor(self) -> Option<Option<std::num::NonZeroU64>> {
+        match self {
+            Self::CompactionFloor(floor) => Some(floor),
+            Self::Respawn | Self::Reload => None,
+        }
+    }
 }
 
 /// Whether `binding` is the member of an identity whose record is its row in
@@ -256,10 +270,8 @@ impl IdentityRuntime {
     ///   replaces the incarnation by its successor in one step
     ///   ([`super::super::bridge::SessionBridge::respawn_member_on_own_session`]),
     ///   seated with the row's current profile, runtime mode and labels, and
-    ///   the identity is never without a member. A compaction floor is carried only by a build
-    ///   this runtime lowers, which that step has none of: the rebuild is
-    ///   refused, typed ([`IdentityRuntimeError::IdentityStoreOwned`]), and
-    ///   nothing is retired.
+    ///   with the compaction floor a maintenance rebuild names; the identity
+    ///   is never without a member.
     ///
     /// Either way what the retirement owes is recorded before Core is asked,
     /// as a reload's: a successor on the same session owes no side effect.
@@ -274,11 +286,6 @@ impl IdentityRuntime {
         let record = self.spec_record(identity).await?;
         let row_spec = match record {
             SpecRecord::Roster => None,
-            SpecRecord::Store if cause == SuccessorCause::CompactionFloor => {
-                return Err(IdentityRuntimeError::IdentityStoreOwned {
-                    identity: identity.clone(),
-                });
-            }
             SpecRecord::Store => Some(self.adopt_row_spec_locked(identity).await?),
         };
         let prepared = self
@@ -291,7 +298,11 @@ impl IdentityRuntime {
         let bridge = self.core_bridge(identity)?;
         let ended = match row_spec.as_ref() {
             None => bridge.retire_member(&live.agent_runtime_id).await,
-            Some(spec) => bridge.respawn_member_on_own_session(identity, spec).await,
+            Some(spec) => {
+                bridge
+                    .respawn_member_on_own_session(identity, spec, cause.compaction_floor())
+                    .await
+            }
         };
         if let Err(error) = ended {
             // A step Core refused before any of it started retired nothing:
@@ -461,7 +472,99 @@ impl IdentityRuntime {
                 tracked.push(spec);
             }
         }
+        Box::pin(self.carry_out_fresh_rows(&tracked)).await;
         tracked
+    }
+
+    /// The roster pass's carry-out of the `Fresh` rows the offline identity
+    /// reset left for the identities whose record is their row (`tracked`,
+    /// registered a moment ago): the roster's declaration carries such a row
+    /// out for an identity the roster lists, and no roster lists these. Each
+    /// is carried out under its identity's lifecycle lock
+    /// ([`Self::carry_out_fresh_row_locked`]); one that fails keeps its row
+    /// for the next pass or the identity's next door, and is logged. The
+    /// manifest is rewritten once, after the locks are released.
+    async fn carry_out_fresh_rows(&self, tracked: &[DurableAgentSpec]) {
+        if tracked.is_empty() || self.load_first_boot_manifest().await.is_err() {
+            // An unreadable manifest refuses the roster's declaration, typed.
+            return;
+        }
+        let rows = self.pending_first_boot_rows_snapshot();
+        let mut settled = false;
+        for spec in tracked {
+            let identity = &spec.identity;
+            if !rows.contains_key(identity) {
+                continue;
+            }
+            let lifecycle_lock = self.lifecycle_lock_for(identity).await;
+            let _lifecycle_guard = lifecycle_lock.lock().await;
+            match self.carry_out_fresh_row_locked(identity).await {
+                Ok(carried_out) => settled |= carried_out,
+                Err(error) => tracing::warn!(
+                    %identity,
+                    %error,
+                    "the fresh life an offline reset left owed was not started; its row stays \
+                     for the next roster pass or the identity's next delivery"
+                ),
+            }
+        }
+        if settled {
+            self.finish_declaration(&[], true).await;
+        }
+    }
+
+    /// Carry out the `Fresh` row the offline identity reset left pending for
+    /// `identity`, whose record is its row in the mob's identity store,
+    /// while the caller holds the identity's lifecycle lock: the fresh life
+    /// the running gateway's reset gives it. Core rotates its member onto a
+    /// fresh session, seated from its row's current spec; nothing is built
+    /// or woken, and its name and row stay. A row Core's history shows
+    /// carried out already (the process ended before the manifest was
+    /// rewritten) is settled. `Ok(true)` when the row is settled in memory:
+    /// the caller rewrites the manifest. An identity the roster holds, a row
+    /// of another kind, a row Core's history contradicts and a candidate
+    /// launch are left to the roster's declaration, which answers them.
+    pub(super) async fn carry_out_fresh_row_locked(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, IdentityRuntimeError> {
+        let Some(row) = self.pending_first_boot_rows_snapshot().remove(identity) else {
+            return Ok(false);
+        };
+        if !matches!(row, FirstBootRow::Fresh { .. })
+            || self.is_candidate_launch()
+            || self.spec_record(identity).await? != SpecRecord::Store
+        {
+            return Ok(false);
+        }
+        let history = self
+            .core_bridge(identity)?
+            .member_binding_history()
+            .await
+            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!(
+                    "reading Core's member history to carry out a first-boot row: {error}"
+                ),
+            })?;
+        match row.state_in(&history) {
+            FirstBootRowState::Contradicted { .. } => return Ok(false),
+            FirstBootRowState::Done => {}
+            FirstBootRowState::ToDo => {
+                self.adopt_current_spec_locked(identity).await?;
+                let last = self.core_last_binding(identity).await?;
+                // The fresh life's future is held behind a pointer: the pass
+                // and the doors that reach this step nest it no deeper.
+                Box::pin(self.start_fresh_life_locked(
+                    identity,
+                    &mut self.foreground_cancel.subscribe(),
+                    super::FreshLife::Reset,
+                    last,
+                ))
+                .await?;
+            }
+        }
+        self.settle_first_boot_row_in_memory(identity);
+        Ok(true)
     }
 
     /// The registration follows `name`'s row after a change of it committed

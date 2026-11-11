@@ -380,11 +380,11 @@ schedule fires go through its door, and the lifecycle verbs (`meta/retire`,
 on a configured identity. Its status reads `intent_managed: false`. Through
 0.9.13 those verbs refused it, final, with `-32603` and structured data
 `{kind: "identity_store_owned", identity, retryable: false}`, and its status
-read `intent_managed: true`. Two things still answer that kind:
-`meta/compact_member` with a compaction floor (the rebuild that carries the
-floor to the member is not available for such an identity; nothing is
-changed), and the offline `meta_gateway identity-reset` (reset it with
-`meta/reset` on the running gateway). A delivery, a wake or a grant to one
+read `intent_managed: true`. Nothing answers that kind any more:
+`meta/compact_member` with a compaction floor rebuilds such an identity's
+member as a configured one's, and the offline `meta_gateway identity-reset`
+takes it (the next start gives it its fresh life). A delivery, a wake or a
+grant to one
 that Core archived answers `-32603` with
 `{kind: "identity_archived", identity, remedy: "unarchive_identity", retryable: false}`:
 nothing is delivered until Core's `unarchive_identity` seats it again. A

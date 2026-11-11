@@ -1220,16 +1220,12 @@ pub enum IdentityRuntimeError {
     IdentityHostAdopted {
         identity: AgentIdentity,
     },
-    /// The identity's record is its row in the mob's identity store (it was
-    /// created at run time, or adopted into the store), and the maintenance
-    /// rebuild that was asked for changes its member's compaction floor,
-    /// which only a build this runtime lowers carries: Core's same-session
-    /// successor of such an identity takes none, so the rebuild is refused
-    /// before anything acts, and nothing was changed. Every lifecycle verb
-    /// (retire, reload, respawn, reset, delete, warm, a scoped retire, a
-    /// grant's seat) serves such an identity as any other and never answers
-    /// this; through 0.9.13 each of them did. Final. JSON-RPC internal-error
-    /// code with `data.kind` `identity_store_owned`.
+    /// No longer produced: an identity whose record is its row in the mob's
+    /// identity store (created at run time, or adopted into the store) is
+    /// served by every lifecycle verb and by a maintenance rebuild as any
+    /// other identity. Through 0.9.13 each of them answered this. Kept so
+    /// that code matching on it still compiles. JSON-RPC internal-error code
+    /// with `data.kind` `identity_store_owned`.
     IdentityStoreOwned {
         identity: AgentIdentity,
     },
@@ -1591,9 +1587,8 @@ impl std::fmt::Display for IdentityRuntimeError {
             ),
             Self::IdentityStoreOwned { identity } => write!(
                 f,
-                "identity {identity}'s record is its row in the mob's identity store: a \
-                 maintenance rebuild cannot carry a compaction floor to its member, so nothing \
-                 was changed"
+                "identity {identity}'s record is its row in the mob's identity store (no \
+                 longer answered: such an identity is served as any identity)"
             ),
             Self::IdentityNameHeldByRawMember {
                 identity,
@@ -2148,9 +2143,7 @@ impl IdentityRuntimeError {
             Self::IdentityHostAdopted { identity } => Some(serde_json::json!({
                 "kind": "identity_host_adopted", "identity": identity, "retryable": false,
             })),
-            // The refusal keeps the internal-error code; the kind tells its
-            // caller that the identity's record is its row, which the
-            // maintenance rebuild asked for cannot serve.
+            // No longer produced; its wire form stays as it was.
             Self::IdentityStoreOwned { identity } => Some(serde_json::json!({
                 "kind": "identity_store_owned", "identity": identity, "retryable": false,
             })),
@@ -4413,6 +4406,19 @@ pub(crate) fn binding_carries_identity_marker(
             if continuity_key == identity.as_str()
                 || continuity_key == binding.identity().as_str()
     )
+}
+
+/// Whether `binding`'s member is `identity`'s by a fact only Core writes: it
+/// carries Core's durable-identity marker for the identity, or the
+/// identity's record is its row in the mob's identity store, under whose
+/// name Core seats the identity's own member only. A spawn label is not
+/// such a fact: Core's own mob tools take any label.
+#[cfg(feature = "extension-state")]
+pub(crate) fn binding_is_the_identitys_by_core(
+    binding: &meerkat_mob::MemberBinding,
+    identity: &AgentIdentity,
+) -> bool {
+    binding_carries_identity_marker(binding, identity) || created::binding_is_a_rows(binding)
 }
 
 /// The error hook's report that the host's retirement hook failed for
@@ -8282,8 +8288,18 @@ impl IdentityRuntime {
             // A send authored from another registered row seats nothing.
             refuse_unless_registered_row(identity, &spec, expected_spec_digest)?;
             // The delivery goes to Core after the seat, and Core's dispatch
-            // materializes the member for it.
-            self.declare_identity_locked(&spec, None).await
+            // materializes the member for it. A fresh life the offline reset
+            // left owed to an identity whose record is its row starts first,
+            // as the declaration starts a roster identity's.
+            match Box::pin(self.carry_out_fresh_row_locked(identity)).await {
+                Ok(carried_out) => {
+                    if carried_out {
+                        self.finish_declaration(&[], true).await;
+                    }
+                    self.declare_identity_locked(&spec, None).await
+                }
+                Err(error) => Err(error),
+            }
         };
         let seat = match seated {
             Ok(seat) => seat,
@@ -9762,7 +9778,12 @@ impl IdentityRuntime {
         // it leaves no member to wake. Core decides it once a lifecycle
         // operation of the member in flight (the kickoff wake of the fresh
         // life a reset seated, a delivery's wake) ended: the door waits for
-        // it. The wake below makes the member live.
+        // it. The wake below makes the member live. A fresh life the offline
+        // reset left owed to an identity whose record is its row starts
+        // first, as the declaration starts a roster identity's.
+        if Box::pin(self.carry_out_fresh_row_locked(identity)).await? {
+            self.finish_declaration(&[], true).await;
+        }
         let seat = self
             .declare_identity_locked(&spec, overrides.customizer)
             .await?;
@@ -14168,12 +14189,13 @@ impl IdentityRuntime {
         let (before, _) = self
             .live_delivery_target(identity, "compact_member")
             .await?;
-        // The floor reaches the member only through a build Meta lowers: the
-        // incarnation retires in Core, and the wake below seats it again on
-        // the same session with the floor, then materializes it.
+        // The floor reaches the member through its next seat: the roster's
+        // declaration lowers it into the build that seats the identity again
+        // at the wake below, and Core's same-session successor of an identity
+        // whose record is its row is seated with it.
         self.retire_locked_with_intent(
             identity,
-            LifecycleRetireIntent::Reload(created::SuccessorCause::CompactionFloor),
+            LifecycleRetireIntent::Reload(created::SuccessorCause::CompactionFloor(change.floor)),
         )
         .await?;
         match change.floor {

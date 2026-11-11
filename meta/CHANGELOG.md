@@ -34,10 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     in the result, always empty; an archived identity is left archived and
     fails nothing.
 
-  A verb on an archived identity answers `identity_archived`. Two things
-  still answer `identity_store_owned`: `meta/compact_member` with a
-  compaction floor, and the offline `meta_gateway identity-reset` (see
-  Known limitations).
+  A verb on an archived identity answers `identity_archived`. Nothing
+  answers `identity_store_owned` any more:
+  - `meta/compact_member` with a compaction floor rebuilds the member with
+    the floor on its own session, and again without it afterwards, as for a
+    configured identity;
+  - the offline `meta_gateway identity-reset` takes it, and the next
+    start's roster pass gives it its fresh life: a fresh session, nothing
+    built, its name and its row unchanged. A delivery that reaches it
+    before a pass carried the reset out carries it out first.
+
+  The kind `identity_store_owned`, `IdentityRuntimeError::IdentityStoreOwned`
+  and `IdentityResetRefusal::IdentityStoreOwned` stay defined and are no
+  longer produced.
 
 - `IdentityStatus.intent_managed` (`meta/status_identity`, the status
   lists, both SDKs) reads `false` for an identity whose record is its row
@@ -93,12 +102,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - The first build of an identity created at run time carries the host
-  customizer's tools when Core wakes its member before a roster pass or a
-  door named the identity. Meta's spawn customizer attaches the identity's
-  tool dispatcher to each build of a member Core holds as an identity
-  entry, and the build preparer publishes the host customizer's tools into
-  it. Through 0.9.13 such a build offered none of them until the member's
-  next build.
+  customizer's tools: the member Core starts at the create to run the
+  identity's first message, and the member Core wakes before a roster pass
+  or a door named the identity. Core asks Meta's build preparer before
+  both, Meta's spawn customizer attaches the identity's tool dispatcher to
+  each build of a member Core holds as an identity entry, and the build
+  preparer publishes the host customizer's tools into it. Through 0.9.13
+  such a build offered none of them until the member's next build.
+
+- A member of an identity whose record is its row acts as that identity
+  for the extension state (the `extension-state` feature): its session
+  resolves the agent principal of its name, as a configured identity's
+  member does. It resolved no principal.
 
 - The lifecycle side effects of an identity whose record is its row run as
   a configured identity's: a reset and a delete note the old session's
@@ -108,23 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Known limitations
 
-- `meta/compact_member` with a compaction floor answers
-  `identity_store_owned` for an identity whose record is its row in the
-  mob's identity store: the rebuild that carries the floor to the member is
-  a build Meta lowers, and Core's same-session successor of such an
-  identity takes none. Nothing is changed.
-
-- The offline `meta_gateway identity-reset` refuses such an identity
-  (`identity_store_owned`): the row it leaves is carried out by a roster
-  compile that lists the identity, and no roster lists it. Reset it with
-  `meta/reset` on the running gateway.
-
-- The member Core starts at such an identity's create to run its first
-  message, and a member the mob's start restores before the identity
-  runtime is bound (one that owes work), is built without the host
-  customizer's tools until its next build, as before: Core asks Meta's
-  build preparer before a wake and a restore, not before the member it
-  starts at a create.
+- A member of an identity whose record is its row that the mob's start
+  restores before the identity runtime is bound (one that owes work) is
+  built without the host customizer's tools until its next build, as
+  before.
 
 - A host customizer's model, system prompt, provider parameters, labels
   and context for a build do not reach the seat of such an identity, at its

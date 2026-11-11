@@ -1296,10 +1296,36 @@ pub async fn console_json_handler(
                 .as_ref()
                 .and_then(MobRuntime::installed_identity_runtime)
                 .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
+        // The agents whose record is their row in the mob's identity
+        // store: the ones a run-time change can change. An agent its host
+        // configures is offered no control.
+        let mut changed_at_run_time = std::collections::BTreeSet::new();
+        if identity_changes_available
+            && let Some(identity_runtime) = state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+        {
+            let listed: Vec<String> = response
+                .body
+                .pointer("/agent_sidebar/live_snapshot/agents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|agent| agent.get("identity").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            for name in listed {
+                if identity_runtime.record_is_store_owned(&name).await {
+                    changed_at_run_time.insert(name);
+                }
+            }
+        }
         crate::runtime::apply_identity_changes_to_experience(
             &mut response.body,
             caller.as_ref().map(|caller| &caller.audience),
             identity_changes_available,
+            &|name| changed_at_run_time.contains(name),
         );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
         if let Some(runtimes) = panel_runtimes {
@@ -5959,8 +5985,10 @@ fn console_rpc_access_requirements(
         // existing agent; a change of one agent is judged on that agent,
         // and its removal, which is permanent, under an action of its own.
         // Holding the mob's changes is the runtime's administration. A
-        // withdrawal names its caller's own operation, which only a caller
-        // that may ask for a change has, so it needs what viewing needs.
+        // plan is judged as the change it plans, on the agent that change
+        // names. A withdrawal and an operation read name an operation, and
+        // their handler answers only the caller's own: they need what
+        // viewing needs.
         crate::rpc::identity_methods::IDENTITY_CREATE => {
             one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None)
         }
@@ -5977,10 +6005,20 @@ fn console_rpc_access_requirements(
         // The reads: one agent is judged on that agent; a list and the
         // directory leave out the agents the caller may not view.
         crate::rpc::identity_methods::IDENTITY_GET => one(ACTION_AGENT_VIEW, target),
+        crate::rpc::identity_methods::IDENTITY_PLAN => {
+            match params.get("change").and_then(Value::as_str) {
+                Some("create") => one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None),
+                Some("remove") => one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target),
+                Some("update" | "archive" | "unarchive" | "adopt") => {
+                    one(crate::access::ACTION_AGENT_IDENTITY_MANAGE, target)
+                }
+                // A plan that names no change is refused by its handler.
+                _ => one(ACTION_AGENT_VIEW, None),
+            }
+        }
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
-        | crate::rpc::identity_methods::IDENTITY_PLAN
         | crate::rpc::identity_methods::IDENTITY_WITHDRAW => one(ACTION_AGENT_VIEW, None),
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
@@ -6418,11 +6456,11 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
         | crate::rpc::identity_methods::IDENTITY_REMOVE
         | crate::rpc::identity_methods::IDENTITY_ADOPT
-        | crate::rpc::identity_methods::IDENTITY_GET => NAMED_AGENT,
+        | crate::rpc::identity_methods::IDENTITY_GET
+        | crate::rpc::identity_methods::IDENTITY_PLAN => NAMED_AGENT,
         crate::rpc::identity_methods::IDENTITY_LIST
         | crate::rpc::identity_methods::IDENTITY_DIRECTORY
         | crate::rpc::identity_methods::IDENTITY_OPERATION
-        | crate::rpc::identity_methods::IDENTITY_PLAN
         | crate::rpc::identity_methods::IDENTITY_WITHDRAW
         | crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => NO_MEMBER,
         // The voice and live channel methods name the member they speak
@@ -36628,11 +36666,34 @@ mod identity_family_console_access_tests {
             console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),
             Some(vec![(ACTION_AGENT_VIEW, scout)])
         );
+        // A plan is judged as the change it plans, on the agent it names.
+        let planned = |change: &str| {
+            let mut params = named.clone();
+            params["change"] = json!(change);
+            console_rpc_access_requirements("meta/identity/plan", &params)
+        };
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/plan",
+                &json!({"change": "create", "agents": [{"name": "scout", "profile": "worker"}]})
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for change in ["update", "archive", "unarchive", "adopt"] {
+            assert_eq!(
+                planned(change),
+                Some(vec![("agent.identity.manage", Some("scout".to_string()))]),
+                "{change}"
+            );
+        }
+        assert_eq!(
+            planned("remove"),
+            Some(vec![("agent.identity.remove", Some("scout".to_string()))])
+        );
         for method in [
             "meta/identity/list",
             "meta/identity/directory",
             "meta/identity/operation",
-            "meta/identity/plan",
             "meta/identity/withdraw",
         ] {
             assert_eq!(

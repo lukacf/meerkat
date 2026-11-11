@@ -50,6 +50,21 @@ impl IdentityRuntime {
         self.runtime_services.mob_handle()
     }
 
+    /// Whether the record of the agent `name` is its row in the mob's
+    /// identity store: an agent created at run time, or adopted. `false`
+    /// for an agent its host configures, for a name no agent holds, and for
+    /// a record this runtime cannot read: a run-time change of such an
+    /// agent is refused, so a surface offers none.
+    pub(crate) async fn record_is_store_owned(&self, name: &str) -> bool {
+        let Ok(identity) = AgentIdentity::parse(name) else {
+            return false;
+        };
+        matches!(
+            self.spec_record(&identity).await,
+            Ok(super::created::SpecRecord::Store)
+        )
+    }
+
     /// The attached family as a caller that sees the agents `seen` admits
     /// calls it: a peer that caller may not see is answered as a name no
     /// agent holds.

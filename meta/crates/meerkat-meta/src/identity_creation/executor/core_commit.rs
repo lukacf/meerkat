@@ -76,7 +76,26 @@ pub(super) fn not_committed(
     commit: &ChangeCommit<'_>,
     error: meerkat_mob::MobError,
 ) -> Result<ChangeCommitted, ExecutorError> {
+    // The name Core found taken, to name the agent of the request that
+    // asked for it.
+    let taken = match &error {
+        meerkat_mob::MobError::IdentityChangeRefused {
+            refusal: meerkat_mob::IdentityChangeRefusal::NameTaken { identity, .. },
+        } => Some(identity.clone()),
+        _ => None,
+    };
     let refusal = refusal_of_error(error)?;
+    let refusal = match (&commit.request.action, taken) {
+        (super::RequestAction::Create { identities }, Some(taken)) if refusal.field.is_none() => {
+            match identities.iter().position(|created| {
+                super::core_member_name(created.spec.identity.as_str()).as_ref() == Some(&taken)
+            }) {
+                Some(index) => refusal.at(format!("agents[{index}].name")),
+                None => refusal,
+            }
+        }
+        _ => refusal,
+    };
     Ok(ChangeCommitted::refused(at_request_field(commit, refusal)))
 }
 

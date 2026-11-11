@@ -54,7 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/decisions/decide`, the launch carries it out by itself and
   `meta/identity/operation` reads `done`. `meta/identity/withdraw` ends a
   change that is still held. An agent that asked is told the outcome by a
-  keyed message to itself.
+  keyed message to itself. A person's approval is evidence, never authority
+  over the policy: when the approved change is carried out, the policy the
+  launch has then is asked again, and a change it denies now is not
+  executed (`meta/identity/operation` says it was denied).
+- `GET /console/experience`: `affordances.can_change_identity` and
+  `affordances.can_remove_identity` are false for an agent the host's
+  configuration declares, so a client offers no control that could only be
+  refused `owner_read_only`.
 - A change names as peers only agents its caller may see: on the Console a
   peer the caller may not view is answered `peer_unknown`, as a name no
   agent holds, and never `peer_not_allowed`.
@@ -90,11 +97,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `IdentityCreationPolicy::check_served`;
   `IdentityRuntime::{attach_identity_family, attach_identity_reads,
   identity_family, identity_family_seen_by, identity_changes_enabled}`;
-  `identity_creation::{PeerVisibility, AgentSpecs, AGENT_SPECS_NOT_GIVEN}`,
-  `CoreChangeExecutor::with_agent_specs` and
-  `IdentityFamilyOptions::with_decision_notices`.
-
-### Added
+  `identity_creation::{PeerVisibility, AgentSpecs, AGENT_SPECS_NOT_GIVEN,
+  FIRST_MESSAGE_IN_GOVERNED_REALM}`, `CoreChangeExecutor::with_agent_specs`,
+  `IdentityFamilyOptions::with_decision_notices`,
+  `UnifiedRuntime::identity_family_seen_by` and `rpc::{HOST_RPC_SURFACE,
+  IDENTITY_REFUSED_CODE}`.
+- On the Console: `meta/identity/plan` needs what the change it plans
+  needs, on the agent it names; `meta/identity/operation` answers the
+  caller's own operations, and another requester's only to a caller with
+  `runtime.admin`; `meta/identity/withdraw` is the signed-in requester's; a
+  signed-in person with `runtime.admin` holds and releases the mob's
+  changes; a `get` names only the peers its caller may view, and no page's
+  `next` names an agent the caller may not view.
+- `proposer` and `source_evidence` are the host's to state: a person and
+  an agent that send one are refused `invalid_request` at the member.
+- One `request_id` names one change and one held decision: another change
+  under the id of a held one, of whatever kind, is `operation_reused`.
+- `name_taken` names the agent of the request that asked for the name
+  (`field: "agents[i].name"`), also when an existing agent holds it.
+- An update answers an `instructions` member only where the launch has an
+  instruction step for updates and the update names `set.instructions`.
 
 - Changes of agents that a person decides. A change whose outcome under the
   host's identity policy is `require_approval` is held as one durable

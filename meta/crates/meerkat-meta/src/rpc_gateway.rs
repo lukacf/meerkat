@@ -27344,7 +27344,7 @@ mod identity_creation_launch_tests {
         assert!(refused.contains("\"ghost\""), "{refused}");
         let mut known = policy_value();
         known["approval"]["rules"][0]["target"] = json!({"profile": ["default"]});
-        known["preparation"] = json!({"default": {"mode": "required"}});
+        known["preparation"] = json!({"default": {"mode": "none"}});
         assert!(
             launch(
                 None,

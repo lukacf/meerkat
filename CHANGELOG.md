@@ -41,7 +41,9 @@ them.
   every store-owned identity that is owed its seat (the spawn of its
   create's kickoff failed), and answers the identities still owed
   afterwards. It runs the pass a start runs, so a host need not restart the
-  mob to seat such an identity; its kickoff then runs once.
+  mob to seat such an identity; its kickoff then runs once. The pass also
+  carries out what the rows keep owed besides: the retirement of a removed
+  or archived identity whose member is not retiring yet.
 
 ## [0.9.13] - 2026-11-11
 

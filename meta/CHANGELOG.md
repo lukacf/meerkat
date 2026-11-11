@@ -30,19 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from then on, and the members already seated in it keep the owner their
   own spawn gave them.
 
-### Added
-
-- A member's LLM client reports the route of the client it runs on for the
-  provider-neutral reasoning effort option (Core's `reasoning_route()`:
-  the backend, the provider API and the effort levels the route states).
-  The four wrappers Meta puts around a member's client forward it: the
-  provider-agnostic wrapper and the replay sanitizer around a raw client,
-  the replay sanitizer around the agent client, and the memory taint
-  observer. Without the forwards every member's client would report no
-  route, and a level set on a member could be checked against none and
-  would be refused as unknown. Nothing reads the report yet, and no request
-  changes.
-
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

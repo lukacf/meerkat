@@ -2589,6 +2589,10 @@ fn one_function_owns_the_instruction_records() {
             &[("identity_first/runtime.rs", 1)],
         ),
         (
+            ".revoke_instruction_record_for_fresh_life(",
+            &[("identity_first/runtime.rs", 1)],
+        ),
+        (
             ".set_operator_instruction(",
             &[("rpc/operator_methods.rs", 1)],
         ),

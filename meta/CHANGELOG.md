@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   never rewritten. An agent that is not loaded is not woken, a restart
   neither loses nor repeats the change, and the removal of an agent revokes
   its record (at the next start when the gateway stopped right after the
-  removal). A model that takes a system instruction only ahead of the
+  removal). A reset or a delete of the agent revokes the record too: the
+  fresh conversation's first prompt is the current text, and nothing is
+  appended to it. A model that takes a system instruction only ahead of the
   conversation applies the change after a compaction or with a fresh
   conversation. See
   [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),

@@ -379,8 +379,11 @@ What to know:
 
 - **A run in flight is not touched.** The entry is appended at a run start,
   never inside a run.
-- **A fresh conversation needs nothing.** `meta/reset` and a new agent build
-  their first prompt from the current text.
+- **A fresh conversation needs nothing.** A new agent, and an agent after
+  `meta/reset` or `meta/delete_identity`, build their first prompt from the
+  current, complete text. A reset or a delete revokes the agent's record, so
+  nothing is appended to the fresh conversation; a later change is recorded
+  again and reaches it as one entry.
 - **Removing an agent** revokes its record. A removal the gateway stopped
   right after, before the record was revoked, is completed at the next
   start: the record of every removed agent is revoked then. Archiving an

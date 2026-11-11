@@ -47,7 +47,11 @@
 //! yet needs no record: its first build takes the current text.
 //!
 //! The removal of an agent revokes its record
-//! ([`IdentityRuntime::after_removal`]). An archive keeps it. A removal
+//! ([`IdentityRuntime::after_removal`]). An archive keeps it. A fresh life
+//! (a reset, a delete) revokes it before the fresh session is seated: that
+//! session's first prompt is built from the current text, and nothing is
+//! appended to it
+//! ([`IdentityRuntime::revoke_instruction_record_for_fresh_life`]). A removal
 //! whose step never ran is completed at the next start: the start check
 //! revokes the record of every agent the mob holds as removed.
 
@@ -499,21 +503,52 @@ impl IdentityRuntime {
         if self.is_candidate_launch() {
             return;
         }
-        let (Some(slot), Ok(identity)) =
-            (instruction_slot(identity), AgentIdentity::parse(identity))
-        else {
+        let Ok(identity) = AgentIdentity::parse(identity) else {
             return;
         };
         let lifecycle_lock = self.lifecycle_lock_for(&identity).await;
         let _lifecycle_guard = lifecycle_lock.lock().await;
+        self.revoke_record_locked(mob, &identity, "a removed agent")
+            .await;
+    }
+
+    /// `identity`'s fresh life (a reset, a delete) is about to be seated,
+    /// under the identity's lifecycle lock: its record is revoked, as a
+    /// removal revokes it. The fresh conversation's first prompt is built
+    /// from the current, complete text, so nothing is to be appended to it;
+    /// a record left active would be appended to it as a second copy. A
+    /// later change is the record's next revision.
+    pub(super) fn revoke_instruction_record_for_fresh_life<'a>(
+        &'a self,
+        identity: &'a AgentIdentity,
+    ) -> BoxedStep<'a, ()> {
+        Box::pin(async move {
+            if self.is_candidate_launch() {
+                return;
+            }
+            let Some(mob) = self.runtime_services.mob_handle() else {
+                return;
+            };
+            self.revoke_record_locked(&mob, identity, "an agent starting a fresh conversation")
+                .await;
+        })
+    }
+
+    /// Revoke `identity`'s record at its slot's next revision, while the
+    /// caller holds the identity's lifecycle lock. An agent with no record,
+    /// or whose record is revoked already, is left as it is.
+    async fn revoke_record_locked(&self, mob: &MobHandle, identity: &AgentIdentity, whose: &str) {
+        let Some(slot) = instruction_slot(identity.as_str()) else {
+            return;
+        };
         let record = match instruction_record(mob, &slot).await {
             Ok(record) => record,
             Err(error) => {
                 tracing::warn!(
                     %identity,
                     %error,
-                    "the mob's instruction record of a removed agent could not be read; it is \
-                     not revoked"
+                    whose,
+                    "the mob's instruction record could not be read; it is not revoked"
                 );
                 return;
             }
@@ -535,7 +570,8 @@ impl IdentityRuntime {
                 revision = %revision,
                 code = ?error.code(),
                 %error,
-                "the mob's instruction record of a removed agent was not revoked"
+                whose,
+                "the mob's instruction record was not revoked"
             );
         }
     }

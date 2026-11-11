@@ -15305,6 +15305,10 @@ impl IdentityRuntime {
         // asked, and its batch waits for the retirement's side effects.
         self.settle_owed_compaction_for_retirement(identity, retiring.as_ref())
             .await;
+        // The fresh conversation's first prompt is the current text: the
+        // identity's instruction record is revoked before it is seated.
+        self.revoke_instruction_record_for_fresh_life(identity)
+            .await;
         let session_id = match bridge.rotate_member(identity, &spec, &draft).await {
             Ok(session_id) => session_id,
             Err(error) => {

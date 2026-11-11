@@ -55,6 +55,136 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.12
+
+This section is for systems running 0.9.11. The full list of changes is in
+the CHANGELOG under `## [0.9.12]`.
+
+Meerkat 0.9.12 is Core 0.9.12, Meta 0.9.12 and Connect 0.9.12, released
+together.
+
+### rusqlite 0.41 (Rust)
+
+Meerkat moves to rusqlite 0.41 (libsqlite3-sys 0.39). libsqlite3-sys links
+one SQLite per build (`links = "sqlite3"`), so Cargo refuses a graph that
+holds rusqlite 0.37 next to Meerkat's rusqlite 0.41. Every public signature
+of `meerkat-sqlite`, `meerkat-store`, `meerkat-runtime` and
+`meerkat-workgraph` that names a rusqlite type names rusqlite 0.41's, for
+example `meerkat_sqlite::Connection` (a re-export of `rusqlite::Connection`)
+and the `rusqlite::Error` that `meerkat_sqlite::SqliteStoreError::Sqlite`
+carries. In Meta,
+`meta_extension_state::SqliteExtensionDocumentStore::from_connection` and
+`meerkat_meta::mob_announcements::SqliteAnnouncementStore::from_connection`
+take a rusqlite 0.41 `Connection`.
+
+**Do:** an application or host that depends on rusqlite (or libsqlite3-sys)
+itself moves to rusqlite 0.41 (libsqlite3-sys 0.39) in the same change that
+moves it to Meerkat 0.9.12.
+
+### Agents and engine configuration files
+
+Agents cannot change engine configuration with the file tools any more, and
+an agent can no longer write a `.rkat` directory anywhere under its project
+root, not only the one at the root: a nested project's `.rkat/mcp.toml`,
+hooks, skills or realm is changed by its operator. The CHANGELOG's Security
+and Changed sections describe the change.
+
+**Do:**
+
+- If you asked an agent to edit `.rkat/mcp.toml`, `.rkat/config.toml` or a
+  file under `.rkat/skills/`, make the change with `rkat mcp add`,
+  `rkat config set` or `rkat config patch`, `rkat skill add`, or edit the
+  file yourself.
+- If you run `rkat-rpc` or `rkat-mcp` (directly or through the Python or
+  TypeScript SDK) and let agents write files, start the server with a
+  context root: `--context-root <dir>`, or the SDK option `context_root` /
+  `contextRoot`. Agents then work in that directory and the realm's state
+  lies outside it. Without one, files still land in the realm directory as
+  before, the realm's documents are refused, and the realm's stores remain
+  writable by the file tools.
+- A Rust host that keeps its realm state, config documents or credential
+  store inside the project root it gives its tools, outside `.rkat`,
+  declares them with `AgentFactory::with_protected_host_inputs`.
+
+### `rkat auth profile` prints no credential values
+
+`rkat auth profile <PROFILE_ID>` prints only the profile's `id`, `provider`,
+`auth_method` and `source_kind`, the `auth_profile` shape JSON-RPC
+`auth/profile/get` returns. Its `source`, `constraints` and
+`metadata_defaults` are no longer printed.
+
+**Do:** a script that read a credential value from that output reads it
+where the profile's source keeps it instead: the realm config that declares
+an `inline_secret` source, the environment variable, file descriptor or
+credential command another source names, or the credential store. To check
+that a binding's credential resolves without reading it, run
+`rkat auth test <BINDING_ID>`.
+
+### Catalog models you had defined yourself
+
+Model IDs are unique across the catalog, `[models.<id>]` entries and
+self-hosted models, and this release adds `claude-fable-5-2` and
+`gemini-4-carbon` to the catalog. A realm or project configuration that has
+`[models.claude-fable-5-2]` or `[models.gemini-4-carbon]` (for example
+because you ran the model before the catalog listed it) is now refused by
+configuration validation with
+`model id '<id>' must be unique across built-in, custom, and self-hosted entries`.
+
+**Do:** remove the entry. The catalog row then serves the model with its own
+limits and capabilities. The same applies whenever a release adds a model
+you had defined yourself.
+
+### Member send results (Rust)
+
+`meerkat-contracts`: `MobMemberSendResult` gains the field
+`admission: Option<WireMemberInputAdmission>`. On the wire the field is
+optional and left out when absent, so a client that does not read it is
+unaffected.
+
+**Do:** code that builds `MobMemberSendResult` with a struct literal sets
+the new field; `None` keeps the earlier answer.
+
+### Meta 0.9.12
+
+Meta 0.9.12 pins Core `=0.9.12`. The full list is in `meta/CHANGELOG.md`
+under `## [0.9.12]`.
+
+- Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
+  (`LifecycleEffectFailureCause`), left off the wire while it is `failed`, so
+  a serialized event reads as before. **Do:** a host that builds the variant
+  literally adds `cause: LifecycleEffectFailureCause::Failed`, and one that
+  destructures it without `..` names the field.
+- `IdentityRuntimeError` gains `IdentityStoreOwned` and `IdentityArchived`.
+  A lifecycle verb (reload, retire, respawn, reset, delete, materialize) of
+  a store-owned identity answers `-32603` with the new kind
+  `identity_store_owned`, and a delivery to an identity created at runtime
+  that Core archived answers `-32603` with the new kind `identity_archived`.
+  **Do:** add the new arms, or a wildcard arm, to each exhaustive match on
+  the enum.
+- `SessionBridge` has two new methods, `created_identities` and
+  `created_identity`. Their defaults answer `BridgeError::Unsupported`: over
+  a bridge that does not implement them the identity runtime serves no
+  identity created at runtime, as before. **Do:** a host's own wrapper of a
+  session bridge forwards them to the bridge it wraps.
+- Forge: the Guide moves from Meta 0.9.3 to the Meta release Forge is built
+  from, so an existing Forge folder starts a fresh setup team in its state
+  directory on its first start. Saved setups, proposals, provider settings
+  and installed applications stay, and the previous setup team's state is
+  kept unchanged, but the new team does not recall earlier conversations.
+  **Do:** to carry them over, follow the installer README's "Work with the
+  setup team" before that first start.
+
+### Connect 0.9.12
+
+Connect 0.9.12 is GitHub release `connect-v0.9.12` in `lukacf/meerkat`, a
+full release that is never the repository's latest. The full list is in
+`connect/CHANGELOG.md` under `## [0.9.12]`.
+
+- Downgrade: an access decision the next host ended as not issued records
+  the issuance state `not_issued`. A Connect without this change answers a
+  conflict when that decision is applied or read again; other decisions are
+  unaffected.
+
 ## Upgrading to 0.9.11
 
 This section is for systems running 0.9.10. The full list of changes is in

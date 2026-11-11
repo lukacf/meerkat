@@ -1452,11 +1452,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.10.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2036,9 +2036,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.35.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2193,7 +2193,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2229,7 +2229,7 @@ dependencies = [
  "meerkat-workgraph",
  "nix 0.29.0",
  "parking_lot",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2255,7 +2255,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-atif"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "chrono",
  "meerkat-core",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "axum",
@@ -2294,7 +2294,7 @@ dependencies = [
  "meerkat-llm-core",
  "oauth2",
  "parking_lot",
- "reqwest 0.12.28",
+ "reqwest",
  "security-framework 3.7.0",
  "serde",
  "serde_json",
@@ -2309,7 +2309,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -2324,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization-contracts"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "meerkat-core",
  "serde",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-capabilities"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "meerkat-anthropic",
  "meerkat-core",
@@ -2358,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-copilot"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2422,7 +2422,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-llm-core",
  "parking_lot",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2481,7 +2481,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-llm-core",
  "meerkat-models",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2503,7 +2503,7 @@ dependencies = [
  "meerkat-sandbox",
  "meerkat-skills",
  "nix 0.29.0",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-live"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "axum",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-llm-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2561,7 +2561,7 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "parking_lot",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "slab",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -2581,14 +2581,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -2622,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "futures",
@@ -2635,7 +2635,7 @@ dependencies = [
  "meerkat-sandbox",
  "meerkat-skills",
  "nix 0.29.0",
- "reqwest 0.12.28",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "hnsw_rs",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2708,7 +2708,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2737,14 +2737,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "meerkat-core",
 ]
 
 [[package]]
 name = "meerkat-openai"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2760,7 +2760,7 @@ dependencies = [
  "meerkat-llm-core",
  "meerkat-models",
  "oai-rt-rs",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rpc"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "axum",
@@ -2806,7 +2806,7 @@ dependencies = [
  "meerkat-sqlite",
  "meerkat-store",
  "meerkat-tools",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sandbox"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "meerkat-core",
  "nix 0.29.0",
@@ -2861,7 +2861,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "futures",
@@ -2909,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -2917,7 +2917,7 @@ dependencies = [
  "meerkat-capabilities",
  "meerkat-core",
  "regex",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -2930,7 +2930,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sqlite"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "notify",
  "rusqlite",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2963,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-workgraph"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3317,7 +3317,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
- "reqwest 0.12.28",
+ "reqwest",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -3339,7 +3339,7 @@ dependencies = [
  "getrandom 0.2.17",
  "http",
  "rand 0.8.8",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -4096,43 +4096,9 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams 0.4.2",
+ "wasm-streams",
  "web-sys",
  "webpki-roots",
-]
-
-[[package]]
-name = "reqwest"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
-dependencies = [
- "base64 0.23.1",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
- "js-sys",
- "log",
- "percent-encoding",
- "pin-project-lite",
- "serde",
- "serde_json",
- "sync_wrapper",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-streams 0.5.0",
- "web-sys",
 ]
 
 [[package]]
@@ -4163,7 +4129,6 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "process-wrap",
- "reqwest 0.13.5",
  "rmcp-macros",
  "schemars 1.2.3",
  "serde",
@@ -4190,10 +4155,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusqlite"
-version = "0.37.0"
+name = "rsqlite-vfs"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.41.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -4201,6 +4175,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -4711,6 +4686,16 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sqlite-wasm-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6cd504cecbfe7eef649988840f9a6cb768d11085efec138f8e99f160632d867"
+dependencies = [
+ "cc",
+ "rsqlite-vfs",
 ]
 
 [[package]]
@@ -5638,19 +5623,6 @@ name = "wasm-streams"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
 dependencies = [
  "futures-util",
  "js-sys",

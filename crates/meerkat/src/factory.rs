@@ -4094,6 +4094,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The paths the host declared as its own state and inputs with
+    /// [`Self::with_protected_host_inputs`]: the in-process file tools of
+    /// every dispatcher this factory builds never write them.
+    #[cfg(not(target_arch = "wasm32"))]
+    protected_host_paths: Vec<PathBuf>,
     /// The host's trust over the convention hook sources, installed with
     /// [`Self::with_hook_source_trust`]: asked about each source over the
     /// bytes the build read.
@@ -4260,9 +4265,11 @@ impl std::fmt::Debug for AgentFactory {
 /// (`AgentFactory::account_model_definition`): its definition for the
 /// build's model registry, and the connection that read the account's model
 /// list, which the build holds until its client is built so the client's
-/// resolution reuses the same account state.
+/// resolution reuses the same account state. The definition is `None` when
+/// the id the build named is the account's spelling of a model the registry
+/// defines: the build then runs that registry row under its own id.
 struct AccountModelDefinition {
-    definition: meerkat_core::config::CustomModelConfig,
+    definition: Option<meerkat_core::config::CustomModelConfig>,
     connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
 }
 
@@ -5417,6 +5424,8 @@ impl AgentFactory {
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
+            protected_host_paths: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
@@ -5628,6 +5637,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            protected_host_paths: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -5955,6 +5966,46 @@ impl AgentFactory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn host_confinement(&self) -> Option<&crate::HostConfinement> {
         self.host_confinement.as_ref()
+    }
+
+    /// Declare the host's own state and inputs to the in-process file
+    /// tools (`apply_patch`, `blob_save_file`) of every dispatcher this
+    /// factory builds, so a model's call never writes them: `inputs` and
+    /// `convention_sources` are the lists a host assembles for
+    /// [`crate::HostConfinement::admit_host_inputs`] and its startup report
+    /// ([`crate::HostConfinement::host_inputs`],
+    /// [`crate::HostConfinement::credential_store_input`],
+    /// [`crate::HostConfinement::convention_sources`]), and
+    /// `realm_documents` is [`crate::HostConfinement::realm_documents`] of
+    /// the realm it serves. Those tools run in the host process, so OS
+    /// process confinement does not reach them, whatever its mode.
+    ///
+    /// A declared path that lies strictly inside a dispatcher's project
+    /// root is refused with everything under it (a realm state root given
+    /// inside the project, a config document, a credential store). One
+    /// that contains or equals the project root is not applied, so a host
+    /// whose tools are rooted in its realm directory keeps the realm
+    /// documents and still lets other files be written there. A relative
+    /// path is taken from the process working directory, as the host
+    /// itself opens it. A `.rkat` directory at or below the project root is
+    /// refused without this call. A declared path that is a symbolic link is
+    /// refused where it leads as well; a link deeper inside a declared
+    /// directory is not followed. Each call replaces the declared paths.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_protected_host_inputs(
+        mut self,
+        inputs: &[(crate::HostInput, PathBuf)],
+        realm_documents: &[PathBuf],
+        convention_sources: &[PathBuf],
+    ) -> Self {
+        self.protected_host_paths = inputs
+            .iter()
+            .map(|(_, path)| path)
+            .chain(realm_documents)
+            .chain(convention_sources)
+            .map(|path| std::path::absolute(path).unwrap_or_else(|_| path.clone()))
+            .collect();
+        self
     }
 
     /// How this factory's skill repositories meet its host confinement: the
@@ -7353,7 +7404,12 @@ impl AgentFactory {
     ///   provider (a resumed build keeps its durable route; the resumed
     ///   provider-switch rule moves it when the provider changed), or
     ///   refuses with [`meerkat_core::ConnectionTargetError::NoCredentialAccountRoute`]
-    ///   when the account has none;
+    ///   when the account has none. When the id is the account's spelling
+    ///   of exactly one model the registry defines for that provider
+    ///   ([`Self::registry_model_for_account_id`]), the build's model
+    ///   becomes that registry id and no definition is added: the session
+    ///   runs the registry row, and its route names the account's id on
+    ///   the wire;
     /// - the account refuses the model: the build fails with
     ///   [`FactoryError::AccountModel`], and no other route or credential is
     ///   tried;
@@ -7438,6 +7494,14 @@ impl AgentFactory {
             _ => return Ok(None),
         };
         let provider = definition.provider;
+        let definition =
+            match Self::registry_model_for_account_id(registry, provider, &build_config.model) {
+                Some(registry_model) => {
+                    build_config.model = registry_model;
+                    None
+                }
+                None => Some(definition),
+            };
         build_config.provider = Some(provider);
         if fresh_build && provider != target.backend.provider {
             let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
@@ -7458,6 +7522,35 @@ impl AgentFactory {
             definition,
             connection,
         }))
+    }
+
+    /// The model `registry` defines for `provider` that `account_id`, an id
+    /// a GitHub Copilot account lists and the registry does not define,
+    /// names: the one registry model of that provider whose id differs from
+    /// it only in its separators (`meerkat_copilot::same_account_model_id`:
+    /// the account lists `claude-opus-5.5`, the catalog `claude-opus-5-5`).
+    /// `None` when no registry model of the provider matches, or more than
+    /// one does: the account's own definition of the id then applies.
+    fn registry_model_for_account_id(
+        registry: &ModelRegistry,
+        provider: Provider,
+        account_id: &str,
+    ) -> Option<String> {
+        #[cfg(feature = "copilot")]
+        {
+            let mut same = registry
+                .entries_for_provider(provider)
+                .filter(|entry| meerkat_copilot::same_account_model_id(&entry.id, account_id));
+            match (same.next(), same.next()) {
+                (Some(entry), None) => Some(entry.id.clone()),
+                _ => None,
+            }
+        }
+        #[cfg(not(feature = "copilot"))]
+        {
+            let _ = (registry, provider, account_id);
+            None
+        }
     }
 
     fn resolve_provider_from_registry(
@@ -7969,7 +8062,7 @@ impl AgentFactory {
         session_id: Option<String>,
         ops_lifecycle: Option<Arc<dyn OpsLifecycleRegistry>>,
     ) -> Result<CompositeDispatcher, CompositeDispatcherError> {
-        CompositeDispatcher::new_with_ops_lifecycle(
+        let mut composite = CompositeDispatcher::new_with_ops_lifecycle(
             store,
             config,
             project_root,
@@ -7977,7 +8070,18 @@ impl AgentFactory {
             external,
             session_id,
             ops_lifecycle,
-        )
+        )?;
+        self.protect_host_paths_of(&mut composite);
+        Ok(composite)
+    }
+
+    /// Give `composite`'s file tools the paths this factory's host declared
+    /// ([`Self::with_protected_host_inputs`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn protect_host_paths_of(&self, composite: &mut CompositeDispatcher) {
+        if !self.protected_host_paths.is_empty() {
+            composite.protect_host_paths(self.protected_host_paths.iter().cloned());
+        }
     }
 
     /// Build a shared builtin dispatcher using the provided config.
@@ -8118,6 +8222,9 @@ impl AgentFactory {
             ops_lifecycle,
             durable_shell_runtime,
         )?;
+        // Before the blob file tools are registered: they are built with the
+        // declared paths.
+        self.protect_host_paths_of(&mut composite);
 
         #[cfg(feature = "skills")]
         if let Some(engine) = skill_engine {
@@ -8745,8 +8852,15 @@ impl AgentFactory {
             })
             .await?
             {
+                // The account's spelling of a model the registry defines:
+                // the build's model is that registry id now, and the
+                // registry stays as it is.
                 Some(AccountModelDefinition {
-                    definition,
+                    definition: None,
+                    connection,
+                }) => (registry, Some(connection)),
+                Some(AccountModelDefinition {
+                    definition: Some(definition),
                     connection,
                 }) => {
                     let mut models = build_config.custom_models.clone();
@@ -13696,6 +13810,11 @@ mod tests {
             65_536,
             "Gemini 4 Argon defaults to its synchronous output cap, above Google's \
              32,768 minimum recommendation"
+        );
+        assert_eq!(
+            model_aware_default_max_tokens(&registry, Provider::Gemini, "gemini-4-carbon"),
+            65_536,
+            "Gemini 4 Carbon defaults to its synchronous output cap, as Gemini 4 Argon"
         );
     }
 

@@ -159,8 +159,13 @@ ANNOUNCEMENT_NOT_FOUND_CODE: int = -32048
 # The long-term agent family (``meta/identity/*``) refused a request; nothing
 # of it was written. Every refusal of the family rides this one code, and the
 # error data is the typed refusal: ``{"kind", "field"?, "retryable",
-# "detail", ...the kind's own members}``.
-IDENTITY_REFUSED_CODE: int = -32049
+# "detail", ...the kind's own members}``. Params the gateway cannot read (an
+# unknown member, a wrong type, a missing ``request_id``) are this error too,
+# with kind ``invalid_request``, never JSON-RPC invalid params. One refusal
+# is not the family's: a candidate launch refuses every writer before the
+# family is reached, with the gateway-wide ``-32047`` and data ``kind``
+# ``candidate_launch``.
+IDENTITY_REFUSED_CODE: int = -32058
 # The identity refusal kinds, a closed vocabulary: a new kind is a breaking
 # change. It is the gateway's own list (``IdentityRefusalKind``), and the SDK
 # suite fails when the two differ.
@@ -1014,7 +1019,13 @@ class IdentityRefusedError(RpcError):
     ``kind``, ``field``, ``detail``, ``retryable`` and ``details`` read it.
     ``kind`` is one of :data:`IDENTITY_REFUSAL_KINDS`; a kind newer than
     this SDK is still this error, with its token in ``kind`` and
-    ``known_kind`` false.
+    ``known_kind`` false. Params the gateway cannot read are this error with
+    kind ``invalid_request``.
+
+    One refusal is not this error: on a candidate launch every write of the
+    family is refused before the family is reached, with the gateway-wide
+    ``-32047``, which keeps the class the SDK gives that code
+    (:class:`AnnouncementRefusedError`, ``kind`` ``candidate_launch``).
     """
 
     def __init__(

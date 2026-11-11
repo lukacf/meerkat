@@ -57,6 +57,7 @@ from .errors import (
     IdentityRefusedError,
     CapabilityUnavailableError,
     CompositionProvenanceError,
+    ContractMismatchError,
     FlowRoleTargetsNotAppliedError,
     FlowRoleTargetsRefusedError,
     FlowRunIdempotencyConflictError,
@@ -737,7 +738,11 @@ class IdentitiesHandle:
     refusal of every call raises
     :class:`~meerkat_meta.errors.IdentityRefusedError` with the typed
     ``kind``, ``field`` and ``detail``; nothing of a refused change was
-    written. A read never wakes an agent.
+    written. Params the gateway cannot read are that error too
+    (``invalid_request``). A candidate launch refuses every write before the
+    family is reached, with the gateway-wide
+    :class:`~meerkat_meta.errors.AnnouncementRefusedError`
+    (``kind`` ``candidate_launch``). A read never wakes an agent.
     """
 
     def __init__(self, runtime: MetaRuntime) -> None:
@@ -998,7 +1003,10 @@ class IdentitiesHandle:
         params = _operation_ref(request_id, operation_id)
         raw = await self._runtime._rpc("meta/identity/operation", params)
         if isinstance(raw, dict) and raw.get("outcome") == IdentityOperationUnknown.outcome:
-            return IdentityOperationUnknown()
+            named = raw.get("operation_id")
+            if not isinstance(named, str):
+                raise ContractMismatchError("an unknown operation has no operation_id")
+            return IdentityOperationUnknown(operation_id=named)
         return identity_outcome_from_dict(raw)
 
     async def directory(

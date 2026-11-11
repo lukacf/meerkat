@@ -528,7 +528,9 @@ class IdentityRefused:
 class IdentityOperationUnknown:
     """No change committed under the operation and no decision is held for
     it: it was never asked, or it was refused. Asking it commits it at most
-    once."""
+    once. ``operation_id`` is the operation the read named."""
+
+    operation_id: str
 
     outcome: ClassVar[str] = "unknown"
 

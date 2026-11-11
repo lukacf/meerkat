@@ -5171,6 +5171,7 @@ const allScenarios = [
     { id: "gating-audit-refresh-error", family: "console", backend: "mock", run: runGatingAuditRefreshErrorProof },
     { id: "chat-pane-older-history-after-today-prefill", family: "presentation", backend: "mock", run: runChatPaneOlderHistoryAfterTodayPrefillProof },
     { id: "identity-changes-story", family: "console", backend: "mock", run: runIdentityChangesStoryProof },
+    ...require("./scenarios/real-identity-changes.cjs").scenarios,
   ];
 
 module.exports = { scenarios: allScenarios };

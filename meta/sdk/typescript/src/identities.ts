@@ -681,8 +681,10 @@ export function parseAgentRecord(raw: unknown): AgentRecord {
 }
 
 /**
- * A page of the mob's agents, in name order. `next` is the name to read the
- * next page after (`list({ after: page.next })`); `null` on the last page.
+ * A page of the mob's agents, in one stable order. `next` is the name to
+ * read the next page after (`list({ after: page.next })`), which continues
+ * that order; `null` on the last page. Do not rely on the order being
+ * alphabetical.
  */
 export interface AgentPage {
   readonly agents: readonly AgentSummary[];

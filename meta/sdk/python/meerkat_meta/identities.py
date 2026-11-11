@@ -705,9 +705,10 @@ class AgentRecord(AgentSummary):
 
 @dataclass(frozen=True)
 class AgentPage:
-    """A page of the mob's agents, in name order. ``next`` is the name to
-    read the next page after (``list(after=page.next)``); ``None`` on the
-    last page."""
+    """A page of the mob's agents, in one stable order. ``next`` is the
+    name to read the next page after (``list(after=page.next)``), which
+    continues that order; ``None`` on the last page. Do not rely on the
+    order being alphabetical."""
 
     agents: tuple[AgentSummary, ...] = ()
     next: str | None = None

@@ -917,7 +917,7 @@ export class IdentitiesHandle {
   }
 
   /**
-   * One page of the mob's agents, in name order. Every agent is listed the
+   * One page of the mob's agents, in one stable order. Every agent is listed the
    * same way, whoever asked for it and by whatever route it came to exist.
    * `profile` keeps only agents of that profile; archived agents are listed
    * only with `includeArchived`; `after` is the previous page's `next`. Each

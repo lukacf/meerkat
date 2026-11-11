@@ -961,7 +961,7 @@ class IdentitiesHandle:
         include_archived: bool = False,
         after: str | None = None,
     ) -> AgentPage:
-        """One page of the mob's agents, in name order.
+        """One page of the mob's agents, in one stable order.
 
         Every agent is listed the same way, whoever asked for it and by
         whatever route it came to exist. ``profile`` keeps only agents of

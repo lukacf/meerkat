@@ -475,22 +475,37 @@ const SECRET_TOKEN_PREFIXES: &[&str] = &[
 /// A token with a well-known secret prefix, or a JSON web token: its end.
 fn secret_token_at(line: &str, start: usize) -> Option<usize> {
     let bytes = line.as_bytes();
-    let token_len = bytes[start..]
+    let rest = &bytes[start..];
+    // Every such token starts with one of the prefixes, so without one here
+    // the run is not measured. `/`, `+` and `=` are part of a run and also
+    // boundaries inside it: measuring from each of them made one long line
+    // (a megabyte of base64) cost its length squared.
+    if !rest.starts_with(JSON_WEB_TOKEN_PREFIX)
+        && !SECRET_TOKEN_PREFIXES
+            .iter()
+            .any(|prefix| rest.starts_with(prefix.as_bytes()))
+    {
+        return None;
+    }
+    let token_len = rest
         .iter()
         .take_while(|byte| is_token_byte(**byte) || matches!(**byte, b'/' | b'+' | b'='))
         .count();
     #[cfg(test)]
     tests::note_measured_token_run(token_len);
-    let token = &bytes[start..start + token_len];
+    let token = &rest[..token_len];
     let prefixed = SECRET_TOKEN_PREFIXES.iter().any(|prefix| {
         token.starts_with(prefix.as_bytes()) && token.len() >= prefix.len() + MIN_TOKEN_BODY_BYTES
     });
     (prefixed || is_json_web_token(token)).then_some(start + token_len)
 }
 
+/// What the header of a JSON web token starts with (`{"` in base64url).
+const JSON_WEB_TOKEN_PREFIX: &[u8] = b"eyJ";
+
 /// `eyJ` then three dot-separated base64url parts, each non-empty.
 fn is_json_web_token(token: &[u8]) -> bool {
-    if !token.starts_with(b"eyJ") {
+    if !token.starts_with(JSON_WEB_TOKEN_PREFIX) {
         return false;
     }
     let mut parts = token.split(|byte| *byte == b'.');

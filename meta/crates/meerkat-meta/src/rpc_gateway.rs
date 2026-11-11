@@ -16488,8 +16488,8 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
     /// them. They are computed before anything is held and again when the
     /// operation executes, and the same request must give the same lines.
     /// `Err` refuses the request `consequences_unavailable`: it is never
-    /// rendered without them. The default states none. A gateway host
-    /// declares the host callback `identity.consequences` instead.
+    /// rendered without them. The default states none. A host behind an SDK
+    /// supplies none in this release: its decisions render without them.
     fn identity_consequences(
         &self,
         request: &crate::identity_creation::IdentityRequest,

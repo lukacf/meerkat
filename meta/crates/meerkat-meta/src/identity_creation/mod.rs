@@ -39,9 +39,13 @@
 //! - the executor seam (`executor`): commit this normalized request under
 //!   this consent, as this requester, in this mob, over Core's change path.
 //!
-//! The family's implementation over the host's rules, the decisions held
-//! for a change, the host RPC methods and the agent tools build on this
-//! module; none of them is here.
+//! The decisions held for a change (`decided`) stand on it: a change whose
+//! outcome is `require_approval` is held as a durable decision, decided by
+//! a person through the decisions surface, and carried out by the decision
+//! kind's executor through the seam.
+//!
+//! The family's implementation over the host's rules, the host RPC methods
+//! and the agent tools build on this module; none of them is here.
 
 /// The wire tokens of a closed vocabulary, listed once with their variants.
 /// It gives the type `ALL_TOKENS`, every token in declaration order, and
@@ -71,6 +75,7 @@ macro_rules! closed_tokens {
 mod approval;
 mod config;
 mod consequences;
+mod decided;
 mod digest;
 mod escape;
 mod executor;
@@ -98,8 +103,13 @@ pub use config::{
     RequesterSelectorConfig, ReservedKeysConfig, SelectorConfig, TimeoutsConfig,
 };
 pub use consequences::{
-    CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal,
-    consequences_callback_params, parse_consequences_callback_result,
+    CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal, HostConsequences,
+    consequences_callback_params, host_consequences_of, parse_consequences_callback_result,
+};
+pub use decided::{
+    HELD_CHANGE_FORMAT, HeldChangeHost, HeldIdentityChange, HeldTarget, IDENTITY_DECISION_KINDS,
+    IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, KeyedSendNotices,
+    NoRequesterNotices, REQUESTER_TRUST_DOMAIN_PREFIX, SUBJECT_WIDENED_REFUSAL,
 };
 pub use digest::Sha256Digest;
 pub use executor::{
@@ -138,8 +148,8 @@ pub use refusal::{
     PolicyRefusalKind, RequestProblem, ValidationRefusal,
 };
 pub use render::{
-    HOST_CONSEQUENCE_MAX_BYTES, HOST_CONSEQUENCES_MAX_BYTES, RENDERER, RENDERING_MAX_BYTES,
-    Rendering, labels, render_v1,
+    AgentTools, HOST_CONSEQUENCE_MAX_BYTES, HOST_CONSEQUENCES_MAX_BYTES, ProfileTools, RENDERER,
+    RENDERING_MAX_BYTES, Rendering, ToolConfigurations, labels, render_held_v1, render_v1,
 };
 pub use request::{
     AdoptIdentitySpec, ArchiveIdentitySpec, CONSOLE_SURFACE, Consequence, ConsequenceEffect,

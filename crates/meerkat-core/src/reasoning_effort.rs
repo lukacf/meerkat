@@ -637,7 +637,7 @@ mod tests {
         ReasoningEffortRefusal {
             requested: EffortLevel::Max,
             provider: Provider::Anthropic,
-            model: "claude-opus-4-5".to_owned(),
+            model: "test-anthropic-default".to_owned(),
             route: Some(anthropic_messages()),
             reason: ReasoningEffortRefusalReason::UnsupportedLevel,
             supported: Some(vec![
@@ -658,7 +658,7 @@ mod tests {
         ReasoningEffortRefusal {
             requested: EffortLevel::High,
             provider: Provider::OpenAI,
-            model: "gpt-5.5".to_owned(),
+            model: "test-openai-default".to_owned(),
             route: Some(route),
             reason,
             supported: None,
@@ -674,10 +674,12 @@ mod tests {
     /// absent.
     #[test]
     fn refusal_serializes_the_documented_shape() {
-        // The two documented examples, as documented (the second one's model
-        // is the document's own placeholder).
+        // The two documented examples, as documented but for the first one's
+        // model: a synthetic id stands in for the model name the document
+        // gives, since core holds no provider model names (the second one's
+        // model is the document's own placeholder).
         const UNSUPPORTED_LEVEL: &str = r#"{
-      "requested": "max", "provider": "anthropic", "model": "claude-opus-4-5",
+      "requested": "max", "provider": "anthropic", "model": "test-anthropic-default",
       "route": {"backend": "anthropic_api", "api": "messages"},
       "reason": "unsupported_level", "supported": ["low", "medium", "high"], "facts": "catalog"
     }"#;
@@ -731,7 +733,7 @@ mod tests {
             serialized,
             compact(
                 r#"{
-  "requested": "high", "provider": "openai", "model": "gpt-5.5",
+  "requested": "high", "provider": "openai", "model": "test-openai-default",
   "route": {"backend": "copilot", "api": "responses"},
   "reason": "conflicting_provider_effort", "supported": ["low", "medium", "high"],
   "facts": "account",
@@ -802,8 +804,8 @@ mod tests {
 
         assert_eq!(
             unsupported_level_refusal().to_string(),
-            "reasoning effort 'max' is not supported by anthropic model 'claude-opus-4-5' on \
-             anthropic_api/messages; supported: low, medium, high"
+            "reasoning effort 'max' is not supported by anthropic model 'test-anthropic-default' \
+             on anthropic_api/messages; supported: low, medium, high"
         );
 
         let no_effort = ReasoningEffortRefusal {
@@ -819,7 +821,7 @@ mod tests {
         };
         assert_eq!(
             no_effort.to_string(),
-            "reasoning effort 'high' is not supported by openai model 'gpt-5.5' on \
+            "reasoning effort 'high' is not supported by openai model 'test-openai-default' on \
              openai_api/realtime; this route accepts no reasoning effort"
         );
 
@@ -829,7 +831,7 @@ mod tests {
                 copilot(ModelApi::ChatCompletions)
             )
             .to_string(),
-            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5' on \
+            "reasoning effort 'high' cannot be checked for openai model 'test-openai-default' on \
              copilot/chat_completions: no source states the levels this route accepts; \
              provider_params can set a provider-specific effort"
         );
@@ -840,7 +842,7 @@ mod tests {
                 copilot(ModelApi::Responses)
             )
             .to_string(),
-            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5' on \
+            "reasoning effort 'high' cannot be checked for openai model 'test-openai-default' on \
              copilot/responses: the account's model list is not loaded; try again once it is"
         );
 
@@ -881,7 +883,7 @@ mod tests {
         assert_eq!(
             thinking_type.to_string(),
             "reasoning effort 'max' conflicts with provider_params.provider_tag.thinking: \
-             anthropic model 'claude-opus-4-5' does not accept that thinking type with this \
+             anthropic model 'test-anthropic-default' does not accept that thinking type with this \
              level on anthropic_api/messages"
         );
         let thinking_type_at_low = ReasoningEffortRefusal {
@@ -895,7 +897,7 @@ mod tests {
         assert_eq!(
             thinking_type_at_low.to_string(),
             "reasoning effort 'low' conflicts with provider_params.provider_tag.thinking: \
-             anthropic model 'claude-opus-4-5' does not accept that thinking type with this \
+             anthropic model 'test-anthropic-default' does not accept that thinking type with this \
              level on copilot/messages"
         );
         assert_eq!(
@@ -925,7 +927,7 @@ mod tests {
         };
         assert_eq!(
             unrouted(unsupported_level_refusal()).to_string(),
-            "reasoning effort 'max' is not supported by anthropic model 'claude-opus-4-5'; \
+            "reasoning effort 'max' is not supported by anthropic model 'test-anthropic-default'; \
              supported: low, medium, high"
         );
         assert_eq!(
@@ -934,8 +936,8 @@ mod tests {
                 copilot(ModelApi::ChatCompletions)
             ))
             .to_string(),
-            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5': no source \
-             states the levels this route accepts; provider_params can set a \
+            "reasoning effort 'high' cannot be checked for openai model 'test-openai-default': no \
+             source states the levels this route accepts; provider_params can set a \
              provider-specific effort"
         );
         assert_eq!(
@@ -944,13 +946,13 @@ mod tests {
                 copilot(ModelApi::Responses)
             ))
             .to_string(),
-            "reasoning effort 'high' cannot be checked for openai model 'gpt-5.5': the \
+            "reasoning effort 'high' cannot be checked for openai model 'test-openai-default': the \
              account's model list is not loaded; try again once it is"
         );
         assert_eq!(
             unrouted(thinking_type).to_string(),
             "reasoning effort 'max' conflicts with provider_params.provider_tag.thinking: \
-             anthropic model 'claude-opus-4-5' does not accept that thinking type with this \
+             anthropic model 'test-anthropic-default' does not accept that thinking type with this \
              level"
         );
     }
@@ -960,8 +962,9 @@ mod tests {
     /// `requested`.
     #[test]
     fn report_serializes_the_documented_shape() {
+        // The documented example, with a synthetic id for its model name.
         const REPORT: &str = r#"{"requested": "high", "sent": [
-  {"level": "high", "provider": "openai", "model": "gpt-5.5",
+  {"level": "high", "provider": "openai", "model": "test-openai-default",
    "route": {"backend": "openai_api", "api": "responses"},
    "fields": ["reasoning.effort"], "facts": "catalog", "decided_by": "request", "requests": 3}]}"#;
 
@@ -974,7 +977,7 @@ mod tests {
             sent: vec![ReasoningEffortSent {
                 level: EffortLevel::High,
                 provider: Provider::OpenAI,
-                model: "gpt-5.5".to_owned(),
+                model: "test-openai-default".to_owned(),
                 route: route.clone(),
                 fields: vec!["reasoning.effort".to_owned()],
                 facts: ReasoningFactsSource::Catalog,
@@ -996,7 +999,7 @@ mod tests {
             requested: EffortLevel::High,
             level: EffortLevel::Low,
             provider: Provider::OpenAI,
-            model: "gpt-5.5".to_owned(),
+            model: "test-openai-default".to_owned(),
             route,
             fields: vec!["reasoning_effort".to_owned(), "reasoning.effort".to_owned()],
             facts: ReasoningFactsSource::Operator,
@@ -1006,7 +1009,8 @@ mod tests {
         assert_eq!(
             serialized,
             compact(
-                r#"{"requested": "high", "level": "low", "provider": "openai", "model": "gpt-5.5",
+                r#"{"requested": "high", "level": "low", "provider": "openai",
+  "model": "test-openai-default",
   "route": {"backend": "openai_api", "api": "responses"},
   "fields": ["reasoning_effort", "reasoning.effort"], "facts": "operator",
   "decided_by": "preference"}"#

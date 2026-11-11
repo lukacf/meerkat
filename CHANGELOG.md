@@ -142,6 +142,35 @@ them.
     own route; for a provider outside the four families it names none
     (`route: null`).
 
+### Changed
+
+- `meerkat-copilot`, `meerkat-auth-core` (GitHub Copilot routes): the
+  default client identity a Copilot route sends is a recent one again:
+  `Editor-Version: vscode/1.145.2` (was `vscode/1.107.0`),
+  `Editor-Plugin-Version: copilot-chat/0.73.0` (was `copilot-chat/0.35.0`)
+  and `User-Agent: GitHubCopilotChat/0.73.0` (was
+  `GitHubCopilotChat/0.35.0`). Two public values change with it: the
+  constant `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT`
+  and what `meerkat_copilot::CopilotBackendConfig::default()` returns. With
+  the values sent through 0.9.13 the Copilot API answered a model listing
+  with a `client_version_deprecated` warning on every entry. Live list
+  reads show that the warning follows `Editor-Version` alone
+  (`vscode/1.118.0` is marked, `vscode/1.130.0` is not) and that the plugin
+  and User-Agent versions do not move it; all three are raised together so
+  that the identity stays one client (the plugin version is the one the
+  editor's public repository pairs with that editor release). Nothing else
+  in the listing changes with the new values: the same entries and the same
+  `capabilities.limits`. The headers go on the token exchange, the identity
+  lookup (User-Agent only), the model listing and inference, as before, and
+  on those requests a route whose backend `options` set `user_agent`,
+  `editor_version` or `editor_plugin_version` keeps its own values. The
+  device sign-in's own OAuth requests to GitHub, the device-code request
+  and the token poll among them, send the same User-Agent constant; no
+  backend option changes it there. Rows now pin the three values, the
+  User-Agent of the device sign-in's requests, and the
+  `X-GitHub-Api-Version` of the model listing and of inference, which
+  nothing asserted before.
+
 ### Fixed
 
 - `meerkat-openai`, `meerkat-core`: a session whose history one OpenAI-wire
@@ -198,6 +227,125 @@ them.
   server (`with_self_hosted_server`) is the self-hosted server at its base
   URL. Anthropic thinking signatures and Gemini thought signatures are still
   replayed to every backend of their wire family.
+
+- `meerkat-openai`, `meerkat-llm-core` (the Responses stream parser of
+  `OpenAiClient`, which serves the OpenAI API, the ChatGPT backend, Azure
+  OpenAI, GitHub Copilot `/responses` and a self-hosted server in Responses
+  mode): how the client reads a failure reported inside an HTTP 200 stream.
+  - Given a `response.failed` event without an error object (`error` null,
+    or an object that names no code, type or message), the client ended the
+    response there as `ServerError { status: 500, message: "response
+    failed" }`, a retryable class, and did not read an `error` event after
+    it (0.6.7 through 0.9.13). It now reads on for the cause: an `error`
+    event that carries a code and a message, at the top level of the event
+    or under `error`, or a `response.failed` that carries them. Nothing in
+    between is read as output. When no cause comes (the stream ends, a frame
+    cannot be read, or sixteen other frames follow) the response fails as
+    `ServerError { status: 500 }` with a message that says so, retryable as
+    before; an `error` event that carries nothing ends the wait as the
+    unknown class, and a reset connection as `ConnectionReset`, both
+    retryable too. While it waits the client reports no stream liveness, so
+    the stream-inactivity window keeps running. This stream shape was not
+    observed from a live service and its rows are synthetic; a live request
+    that the Copilot route refused was answered with HTTP 400 and the code
+    `invalid_request_body`, which was terminal already.
+  - As stream error codes, `invalid_request_body`,
+    `invalid_encrypted_content`, `invalid_prompt`, `invalid_value`,
+    `invalid_argument`, `unsupported_value`, `unsupported_parameter` and
+    `model_not_found` were the unknown class, which is retried (0.8.25
+    through 0.9.13): a request refused with one of them in a stream `error`
+    or `response.failed` event was sent again until the retry policy was
+    used up (four attempts with the default `max_retries = 3`) and the turn
+    ended as `retry exhausted`, where the same refusal over HTTP fails at
+    once. The first seven, and `invalid_request_error`, which had that class
+    already, are now classified as an HTTP 400 with the same message is:
+    `LlmError::InvalidRequest` (`provider_error_kind` `invalid_request`,
+    non-retryable) with the message `<code>: <the service's message>`, or
+    the context-overflow, oversized-request or exhausted-quota class when
+    the message names one. `model_not_found` is `LlmError::ModelNotFound`
+    (`reason_type` `llm_invalid_model`), the class of an HTTP 404 with that
+    code and of the realtime adapter. The message is read as text: one that
+    is itself a JSON object never selects a policy stop. The turn fails
+    once, on the LLM failure itself and not on used-up retries. A code
+    outside this list is classified the same way, as the invalid request,
+    when its error object's `type` is `invalid_request_error` (this includes
+    a code that names an authentication fault: terminal, though not the
+    class an HTTP 401 has); with any other type, or with none, it is still
+    the unknown class and is retried.
+  - An error object that names no `code` is classified by its `type` when
+    the type is `invalid_request_error` or an exhausted-quota code. Any
+    other type selects no class: the event keeps its default, as before
+    (the retryable server error for a `response.failed`, the unknown class
+    for an `error` event), so a type alone is never a policy stop.
+  - `usage_limit_reached` (the ChatGPT backend's plan usage limit) is now an
+    exhausted-quota code wherever that list is read:
+    `LlmError::QuotaExhausted`, non-retryable, as a Responses stream code or
+    type, in an HTTP 429 body of any provider (a rate limit, retried,
+    through 0.9.13), in another HTTP 4xx body (an invalid request before),
+    on the OpenAI realtime and live error paths and in an Anthropic stream
+    rate-limit object.
+
+  The cause is provider text. On a client with an authorizer it passes the
+  authorizer's credential redaction, like every other error a stream ends
+  with. No request is changed and nothing is retried in another form.
+
+- `meerkat-auth-core`, `meerkat-store`, `meerkat-tools`, `rkat`: a file write
+  that the operating system refuses no longer replaces the file with an empty
+  one while the operation reports success. These writers write a temporary
+  file, sync it and rename it onto the target. They wrote through tokio's
+  `File`, whose `sync_all` waits for the write but does not return the
+  write's error, so a write refused by a file size limit (`RLIMIT_FSIZE`), a
+  quota, a full filesystem that allocates at write time, or an I/O error
+  went unreported: the sync of the empty temporary file succeeded and the
+  rename published it. A payload above 2 MiB could instead end short. The
+  files, through 0.9.13:
+  - a credential file of the file credential store
+    (`<credentials>/<realm>/<slot>.json`, since 0.6.0): a login, a token
+    refresh or a secret save returned success, and the stored credential was
+    replaced by an empty file that no longer loads;
+  - `realm_manifest.json` (since 0.3.3): the first open of a realm, or
+    selecting governance for one, returned success and left an empty
+    manifest; every later open of that realm failed to parse it, and so did
+    `rkat realm list` and `rkat realm prune` for the whole state root;
+  - a realm lease record (`leases/<instance>.json`, since 0.3.3), at a
+    surface's start and at each heartbeat: an empty record is counted as
+    unreadable, so the instance was not listed as active and `rkat realm
+    delete` refused without `--force`;
+  - a blob object (since 0.7.27): the put itself failed at its read-back,
+    but the empty or short object stayed at the content address, where reads
+    report it as corrupt, until an identical put rewrote it;
+  - the builtin task tools' JSON task file (`.rkat/tasks.json`, since 0.3.0):
+    creating, updating or deleting a task returned success, and every stored
+    task was lost. Only the file task store writes this file: a Rust
+    embedding that builds the `meerkat` facade without its `session-store`
+    feature, or that builds its tools with the SDK helpers
+    `create_dispatcher_with_builtins_persisted` or
+    `create_dispatcher_with_builtins_in_project`. The shipped `rkat`,
+    `rkat-rpc`, `rkat-rest` and `rkat-mcp` binaries are built with
+    `session-store` and keep tasks in SQLite;
+  - an ATIF trajectory export (`rkat session export-atif`, `rkat run
+    --export-atif`, since 0.8.22): reported as written, and empty or short.
+
+  Each of these writes now fails with the error the operation already
+  returns for a failed open or rename, publishes nothing and removes its
+  temporary file: the file it would have replaced stays as it was, and a
+  file that did not exist is not created. A realm whose first open fails
+  this way opens normally once writes work again. A lease record is the one
+  file that is still emptied, now on purpose and only at a heartbeat: a
+  holder whose heartbeat cannot replace its record (the write is refused, or
+  the temporary file cannot be created or renamed) empties its own record,
+  which needs no free space. An empty record is counted as unreadable, so
+  `rkat realm delete` and `rkat realm prune` keep refusing without `--force`
+  while the holder is alive on a full disk. Left as it was, the last good
+  record would go stale 30 seconds later and both commands would remove the
+  realm under the running holder, as they could through 0.9.13 when a
+  heartbeat failed to create or rename its temporary file. The next
+  heartbeat that succeeds restores the record; a refused write at a
+  surface's start still fails the start and writes nothing. The realm
+  manifest lock and the first-start marker (since 0.8.4), which such a write
+  left empty without effect, now fail the same way and are removed, so
+  neither stays behind to be waited on. A file an earlier release already
+  emptied is not restored.
 
 ### Known limitations
 

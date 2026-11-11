@@ -39,6 +39,7 @@ pub struct OperationId(String);
 /// id is made of. Every member is taken from the dispatch that carries the
 /// call, never from its arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ToolCallOrigin<'a> {
     /// The mob the call changes.
     pub mob_id: &'a str,
@@ -46,8 +47,32 @@ pub struct ToolCallOrigin<'a> {
     pub session_id: &'a str,
     /// The run of that session the call belongs to.
     pub run_id: &'a str,
-    /// The tool call's id within its run.
+    /// The round of that run the call belongs to: one answer of the
+    /// agent's model. A model numbers its tool calls anew in each answer,
+    /// so a call id is unique within one round only.
+    pub round: &'a str,
+    /// The tool call's id within its round.
     pub tool_call_id: &'a str,
+}
+
+impl<'a> ToolCallOrigin<'a> {
+    /// The tool call `tool_call_id` of the round `round` of the run
+    /// `run_id` of the session `session_id`, changing the mob `mob_id`.
+    pub fn new(
+        mob_id: &'a str,
+        session_id: &'a str,
+        run_id: &'a str,
+        round: &'a str,
+        tool_call_id: &'a str,
+    ) -> Self {
+        Self {
+            mob_id,
+            session_id,
+            run_id,
+            round,
+            tool_call_id,
+        }
+    }
 }
 
 impl OperationId {

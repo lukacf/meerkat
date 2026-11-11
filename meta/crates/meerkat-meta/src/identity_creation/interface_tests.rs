@@ -376,22 +376,14 @@ fn an_operation_id_is_namespaced_by_the_requester() {
         );
     }
 
-    let origin = ToolCallOrigin {
-        mob_id: "mob-1",
-        session_id: "session-1",
-        run_id: "run-1",
-        tool_call_id: "call-1",
-    };
+    let origin = ToolCallOrigin::new("mob-1", "session-1", "run-1", "round-1", "call-1");
     let derived = OperationId::for_tool_call(&agent, &origin);
     assert_eq!(derived, OperationId::for_tool_call(&agent, &origin));
     assert_ne!(
         derived,
         OperationId::for_tool_call(
             &agent,
-            &ToolCallOrigin {
-                run_id: "run-2",
-                ..origin
-            }
+            &ToolCallOrigin::new("mob-1", "session-1", "run-2", "round-1", "call-1")
         ),
         "the same tool call id in another run is another operation"
     );

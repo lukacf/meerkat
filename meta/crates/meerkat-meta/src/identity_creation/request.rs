@@ -151,6 +151,18 @@ impl RequesterFacts {
     pub fn console() -> Self {
         Self::host(CONSOLE_SURFACE)
     }
+
+    /// The authenticated human `principal`: no profile and no authority
+    /// labels.
+    pub fn human(principal: impl Into<String>) -> Self {
+        Self {
+            requester: Requester::Human {
+                principal: principal.into(),
+            },
+            profile: None,
+            authority_labels: BTreeMap::new(),
+        }
+    }
 }
 
 /// What normalization knows of an existing identity a request names as a

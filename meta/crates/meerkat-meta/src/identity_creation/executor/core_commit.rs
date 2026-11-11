@@ -42,14 +42,19 @@ pub(super) fn committed(
     outcome_of_change(commit.mob, commit.operation_id, change)
 }
 
-/// The answer of a change Core did not commit: its typed refusal, with the
-/// request field it concerns, or the error that is none.
-fn not_committed(
-    commit: &ChangeCommit<'_>,
-    error: meerkat_mob::MobError,
-) -> Result<ChangeCommitted, ExecutorError> {
-    let refusal = refusal_of_error(error)?;
-    Ok(ChangeCommitted::refused(at_request_field(commit, refusal)))
+impl CoreChangeExecutor {
+    /// What a commit answers when Core's call of the change erred: the
+    /// typed refusal of the error, with the request field it concerns, or
+    /// the error that is none. The bodies of every change answer a Core
+    /// error through here.
+    pub async fn after_core_error(
+        &self,
+        commit: &ChangeCommit<'_>,
+        error: meerkat_mob::MobError,
+    ) -> Result<ChangeCommitted, ExecutorError> {
+        let refusal = refusal_of_error(error)?;
+        Ok(ChangeCommitted::refused(at_request_field(commit, refusal)))
+    }
 }
 
 /// `refusal`, about the request field it concerns when the request has one
@@ -208,6 +213,7 @@ fn preparation_of(commit: &ChangeCommit<'_>, profile: &str) -> IdentityPreparati
 /// An agent of a profile its host prepares is committed pending its
 /// preparation instead: it has no member until the host settles it.
 pub(super) async fn create(
+    executor: &CoreChangeExecutor,
     commit: &ChangeCommit<'_>,
     operation: IdentityOperation,
     identities: &[CreatedSpec],
@@ -245,7 +251,7 @@ pub(super) async fn create(
         .await
     {
         Ok(created) => committed(commit, &created.change),
-        Err(error) => not_committed(commit, error),
+        Err(error) => executor.after_core_error(commit, error).await,
     }
 }
 
@@ -340,6 +346,6 @@ pub(super) async fn entry_change(
             }
             Ok(committed)
         }
-        Err(error) => not_committed(commit, error),
+        Err(error) => executor.after_core_error(commit, error).await,
     }
 }

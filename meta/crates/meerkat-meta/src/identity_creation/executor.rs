@@ -462,7 +462,7 @@ impl IdentityChangeExecutor for CoreChangeExecutor {
         let operation = IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
         match &commit.request.action {
             RequestAction::Create { identities } => {
-                core_commit::create(&commit, operation, identities).await
+                core_commit::create(self, &commit, operation, identities).await
             }
             RequestAction::Archive {
                 identity,

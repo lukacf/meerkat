@@ -8,9 +8,10 @@
 // field it names in the console's sentence for its kind, and an agent's
 // details read its record.
 //
-// The fixture's two agents are declared by its configuration, so a change
-// of either is refused by the gateway; the console shows that sentence and
-// does not work it out itself.
+// The fixture's two agents are declared by its configuration: the gateway
+// offers no change of either (their two affordances are false), so the
+// console shows no Edit, Archive or Remove for them, and it would refuse a
+// change that was sent all the same. The console works none of that out.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -89,25 +90,37 @@ async function readsAndRefusals() {
     assert.deepEqual(Object.keys(creates[0]).filter(key => key !== "expected_caller_scope").sort(), ["agents", "request_id"]);
     await page.getByTestId("identity-cancel").click();
 
-    // An agent the host's configuration declares: the gateway refuses its
-    // archive, and the console shows the gateway's sentence.
-    await agent(router).locator(".cc-entity__hit").click();
-    await page.getByTestId(`roster-detail:${router}`).waitFor();
-    await page.getByTestId(`roster-action:${router}:archive`).click();
-    await page.getByTestId(`identity-confirm:${router}:archive`).getByTestId("identity-confirm-yes").click();
-    await notice.getByText("This agent is set up in the host's configuration and cannot be changed here. Change it in the configuration.").waitFor();
-    assert.equal(await notice.getByText("owner_read_only").count(), 0);
-    const archives = sent(fixture, "meta/identity/archive");
-    assert.equal(archives.length, 1);
-    assert.equal(archives[0].name, router);
-    // The change names the spec digest of the record the console just read.
-    assert.equal(archives[0].expected_spec_digest, record.spec_digest);
-    assert.deepEqual(Object.keys(archives[0]).filter(key => key !== "expected_caller_scope").sort(), ["expected_spec_digest", "name", "request_id"]);
-    await page.screenshot({ path: path.join(evidence, "real-identity-configured-refused.png"), fullPage: true });
-    await page.getByTestId("identity-confirm-cancel").click();
+    // The agents the host's configuration declares: the gateway offers no
+    // change of them, and their drawers show none. The roster's own
+    // controls of an agent are still there.
+    for (const row of experience.agent_sidebar.live_snapshot.agents) {
+      assert.equal(row.affordances.can_change_identity, false, row.identity);
+      assert.equal(row.affordances.can_remove_identity, false, row.identity);
+    }
+    for (const name of [router, delivery]) {
+      await agent(name).locator(".cc-entity__hit").click();
+      const drawer = page.getByTestId(`roster-detail:${name}`);
+      await drawer.waitFor();
+      await drawer.getByRole("button", { name: "Details", exact: true }).waitFor();
+      for (const change of ["edit", "archive", "remove"]) {
+        assert.equal(await page.getByTestId(`roster-action:${name}:${change}`).count(), 0, `${name} ${change}`);
+      }
+    }
+    await page.screenshot({ path: path.join(evidence, "real-identity-configured-no-change.png"), fullPage: true });
+    // The browser sent no change of them. One that is sent all the same is
+    // the gateway's to refuse, and it does.
+    for (const change of ["update", "archive", "remove"]) {
+      assert.deepEqual(sent(fixture, `meta/identity/${change}`), [], change);
+    }
+    const refused = (await rpc(fixture.baseUrl, "meta/identity/archive", {
+      request_id: "configured-archive", name: router, expected_spec_digest: record.spec_digest,
+    })).body.error;
+    assert.equal(refused.code, -32058);
+    assert.equal(refused.data.kind, "owner_read_only");
     // Nothing changed: the agent is still in the roster and none is archived.
     await agent(router).waitFor();
-    assert.equal(await page.getByTestId("roster-archived").count(), 0);
+    const listed = (await rpc(fixture.baseUrl, "meta/identity/list", { include_archived: true })).body.result.agents;
+    assert.deepEqual(listed.filter(entry => entry.archived), []);
 
     // The agent's details read its record: nobody asked for a configured
     // agent, and its spec digest is among the technical details.
@@ -115,6 +128,12 @@ async function readsAndRefusals() {
     await page.getByTestId(`roster-detail:${router}`).getByRole("button", { name: "Details", exact: true }).click();
     const details = page.getByTestId(`inspect-record:${router}`);
     await details.waitFor();
+    // Its menu offers no change of its record either.
+    await page.getByTestId(`inspect-menu:${router}`).click();
+    for (const change of ["edit", "archive", "remove"]) {
+      assert.equal(await page.getByTestId(`inspect-action:${router}:${change}`).count(), 0, `details ${change}`);
+    }
+    await page.keyboard.press("Escape");
     assert.equal(await details.getByText("Asked for by").count(), 0);
     assert.equal(await details.getByText(/created|configured|adopted|imported|origin/i).count(), 0);
 
@@ -157,9 +176,14 @@ async function fullStory() {
     await page.getByTestId("roster-panel").waitFor();
     const agent = name => page.locator(`[data-testid="roster-card:${name}"], [data-testid="roster-row:${name}"]`);
     const notice = page.getByTestId("identity-notice");
-    // What a change came to. The gateway answers a change that follows a
-    // create late (about half a minute after that create), so an outcome is
-    // waited for longer than anything else in the story.
+    // What a change came to. An outcome is waited for longer than anything
+    // else in the story: a change that follows a create can be answered
+    // about half a minute after that create. The team's actor then still
+    // sends the new agent's kickoff notice to a peer that is not awake, and
+    // every later command waits behind that step; the gateway says so in
+    // its log ("actor inline step exceeded its budget; every later command
+    // is queued behind it", command_kind KickoffOutcomeResolved). The wait
+    // stands until that step no longer holds the actor.
     const outcome = text => notice.getByText(text).waitFor({ timeout: 90_000 });
     const openAgent = async (name) => {
       await agent(name).locator(".cc-entity__hit").click();
@@ -304,7 +328,13 @@ async function fullStory() {
     await form.getByTestId("identity-profile:lead").check();
     await form.getByTestId("identity-field:name").fill("scout");
     await form.getByTestId("identity-submit").click();
-    await page.getByText("This name is taken. Choose another; a removed agent's name is never free again.").waitFor({ timeout: 90_000 });
+    // The refusal names the name, so it shows there and not as the form's
+    // notice.
+    const taken = page.getByTestId("identity-field-error:name");
+    await taken.waitFor({ timeout: 90_000 });
+    assert.equal(await taken.textContent(), "This name is taken. Choose another; a removed agent's name is never free again.");
+    assert.equal(await notice.count(), 0);
+    await taken.scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(evidence, "real-identity-story-removed-name.png"), fullPage: true });
     await page.getByTestId("identity-cancel").click();
 

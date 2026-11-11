@@ -133,6 +133,13 @@ withdraws it with `meta/identity/withdraw`. An agent that asked is told
 the outcome by a message to itself; host code and a person read
 `meta/identity/operation`.
 
+A person's approval is evidence, never authority over the policy. When an
+approved change is carried out, the policy the launch has then is asked
+again: if its rules deny the change now, nothing is executed, the decision
+ends refused and `meta/identity/operation` says the change was denied. A
+launch without an enabled policy carries nothing out: the decision stays
+as it is until a launch with a policy runs, or its deadline passes.
+
 Two more kinds are part of the policy's vocabulary and are **refused at init
 in this release**: `notify`, because no notice reaches an approver yet, and
 `review`, because no reviewer decides yet. Write `allow` where you would

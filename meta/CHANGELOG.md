@@ -54,7 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/decisions/decide`, the launch carries it out by itself and
   `meta/identity/operation` reads `done`. `meta/identity/withdraw` ends a
   change that is still held. An agent that asked is told the outcome by a
-  keyed message to itself.
+  keyed message to itself. A person's approval is evidence, never authority
+  over the policy: when the approved change is carried out, the policy the
+  launch has then is asked again, and a change it denies now is not
+  executed (`meta/identity/operation` says it was denied).
+- `GET /console/experience`: `affordances.can_change_identity` and
+  `affordances.can_remove_identity` are false for an agent the host's
+  configuration declares, so a client offers no control that could only be
+  refused `owner_read_only`.
 - A change names as peers only agents its caller may see: on the Console a
   peer the caller may not view is answered `peer_unknown`, as a name no
   agent holds, and never `peer_not_allowed`.

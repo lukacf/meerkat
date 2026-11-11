@@ -389,10 +389,9 @@ What to know:
   start: the record of every removed agent is revoked then. Archiving an
   agent keeps the record: the agent comes back on its conversation with its
   instructions as they were. A change made while the agent is archived is
-  recorded and reaches it after its unarchive: at its first run, or at the
-  next one when the first starts before the mob's delivery lands. The same
+  recorded and reaches it at its first run after its unarchive. The same
   holds for an agent the host's configuration dropped and lists again with
-  other instructions.
+  other instructions: its first run after the listing carries the change.
 - **Models that take a system instruction only ahead of the conversation**
   apply the change once a compaction at a run's first request carries it,
   or with a fresh conversation. The update's result says

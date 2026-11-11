@@ -117,7 +117,7 @@ them.
   the first after a generation is forgotten, therefore renders those earlier
   turns differently than the request before it did, and the provider's
   prompt cache misses once from the first such turn on. Nothing in a stored
-  session, an event, an export or an SDK payload changes: 0.9.12 and this
+  session, an event, an export or an SDK payload changes: 0.9.13 and this
   release write the same rows for the same response.
 
   With `store: true`, the `previous_response_id` shortcut is taken only when
@@ -138,6 +138,15 @@ them.
   same service at the same endpoint inside one process (two API keys of
   different organisations, two ChatGPT accounts, two Copilot accounts on one
   API host). Whether a service refuses that is not known; it was not tested.
+
+## [0.9.13] - 2026-11-11
+
+### Changed
+
+- No code changes. Core 0.9.13 is released so that Core, Meta and Connect keep
+  one version: the `meerkat-meta` 0.9.12 crate was larger than the crates.io
+  upload limit and was never published, so Meta and Connect are released
+  again as 0.9.13.
 
 ## [0.9.12] - 2026-11-10
 
@@ -47966,7 +47975,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10

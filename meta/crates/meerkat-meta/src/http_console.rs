@@ -13193,7 +13193,9 @@ async fn handle_console_runtime_rpc_with_visibility(
             mob: &handle,
             family: family.as_ref(),
             requester: crate::rpc::identity_methods::console_requester(
-                person.as_ref().map(|person| person.as_str()),
+                person
+                    .as_ref()
+                    .map(meerkat_core::approval::decision::DecisionPrincipalKey::as_str),
             ),
             access: access_view,
         };

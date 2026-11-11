@@ -65,12 +65,7 @@ impl IdentityOutcome {
     /// The outcome's stable token: `done`, `pending_decision`,
     /// `pending_preparation` or `refused`.
     pub fn token(&self) -> &'static str {
-        match self {
-            Self::Done { .. } => "done",
-            Self::PendingDecision { .. } => "pending_decision",
-            Self::PendingPreparation { .. } => "pending_preparation",
-            Self::Refused(_) => "refused",
-        }
+        self.listed_token()
     }
 
     /// The operation, for every outcome but a refusal.
@@ -171,8 +166,9 @@ pub struct AgentOutcome {
     pub name: String,
     /// What the change did to it.
     pub state: AgentChangeState,
-    /// Its spec digest after the change: what its next change names as the
-    /// spec it read. Absent for a removed agent.
+    /// Its spec digest after the change: Core's digest of the spec in its
+    /// row form, the one spec digest every surface shows, and what its
+    /// next change names as the spec it read. Absent for a removed agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_digest: Option<Sha256Digest>,
     /// Its spec revision after the change, from 1.
@@ -233,17 +229,19 @@ pub enum AgentChangeState {
 impl AgentChangeState {
     /// The stable token (`committed`, `archived`, ...).
     pub fn token(self) -> &'static str {
-        match self {
-            Self::Committed => "committed",
-            Self::PendingPreparation => "pending_preparation",
-            Self::Archiving => "archiving",
-            Self::Archived => "archived",
-            Self::Restored => "restored",
-            Self::Retiring => "retiring",
-            Self::Removed => "removed",
-        }
+        self.listed_token()
     }
 }
+
+closed_tokens!(AgentChangeState {
+    Committed => "committed",
+    PendingPreparation => "pending_preparation",
+    Archiving => "archiving",
+    Archived => "archived",
+    Restored => "restored",
+    Retiring => "retiring",
+    Removed => "removed",
+});
 
 /// Whether the agent a create committed is seated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -258,6 +256,25 @@ pub enum AgentSeat {
     /// seat is driven again, and its first message runs once then.
     Owed,
 }
+
+impl AgentSeat {
+    /// The stable token: `seated` or `owed`.
+    pub fn token(self) -> &'static str {
+        self.listed_token()
+    }
+}
+
+closed_tokens!(AgentSeat {
+    Seated => "seated",
+    Owed => "owed",
+});
+
+closed_tokens!(IdentityOutcome {
+    Done => "done",
+    PendingDecision => "pending_decision",
+    PendingPreparation => "pending_preparation",
+    Refused => "refused",
+});
 
 /// What became of an update's instructions change. The new text is in the
 /// agent's record at once, whatever the outcome: it reaches the agent at
@@ -291,14 +308,16 @@ impl InstructionOutcome {
     /// The stable token: `applies_at_next_run`, `applies_after_compaction`,
     /// `applies_at_next_session` or `unchanged`.
     pub fn token(self) -> &'static str {
-        match self {
-            Self::AppliesAtNextRun => "applies_at_next_run",
-            Self::AppliesAfterCompaction => "applies_after_compaction",
-            Self::AppliesAtNextSession { .. } => "applies_at_next_session",
-            Self::Unchanged => "unchanged",
-        }
+        self.listed_token()
     }
 }
+
+closed_tokens!(InstructionOutcome {
+    AppliesAtNextRun => "applies_at_next_run",
+    AppliesAfterCompaction => "applies_after_compaction",
+    AppliesAtNextSession => "applies_at_next_session",
+    Unchanged => "unchanged",
+});
 
 /// Why an instructions change does not reach an agent as it runs now
 /// ([`InstructionOutcome::AppliesAtNextSession`]).
@@ -325,16 +344,18 @@ pub enum InstructionNextSessionReason {
 impl InstructionNextSessionReason {
     /// The stable token (`prepared_authorization_required`, ...).
     pub fn token(self) -> &'static str {
-        match self {
-            Self::PreparedAuthorizationRequired => "prepared_authorization_required",
-            Self::SlotLimitExceeded => "slot_limit_exceeded",
-            Self::ActiveSetBudgetExceeded => "active_set_budget_exceeded",
-            Self::LoweringUnavailable => "lowering_unavailable",
-            Self::BodyTooLarge => "body_too_large",
-            Self::RecordUnavailable => "record_unavailable",
-        }
+        self.listed_token()
     }
 }
+
+closed_tokens!(InstructionNextSessionReason {
+    PreparedAuthorizationRequired => "prepared_authorization_required",
+    SlotLimitExceeded => "slot_limit_exceeded",
+    ActiveSetBudgetExceeded => "active_set_budget_exceeded",
+    LoweringUnavailable => "lowering_unavailable",
+    BodyTooLarge => "body_too_large",
+    RecordUnavailable => "record_unavailable",
+});
 
 /// The fact that a committed update changed an agent's instructions text:
 /// the agent, the text its record held before the update and the text it

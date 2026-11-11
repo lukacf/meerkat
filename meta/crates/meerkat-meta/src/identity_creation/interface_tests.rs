@@ -284,7 +284,15 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
     let encoded = core_member_name("domain:calendar").expect("a name that needs the encoding");
     assert_ne!(encoded.as_str(), "domain:calendar");
     assert_eq!(identity_name_of_member(&encoded), "domain:calendar");
-    assert_eq!(core_member_name("mk--keeper"), None);
+    // A name in the reserved member-id namespace, which every public door
+    // refuses, and a name of a generated runtime alias's shape, whose
+    // member id stands for another identity: both are agent names in
+    // form, and neither is admitted.
+    const RESERVED: [&str; 2] = ["mk--keeper", "rt:keeper:3"];
+    for name in RESERVED {
+        assert!(AgentIdentity::parse(name).is_ok(), "{name}");
+        assert_eq!(core_member_name(name), None, "{name}");
+    }
 
     let requesters = [
         RequesterFacts::agent("helper", "worker", BTreeMap::new()),
@@ -298,13 +306,15 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
         },
     ];
     for requester in &requesters {
-        let refused = create_of(requester, "mk--keeper").expect_err("the name is refused");
-        assert_eq!(
-            refused.to_data(),
-            json!({"kind": "invalid_name", "field": "agents[0].name"}),
-            "{:?}",
-            requester.requester
-        );
+        for name in RESERVED {
+            let refused = create_of(requester, name).expect_err("the name is refused");
+            assert_eq!(
+                refused.to_data(),
+                json!({"kind": "invalid_name", "field": "agents[0].name"}),
+                "{name}: {:?}",
+                requester.requester
+            );
+        }
         assert!(
             create_of(requester, "keeper").is_ok(),
             "{:?}: a plain name is planned",
@@ -751,8 +761,8 @@ fn a_refusal_of_cores_keeps_its_token_and_whether_it_is_retryable() {
 }
 
 /// The rendering of an archive, an unarchive and an adoption names the
-/// action, the identity and the spec the requester read, as a removal's
-/// does, and parses to a structured card.
+/// action and the identity, and parses to a structured card. It shows no
+/// spec digest: a target that moved is refused `stale_spec` at the commit.
 #[test]
 fn every_action_has_its_rendering() {
     let host = RequesterFacts::host("ops");
@@ -796,12 +806,8 @@ fn every_action_has_its_rendering() {
             "{action}: {text}"
         );
         assert!(
-            text.contains(&format!(
-                "{}: {}\n",
-                labels::EXPECTED_SPEC_DIGEST,
-                expected.as_str()
-            )),
-            "{action}: {text}"
+            !text.contains(labels::EXPECTED_SPEC_DIGEST),
+            "{action}: the rendering shows no spec digest: {text}"
         );
         assert!(rendering.card().is_ok(), "{action}: a structured card");
         digests.insert(rendering.subject_digest());
@@ -1080,11 +1086,18 @@ fn the_wire_spelling_of_a_create_an_update_and_a_refusal() {
     let host = RequesterFacts::host("ops");
     let profiles = BTreeSet::from(["worker".to_owned()]);
     let peers = BTreeMap::from([("helper".to_owned(), PeerFacts::default())]);
+    let open_peers = IdentityCreationPolicy::parse(&json!({
+        "enabled": true,
+        "peers": {"default": "allow"},
+        "approval": {"rules": allow(&["create"])},
+    }))
+    .expect("the policy parses")
+    .expect("the policy is enabled");
     let normalize = |request: serde_json::Value| {
         let request: CreateAgents = serde_json::from_value(request).expect("a create request");
         let specs = request.to_create_specs()?;
         normalize_create(
-            &policy(allow(&["create"])),
+            &open_peers,
             &RequestContext {
                 requester: &host,
                 profiles: &profiles,
@@ -1106,14 +1119,40 @@ fn the_wire_spelling_of_a_create_an_update_and_a_refusal() {
             "detail": "The mob has no profile of this name: name one of the mob's profiles.",
         })
     );
-    let unknown_peer = normalize(json!({"agents": [
+    // A refusal names the first offending member of the request as
+    // written. Where the peer rules allow a peer by default, the first
+    // offending peer is the one that is no agent the requester may name.
+    let peers_request = json!({"agents": [
         {"name": "warden", "profile": "worker"},
         {"name": "keeper", "profile": "worker", "peers": ["warden", "stranger"]},
-    ]}))
-    .expect_err("a peer nobody knows");
+    ]});
+    let unknown_peer = normalize(peers_request.clone()).expect_err("a peer nobody knows");
     assert_eq!(
         unknown_peer.to_data(),
         json!({"kind": "peer_unknown", "field": "agents[1].peers[1]"})
+    );
+    // Where they deny a peer by default, it is the first peer listed.
+    let closed_peers = {
+        let request: CreateAgents =
+            serde_json::from_value(peers_request).expect("a create request");
+        let specs = request
+            .to_create_specs()
+            .expect("the agents are well formed");
+        normalize_create(
+            &policy(allow(&["create"])),
+            &RequestContext {
+                requester: &host,
+                profiles: &profiles,
+                peers: &peers,
+            },
+            request.envelope(),
+            &specs,
+        )
+        .expect_err("the peer rules deny by default")
+    };
+    assert_eq!(
+        closed_peers.to_data(),
+        json!({"kind": "peer_not_allowed", "identity": "warden", "field": "agents[1].peers[0]"})
     );
     let bad_name = normalize(json!({"agents": [
         {"name": "warden", "profile": "worker"},
@@ -1200,5 +1239,149 @@ fn a_policy_may_name_the_archive_and_adopt_change_classes() {
         }))
         .is_err(),
         "a change class the vocabulary lacks is refused"
+    );
+}
+
+/// The closed vocabularies' token lists are complete and are what each
+/// value writes: the lists the SDKs' token files are compared with.
+#[test]
+fn the_closed_vocabularies_list_every_wire_token() {
+    assert_eq!(IdentityRefusalKind::ALL_TOKENS.len(), 57);
+    assert_eq!(
+        IdentityRefusalKind::ALL_TOKENS
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len(),
+        57,
+        "no token twice"
+    );
+    for token in [
+        "owner_read_only",
+        "private_requester",
+        "unsupported",
+        "change_denied",
+    ] {
+        assert!(IdentityRefusalKind::ALL_TOKENS.contains(&token), "{token}");
+    }
+    assert_eq!(
+        IdentityOutcome::ALL_TOKENS,
+        ["done", "pending_decision", "pending_preparation", "refused"]
+    );
+    assert_eq!(
+        InstructionOutcome::ALL_TOKENS,
+        [
+            "applies_at_next_run",
+            "applies_after_compaction",
+            "applies_at_next_session",
+            "unchanged"
+        ]
+    );
+    assert_eq!(
+        InstructionNextSessionReason::ALL_TOKENS,
+        [
+            "prepared_authorization_required",
+            "slot_limit_exceeded",
+            "active_set_budget_exceeded",
+            "lowering_unavailable",
+            "body_too_large",
+            "record_unavailable"
+        ]
+    );
+    assert_eq!(AgentSeat::ALL_TOKENS, ["seated", "owed"]);
+    assert_eq!(
+        AgentChangeState::ALL_TOKENS,
+        [
+            "committed",
+            "pending_preparation",
+            "archiving",
+            "archived",
+            "restored",
+            "retiring",
+            "removed"
+        ]
+    );
+    assert_eq!(
+        NameTakenBy::ALL_TOKENS,
+        ["identity", "removed", "worker", "unreadable"]
+    );
+    assert_eq!(NotAdoptableReason::ALL_TOKENS.len(), 8);
+    // What a value writes is its listed token.
+    assert_eq!(
+        serde_json::to_value(AgentSeat::Owed).expect("a seat"),
+        json!(AgentSeat::Owed.token())
+    );
+    assert_eq!(
+        serde_json::to_value(InstructionNextSessionReason::BodyTooLarge).expect("a reason"),
+        json!(InstructionNextSessionReason::BodyTooLarge.token())
+    );
+    assert_eq!(
+        serde_json::to_value(InstructionOutcome::AppliesAfterCompaction).expect("an outcome"),
+        json!({"kind": InstructionOutcome::AppliesAfterCompaction.token()})
+    );
+    assert_eq!(
+        serde_json::to_value(AgentChangeState::Archived).expect("a state"),
+        json!(AgentChangeState::Archived.token())
+    );
+}
+
+/// A directory entry writes its verdict flat: `verdict`, with `lines` for
+/// a decision and `reason` for a refusal when the host's rule gives one.
+#[test]
+fn a_directory_entry_writes_its_verdict_flat() {
+    let page = DirectoryPage {
+        profiles: vec![
+            DirectoryProfile {
+                profile: "worker".to_owned(),
+                verdict: DirectoryVerdict::Allowed,
+            },
+            DirectoryProfile {
+                profile: "lead".to_owned(),
+                verdict: DirectoryVerdict::NotAllowed { reason: None },
+            },
+        ],
+        peers: vec![
+            DirectoryPeer {
+                name: "keeper".to_owned(),
+                display_name: Some("The keeper".to_owned()),
+                profile: "worker".to_owned(),
+                verdict: DirectoryVerdict::NeedsDecision {
+                    lines: vec!["A peer of the records desk needs a decision.".to_owned()],
+                },
+            },
+            DirectoryPeer {
+                name: "warden".to_owned(),
+                display_name: None,
+                profile: "worker".to_owned(),
+                verdict: DirectoryVerdict::NotAllowed {
+                    reason: Some("Wardens take no peers.".to_owned()),
+                },
+            },
+        ],
+        next: Some("warden".to_owned()),
+    };
+    assert_eq!(
+        serde_json::to_value(&page).expect("a directory page"),
+        json!({
+            "profiles": [
+                {"profile": "worker", "verdict": "allowed"},
+                {"profile": "lead", "verdict": "not_allowed"},
+            ],
+            "peers": [
+                {
+                    "name": "keeper",
+                    "display_name": "The keeper",
+                    "profile": "worker",
+                    "verdict": "needs_decision",
+                    "lines": ["A peer of the records desk needs a decision."],
+                },
+                {
+                    "name": "warden",
+                    "profile": "worker",
+                    "verdict": "not_allowed",
+                    "reason": "Wardens take no peers.",
+                },
+            ],
+            "next": "warden",
+        })
     );
 }

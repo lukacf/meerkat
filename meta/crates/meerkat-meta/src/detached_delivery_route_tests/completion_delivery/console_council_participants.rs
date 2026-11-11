@@ -49,6 +49,9 @@ const NESTED_MEMBER: &str = "nested-worker";
 const LOOKALIKE_MEMBER: &str = "lookalike-worker";
 /// A member that takes no part in the council.
 const BYSTANDER: &str = "bystander";
+/// A member of an ordinary nested mob created under the mob id of a council
+/// that settled.
+const REUSE_MEMBER: &str = "reuse-worker";
 
 fn everyone_views() -> AccessRule {
     AccessRule {
@@ -273,6 +276,29 @@ impl Council {
         })
         .await
         .expect("the council's temporary mob is destroyed");
+    }
+
+    /// Wait for the council's record to settle: its cleanup destroyed the
+    /// temporary mob and owes nothing more. The record itself stays.
+    async fn settled(&self, fixture: &CompletionFixture) {
+        let council_id = meerkat_mob::temporary_council::TemporaryCouncilId::new(&self.id)
+            .expect("council identity");
+        let store = mob_tools(fixture).temporary_council_store_for_tests();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let record = store
+                    .load(&council_id)
+                    .await
+                    .expect("read council custody")
+                    .expect("council record");
+                if !record.is_unfinished() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the council's record settles");
     }
 }
 
@@ -831,6 +857,260 @@ async fn frames_stored_for_a_council_participant_are_not_served() {
             "a caller denied the source reads no council participant's stored frame"
         );
     }
+    realm.fixture.stop().await;
+}
+
+/// Frames a console stored under a participant's name are not served once no
+/// runtime is registered either. A console keeps the frames it stored
+/// readable after its last runtime is unregistered (its host shut down);
+/// a participant's stay unserved then, whoever asks: with the council's
+/// record present before, and with the record lost. Nothing registered says
+/// which mob an id of a council mob's form names, so a frame of an ordinary
+/// nested mob with such an id is not served then either; a frame of a nested
+/// mob under any other id is served as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frames_stored_for_a_council_participant_are_not_served_with_no_runtime_registered() {
+    let realm = Realm::start().await;
+    let council = Council::convene(&realm.fixture, &realm.gate).await;
+    let fork_session = council.source_fork_session(&realm.fixture).await;
+    council.end(&realm.fixture, &realm.gate).await;
+    let primary = realm.fixture.runtime.handle().mob_id().to_string();
+    let gone_mob = unique("nested-gone");
+
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let seeds = [
+        (
+            "council-record-present",
+            captured(
+                PARTICIPANTS[0],
+                &fork_session,
+                "council_p0",
+                &primary,
+                &council.mob,
+            ),
+        ),
+        (
+            "council-record-lost",
+            captured(
+                PARTICIPANTS[0],
+                "lost-council-session",
+                "council_p0",
+                &primary,
+                &lost_council_mob(),
+            ),
+        ),
+        (
+            "lookalike-live",
+            captured(
+                LOOKALIKE_MEMBER,
+                &realm.lookalike_session.to_string(),
+                "general",
+                &primary,
+                &realm.lookalike_mob,
+            ),
+        ),
+        (
+            "nested-live",
+            captured(
+                NESTED_MEMBER,
+                &realm.nested_session.to_string(),
+                "general",
+                &primary,
+                &realm.nested_mob,
+            ),
+        ),
+        (
+            "nested-gone",
+            captured(
+                "gone-worker",
+                "gone-worker-session",
+                "general",
+                &primary,
+                &gone_mob,
+            ),
+        ),
+    ];
+    for (key, provenance) in seeds {
+        aggregator
+            .store()
+            .append_if_absent(stored_frame(key, SOURCE_TURN, provenance))
+            .await
+            .expect("seeded frame");
+    }
+    register(
+        &aggregator,
+        &realm.fixture.runtime,
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    let _ = listed(&aggregator).await;
+
+    let mut names = realm.names();
+    names.push("gone-worker");
+    // While the runtime is registered the ordinary frames are served, so the
+    // reads below are of frames a console does serve.
+    assert_eq!(
+        served_seeds(
+            &aggregator,
+            &controller(deny_source_by_identity()),
+            ROOT,
+            &names
+        )
+        .await,
+        BTreeSet::from([
+            "lookalike-live".to_string(),
+            "nested-live".to_string(),
+            "nested-gone".to_string(),
+        ]),
+        "with the runtime registered the administrator reads the ordinary nested members' frames"
+    );
+
+    aggregator.unregister_runtime(RUNTIME);
+    let ordinary = BTreeSet::from(["nested-live".to_string(), "nested-gone".to_string()]);
+    for deny in [deny_source_by_identity(), deny_source_by_role()] {
+        let by_role = !deny.roles.is_empty();
+        let controller = controller(deny);
+        assert_eq!(
+            served_seeds(&aggregator, &controller, ROOT, &names).await,
+            ordinary,
+            "with no runtime registered the administrator reads no council participant's stored \
+             frame, and none of a mob whose id has a council mob's form"
+        );
+        // The role rule denies every `general` member, the nested ones
+        // included: the caller then reads none of the seeded frames.
+        let expected = if by_role {
+            BTreeSet::new()
+        } else {
+            ordinary.clone()
+        };
+        assert_eq!(
+            served_seeds(&aggregator, &controller, CALLER, &names).await,
+            expected,
+            "with no runtime registered a caller denied the source reads no council \
+             participant's stored frame"
+        );
+    }
+    realm.fixture.stop().await;
+}
+
+/// A council's record outlives the council (it answers a replay of the same
+/// request), and a mob id is free again once its mob is destroyed. An
+/// ordinary nested mob created under the mob id of a council that settled is
+/// no council's: its member is listed and resolved by name, its history is
+/// read, and its frames are served, a stored one included. The frames a
+/// console stored for the settled council's own seats stay unserved, whoever
+/// asks: by the seat's fork session and by the seat's name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frames_served() {
+    const REUSE_TURN: &str = "META-REUSE-TURN";
+    let realm = Realm::start().await;
+    let aggregator = console(&realm.fixture, Arc::new(AllowAllConsoleVisibilityPolicy));
+    let council = Council::convene(&realm.fixture, &realm.gate).await;
+    let fork_session = council.source_fork_session(&realm.fixture).await;
+    council.end(&realm.fixture, &realm.gate).await;
+    council.settled(&realm.fixture).await;
+    let primary = realm.fixture.runtime.handle().mob_id().to_string();
+
+    // The ordinary mob under the settled council's mob id, with one turn.
+    let state = mob_tools(&realm.fixture);
+    let reuse_session = seat_nested_mob(&state, &council.mob, REUSE_MEMBER).await;
+    let reused = state
+        .handle_for(&meerkat_mob::MobId::from(council.mob.as_str()))
+        .await
+        .expect("the ordinary mob under the council's mob id");
+    turn_on(&realm.fixture, &reused, REUSE_MEMBER, REUSE_TURN).await;
+
+    // What a console holds under that mob id: frames stored for the
+    // council's seats (the second under a session the record never held),
+    // and one stored for the ordinary mob's member.
+    let seeds = [
+        (
+            "settled-council-seat",
+            captured(
+                PARTICIPANTS[0],
+                &fork_session,
+                "council_p0",
+                &primary,
+                &council.mob,
+            ),
+        ),
+        (
+            "settled-council-seat-by-name",
+            captured(
+                PARTICIPANTS[1],
+                "unrecorded-seat-session",
+                "council_p1",
+                &primary,
+                &council.mob,
+            ),
+        ),
+        (
+            "ordinary-member",
+            captured(
+                REUSE_MEMBER,
+                &reuse_session.to_string(),
+                "general",
+                &primary,
+                &council.mob,
+            ),
+        ),
+    ];
+    for (key, provenance) in seeds {
+        aggregator
+            .store()
+            .append_if_absent(stored_frame(key, SOURCE_TURN, provenance))
+            .await
+            .expect("seeded frame");
+    }
+    backfill(&aggregator).await;
+
+    let mut wrong = Vec::new();
+    let identities = listed(&aggregator).await;
+    if !identities.contains(REUSE_MEMBER) {
+        wrong.push(format!(
+            "identities does not list {REUSE_MEMBER} of the ordinary mob {}: {identities:?}",
+            council.mob
+        ));
+    }
+    assert!(
+        identities.is_disjoint(&PARTICIPANTS.map(str::to_string).into()),
+        "the settled council's participants are not listed: {identities:?}"
+    );
+    if aggregator
+        .inspect_identity(REUSE_MEMBER)
+        .await
+        .expect("inspect")
+        .is_none()
+    {
+        wrong.push(format!("inspect does not resolve {REUSE_MEMBER}"));
+    }
+    // An identities read asks for each listed member's history too.
+    backfill(&aggregator).await;
+
+    let mut names = realm.names();
+    names.push(REUSE_MEMBER);
+    let ordinary = BTreeSet::from(["ordinary-member".to_string()]);
+    let controller = controller(deny_source_by_identity());
+    let administrator = served(&aggregator, &controller, Some(ROOT), &names).await;
+    if !administrator
+        .iter()
+        .any(|frame| frame.identity == REUSE_MEMBER && carries(frame, REUSE_TURN))
+    {
+        wrong.push(format!(
+            "the history of {REUSE_MEMBER} is not served to the administrator"
+        ));
+    }
+    for subject in [ROOT, CALLER] {
+        let seeded = served_seeds(&aggregator, &controller, subject, &names).await;
+        if seeded != ordinary {
+            wrong.push(format!(
+                "{subject} is served the stored frames {seeded:?}, not {ordinary:?}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "an ordinary mob under a settled council's mob id is decided as the council's: {wrong:#?}"
+    );
     realm.fixture.stop().await;
 }
 

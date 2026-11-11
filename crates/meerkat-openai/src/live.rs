@@ -7312,16 +7312,21 @@ mod tests {
                 response: failed,
             })),
         ]);
-        let decided_on = [
-            "insufficient_quota",
-            "context_length_exceeded",
-            "context_window_exceeded",
-            "response_cancel_not_active",
-            "model_not_found",
-            "max_output_tokens",
-            "content_filter",
-        ];
-        for fixed in decided_on {
+        // Every fixed value the session decides on: the quota codes, read
+        // from the one list its classification uses
+        // (`LlmError::code_signals_quota_exhausted`), then the two context
+        // codes and the two reasons this file matches on.
+        let decided_on: Vec<&str> = meerkat_llm_core::error::QUOTA_EXHAUSTED_ERROR_CODES
+            .iter()
+            .copied()
+            .chain([
+                "context_length_exceeded",
+                "context_window_exceeded",
+                "max_output_tokens",
+                "content_filter",
+            ])
+            .collect();
+        for fixed in decided_on.iter().copied() {
             let mut incomplete = fake_response("resp_fixed", ResponseStatus::Incomplete);
             incomplete.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
                 reason: Some(fixed.to_string()),

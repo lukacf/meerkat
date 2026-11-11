@@ -225,7 +225,11 @@ mod operation_refusal_wire {
 /// until the quota resets or request a quota increase." The neighbouring
 /// per-minute codes on that table (`rate_limit_exceeded`, `too_many_requests`)
 /// are deliberately absent so they keep the retryable rate-limit class.
-const QUOTA_EXHAUSTED_ERROR_CODES: &[&str] = &[
+///
+/// [`LlmError::code_signals_quota_exhausted`] decides on exactly this list.
+/// It is public so that a client that rewrites provider text (credential
+/// redaction) can check that every code here passes through unchanged.
+pub const QUOTA_EXHAUSTED_ERROR_CODES: &[&str] = &[
     "insufficient_quota",
     "credit_balance_exhausted",
     "organization_spend_limit_exceeded",

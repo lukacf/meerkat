@@ -96,6 +96,9 @@ export const CONSOLE_RPC_METHODS = {
   identityList: "meta/identity/list",
   identityOperation: "meta/identity/operation",
   identityDirectory: "meta/identity/directory",
+  identityAdopt: "meta/identity/adopt",
+  identityChangesHold: "meta/identity/changes_hold",
+  identityPlan: "meta/identity/plan",
 } as const;
 
 export const CONSOLE_BLOB_PATH_PREFIX = "/blobs/";

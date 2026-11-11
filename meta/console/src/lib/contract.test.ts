@@ -298,6 +298,28 @@ test("console contract documents a login that ended before a decision was taken 
   }
 });
 
+test("console contract documents every method of the long-term agent family, and what a launch without an identity policy answers", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as ContractSchema;
+  const family = parseIdentityFamilyMethods(
+    readFileSync(resolve(process.cwd(), "../crates/meerkat-meta/src/rpc/identity_methods.rs"), "utf8"),
+  );
+  assert.equal(family.size > 0, true, "the family's registry lists its methods");
+  const methods = schema.surfaces.rpc.methods as Record<string, { errors?: Array<{ codes?: number[]; note?: string }> }>;
+  for (const method of family) {
+    const entry = methods[method];
+    assert.notEqual(entry, undefined, `the contract documents ${method}`);
+    const notes = (entry?.errors ?? []).map((error) => error.note ?? "").join(" ");
+    // The reads are served with or without a policy, and a change without
+    // an enabled one is refused: no launch with agents answers "no such
+    // method" for the family.
+    assert.equal(/does not serve the family/.test(notes), false, `${method}: a launch without a policy serves the reads`);
+    assert.equal(/change_denied/.test(notes), true, `${method}: a change without an enabled policy is refused change_denied`);
+    assert.equal(/-32601 only on a launch without agents of its own/.test(notes), true, method);
+  }
+});
+
 test("console contract route and method names stay synchronized with Rust http console source", () => {
   const schema = JSON.parse(
     readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),

@@ -2655,7 +2655,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2691,7 +2691,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2723,7 +2723,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2755,7 +2755,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2787,7 +2787,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2816,7 +2816,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2849,7 +2849,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2877,7 +2877,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2904,7 +2904,7 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         },
@@ -2932,7 +2932,101 @@
                 -32058,
                 -32601
               ],
-              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. -32601 on a console whose launch has no identity creation policy: it does not serve the family."
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/adopt": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "request_id",
+              "name",
+              "expected_spec_digest"
+            ],
+            "optional_fields": [],
+            "note": "Releases one agent from the host's configuration: from the adoption on it is changed at run time and configuration no longer declares it. Gated on a writable console and agent.identity.manage for the agent. An unknown member is refused. The stock console does not call it."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "operation_id"
+            ],
+            "note": "The change's typed outcome, tagged by outcome: done {operation_id, agents: [{name, state, spec_digest?, spec_revision?, session_id?, seat?, instructions?}]}, pending_decision {operation_id, decision_id, deadline_ms} (nothing is written but the decision) or pending_preparation {operation_id, agents}. The same caller, request_id and request answer the same state again and write nothing."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/changes_hold": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "held"
+            ],
+            "optional_fields": [
+              "reason"
+            ],
+            "note": "Holds or releases the mob's changes of agents: while held, every change is refused the retryable changes_held. Not durable: a host that holds changes holds them again at its next start. Gated on a writable console and runtime.admin, and the hold is the host's alone: a signed-in person is refused kind change_denied. The stock console does not call it."
+          },
+          "success": {
+            "required_fields": [
+              "held"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
+            }
+          ]
+        },
+        "meta/identity/plan": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "change",
+              "request_id"
+            ],
+            "note": "The outcome and the rendering a change would get; nothing is held and nothing is written. change is create, update, archive, unarchive, remove or adopt, and the other members are that change's own params. Gated on agent.view. The stock console asks it before a profile change."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "change",
+              "timeout_ms",
+              "request_digest",
+              "subject_digest",
+              "rendering"
+            ],
+            "note": "outcome is allow, notify or require_approval (a change the host's rules deny is refused, not planned); change is the change class whose rule decided; approver_id is present when the outcome names one."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32058,
+                -32601
+              ],
+              "note": "-32058 is the family's one refusal: message is the refusal's sentence, and data carries kind (a closed vocabulary), field (a path into the request, when the refusal concerns one field), retryable, detail, and the kind's own members. Params that are not what the method takes are that error too, kind invalid_request. The reads are served on every launch that has agents of its own, with or without an identity policy; a change, and a plan, on a launch without an enabled identity policy is refused kind change_denied. -32601 only on a launch without agents of its own, or once its mob stopped."
             }
           ]
         }

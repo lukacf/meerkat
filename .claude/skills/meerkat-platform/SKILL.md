@@ -465,7 +465,8 @@ surface, not the old live-adapter/docs-refresh snapshot:
   clients reporting a monotonic raw-event count through
   `stream_activity_count()`; `"disabled"` opts out. An explicit window applies
   to every model; omitted, each call uses the current model's own window
-  (`gemini-4-argon` 900s, `gpt-5.5-pro` 7200s, a self-hosted model's
+  (`gemini-4-carbon` and `gemini-4-argon` 900s, `gpt-5.5-pro` 7200s, a
+  self-hosted model's
   `stream_inactivity_timeout_secs`), else 300s. Stalls surface as retryable
   `StreamStalled`. A custom client returning the default `None` has no
   inactivity watchdog, only any configured hard call/turn deadlines.
@@ -1245,13 +1246,13 @@ tools.
 
 ```toml
 # Default: three providers + Copilot backend; no persistent realm/comms/MCP/skills/memory/live activation
-meerkat = "=0.9.11"
+meerkat = "=0.9.12"
 
 # Single provider, minimal
-meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.12", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "=0.9.11", features = [
+meerkat = { version = "=0.9.12", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live", "live-webrtc"
@@ -1282,7 +1283,7 @@ surfaces. The default `rkat` feature set includes `memory-store` and
 builds:
 
 ```bash
-cargo install rkat --version "=0.9.11" --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "=0.9.12" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
@@ -1390,7 +1391,8 @@ stream_inactivity_timeout = "120s"       # explicit window, every model
 
 The window is resolved for each model call, so a model switch or fallback
 uses the new model's window. The catalog sets one where a provider documents
-long silent responses (`gemini-4-argon` 900s, `gpt-5.5-pro` 7200s); a
+long silent responses (`gemini-4-carbon` and `gemini-4-argon` 900s,
+`gpt-5.5-pro` 7200s); a
 self-hosted model can set `stream_inactivity_timeout_secs` in
 `[self_hosted.models.<id>]` (at least 60, for a long prefill, for example).
 Custom `[models.<id>]` entries have no window of their own.

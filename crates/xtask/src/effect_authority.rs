@@ -140,6 +140,10 @@ const AGENT_LLM_CLIENT_DEFAULT_METHODS: &[AgentLlmClientDefaultMethod] = &[
         "unsupported clients refuse request-free controller route facts",
     ),
     AgentLlmClientDefaultMethod::fail_closed(
+        "reasoning_route",
+        "absence reports no route, so no source states the reasoning-effort levels it accepts",
+    ),
+    AgentLlmClientDefaultMethod::fail_closed(
         "prepare_controller_credential",
         "unsupported clients refuse existing-controller credential maintenance",
     ),

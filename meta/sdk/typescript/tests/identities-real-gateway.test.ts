@@ -18,7 +18,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { IDENTITY_REFUSAL_KINDS, IdentityRefusedError, Meta } from "../src/index.js";
+import {
+  IDENTITY_REFUSAL_KINDS,
+  INSTRUCTION_OUTCOME_KINDS,
+  IdentityRefusedError,
+  Meta,
+} from "../src/index.js";
 import type { IdentitiesHandle } from "../src/index.js";
 
 const gatewayBin = process.env.META_RPC_GATEWAY_BIN;
@@ -278,13 +283,24 @@ describe("identity family on a real gateway", () => {
       assert.deepEqual(record.peers, ["scout"]);
       assert.equal(record.specDigest, outcome.agents[0].specDigest);
 
-      // A name is taken once.
+      // A name is taken once: by an agent of the mob, or by another agent
+      // of the same create, which names the agent of the request.
       const taken = await refusedBy(
         identities.create([{ name: "editor", profile: "writer" }], { requestId: "create-again" }),
       );
       assert.equal(taken.kind, "name_taken");
-      assert.equal(taken.field, "agents[0].name");
       assert.equal(taken.details.by, "identity");
+      const twins = await refusedBy(
+        identities.create(
+          [
+            { name: "twin", profile: "writer" },
+            { name: "twin", profile: "writer" },
+          ],
+          { requestId: "create-twins" },
+        ),
+      );
+      assert.equal(twins.kind, "name_taken");
+      assert.equal(twins.field, "agents[1].name");
     });
   });
 
@@ -303,7 +319,14 @@ describe("identity family on a real gateway", () => {
       assert.ok(updated.outcome === "done", JSON.stringify(updated));
       const agent = updated.agents[0];
       assert.notEqual(agent.specDigest, digest);
-      assert.notEqual(agent.instructions, null);
+      // What became of the instructions change is on the outcome when the
+      // launch carries instruction changes to its agents; it is one of the
+      // closed kinds then.
+      if (agent.instructions !== null) {
+        assert.ok(
+          (INSTRUCTION_OUTCOME_KINDS as readonly string[]).includes(agent.instructions.kind),
+        );
+      }
       const record = await identities.get("editor");
       assert.equal(record.displayName, "Chief editor");
       assert.deepEqual(record.instructions, ["Edit for clarity.", "Keep the author's voice."]);

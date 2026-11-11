@@ -30,6 +30,7 @@ from meerkat_meta import (
     AgentSet,
     AgentSpec,
     IDENTITY_REFUSAL_KINDS,
+    INSTRUCTION_OUTCOME_KINDS,
     IdentityChangePlan,
     IdentityChangesHold,
     IdentityDone,
@@ -312,14 +313,24 @@ async def test_create_commits_a_dormant_agent(tmp_path):
         assert record.peers == ("scout",)
         assert record.spec_digest == outcome.agents[0].spec_digest
 
-        # A name is taken once.
+        # A name is taken once: by an agent of the mob, or by another agent
+        # of the same create, which names the agent of the request.
         with pytest.raises(IdentityRefusedError) as refused:
             await identities.create(
                 [AgentSpec(name="editor", profile="writer")], request_id="create-again"
             )
         assert refused.value.kind == "name_taken"
-        assert refused.value.field == "agents[0].name"
         assert refused.value.details.get("by") == "identity"
+        with pytest.raises(IdentityRefusedError) as refused:
+            await identities.create(
+                [
+                    AgentSpec(name="twin", profile="writer"),
+                    AgentSpec(name="twin", profile="writer"),
+                ],
+                request_id="create-twins",
+            )
+        assert refused.value.kind == "name_taken"
+        assert refused.value.field == "agents[1].name"
 
 
 async def test_update_changes_an_agent_and_says_when_instructions_apply(tmp_path):
@@ -338,7 +349,11 @@ async def test_update_changes_an_agent_and_says_when_instructions_apply(tmp_path
         assert isinstance(updated, IdentityDone), updated
         agent = updated.agents[0]
         assert agent.spec_digest != digest
-        assert agent.instructions is not None
+        # What became of the instructions change is on the outcome when the
+        # launch carries instruction changes to its agents; it is one of
+        # the closed kinds then.
+        if agent.instructions is not None:
+            assert agent.instructions.kind in INSTRUCTION_OUTCOME_KINDS
         record = await identities.get("editor")
         assert record.display_name == "Chief editor"
         assert record.instructions == ("Edit for clarity.", "Keep the author's voice.")

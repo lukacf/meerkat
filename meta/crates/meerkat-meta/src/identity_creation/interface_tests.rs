@@ -1337,24 +1337,84 @@ fn the_closed_vocabularies_list_every_wire_token() {
         NameTakenBy::ALL_TOKENS,
         ["identity", "removed", "worker", "unreadable"]
     );
-    assert_eq!(NotAdoptableReason::ALL_TOKENS.len(), 8);
-    // What a value writes is its listed token.
     assert_eq!(
-        serde_json::to_value(AgentSeat::Owed).expect("a seat"),
-        json!(AgentSeat::Owed.token())
+        NotAdoptableReason::ALL_TOKENS,
+        [
+            "nothing_to_adopt",
+            "not_an_agent",
+            "placed",
+            "no_session",
+            "hosted_on_first_use",
+            "awaiting_held_creation",
+            "awaiting_host_preparation",
+            "profile_override"
+        ]
     );
     assert_eq!(
-        serde_json::to_value(InstructionNextSessionReason::BodyTooLarge).expect("a reason"),
-        json!(InstructionNextSessionReason::BodyTooLarge.token())
+        RequestProblem::ALL_TOKENS,
+        ["empty", "conflicting", "malformed"]
     );
+
+    // Four vocabularies are written by their serde form. Each variant, in
+    // declaration order, writes the token its list holds at that place, and
+    // the list holds no token beyond them: a variant added to one of them
+    // must be listed with its token to compile, which makes its list one
+    // longer than the variants here.
+    fn written<T: serde::Serialize>(value: T) -> serde_json::Value {
+        serde_json::to_value(value).expect("a value")
+    }
+    let seats = [AgentSeat::Seated, AgentSeat::Owed];
+    assert_eq!(seats.len(), AgentSeat::ALL_TOKENS.len());
+    for (seat, token) in seats.into_iter().zip(AgentSeat::ALL_TOKENS) {
+        assert_eq!(written(seat), json!(token));
+        assert_eq!(seat.token(), *token);
+    }
+    let states = [
+        AgentChangeState::Committed,
+        AgentChangeState::PendingPreparation,
+        AgentChangeState::Archiving,
+        AgentChangeState::Archived,
+        AgentChangeState::Restored,
+        AgentChangeState::Retiring,
+        AgentChangeState::Removed,
+    ];
+    assert_eq!(states.len(), AgentChangeState::ALL_TOKENS.len());
+    for (state, token) in states.into_iter().zip(AgentChangeState::ALL_TOKENS) {
+        assert_eq!(written(state), json!(token));
+        assert_eq!(state.token(), *token);
+    }
+    let reasons = [
+        InstructionNextSessionReason::PreparedAuthorizationRequired,
+        InstructionNextSessionReason::SlotLimitExceeded,
+        InstructionNextSessionReason::ActiveSetBudgetExceeded,
+        InstructionNextSessionReason::LoweringUnavailable,
+        InstructionNextSessionReason::BodyTooLarge,
+        InstructionNextSessionReason::RecordUnavailable,
+    ];
     assert_eq!(
-        serde_json::to_value(InstructionOutcome::AppliesAfterCompaction).expect("an outcome"),
-        json!({"kind": InstructionOutcome::AppliesAfterCompaction.token()})
+        reasons.len(),
+        InstructionNextSessionReason::ALL_TOKENS.len()
     );
-    assert_eq!(
-        serde_json::to_value(AgentChangeState::Archived).expect("a state"),
-        json!(AgentChangeState::Archived.token())
-    );
+    for (reason, token) in reasons
+        .into_iter()
+        .zip(InstructionNextSessionReason::ALL_TOKENS)
+    {
+        assert_eq!(written(reason), json!(token));
+        assert_eq!(reason.token(), *token);
+    }
+    let outcomes = [
+        InstructionOutcome::AppliesAtNextRun,
+        InstructionOutcome::AppliesAfterCompaction,
+        InstructionOutcome::AppliesAtNextSession {
+            reason: InstructionNextSessionReason::BodyTooLarge,
+        },
+        InstructionOutcome::Unchanged,
+    ];
+    assert_eq!(outcomes.len(), InstructionOutcome::ALL_TOKENS.len());
+    for (outcome, token) in outcomes.into_iter().zip(InstructionOutcome::ALL_TOKENS) {
+        assert_eq!(written(outcome)["kind"], json!(token));
+        assert_eq!(outcome.token(), *token);
+    }
 }
 
 /// A directory entry writes its verdict flat: `verdict`, with `lines` for

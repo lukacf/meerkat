@@ -722,6 +722,9 @@ pub struct AgentSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<AgentProvenance>,
     /// The operations open for it: held decisions and pending preparation.
+    /// An operation id tells who asked (its text carries the requester's
+    /// kind and a digest of its id), so it is for the host plane: an
+    /// answer an agent reads leaves this empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_operations: Vec<OperationId>,
 }

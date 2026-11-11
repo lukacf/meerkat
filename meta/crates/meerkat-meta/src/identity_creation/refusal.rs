@@ -268,13 +268,15 @@ pub enum RequestProblem {
 impl RequestProblem {
     /// The stable token (`empty`, `conflicting`, `malformed`).
     pub fn token(self) -> &'static str {
-        match self {
-            Self::Empty => "empty",
-            Self::Conflicting => "conflicting",
-            Self::Malformed => "malformed",
-        }
+        self.listed_token()
     }
 }
+
+closed_tokens!(RequestProblem {
+    Empty => "empty",
+    Conflicting => "conflicting",
+    Malformed => "malformed",
+});
 
 /// One kind of the closed refusal vocabulary, with its details.
 #[derive(Debug, Clone, PartialEq, Eq)]

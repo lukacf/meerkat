@@ -346,15 +346,15 @@ count, or `None` for the default.
 ## SQLite Lock Profile
 
 Meerkat's stores run on the SQLite that `libsqlite3-sys` bundles. Three
-defaults of that build put one process-wide mutex in front of every
+settings of that build each put one process-wide mutex in front of every
 connection in the process, so sessions that share a host process queue on
 each other:
 
-| Lock | Taken on | On by default because |
-|------|----------|-----------------------|
-| Allocator statistics (`SQLITE_MUTEX_STATIC_MEM`) | every SQLite allocation and free; opening a connection and parsing its schema makes thousands | SQLite's `SQLITE_DEFAULT_MEMSTATUS=1` |
-| Shared page cache (`SQLITE_MUTEX_STATIC_LRU`) | every page fetch, unpin and release | `libsqlite3-sys` builds with `SQLITE_ENABLE_MEMORY_MANAGEMENT` |
-| Page-cache overflow statistics (`SQLITE_MUTEX_STATIC_PMEM`) | every page buffer allocated or freed on the heap | SQLite's default |
+| Lock | Taken on | Default |
+|------|----------|---------|
+| Allocator statistics (`SQLITE_MUTEX_STATIC_MEM`) | every SQLite allocation and free; opening a connection and parsing its schema makes thousands | on: SQLite's `SQLITE_DEFAULT_MEMSTATUS=1` |
+| Shared page cache (`SQLITE_MUTEX_STATIC_LRU`) | every page fetch, unpin and release | off since `libsqlite3-sys` 0.39; earlier releases build with `SQLITE_ENABLE_MEMORY_MANAGEMENT` |
+| Page-cache overflow statistics (`SQLITE_MUTEX_STATIC_PMEM`) | every page buffer allocated or freed on the heap | on: SQLite's default |
 
 On a shared 192-core host (`meerkat-sqlite`'s `process_wide_locks_bench`
 test measures this), sixteen threads that each opened their own database
@@ -385,8 +385,7 @@ Intel macOS under Rosetta, and Windows on the Windows verification runner.
 A build outside the repository does not read those files: set the variable
 yourself for `cargo install rkat` and for an application that embeds Meerkat.
 Without it, every host binary still turns allocator statistics off as the
-first statement of `main`, but the shared page cache and the overflow
-statistics stay on.
+first statement of `main`, but the overflow statistics stay on.
 
 `rkat storage doctor` reports the profile its binary runs with (the
 `sqlite_lock_profile` object of `--json`, and a line of the text report) and

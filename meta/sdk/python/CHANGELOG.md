@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.12
+
 - `MetaRuntime.grant_tool` returns the gateway's `applies` beside the
   grant (whether it applies to the member's running build: `now`,
   `not_mounted` or `at_next_build`), and `list_tool_grants` the member's

@@ -75,10 +75,7 @@ them.
   (`prompt_cache_key: <value>`), a model id written after `key:`, a word
   that begins with a token prefix (`sk-learn-compatible`). Text outside
   those positions is unchanged. A rejection is classified from the body as
-  received and then redacted, so the rules do not change an error's class
-  (one exception: when the Anthropic client sends a request again without
-  its thinking blocks, a refusal of that second attempt is redacted
-  first).
+  received and then redacted, so the rules do not change an error's class.
 
 ### Security
 
@@ -139,8 +136,6 @@ them.
   - Requests that obtain a credential are not covered: a refused token,
     device-code, cloud identity or API-key provisioning request reports the
     body as received at sign-in and when a route resolves.
-  - The opt-in realtime frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
-    prints frames as they arrive.
 
   Affects 0.3.0 through 0.9.13.
 

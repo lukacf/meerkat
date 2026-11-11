@@ -11971,10 +11971,12 @@ mod tests {
 
             // Only the bearers this account signed with are replaced: any
             // other text, credential-shaped or not, is returned as it was.
+            // (The made-up values are assembled here so no scanner reads the
+            // source as a secret.)
             let other = format!(
                 "upstream echo: authorization: Bearer {}, api_key={}",
-                ["notsignedbythisaccount", "0123"].concat(),
-                ["notsignedeither", "0123"].concat(),
+                "notsignedbythisaccount".repeat(2),
+                "notsignedeither".repeat(2),
             );
             let mut diagnostic = other.clone();
             authorizer.redact_response_diagnostic(&mut diagnostic);

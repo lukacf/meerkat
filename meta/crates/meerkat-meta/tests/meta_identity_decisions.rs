@@ -33,15 +33,17 @@ use meerkat_core::approval::decision::{
 use meerkat_core::types::StopReason;
 use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_meta::identity_creation::{
-    AgentTools, ChangeCommit, ChangeCommitted, ChangeConsent, ChangeRequester, ConsequenceLine,
-    CreateIdentitySpec, ExecutorError, HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal,
-    IDENTITY_DECISION_KINDS, IdentityChangeExecutor, IdentityCreationPolicy,
-    IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts,
-    IdentityOutcome, IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest,
-    OperationId, ProfileTools, RemoveIdentitySpec, RequestAction, RequestContext, RequestEnvelope,
-    Requester, RequesterFacts, Sha256Digest, ToolConfigurations, WithdrawRequest,
-    committed_outcome, consent_of_plan, core_member_name, host_consequences_of, normalize_create,
-    normalize_remove, refusal_of_error, render_held_v1,
+    AdoptIdentitySpec, AgentTools, ArchiveIdentitySpec, ChangeCommit, ChangeCommitted,
+    ChangeConsent, ChangeRequester, ConsequenceLine, CreateIdentitySpec, ExecutorError,
+    HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal, IDENTITY_DECISION_KINDS,
+    IdentityChangeExecutor, IdentityCreationPolicy, IdentityDecisionNotice,
+    IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts, IdentityOutcome,
+    IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest, OperationId,
+    ProfileTools, RemoveIdentitySpec, RequestAction, RequestContext, RequestEnvelope, Requester,
+    RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, WithdrawRequest,
+    committed_outcome, consent_of_plan, core_member_name, host_consequences_of, normalize_adopt,
+    normalize_archive, normalize_create, normalize_remove, normalize_unarchive, refusal_of_error,
+    render_held_v1,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -481,7 +483,7 @@ fn approval_policy(timeout_ms: u64) -> IdentityCreationPolicy {
     IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
-            "change": ["create", "descriptive", "remove", "archive"],
+            "change": ["create", "descriptive", "remove", "archive", "adopt"],
             "outcome": {
                 "kind": "require_approval",
                 "approver": {"id": APPROVERS},
@@ -2145,4 +2147,61 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
     )
     .expect_err("a profile with no declaration");
     assert_eq!(unknown.kind_token(), "profile_unknown");
+
+    // Every change of one agent shows the tools of the agent it names.
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry =
+        IdentityEntryFacts::new("keeper", digest.clone(), Some(1), "worker", BTreeMap::new());
+    let policy = approval_policy(1000);
+    let envelope = RequestEnvelope::default;
+    let facts = host_facts();
+    let whole = [
+        normalize_remove(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &RemoveIdentitySpec::new("keeper", digest.clone()),
+        ),
+        normalize_archive(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &ArchiveIdentitySpec::new("keeper", digest.clone()),
+        ),
+        normalize_unarchive(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &UnarchiveIdentitySpec::new("keeper", digest.clone()),
+        ),
+        normalize_adopt(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &AdoptIdentitySpec::new("keeper", digest),
+        ),
+    ];
+    for normalized in whole {
+        let request = normalized.expect("the change normalizes").request;
+        let configurations = ToolConfigurations::of_request(
+            &request,
+            vec![AgentTools::new("keeper", "worker")],
+            BTreeMap::from([("worker".to_owned(), declared.clone())]),
+        )
+        .expect("the tools of the request");
+        let rendering = render_held_v1(&request, None, &configurations).expect("renders");
+        assert!(
+            rendering
+                .as_str()
+                .contains("Agent tools (1):\n- \"keeper\" profile \"worker\" tools sha256:"),
+            "a held {} shows the agent's tools:\n{}",
+            request.action.token(),
+            rendering.as_str()
+        );
+        rendering.card().expect("a structured card");
+    }
 }

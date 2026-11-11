@@ -376,6 +376,7 @@ fn render(
         | RequestAction::Adopt { identity, .. } => {
             text.field(labels::IDENTITY, &quoted(identity));
             consequence_blocks(&mut text, &request.consequences, &host_lines);
+            tool_blocks(&mut text, tools);
         }
         RequestAction::Remove {
             identity,

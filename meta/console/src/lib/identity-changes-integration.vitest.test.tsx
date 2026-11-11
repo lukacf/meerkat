@@ -626,6 +626,31 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
+  it("the_archived_agents_follow_the_roster", async () => {
+    // The console reads the roster again on its own clock; that clock is
+    // the row's to turn.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const family = createScriptedIdentityFamily();
+      family.seed({ name: "oldhand", display_name: "Old hand", archived: true });
+      const { view } = await openRoster(family);
+      await find(view, "roster-archived:oldhand");
+      // Somebody else unarchives the agent: the roster's next read lists
+      // it, and the archived agents are read again with it.
+      const oldhand = family.agents.get("oldhand");
+      oldhand.archived = false;
+      oldhand.readiness = "dormant";
+      await act(async () => {
+        vi.advanceTimersByTime(15_000);
+      });
+      await find(view, "roster-row:oldhand");
+      await gone(view, "roster-archived:oldhand");
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 60_000);
+
   it("a_pending_decision_is_shown_and_can_be_withdrawn", async () => {
     const family = createScriptedIdentityFamily({ now: () => Date.UTC(2030, 0, 1, 9, 0, 0) });
     const { view } = await openRoster(family);

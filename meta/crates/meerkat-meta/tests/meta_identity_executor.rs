@@ -1005,6 +1005,107 @@ async fn a_change_that_erred_after_cores_commit_is_answered_as_committed() {
     rig.shutdown().await;
 }
 
+/// A late error under an operation id that holds the change of another
+/// request is `operation_reused`, as Core answers that request at its
+/// commit: the receipt is of the other request, so this one committed
+/// nothing, and the instruction step is told of no removal.
+///
+/// RED before the receipt's request was compared with the commit's: a
+/// removal asked under the id of a committed archive answered the archive's
+/// outcome, and the step was told the archived agent was removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_error_under_another_requests_operation_id_is_operation_reused() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let digest = rig.create(CREATED).await;
+    let facts = RequesterFacts::host(SURFACE);
+    let policy = allow_all();
+    let target = entry(CREATED, &digest);
+    let requester = host();
+    let mob = rig.mob();
+    let executor = rig.executor();
+    let pending = || meerkat_mob::MobError::LifecycleOperationPending {
+        intent: "the member's retirement is still running".to_owned(),
+    };
+
+    let archive = normalize_archive(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &target,
+        &ArchiveIdentitySpec::new(CREATED, digest.clone()),
+    )
+    .expect("the archive is allowed");
+    let remove = normalize_remove(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &target,
+        &RemoveIdentitySpec::new(CREATED, digest.clone()),
+    )
+    .expect("the removal is allowed");
+    let archived = rig.commit(&requester, "archive-keeper", &archive).await;
+    assert!(
+        matches!(archived.outcome, IdentityOutcome::Done { .. }),
+        "{archived:?}"
+    );
+    let archive_operation =
+        OperationId::for_request(&requester.recorded(), "archive-keeper").expect("a request id");
+
+    // The removal under the archive's id: the id holds the archive.
+    let consent = consent_of_plan(&remove.plan).expect("the policy allows the change");
+    let reused = executor
+        .after_core_error(
+            &ChangeCommit::new(
+                &mob,
+                &archive_operation,
+                &requester,
+                consent,
+                &remove.request,
+            ),
+            pending(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        refused(&reused),
+        ("operation_reused".to_owned(), None),
+        "the receipt is of another request: {reused:?}"
+    );
+    assert!(
+        rig.removed().is_empty(),
+        "the instruction step is told of no removal: the agent was archived, not removed"
+    );
+    assert!(
+        matches!(
+            rig.mob().identity_entry(&id(CREATED)),
+            Ok(IdentityEntryRead::Entry(_))
+        ),
+        "the archived agent keeps its name"
+    );
+
+    // The archive itself under its own id is still answered as committed.
+    let consent = consent_of_plan(&archive.plan).expect("the policy allows the change");
+    let late = executor
+        .after_core_error(
+            &ChangeCommit::new(
+                &mob,
+                &archive_operation,
+                &requester,
+                consent,
+                &archive.request,
+            ),
+            pending(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        late.outcome, archived.outcome,
+        "the request the receipt is of is answered as committed"
+    );
+    rig.shutdown().await;
+}
+
 /// What the seam refuses before Core is called, for every requester: a
 /// member private to a person, a change of an agent its host configures
 /// other than its adoption, and a requester the request does not record.

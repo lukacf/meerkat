@@ -1117,10 +1117,10 @@ class IdentityStatus:
     customizer_tools_pending: dict[str, Any] | None = None
     #: ``True`` when Core drives the identity itself, so Meta's lifecycle
     #: verbs refuse it: a host intent declaration in Core manages it (the
-    #: verbs raise :class:`~meerkat_meta.errors.IdentityHostAdoptedError`), or
-    #: it is store-owned, created at runtime or adopted into store custody
-    #: (they raise a plain :class:`~meerkat_meta.errors.RpcError`, ``-32603``
-    #: with ``data["kind"] == "identity_store_owned"``).
+    #: verbs raise :class:`~meerkat_meta.errors.IdentityHostAdoptedError`).
+    #: ``False`` for every other identity: one created at run time, or
+    #: adopted into the mob's identity store, is served by the verbs as a
+    #: configured one is (it read ``True`` through 0.9.13).
     intent_managed: bool = False
     #: Core's convergence status, when :attr:`intent_managed` is set and Core
     #: could read it.

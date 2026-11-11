@@ -1287,13 +1287,15 @@ pub async fn console_json_handler(
     }
     if response.status == 200 && uri.path() == "/console/experience" {
         // Whether this console serves changes of the mob's long-term agents
-        // to the caller, and which of them the caller's grants admit.
+        // to the caller (its launch has an enabled identity policy and the
+        // console is not read-only), and which of them the caller's grants
+        // admit.
         let identity_changes_available = !state.decisions.console.read_only
             && state
                 .runtime
                 .as_ref()
                 .and_then(MobRuntime::installed_identity_runtime)
-                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some());
+                .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
         crate::runtime::apply_identity_changes_to_experience(
             &mut response.body,
             caller.as_ref().map(|caller| &caller.audience),
@@ -13131,9 +13133,15 @@ async fn handle_console_runtime_rpc_with_visibility(
     // that person by, or the host on its console surface when the caller is
     // no verified person; never the host's operator.
     if crate::rpc::identity_methods::is_identity_family_method(request.method.as_str())
-        && let Some(family) = identity_runtime
-            .as_ref()
-            .and_then(|identity_runtime| identity_runtime.identity_family())
+        && let Some(family) = identity_runtime.as_ref().and_then(|identity_runtime| {
+            // A caller under access rules names only the peers it may view.
+            match access_view {
+                Some(view) => identity_runtime.identity_family_seen_by(Arc::new(
+                    crate::rpc::identity_methods::ViewedAgents(view.clone()),
+                )),
+                None => identity_runtime.identity_family(),
+            }
+        })
     {
         let handle = runtime.handle();
         let person = governance
@@ -18829,11 +18837,11 @@ async fn reset_all_live_console_agents(
     let mut retired_delegate_details = Vec::new();
     let mut reset_details = Vec::new();
     let mut failures = Vec::new();
-    // The store-owned identities (created at runtime, or adopted into store
-    // custody): Core's MobMachine drives them, so Meta's reset refuses each
-    // before anything acts, and none fails the call. Each is reported with
-    // its kind; Core's own changes reset nothing of them.
-    let mut store_owned = Vec::new();
+    // Kept in the body for shape stability, always empty: through 0.9.13 it
+    // listed the identities whose record is their row in the mob's identity
+    // store, which the reset then refused. They are reset as any identity
+    // now, and appear under `reset` or `failed` like the others.
+    let store_owned: Vec<Value> = Vec::new();
     // Kept in the body for shape stability. Nothing on the reset path warns
     // today: a registered identity resets through Core's rotation, which
     // retires the current incarnation and seats the fresh one in one step,
@@ -19246,13 +19254,9 @@ async fn reset_all_live_console_agents(
                             .await;
                     }
                 }
-                Err(
-                    err @ crate::identity_first::IdentityRuntimeError::IdentityStoreOwned { .. },
-                ) => store_owned.push(json!({
-                    "identity": identity,
-                    "kind": "identity_store_owned",
-                    "error": err.to_string(),
-                })),
+                // An archived identity has no member and no life to reset:
+                // it is left archived, and it fails nothing.
+                Err(crate::identity_first::IdentityRuntimeError::IdentityArchived { .. }) => {}
                 Err(err) => failures.push(json!({
                     "identity": identity,
                     "error": err.to_string(),
@@ -27545,10 +27549,10 @@ message = "review"
     /// (`-32014`, `identity_name_unreadable`). A read of Core's entry that
     /// Core could not serve refuses the mutation retryable (`-32052`,
     /// `identity_history_unavailable`), never as an unknown identity. An
-    /// identity created at runtime (Core holds it as a created entry, whose
-    /// record the mob's identity store owns) is registered from its row and
-    /// goes through its door, which refuses the mutation: Core drives a
-    /// store-owned identity.
+    /// identity created at runtime (Core holds it as an identity entry whose
+    /// record is its row in the mob's identity store) is registered from its
+    /// row and goes through its door, which serves the mutation as any
+    /// identity's.
     ///
     /// RED before the door told them apart: `meta/retire_member` answered
     /// each of them with an untyped `-32000`.
@@ -27623,28 +27627,25 @@ message = "review"
             );
         }
         // The identity created at runtime goes through its door, which
-        // refuses the retire: Core drives a store-owned identity.
+        // registers it from its row and serves the retire as any identity's:
+        // Core releases its member and keeps it seated.
         let response = retire("console-created").await;
-        assert!(response["result"].is_null(), "{response:#?}");
-        assert_eq!(response["error"]["code"], json!(-32000), "{response:#?}");
-        let detail = response["error"]["data"]["detail"]
-            .as_str()
-            .unwrap_or_default();
         assert!(
-            detail.contains("retire_member (identity)") && detail.contains("store-owned"),
-            "the identity's door refused the retire: {response:#?}"
+            response.get("error").is_none_or(Value::is_null),
+            "the identity's door serves the retire: {response:#?}"
         );
         assert!(
             identity_runtime.contains(&created).await,
             "the door registered the identity created at runtime from its row"
         );
-        assert!(
-            core_bridge.releases().is_empty(),
-            "a refused mutation releases nothing"
+        assert_eq!(
+            core_bridge.releases(),
+            vec![created.clone()],
+            "the retire released the identity's member"
         );
         assert!(
             core_bridge.core.live_member(&created)?.is_some(),
-            "Core's member of the created identity is untouched"
+            "Core keeps the member of the created identity seated"
         );
 
         // Every read of Core's entry fails: the mutation of a plain name is
@@ -27667,16 +27668,18 @@ message = "review"
         Ok(())
     }
 
-    /// `meta/reset_all` does not fail on a store-owned identity (created at
-    /// runtime, or adopted into store custody): Meta's reset refuses it
-    /// before anything acts, as Core's MobMachine drives it, and the call
-    /// reports it in its own `store_owned` list with its kind
-    /// (`identity_store_owned`), not under `failed`. Nothing of it is reset.
+    /// `meta/reset_all` resets an identity whose record is its row in the
+    /// mob's identity store (created at runtime, or adopted into the store)
+    /// as any other: its reset reaches Core's rotation, and the call's
+    /// `store_owned` list, kept for shape stability, is empty. Over this
+    /// bridge, which implements no rotation, the reset's own failure is
+    /// reported under `failed`, as a configured identity's would be.
     ///
-    /// RED before the list: the call failed `-32000` "reset_all failed for
-    /// one or more identities", with the store-owned identity under `failed`.
+    /// RED before the reset served such an identity: it was refused before
+    /// Core was asked, and listed under `store_owned` with the kind
+    /// `identity_store_owned`.
     #[tokio::test]
-    async fn reset_all_reports_a_store_owned_identity_apart_and_does_not_fail()
+    async fn reset_all_resets_an_identity_whose_record_is_its_row_like_any_other()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (_temp_dir, runtime) =
             build_empty_console_test_runtime("console-reset-all-store-owned").await?;
@@ -27722,31 +27725,33 @@ message = "review"
             true,
         ))
         .await;
-        assert!(
-            response.get("error").is_none_or(Value::is_null),
-            "a store-owned identity does not fail the call: {response:#?}"
-        );
-        let result = &response["result"];
-        assert_eq!(result["failed"], json!([]), "{response:#?}");
-        assert_eq!(result["reset"], json!([]), "{response:#?}");
-        let store_owned = result["store_owned"]
-            .as_array()
-            .ok_or_else(|| format!("reset_all lists its store-owned identities: {response:#?}"))?;
+        let body = if response.get("error").is_none_or(Value::is_null) {
+            &response["result"]
+        } else {
+            &response["error"]["data"]
+        };
         assert_eq!(
-            store_owned
+            body["store_owned"],
+            json!([]),
+            "no identity is set apart by where its record lives: {response:#?}"
+        );
+        let failed = body["failed"]
+            .as_array()
+            .ok_or_else(|| format!("reset_all lists its failures: {response:#?}"))?;
+        assert_eq!(
+            failed
                 .iter()
-                .map(|row| (row["identity"].clone(), row["kind"].clone()))
+                .map(|row| row["identity"].clone())
                 .collect::<Vec<_>>(),
-            vec![(json!("console-store-owned"), json!("identity_store_owned"))],
-            "{response:#?}"
+            vec![json!("console-store-owned")],
+            "the reset was carried to Core, whose rotation this bridge does not implement: \
+             {response:#?}"
         );
         assert!(
-            core_bridge.releases().is_empty(),
-            "nothing of the store-owned identity is reset"
-        );
-        assert!(
-            core_bridge.core.live_member(&created)?.is_some(),
-            "Core's member of the store-owned identity is untouched"
+            failed[0]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("member rotation")),
+            "the failure is the rotation's, not a refusal of the identity: {response:#?}"
         );
         let _ = runtime.handle().stop().await;
         Ok(())
@@ -36567,6 +36572,97 @@ mod tool_grant_console_access_tests {
         for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
             assert!(is_console_mutating_rpc_method(method), "{method}");
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_family_console_access_tests {
+    use super::*;
+    use crate::rpc::identity_methods::{
+        IDENTITY_FAMILY_METHODS, is_identity_family_mutating_method,
+    };
+
+    /// On the console a create needs `agent.identity.create`, a change of
+    /// one agent `agent.identity.manage` on that agent, its removal
+    /// `agent.identity.remove` on it and the hold of the mob's changes
+    /// `runtime.admin`; the reads need `agent.view`, a get on the agent it
+    /// names. A read-only console refuses exactly the family's writers, and
+    /// every method names its members in the member field table, a create
+    /// the agents it creates.
+    #[test]
+    fn the_console_gates_identity_changes_on_their_actions_and_reads_on_view() {
+        let named = json!({
+            "request_id": "r-1",
+            "name": "scout",
+            "expected_spec_digest": "sha256:00",
+        });
+        let scout = Some("scout".to_string());
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout", "profile": "worker" }] })
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for method in [
+            "meta/identity/update",
+            "meta/identity/archive",
+            "meta/identity/unarchive",
+            "meta/identity/adopt",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &named),
+                Some(vec![("agent.identity.manage", scout.clone())]),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/remove", &named),
+            Some(vec![("agent.identity.remove", scout.clone())])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/changes_hold", &json!({ "held": true })),
+            Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),
+            Some(vec![(ACTION_AGENT_VIEW, scout)])
+        );
+        for method in [
+            "meta/identity/list",
+            "meta/identity/directory",
+            "meta/identity/operation",
+            "meta/identity/plan",
+            "meta/identity/withdraw",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &json!({})),
+                Some(vec![(ACTION_AGENT_VIEW, None)]),
+                "{method}"
+            );
+        }
+        for method in IDENTITY_FAMILY_METHODS {
+            assert_eq!(
+                is_console_mutating_rpc_method(method),
+                is_identity_family_mutating_method(method),
+                "{method}"
+            );
+            assert!(
+                console_method_member_fields(method).is_some(),
+                "{method} is in the member field table"
+            );
+        }
+        assert_eq!(
+            console_method_members(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout" }, { "name": "ledger" }] })
+            ),
+            ["scout", "ledger"]
+        );
+        assert_eq!(
+            console_method_members("meta/identity/remove", &named),
+            ["scout"]
+        );
     }
 }
 

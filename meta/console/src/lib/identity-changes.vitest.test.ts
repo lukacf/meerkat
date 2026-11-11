@@ -26,8 +26,10 @@ import {
   outcomeWords,
   parseAgentPage,
   parseAgentRecord,
+  parseChangePlan,
   parseIdentityDirectory,
   parseIdentityOutcome,
+  planWords,
   readAllPages,
   refusalFormField,
   refusalSentence,
@@ -312,6 +314,29 @@ describe("reading the family's answers", () => {
     expect(verdictWords({ verdict: "probation", lines: [] })).toMatchObject({ label: "probation", pickable: true });
     // The verdict is a member of the entry itself: a nested one is none.
     expect(parseIdentityDirectory({ profiles: [{ profile: "worker", verdict: { verdict: "allowed" } }], peers: [] }).profiles[0].verdict).toBe("");
+  });
+
+  it("reads a plan as the family writes it and says its outcome in words", () => {
+    const family = createScriptedIdentityFamily();
+    const digest = family.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
+    const ask = (profile: string) => family.handle("meta/identity/plan", {
+      change: "update", request_id: `plan-${profile}`, name: "warden", expected_spec_digest: digest, set: { profile },
+    });
+    expect(parseChangePlan(ask("operator").result)).toEqual({ outcome: "allow" });
+    family.setProfileChange("reviewer", "require_approval");
+    expect(parseChangePlan(ask("reviewer").result)).toEqual({ outcome: "require_approval" });
+    expect(parseChangePlan({ change: "profile" })).toBeNull();
+    expect(parseChangePlan(null)).toBeNull();
+    expect(planWords({ outcome: "allow" })).toEqual({ tone: "ok", label: "Allowed", line: "The host's rules allow this change." });
+    // A change its host is only told about is made like an allowed one.
+    expect(planWords({ outcome: "notify" })).toEqual(planWords({ outcome: "allow" }));
+    expect(planWords({ outcome: "require_approval" }))
+      .toEqual({ tone: "warn", label: "Needs a decision", line: "A person must decide this change before it is made." });
+    // An outcome this console does not know says nothing: no raw token.
+    expect(planWords({ outcome: "probation" })).toBeNull();
+    // A plan writes nothing and holds nothing.
+    expect(family.agents.get("warden").profile).toBe("worker");
+    expect(family.decisionStatuses()).toEqual([]);
   });
 
   it("reads every page of a paged read and stops on a cursor it was already given", async () => {

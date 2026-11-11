@@ -540,6 +540,87 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
+  it("a_profile_change_is_judged_by_the_gateway_not_by_what_a_create_may_name", async () => {
+    // The directory's verdicts say what a new agent may be created with:
+    // here a reviewer needs a decision and an operator is not allowed. A
+    // change of an existing agent's profile is another change under its
+    // own rules, so the Edit form shows none of them and asks the gateway.
+    const family = createScriptedIdentityFamily();
+    const { view } = await openRoster(family);
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:edit"));
+    const edit = await find(view, "identity-edit:warden");
+    const profiles = await within(edit).findByTestId("identity-field:profile", undefined, { timeout: 5_000 });
+    const digest = family.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
+    for (const profile of ["worker", "reviewer", "operator"]) {
+      expect((within(edit).getByTestId(`identity-profile:${profile}`) as HTMLInputElement).disabled).toBe(false);
+    }
+    expect(profiles.textContent).not.toContain("Not allowed");
+    expect(profiles.textContent).not.toContain("Needs a decision");
+    expect(profiles.textContent).not.toContain("A person decides each new reviewer.");
+    expect(profiles.textContent).not.toContain("keep operators to its configuration");
+    // The profile the agent has asks nothing.
+    expect(present(view, "identity-profile-plan")).toBe(false);
+    expect(calls(family, "meta/identity/plan")).toEqual([]);
+
+    // Another profile: the gateway is asked what this change of this agent
+    // would get, and its answer shows at the field. It allows the profile a
+    // create may not name.
+    fireEvent.click(within(edit).getByTestId("identity-profile:operator"));
+    let plan = await find(view, "identity-profile-plan");
+    await waitFor(() => expect(view.getByTestId("identity-profile-plan").getAttribute("data-plan")).toBe("allow"), { timeout: 5_000 });
+    plan = view.getByTestId("identity-profile-plan");
+    expect(plan.textContent).toContain("The host's rules allow this change");
+    expect(calls(family, "meta/identity/plan")).toEqual([{
+      change: "update",
+      request_id: expect.stringMatching(/\S/),
+      name: "warden",
+      expected_spec_digest: digest,
+      set: { profile: "operator" },
+    }]);
+
+    // A change the rules hold for a person: said before it is sent.
+    family.setProfileChange("reviewer", "require_approval");
+    fireEvent.click(within(edit).getByTestId("identity-profile:reviewer"));
+    await waitFor(() => expect(view.getByTestId("identity-profile-plan").getAttribute("data-plan")).toBe("require_approval"), { timeout: 5_000 });
+    expect(view.getByTestId("identity-profile-plan").textContent).toContain("A person must decide this change before it is made");
+
+    // A change the rules deny: the refusal shows at the profile, as a
+    // sentence, and the profile stays one the person can pick.
+    family.setProfileChange("operator", "deny");
+    fireEvent.click(within(edit).getByTestId("identity-profile:operator"));
+    const refused = await find(view, "identity-field-error:profile");
+    expect(refused.textContent).toMatch(/\S/);
+    expect(refused.textContent).not.toContain("change_denied");
+    expect(present(view, "identity-profile-plan")).toBe(false);
+    expect((within(edit).getByTestId("identity-profile:operator") as HTMLInputElement).disabled).toBe(false);
+
+    // Back on the agent's own profile nothing is asked and nothing is said.
+    fireEvent.click(within(edit).getByTestId("identity-profile:worker"));
+    await gone(view, "identity-field-error:profile");
+    expect(present(view, "identity-profile-plan")).toBe(false);
+    expect(calls(family, "meta/identity/plan")).toHaveLength(3);
+
+    // A plan writes nothing and holds nothing: the change is the Save, a
+    // request of its own, which the gateway holds as it said it would.
+    fireEvent.click(within(edit).getByTestId("identity-profile:reviewer"));
+    await waitFor(() => expect(view.getByTestId("identity-profile-plan").getAttribute("data-plan")).toBe("require_approval"), { timeout: 5_000 });
+    expect(family.agents.get("warden").profile).toBe("worker");
+    expect(family.decisionStatuses()).toEqual([]);
+    fireEvent.submit(edit);
+    const notice = await find(view, "identity-notice");
+    expect(notice.querySelector("[data-outcome='pending_decision']")).not.toBeNull();
+    const updates = calls(family, "meta/identity/update");
+    expect(updates).toEqual([{
+      request_id: expect.stringMatching(/\S/),
+      name: "warden",
+      expected_spec_digest: digest,
+      set: { profile: "reviewer" },
+    }]);
+    expect(calls(family, "meta/identity/plan").map((params) => params.request_id)).not.toContain(updates[0].request_id);
+    view.unmount();
+  }, 60_000);
+
   it("an_agents_details_offer_the_same_changes_and_read_its_record_again", async () => {
     const family = createScriptedIdentityFamily();
     seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });

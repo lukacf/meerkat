@@ -579,6 +579,7 @@ test("stock and shared-core command surfaces carry the changes of long-term agen
     [CONSOLE_COMMAND_NAMES.listAgentRecords, "meta/identity/list"],
     [CONSOLE_COMMAND_NAMES.getAgentChange, "meta/identity/operation"],
     [CONSOLE_COMMAND_NAMES.listAgentDirectory, "meta/identity/directory"],
+    [CONSOLE_COMMAND_NAMES.planAgentChange, "meta/identity/plan"],
   ] as const;
   for (const [command, method] of commands) {
     assert.equal(consoleCommandMethod(command), method);

@@ -155,6 +155,37 @@ describe("the console's changes of long-term agents", () => {
     expect((result as { refusal: { origin?: string } }).refusal.origin).toBeUndefined();
   });
 
+  it("asks the gateway what a change would get, under a request id of its own, and takes only its judgment as one", async () => {
+    const { family, onChanged, hook } = setup();
+    const api = () => hook.result.current!;
+    const digest = family.handle("meta/identity/get", { name: "warden" }).result.spec_digest;
+    const request = (profile: string) => ({ name: "warden", expected_spec_digest: digest, set: { profile } });
+    let result: unknown;
+    await act(async () => { result = await api().plan("update", request("operator")); });
+    expect(result).toEqual({ kind: "plan", plan: { outcome: "allow" } });
+    family.setProfileChange("reviewer", "deny");
+    await act(async () => { result = await api().plan("update", request("reviewer")); });
+    expect(result).toMatchObject({ kind: "refused", refusal: { kind: "change_denied", field: "set.profile" } });
+    // A plan that was refused as a read, lost or unreadable says nothing
+    // about the change: the gateway judges it when it is sent.
+    for (const script of [
+      { error: { code: -32030, message: "access denied", data: { kind: "access_denied", action: "agent.view" } } },
+      { fail: "before" },
+    ]) {
+      family.scriptNext("meta/identity/plan", script);
+      await act(async () => { result = await api().plan("update", request("operator")); });
+      expect(result).toEqual({ kind: "unknown" });
+    }
+    const plans = family.calls.filter((call: { method: string }) => call.method === "meta/identity/plan").map((call: { params: Record<string, unknown> }) => call.params);
+    expect(plans[0]).toEqual({ change: "update", request_id: expect.stringMatching(/\S/), ...request("operator") });
+    // Each question is a request of its own.
+    expect(new Set(plans.map((params: Record<string, unknown>) => params.request_id)).size).toBe(plans.length);
+    // Nothing changed, so nothing is read again and nothing waits.
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(api().pending).toEqual([]);
+    expect(family.agents.get("warden").profile).toBe("worker");
+  });
+
   it("reads every page of the directory and of the archived agents", async () => {
     const family = createScriptedIdentityFamily({ pageSize: 1 });
     family.seed({ name: "oldhand", archived: true });

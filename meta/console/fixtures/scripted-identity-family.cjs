@@ -74,6 +74,11 @@ function createScriptedIdentityFamily(options = {}) {
     { profile: "operator", verdict: "not_allowed", reason: "The host's rules keep operators to its configuration." },
   ];
   const agents = new Map();
+  // What the host's rules give a change of an agent's profile to one
+  // profile (`allow`, `require_approval`, `deny`), and what the directory
+  // says of naming one agent as a peer. Absent means allowed.
+  const profileChanges = new Map();
+  const peerVerdicts = new Map();
   const tombstones = new Set();
   const operations = new Map();
   const held = new Map();
@@ -221,14 +226,20 @@ function createScriptedIdentityFamily(options = {}) {
     return { agents: commit(false) };
   }
 
-  function update(params) {
+  // What the host's rules give a change of an agent's profile, checked
+  // before anything is written: a refusal, or what the rules give it
+  // (`allow`, or `require_approval`). The rules of a profile change are
+  // their own, not a create's: the script's answer per profile, `allow`
+  // where it has none.
+  function judgeUpdate(params) {
     const found = target(params);
     if (found.refused) return found;
-    const agent = found.agent;
     const set = params.set || {};
     if (set.profile !== undefined && !profiles.some(entry => entry.profile === set.profile)) {
       return { refused: refusal("profile_unknown", "set.profile", { profile: set.profile }) };
     }
+    const rule = set.profile !== undefined ? profileChanges.get(set.profile) || "allow" : "allow";
+    if (rule === "deny") return { refused: refusal("change_denied", "set.profile", { change: "profile" }) };
     for (const [index, peer] of (params.peers_add || []).entries()) {
       if (!agents.has(peer)) return { refused: refusal("peer_unknown", `peers_add[${index}]`) };
     }
@@ -237,23 +248,63 @@ function createScriptedIdentityFamily(options = {}) {
         return { refused: refusal("invalid_request", "set.labels_remove", { problem: "conflicting" }, "A label is both set and removed.") };
       }
     }
-    const before = stable(agent.instructions);
-    if (set.display_name !== undefined) agent.display_name = set.display_name;
-    if (set.instructions !== undefined) agent.instructions = set.instructions;
-    if (set.context !== undefined) agent.context = set.context;
-    if (set.labels !== undefined) agent.labels = { ...agent.labels, ...set.labels };
-    for (const key of set.labels_remove || []) delete agent.labels[key];
-    if (set.profile !== undefined) agent.profile = set.profile;
-    agent.peers = [...agent.peers.filter(peer => !(params.peers_remove || []).includes(peer)), ...(params.peers_add || []).filter(peer => !agent.peers.includes(peer))];
-    agent.spec_revision += 1;
-    // What became of an instructions change: the script's answer for this
-    // agent, the next run by default, `unchanged` for the same text.
-    const instructions = set.instructions === undefined
-      ? undefined
-      : before === stable(agent.instructions)
-        ? { kind: "unchanged" }
-        : (agent.instruction_outcome || { kind: "applies_at_next_run" });
-    return { agents: [outcomeOf(agent, "committed", instructions ? { instructions } : {})] };
+    return { agent: found.agent, rule };
+  }
+
+  function update(params) {
+    const judged = judgeUpdate(params);
+    if (judged.refused) return judged;
+    const agent = judged.agent;
+    const set = params.set || {};
+    const apply = () => {
+      const before = stable(agent.instructions);
+      if (set.display_name !== undefined) agent.display_name = set.display_name;
+      if (set.instructions !== undefined) agent.instructions = set.instructions;
+      if (set.context !== undefined) agent.context = set.context;
+      if (set.labels !== undefined) agent.labels = { ...agent.labels, ...set.labels };
+      for (const key of set.labels_remove || []) delete agent.labels[key];
+      if (set.profile !== undefined) agent.profile = set.profile;
+      agent.peers = [...agent.peers.filter(peer => !(params.peers_remove || []).includes(peer)), ...(params.peers_add || []).filter(peer => !agent.peers.includes(peer))];
+      agent.spec_revision += 1;
+      // What became of an instructions change: the script's answer for this
+      // agent, the next run by default, `unchanged` for the same text.
+      const instructions = set.instructions === undefined
+        ? undefined
+        : before === stable(agent.instructions)
+          ? { kind: "unchanged" }
+          : (agent.instruction_outcome || { kind: "applies_at_next_run" });
+      return [outcomeOf(agent, "committed", instructions ? { instructions } : {})];
+    };
+    return judged.rule === "require_approval" ? { hold: apply } : { agents: apply() };
+  }
+
+  // `meta/identity/plan`: the outcome a change would get. Nothing is held
+  // and nothing is written. The script plans updates, the one change the
+  // console asks a plan of.
+  function plan(params) {
+    const { change: planned, request_id: requestId, ...body } = params;
+    if (typeof requestId !== "string" || !requestId) {
+      return { error: refusal("invalid_request", "request_id", { problem: "empty" },
+        "A change names its operation: send a request_id, and the same one again to read the change's result.") };
+    }
+    if (planned !== "update") {
+      return { error: refusal("invalid_request", "change", { problem: "malformed" },
+        "Name the change to plan: change is create, update, archive, unarchive, remove or adopt, beside that change's own params.") };
+    }
+    const judged = judgeUpdate(body);
+    if (judged.refused) return { error: judged.refused };
+    const rendering = `Update ${judged.agent.name}`;
+    return {
+      result: {
+        outcome: judged.rule,
+        change: body.set && body.set.profile !== undefined ? "profile" : "descriptive",
+        ...(judged.rule === "require_approval" ? { approver_id: "owner" } : {}),
+        timeout_ms: 3_600_000,
+        request_digest: sha256(stable(body)),
+        subject_digest: sha256(rendering),
+        rendering,
+      },
+    };
   }
 
   function whole(params, change) {
@@ -369,11 +420,13 @@ function createScriptedIdentityFamily(options = {}) {
             name: agent.name,
             ...(agent.display_name ? { display_name: agent.display_name } : {}),
             profile: agent.profile,
-            verdict: "allowed",
+            ...(peerVerdicts.get(agent.name) || { verdict: "allowed" }),
           }));
         const { shown, next } = page(peers, params.after, "name");
         return { result: { profiles: params.after ? [] : profiles, peers: shown, ...(next ? { next } : {}) } };
       }
+      case "meta/identity/plan":
+        return plan(params);
       default:
         return null;
     }
@@ -388,11 +441,17 @@ function createScriptedIdentityFamily(options = {}) {
     methods: [
       "meta/identity/create", "meta/identity/update", "meta/identity/archive", "meta/identity/unarchive",
       "meta/identity/remove", "meta/identity/withdraw", "meta/identity/operation", "meta/identity/get",
-      "meta/identity/list", "meta/identity/directory",
+      "meta/identity/list", "meta/identity/directory", "meta/identity/plan",
     ],
     seed,
     /** Set one agent's two affordances as the experience read carries them. */
     setAffordances(name, value) { affordances.set(name, value); },
+    /** What the host's rules give a change of an agent's profile to
+     * `profile`: `allow`, `require_approval` or `deny`. */
+    setProfileChange(profile, rule) { profileChanges.set(profile, rule); },
+    /** What the directory says of naming `name` as a peer: `{verdict,
+     * reason?, lines?}`. */
+    setPeerVerdict(name, verdict) { peerVerdicts.set(name, verdict); },
     /** What became of the next instructions change of `name`. */
     setInstructionOutcome(name, outcome) { agents.get(name).instruction_outcome = outcome; },
     /**

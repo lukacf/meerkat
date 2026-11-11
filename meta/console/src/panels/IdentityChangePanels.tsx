@@ -10,6 +10,7 @@ import {
   createAgentsRequest,
   editDraftOf,
   outcomeWords,
+  planWords,
   refusalFormField,
   refusalSentence,
   requestIdFor,
@@ -27,7 +28,7 @@ import {
   type NewAgentDraft,
   type RequestIdSlot,
 } from "../lib/identity-changes";
-import type { IdentityChangeResult, IdentityChangesApi, IdentityDirectory } from "../lib/use-identity-changes";
+import type { IdentityChangeResult, IdentityChangesApi, IdentityDirectory, IdentityPlanResult } from "../lib/use-identity-changes";
 import { errorMessage } from "../lib/errors";
 import { principalName } from "./decision-cards";
 import {
@@ -101,19 +102,25 @@ function Verdict({ entry }: { entry: DirectoryVerdict }) {
   );
 }
 
-/** The profiles of the directory, one to pick, each with its verdict. */
+/** The profiles of the directory, one to pick. With `verdicts` each shows
+ * what the host's rules give a new agent of it, and one they do not allow
+ * cannot be picked. Without, every profile can be picked and none carries a
+ * verdict: the directory's verdicts are a create's, not those of another
+ * change. */
 function ProfilePicker({
   directory,
   value,
   onChange,
   describedBy,
   invalid,
+  verdicts = true,
 }: {
   directory: IdentityDirectory;
   value: string;
   onChange: (profile: string) => void;
   describedBy?: string;
   invalid: boolean;
+  verdicts?: boolean;
 }) {
   const name = React.useId();
   // A profile the record names that the directory does not list stays
@@ -124,20 +131,20 @@ function ProfilePicker({
   return (
     <div className="identity-form__options" role="radiogroup" aria-label="Profile" aria-describedby={describedBy} aria-invalid={invalid || undefined} data-testid="identity-field:profile">
       {listed.map((entry) => {
-        const words = verdictWords(entry);
+        const pickable = !verdicts || verdictWords(entry).pickable;
         return (
-          <label key={entry.profile} className={cx("identity-form__option", !words.pickable && "is-refused")}>
+          <label key={entry.profile} className={cx("identity-form__option", !pickable && "is-refused")}>
             <input
               type="radio"
               name={name}
               value={entry.profile}
               checked={value === entry.profile}
-              disabled={!words.pickable}
+              disabled={!pickable}
               onChange={() => onChange(entry.profile)}
               data-testid={`identity-profile:${entry.profile}`}
             />
             <span className="identity-form__option-name">{humanizeEnum(entry.profile)}</span>
-            {entry.verdict ? <Verdict entry={entry} /> : null}
+            {verdicts && entry.verdict ? <Verdict entry={entry} /> : null}
           </label>
         );
       })}
@@ -500,6 +507,30 @@ export function NewAgentForm({ api, onClose }: { api: IdentityChangesApi; onClos
 }
 
 /**
+ * What the gateway says a change of the agent's profile to `profile` would
+ * get. Asked whenever the form names another profile than the record's, of
+ * this agent at the spec the form was opened on; null while the profile is
+ * the record's own and until the answer is in.
+ */
+function useProfilePlan(api: IdentityChangesApi, record: AgentRecord | null, profile: string): IdentityPlanResult | null {
+  const [answer, setAnswer] = React.useState<{ key: string; result: IdentityPlanResult } | null>(null);
+  const plan = React.useRef(api.plan);
+  plan.current = api.plan;
+  const name = record?.name ?? "";
+  const digest = record?.specDigest ?? "";
+  const key = record && profile && profile !== record.profile ? `${name}\n${digest}\n${profile}` : "";
+  React.useEffect(() => {
+    if (!key) return undefined;
+    let active = true;
+    void plan.current("update", { name, expected_spec_digest: digest, set: { profile } }).then((result) => {
+      if (active) setAnswer({ key, result });
+    });
+    return () => { active = false; };
+  }, [key, name, digest, profile]);
+  return answer && answer.key === key ? answer.result : null;
+}
+
+/**
  * Edit one agent: its display name, instructions, context, labels, profile
  * and peers, against the record read when the form opened. Only what the
  * form changed is sent, at that record's spec digest.
@@ -572,6 +603,11 @@ export function EditAgentForm({
   const open = keepsForm(sender.result);
   const ready = record && draft && directory;
   const failed = loadError || directoryError;
+  // A profile change is its own change under its own rules: the gateway
+  // says what it would get, and a refusal of it shows at the profile.
+  const profilePlan = useProfilePlan(api, record, draft?.profile ?? "");
+  const planned = profilePlan?.kind === "plan" ? planWords(profilePlan.plan) : null;
+  const profileError = errors.profile ?? (profilePlan?.kind === "refused" ? refusalSentence(profilePlan.refusal) : undefined);
   return (
     <form
       className="identity-form"
@@ -626,8 +662,18 @@ export function EditAgentForm({
                 </>
               )}
             </Field>
-            <Field field="profile" label="Profile" hint="A new profile moves the agent to that profile's model and tools, on the same conversation." error={errors.profile}>
-              {(ids) => <ProfilePicker directory={directory} value={draft.profile} onChange={(profile) => set("profile", "profile", profile)} {...ids} />}
+            <Field field="profile" label="Profile" hint="A new profile moves the agent to that profile's model and tools, on the same conversation." error={profileError}>
+              {(ids) => (
+                <>
+                  <ProfilePicker directory={directory} value={draft.profile} onChange={(profile) => set("profile", "profile", profile)} verdicts={false} {...ids} />
+                  {planned && profilePlan?.kind === "plan" ? (
+                    <span className="identity-form__plan" role="status" data-testid="identity-profile-plan" data-plan={profilePlan.plan.outcome}>
+                      <StatusPill tone={VERDICT_TONE[planned.tone]} variant="quiet">{planned.label}</StatusPill>
+                      <span>{planned.line}</span>
+                    </span>
+                  ) : null}
+                </>
+              )}
             </Field>
             <Field field="peers" label="Peers" hint="The agents it can message." error={errors.peers}>
               {(ids) => <PeerPicker directory={directory} value={draft.peers} exclude={name} onChange={(peers) => set("peers", "peers", peers)} describedBy={ids.describedBy} />}

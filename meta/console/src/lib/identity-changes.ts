@@ -379,6 +379,37 @@ export function parseIdentityOutcome(value: unknown): IdentityOutcome | null {
   }
 }
 
+/** What the gateway says a change would get (`meta/identity/plan`): the
+ * outcome its host's rules give it. Nothing is held and nothing is written
+ * by asking. */
+export interface ChangePlan {
+  /** `allow`, `notify` or `require_approval`. Advisory: another value is
+   * kept as it is. */
+  outcome: string;
+}
+
+/** The answer of `meta/identity/plan`; null when it is no plan. */
+export function parseChangePlan(value: unknown): ChangePlan | null {
+  const outcome = textOf(rawOf(value)?.outcome);
+  return outcome ? { outcome } : null;
+}
+
+/** A plan in words, for the field of the form whose change was planned.
+ * Null for an outcome this console has no words for: it then says nothing,
+ * and the gateway judges the change when it is sent. */
+export function planWords(plan: ChangePlan): { tone: NoticeTone; label: string; line: string } | null {
+  switch (plan.outcome) {
+    case "allow":
+    // A change its host is told about is made like an allowed one.
+    case "notify":
+      return { tone: "ok", label: "Allowed", line: "The host's rules allow this change." };
+    case "require_approval":
+      return { tone: "warn", label: "Needs a decision", line: "A person must decide this change before it is made." };
+    default:
+      return null;
+  }
+}
+
 /** The refusal an error of the console transport carries: the family's one
  * JSON-RPC error. Null for any other failure. */
 export function identityRefusalOf(error: unknown): IdentityRefusal | null {

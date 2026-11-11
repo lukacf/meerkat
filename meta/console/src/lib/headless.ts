@@ -189,6 +189,7 @@ export const CONSOLE_COMMAND_NAMES = {
   listAgentRecords: "listAgentRecords",
   getAgentChange: "getAgentChange",
   listAgentDirectory: "listAgentDirectory",
+  planAgentChange: "planAgentChange",
 } as const;
 
 export type ConsoleCommandName = typeof CONSOLE_COMMAND_NAMES[keyof typeof CONSOLE_COMMAND_NAMES];
@@ -505,6 +506,7 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   [CONSOLE_COMMAND_NAMES.listAgentRecords]: { method: CONSOLE_RPC_METHODS.identityList, targetKinds: IDENTITY_CHANGE_TARGETS },
   [CONSOLE_COMMAND_NAMES.getAgentChange]: { method: CONSOLE_RPC_METHODS.identityOperation, targetKinds: IDENTITY_CHANGE_TARGETS },
   [CONSOLE_COMMAND_NAMES.listAgentDirectory]: { method: CONSOLE_RPC_METHODS.identityDirectory, targetKinds: IDENTITY_CHANGE_TARGETS },
+  [CONSOLE_COMMAND_NAMES.planAgentChange]: { method: CONSOLE_RPC_METHODS.identityPlan, targetKinds: IDENTITY_CHANGE_TARGETS },
 };
 
 /// The RPC method a console command dispatches to. Client-local frames

@@ -9,13 +9,16 @@ import { createConsoleId } from "./id";
 import {
   agentRefRequest,
   answeredRefusalOf,
+  identityRefusalOf,
   parseAgentPage,
   parseAgentRecord,
+  parseChangePlan,
   parseIdentityDirectory,
   parseIdentityOutcome,
   readAllPages,
   type AgentRecord,
   type AgentSummary,
+  type ChangePlan,
   type DirectoryPeer,
   type DirectoryProfile,
   type IdentityChangeFlags,
@@ -36,7 +39,8 @@ export type IdentityCommand =
   | "getAgentRecord"
   | "listAgentRecords"
   | "getAgentChange"
-  | "listAgentDirectory";
+  | "listAgentDirectory"
+  | "planAgentChange";
 
 /** Runs one command of the family and answers its result; a refusal is the
  * transport's error with the family's JSON-RPC error on it. */
@@ -57,6 +61,16 @@ export type IdentityChangeResult =
   /** No answer the console can read: the change may or may not have been
    * made. Sending the same request again under the same id is safe. */
   | { kind: "failed"; message: string };
+
+/** What asking the gateway about a change came to. */
+export type IdentityPlanResult =
+  | { kind: "plan"; plan: ChangePlan }
+  /** The gateway refuses the change as planned. */
+  | { kind: "refused"; refusal: IdentityRefusal }
+  /** The gateway said nothing the console can use: no answer came, it
+   * could not be read, or the gateway plans no change for the console. The
+   * change is judged when it is sent. */
+  | { kind: "unknown" };
 
 /** A request of this page that waits for a person's decision. */
 export interface PendingIdentityRequest {
@@ -92,6 +106,10 @@ export interface IdentityChangesApi {
    * the agent as people know it, kept with a request that waits for a
    * decision. */
   change(change: IdentityChangeKind, request: Record<string, unknown>, requestId: string, name: string): Promise<IdentityChangeResult>;
+  /** Ask the gateway what `request` as the change `change` would get.
+   * Nothing is held and nothing is written, and the question has a request
+   * id of its own: the change, when it is sent, is another request. */
+  plan(change: IdentityChangeKind, request: Record<string, unknown>): Promise<IdentityPlanResult>;
   /** Archive, unarchive or remove the agent `name`: reads its record for
    * the spec digest, then sends the change. */
   changeWhole(change: "archive" | "unarchive" | "remove", name: string, requestId: string, displayName: string): Promise<IdentityChangeResult>;
@@ -197,6 +215,20 @@ export function useIdentityChanges({
         return agents.filter((agent) => agent.archived);
       },
       change,
+      plan: async (kind, request): Promise<IdentityPlanResult> => {
+        let answer: unknown;
+        try {
+          answer = await runRef.current("planAgentChange", { ...request, change: kind, request_id: createConsoleId("agent-plan") });
+        } catch (error) {
+          // Only the family's own refusal is the gateway's judgment of the
+          // change. A plan that was not answered, not asked or refused as a
+          // read says nothing about it.
+          const refusal = identityRefusalOf(error);
+          return refusal ? { kind: "refused", refusal } : { kind: "unknown" };
+        }
+        const plan = parseChangePlan(answer);
+        return plan ? { kind: "plan", plan } : { kind: "unknown" };
+      },
       changeWhole: async (kind, name, requestId, displayName): Promise<IdentityChangeResult> => {
         let record: AgentRecord;
         try {

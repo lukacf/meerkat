@@ -303,6 +303,14 @@ export interface IdentityRefusal {
   detail: string;
   /** The kind's own members (`current_digest`, `by`, `profile`, ...). */
   data: Raw;
+  /**
+   * Absent for the family's own refusal. `gateway`: another answer of the
+   * gateway that refuses the call (access denied, a read-only console, a
+   * candidate launch, any other error it answered). `console`: the console
+   * itself sent nothing (the gateway does not offer the method, or the
+   * console does not know whom it acts for).
+   */
+  origin?: "gateway" | "console";
 }
 
 function refusalOf(data: unknown, message?: unknown): IdentityRefusal | null {
@@ -377,6 +385,38 @@ export function identityRefusalOf(error: unknown): IdentityRefusal | null {
   const rpc = (error as { rpcError?: { code?: unknown; message?: unknown; data?: unknown } } | null)?.rpcError;
   if (rpc?.code !== IDENTITY_REFUSED_CODE) return null;
   return refusalOf(rpc.data, rpc.message);
+}
+
+/**
+ * What a failed call was, when it was an answer: the family's refusal, any
+ * other error the gateway answered (the call was refused and nothing was
+ * made), or the console's own refusal to send (the gateway does not offer
+ * the method; the console does not know whom it acts for). Null only when
+ * no answer came: a timeout, a lost connection, an answer that cannot be
+ * read. Only then may the change have been made.
+ */
+export function answeredRefusalOf(error: unknown): IdentityRefusal | null {
+  const own = identityRefusalOf(error);
+  if (own) return own;
+  const failure = error as {
+    rpcError?: { message?: unknown; data?: unknown };
+    responseRpcError?: { message?: unknown; data?: unknown };
+    kind?: unknown;
+    transportFailure?: unknown;
+    message?: unknown;
+  } | null;
+  const rpc = failure?.rpcError ?? failure?.responseRpcError;
+  if (rpc) {
+    const data = rawOf(rpc.data) ?? {};
+    return { kind: textOf(data.kind) ?? "", retryable: false, detail: textOf(rpc.message)?.trim() ?? "", data, origin: "gateway" };
+  }
+  if (failure?.kind === "console-capability-unavailable") {
+    return { kind: "not_offered", retryable: false, detail: "", data: {}, origin: "console" };
+  }
+  if (failure?.transportFailure === "caller_unknown") {
+    return { kind: "caller_unknown", retryable: false, detail: textOf(failure.message) ?? "", data: {}, origin: "console" };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

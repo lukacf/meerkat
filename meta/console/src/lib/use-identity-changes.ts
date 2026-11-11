@@ -8,7 +8,7 @@ import React from "react";
 import { createConsoleId } from "./id";
 import {
   agentRefRequest,
-  identityRefusalOf,
+  answeredRefusalOf,
   parseAgentPage,
   parseAgentRecord,
   parseIdentityDirectory,
@@ -104,8 +104,10 @@ export interface IdentityChangesApi {
   refreshPending(): Promise<void>;
 }
 
+/** A failed call as a result: a refusal when the call was answered (or
+ * never sent), "no answer" only when none came. */
 function failure(error: unknown): IdentityChangeResult {
-  const refusal = identityRefusalOf(error);
+  const refusal = answeredRefusalOf(error);
   return refusal ? { kind: "refused", refusal } : { kind: "failed", message: errorMessage(error) };
 }
 

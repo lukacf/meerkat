@@ -441,6 +441,9 @@ function createScriptedIdentityFamily(options = {}) {
       const index = scripted.findIndex(entry => entry.method === method);
       const script = index >= 0 ? scripted.splice(index, 1)[0].script : null;
       if (script?.fail === "before") return { lost: true };
+      // Another answer of the gateway than the family's own refusal (access
+      // denied, a read-only console, a candidate launch): given whole.
+      if (script?.error) return { error: script.error };
       if (script?.refuse) {
         const { kind, field, detail, ...members } = script.refuse;
         const data = refusal(kind, field, members, detail);

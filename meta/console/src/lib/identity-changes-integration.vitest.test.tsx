@@ -121,6 +121,12 @@ function setField(scope: HTMLElement, testId: string, value: string): void {
   fireEvent.change(within(scope).getByTestId(testId), { target: { value } });
 }
 
+/** Show the roster's archived agents, where it keeps them behind a control. */
+async function openArchived(view: View): Promise<void> {
+  const open = view.queryByTestId("roster-archived-open");
+  if (open) fireEvent.click(open);
+}
+
 /** Open New agent and wait for the team's profiles. */
 async function openNewAgent(view: View): Promise<HTMLElement> {
   fireEvent.click(await find(view, "roster-new-agent"));
@@ -712,6 +718,32 @@ describe("long-term agents in the console", () => {
     expect(calls(family, "meta/identity/remove")).toEqual([]);
     expect(family.agents.has("courier")).toBe(true);
     expect(family.agents.has("warden")).toBe(true);
+    view.unmount();
+  }, 60_000);
+
+  it("an_answer_that_refuses_is_shown_as_a_refusal_never_as_no_answer", async () => {
+    // An archived agent's Unarchive is offered by the section's flag; the
+    // gateway judges the agent when the change is sent, and may say no.
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "oldhand", display_name: "Old hand", archived: true });
+    const { view } = await openRoster(family);
+    await openArchived(view);
+    fireEvent.click(await find(view, "roster-archived-action:oldhand:unarchive"));
+    const confirm = await find(view, "identity-confirm:oldhand:unarchive");
+    family.scriptNext("meta/identity/unarchive", {
+      error: { code: -32030, message: "access denied", data: { kind: "access_denied", action: "agent.identity.manage" } },
+    });
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    const notice = await find(view, "identity-notice");
+    // A definite refusal: nothing was made, nothing is offered again, and
+    // the notice does not say the change may have been made.
+    expect(notice.querySelector("[data-outcome='refused']")).not.toBeNull();
+    expect(notice.getAttribute("role")).toBe("alert");
+    expect(notice.textContent).not.toContain("may or may not");
+    expect(notice.textContent).not.toContain("no answer");
+    expect(within(notice).queryByTestId("identity-retry")).toBeNull();
+    expect(notice.textContent).toContain("access denied");
+    expect(family.agents.get("oldhand").archived).toBe(true);
     view.unmount();
   }, 60_000);
 

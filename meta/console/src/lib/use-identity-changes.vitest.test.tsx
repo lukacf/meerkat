@@ -125,6 +125,36 @@ describe("the console's changes of long-term agents", () => {
     expect(onChanged).toHaveBeenCalledTimes(2);
   });
 
+  it("reads every answer of the gateway as an answer: only a lost one is no answer", async () => {
+    const { family, onChanged, hook } = setup();
+    const api = () => hook.result.current!;
+    let result: unknown;
+    // The gateway's other refusals are answers too: nothing was made, and
+    // nothing is read again.
+    for (const error of [
+      { code: -32030, message: "access denied", data: { kind: "access_denied", action: "agent.identity.manage" } },
+      { code: -32010, message: "console is read-only", data: { kind: "read_only" } },
+      { code: -32047, message: "a candidate launch changes nothing", data: { kind: "candidate_launch" } },
+      { code: -32000, message: "internal error" },
+    ]) {
+      family.scriptNext("meta/identity/create", { error });
+      await act(async () => {
+        result = await api().change("create", { agents: [{ name: "scout", profile: "worker" }] }, `r-${error.code}`, "scout");
+      });
+      expect(result).toMatchObject({
+        kind: "refused",
+        refusal: { kind: error.data?.kind ?? "", retryable: false, detail: error.message, origin: "gateway" },
+      });
+    }
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(family.agents.has("scout")).toBe(false);
+    // The family's own refusal carries no such mark.
+    await act(async () => {
+      result = await api().change("create", { agents: [{ name: "warden", profile: "worker" }] }, "r-own", "warden");
+    });
+    expect((result as { refusal: { origin?: string } }).refusal.origin).toBeUndefined();
+  });
+
   it("reads every page of the directory and of the archived agents", async () => {
     const family = createScriptedIdentityFamily({ pageSize: 1 });
     family.seed({ name: "oldhand", archived: true });

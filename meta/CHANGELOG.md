@@ -19,6 +19,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
+- Behaviour of `identity_creation::render_v1`: the rendering of an update and
+  of a removal no longer has the line `Expected spec digest`, so the subject
+  digest of such a request differs from the one 0.9.13 computed for it. No
+  rendering shows that digest; the request digest still covers it. Nothing
+  stored a rendering before this release.
+- Behaviour of `identity_creation::normalize_create`, `normalize_update` and
+  `normalize_remove`: a refusal's `field` is a path into the request as every
+  surface writes it. `identities[i].spec.identity` is `agents[i].name`,
+  `identities[i].spec.<member>` is `agents[i].<member>`,
+  `identities[i].peers[j]` is `agents[i].peers[j]`, `identities` is `agents`,
+  `identity` is `name`, `set.descriptive_labels` and `set.authority_fields`
+  are `set.labels`, and `set.peers_add[j]` is `peers_add[j]`.
+
+### Added
+
+- Rust API of `meerkat-meta`, `identity_creation`: the interface of the
+  identity family, with nothing reachable by a caller of the gateways yet.
+  - The family and its wire types: the trait `IdentityFamily` and the
+    requests every surface writes (`CreateAgents`, `AgentSpec`,
+    `UpdateAgent`, `AgentSet`, `AgentRef`, `OperationRef`, `ListAgents`,
+    `GetAgent`, `ReadDirectory`, `ChangesHoldRequest`), with their answers
+    (`AgentPage`, `AgentSummary`, `AgentRecord`, `DirectoryPage`,
+    `ChangePlan` and the types they hold).
+  - The typed outcome `IdentityOutcome` (`done`, `pending_decision`,
+    `pending_preparation`, `refused`), with `AgentOutcome`, `AgentSeat`,
+    `AgentChangeState`, `InstructionOutcome` and
+    `InstructionNextSessionReason`.
+  - `OperationId`, the one way a caller's request id becomes an operation
+    id, namespaced by the requester, and `ToolCallOrigin` for a tool call
+    that gives none.
+  - The executor seam: `IdentityChangeExecutor`, `CoreChangeExecutor`,
+    `ChangeCommit`, `ChangeCommitted`, `ChangeRequester`, `ChangeConsent`,
+    `ExecutorError`, `InstructionStep`, `committed_outcome`,
+    `refusal_of_core`, `refusal_of_error`. It commits a create, an archive,
+    an unarchive and a removal through Core; an update and an adoption
+    answer `unsupported`.
+  - Request actions and normalization for an archive, an unarchive and an
+    adoption (`ArchiveIdentitySpec`, `UnarchiveIdentitySpec`,
+    `AdoptIdentitySpec`, `normalize_archive`, `normalize_unarchive`,
+    `normalize_adopt`), and ten refusal kinds: `privileged_field`,
+    `grant_revoked`, `private_requester`, `owner_read_only`,
+    `not_adoptable`, `not_archived`, `declared_apply_open`, `purge_refused`,
+    `mob_not_running`, `purged`. A refusal carries a detail sentence
+    (`IdentityRefusal::detail`, `to_refused`).
+- Rust API of `meerkat-meta`: `IdentityRecordFacts`, the record facts of an
+  identity's status (spec digest and revision, archived, preparation
+  pending, provenance, open operations), each absent on the wire while
+  unset. Nothing sets them yet.
 
 ### Changed
 
@@ -27,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
   default). A launch that names them was refused at init before. Nothing
   acts on the policy yet.
+- `identity_creation::normalize_create` refuses a name in a reserved
+  namespace `invalid_name` at the agent's `name`: a name that starts with
+  `mk--` (the encoded member-id namespace) or with `rt:` (the namespace of
+  generated runtime aliases). It admitted such names before.
+- `identity_creation::IdentityRefusalKind::AdmissionUnsettled` is retryable
+  (`is_retryable`), as Core's refusal of the same name is.
 
 ## [0.9.13] - 2026-11-11
 

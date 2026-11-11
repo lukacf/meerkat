@@ -197,19 +197,68 @@ fn turn_reasoning_effort_is_field_level_and_sticky() {
     assert_eq!(read.provider_params, Some(params(None, Some(High))));
 }
 
-/// The turn field decides over the nested key when it clears: the session
-/// ends with no level, and the turn's other params apply.
+/// A turn that clears the field while its new params name a level asks for
+/// two outcomes at once. It is refused like two different levels, whatever
+/// level the session holds and whatever level the params name, and nothing
+/// of the turn applies.
 #[test]
-fn a_cleared_turn_level_wins_over_the_nested_key() {
-    let nested = params(Some(0.7), Some(EffortLevel::Low));
+fn a_cleared_turn_level_with_a_nested_level_is_refused() {
+    use EffortLevel::{High, Low};
+    use TurnMetadataOverride::{Clear, Set};
+
+    for (current, nested_level) in [
+        (Some(params(None, Some(High))), Low),
+        // The nested level is the session's own.
+        (Some(params(Some(0.2), Some(High))), High),
+        // The session holds no level.
+        (None, Low),
+        // `none` is a level, not the absence of one.
+        (Some(params(None, Some(High))), EffortLevel::None),
+    ] {
+        let nested = params(Some(0.7), Some(nested_level));
+        let refused = turn(current.clone(), Some(Set(&nested)), Some(Clear))
+            .expect_err("a clear beside a nested level is refused");
+        assert!(
+            matches!(
+                &refused,
+                SessionLlmIdentityOverrideError::ReasoningEffortSpellingsDisagree {
+                    nested: named,
+                    ..
+                } if *named == nested_level
+            ),
+            "{current:?} / {nested_level:?}: {refused:?}"
+        );
+        let text = refused.to_string();
+        assert!(
+            text.contains("reasoning_effort is cleared")
+                && text.contains(&format!(
+                    "provider_params.reasoning_effort is '{}'",
+                    nested_level.as_wire_str()
+                )),
+            "{text}"
+        );
+    }
+
+    // A clear beside new params that name no level is still a clear, and so
+    // is a clear beside cleared params.
+    let replacement = params(Some(0.7), None);
     assert_eq!(
         turn(
-            Some(params(None, Some(EffortLevel::High))),
-            Some(TurnMetadataOverride::Set(&nested)),
-            Some(TurnMetadataOverride::Clear)
+            Some(params(None, Some(High))),
+            Some(Set(&replacement)),
+            Some(Clear)
         )
         .unwrap(),
         Some(params(Some(0.7), None))
+    );
+    assert_eq!(
+        turn(
+            Some(params(Some(0.2), Some(High))),
+            Some(Clear),
+            Some(Clear)
+        )
+        .unwrap(),
+        None
     );
 }
 

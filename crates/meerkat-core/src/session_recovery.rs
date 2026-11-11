@@ -1818,7 +1818,8 @@ mod tests {
         assert!(recovered.build.resume_override_mask.provider_params);
 
         // The nested key sets the level; equal spellings are accepted;
-        // different spellings are refused.
+        // different spellings are refused, and so is a clear beside a
+        // nested level.
         let recovered =
             recover(stored(), Some(Set(level_params(None, Some(Low)))), None).expect("recovered");
         assert_eq!(
@@ -1846,6 +1847,21 @@ mod tests {
                 &refused,
                 SurfaceSessionRecoveryError::InvalidOverride(message)
                     if message.contains("high") && message.contains("low")
+            ),
+            "{refused:?}"
+        );
+        // A clear beside a nested level is refused the same way.
+        let refused = recover(
+            stored(),
+            Some(Set(level_params(None, Some(Low)))),
+            Some(Clear),
+        )
+        .expect_err("a clear beside a nested level is refused");
+        assert!(
+            matches!(
+                &refused,
+                SurfaceSessionRecoveryError::InvalidOverride(message)
+                    if message.contains("cleared") && message.contains("low")
             ),
             "{refused:?}"
         );
@@ -2051,9 +2067,9 @@ mod tests {
             }
         }
         assert_eq!(cases, 120);
-        // Two nested levels, each against the one different turn level, for
-        // every stored value.
-        assert_eq!(refused, 10);
+        // Two nested levels, each against the one different turn level and
+        // against a clear, for every stored value.
+        assert_eq!(refused, 20);
         assert_eq!(merge_alone, 90);
     }
 }

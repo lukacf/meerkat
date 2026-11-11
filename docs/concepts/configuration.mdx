@@ -332,7 +332,8 @@ event re-arms the window, so long-but-alive responses are unaffected. Set
 (`"120s"`) for an explicit window for every model. Like `call_timeout`, an
 omitted value inherits from the model profile: a model whose provider
 documents responses that can stay silent for minutes has its own catalog
-window (`gemini-4-argon`: 900 s, `gpt-5.5-pro`: 7200 s), a self-hosted model
+window (`gemini-4-carbon` and `gemini-4-argon`: 900 s, `gpt-5.5-pro`:
+7200 s), a self-hosted model
 can declare one with `stream_inactivity_timeout_secs` (at least 60 seconds;
 config validation refuses a shorter one), and every other model uses the
 built-in 300 s. The window is resolved for each LLM call, so a model change or
@@ -832,6 +833,14 @@ A host that runs any launch kind as the trusted host claims none of this: its
 startup report says that a process the agent drives can still change the
 host's own inputs. `--confinement trusted-host` turns confinement off for the
 whole process, with no such guarantee.
+
+All of the above is about the processes an agent launches. The in-process
+file tools (`apply_patch`, `blob_save_file`) are not processes and are bound
+by a rule of their own, in every confinement mode and without confinement:
+they never write a `.rkat` directory at or below the project root, or any
+of the inputs and convention sources listed above that lie inside the project
+root. See
+[paths the file tools never write](/reference/builtin-tools#paths-the-file-tools-never-write).
 
 ### Administration
 

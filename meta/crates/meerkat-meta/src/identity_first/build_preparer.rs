@@ -11,7 +11,12 @@
 //!   customizer is prepared with the host's `customize_build`, run with the
 //!   identity runtime's real context; its tools are published into the
 //!   identity's stable customizer tool dispatcher, so the member is built
-//!   with them;
+//!   with them. A member of an identity created at runtime that Core wakes
+//!   or restores is registered from its row in the mob's identity store,
+//!   whether or not a roster pass or a door registered it yet, and is
+//!   prepared the same way; its build carries the stable dispatcher once the
+//!   identity was registered before Core built it (Meta's spawn customizer
+//!   attaches the dispatcher of a registered identity only);
 //! - before the identity runtime is composed (its roster registered, its
 //!   customizer and runtime services installed), an identity's member is
 //!   answered `HoldUntilReleased`: Core builds it and holds its run starts,
@@ -24,9 +29,11 @@
 //!
 //! A member that is not a Meta identity's (a helper, a fork, a member the
 //! host made on the mob under its own id) is prepared with nothing to
-//! publish. The preparation reads only through the request's read handle:
-//! it runs inside Core's wake and inside the boot restore, so it never
-//! issues a mob command.
+//! publish. The preparation reads through the request's read handle, and a
+//! created identity's row through the runtime's session bridge (the machine
+//! state the mob's actor published, and the identity store): it runs inside
+//! Core's wake and inside the boot restore, so it never issues a mob command
+//! and never waits on an identity's lifecycle lock.
 //!
 //! A runtime composed with `UnifiedRuntime::bootstrap` over a spec that
 //! declares its agent customizer (`MobBootstrapSpec::with_agent_customizer`)
@@ -218,9 +225,15 @@ impl IdentityBuildPreparer {
     }
 
     /// The Meta identity `request`'s member belongs to, if any: the
-    /// identity a registered roster identity's member id names, or the
+    /// identity a registered roster identity's member id names, the identity
+    /// created at runtime its member id names (registered now from its row
+    /// in the mob's identity store, whether or not a roster pass or a door
+    /// registered it yet, and prepared as a registered identity's), or the
     /// identity its runtime-authoritative label names. `Ok(None)` for every
-    /// other member.
+    /// other member. It runs inside Core's build of the member, so the
+    /// registration of a created identity never waits on its lifecycle lock
+    /// ([`IdentityRuntime::register_created_member_for_build`]); a row that
+    /// could not be read refuses the build, retryable.
     async fn identity_of(
         &self,
         request: &MemberBuildPreparation,
@@ -231,9 +244,17 @@ impl IdentityBuildPreparer {
                 AgentIdentity::parse(&crate::member_comms_id::durable_identity_for_roster_member(
                     request.agent_identity.as_str(),
                 ))
-            && runtime.contains(&identity).await
         {
-            return Ok(Some(identity));
+            if runtime.contains(&identity).await {
+                return Ok(Some(identity));
+            }
+            if runtime
+                .register_created_member_for_build(&identity)
+                .await
+                .map_err(|reason| MemberBuildPreparationRefusal::Retryable { reason })?
+            {
+                return Ok(Some(identity));
+            }
         }
         let entry = request
             .handle

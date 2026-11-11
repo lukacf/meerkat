@@ -606,7 +606,7 @@ async fn explicit_auth_retry_reprepares_and_refuses_after_revocation() {
     }
 }
 
-fn continuation_request() -> LlmRequest {
+fn continuation_request(response_id: &str) -> LlmRequest {
     LlmRequest::new(
         MODEL,
         vec![
@@ -615,7 +615,7 @@ fn continuation_request() -> LlmRequest {
                 vec![AssistantBlock::Text {
                     text: "old answer".to_owned(),
                     meta: Some(Box::new(ProviderMeta::OpenAiResponse {
-                        response_id: "resp_missing".to_owned(),
+                        response_id: response_id.to_owned(),
                     })),
                 }],
                 StopReason::EndTurn,
@@ -637,8 +637,25 @@ async fn continuation_fallback_gets_a_fresh_binding_and_cannot_bypass_revocation
             revoke.then(|| Arc::clone(&policy.allowed)),
         )
         .await;
+        // The stored answer is this session's own on the public API: the
+        // process received it there, so its response id may continue. Each
+        // case has a response of its own (the same response from two
+        // endpoints would belong to neither).
+        let stored = continuation_request(if revoke {
+            "resp_missing_revoked"
+        } else {
+            "resp_missing_allowed"
+        });
+        crate::client::record_received_for_test(
+            &meerkat_core::OpenAiContinuityLedger::process(),
+            &meerkat_core::OpenAiContinuityIssuer::at_base_url(
+                meerkat_core::OpenAiContinuityService::OpenAiApi,
+                &server.url,
+            ),
+            &stored.messages,
+        );
         let client = client(Route::Public, &server.url, Authorizer::new(false, None));
-        let request = request(client.as_ref(), Arc::clone(&policy), continuation_request());
+        let request = request(client.as_ref(), Arc::clone(&policy), stored);
         let events = collect(client.as_ref(), &request).await;
         assert_eq!(refused(&events), revoke);
         if !revoke {

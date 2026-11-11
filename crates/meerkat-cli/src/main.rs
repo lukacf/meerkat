@@ -5947,15 +5947,25 @@ pub(crate) fn with_cli_confinement(
             .and_then(meerkat::HostConfinement::credential_store_input),
     );
     confinement.admit_host_inputs(&inputs)?;
-    report_cli_confinement(
-        &confinement,
-        &inputs,
-        &meerkat::HostConfinement::convention_sources(
-            Some(scope.context_root.as_deref().unwrap_or(workspace_root)),
-            scope.user_config_root.as_deref(),
-        ),
+    let convention_sources = meerkat::HostConfinement::convention_sources(
+        Some(scope.context_root.as_deref().unwrap_or(workspace_root)),
+        scope.user_config_root.as_deref(),
     );
-    Ok(factory.with_host_confinement(&confinement))
+    report_cli_confinement(&confinement, &inputs, &convention_sources);
+    // The agent's in-process file tools never write these, in any
+    // confinement mode: the inputs and convention sources above, and the
+    // documents of the realm this scope names and of the realm the factory
+    // serves (its storage realm, when the two differ).
+    let mut realm_documents = meerkat::HostConfinement::realm_documents(
+        &meerkat_store::realm_paths_in(&scope.locator.state_root, scope.locator.realm.as_str())
+            .root,
+    );
+    if let Some(served) = factory.runtime_root.as_deref() {
+        realm_documents.extend(meerkat::HostConfinement::realm_documents(served));
+    }
+    Ok(factory
+        .with_host_confinement(&confinement)
+        .with_protected_host_inputs(&inputs, &realm_documents, &convention_sources))
 }
 
 /// The project root a CLI factory in `scope` works in: the context root,

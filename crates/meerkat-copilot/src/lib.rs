@@ -17,12 +17,13 @@ pub use protocol::{
     CopilotModelPolicyState, CopilotModelSnapshot, CopilotModelSupports, CopilotModelsEnvelope,
     CopilotProviderRoute, CopilotTokenEnvelope, DEFAULT_COPILOT_API_BASE,
     GITHUB_COPILOT_AUTHORIZER_LABEL, GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID, GitHubCopilotEndpoints,
-    PROVISIONAL_GITHUB_COPILOT_CLIENT_ID,
+    PROVISIONAL_GITHUB_COPILOT_CLIENT_ID, same_account_model_id,
 };
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 pub use runtime::{
     CopilotAuthorizer, CopilotChatCompletionsClientFactory, CopilotChatCompletionsClientSpec,
     CopilotModelAccess, CopilotResolvedAuth, CopilotRouteClientFactory, CopilotRouteResolution,
-    CopilotRuntime, capability_gated_client, routed_client, verify_operator_token,
+    CopilotRuntime, CopilotSeatedAccount, capability_gated_client, routed_client,
+    verify_operator_token,
 };

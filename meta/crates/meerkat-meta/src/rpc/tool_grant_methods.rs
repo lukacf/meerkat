@@ -10,7 +10,8 @@
 //!
 //! A grant names an identity the gateway's identity runtime serves. One
 //! created at runtime (store-owned: its record is its row in the mob's
-//! identity store) is not one yet, and is `subject_unknown`. When Core holds
+//! identity store) is served, but Meta's grant methods do not act on a
+//! store-owned identity yet: it is `subject_unknown`. When Core holds
 //! no member of the identity, the grant seats it through the declared
 //! apply's one-identity door, Dormant, building nothing, so its first build
 //! reads the grant. The target must be named by the gate the member's next

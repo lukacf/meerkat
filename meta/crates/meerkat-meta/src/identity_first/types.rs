@@ -1631,7 +1631,10 @@ pub struct DeferredIdentity {
     pub reason: DeferredIdentityReason,
 }
 
-/// Typed snapshot for bootstrap observability and readiness barriers.
+/// Typed snapshot for bootstrap observability and readiness barriers. It is
+/// built from the host's roster: an identity created at runtime (Core's
+/// created entry, which no roster lists) is not in it, though the identity
+/// runtime serves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityBootstrapStatus {
     pub mode: IdentityBootstrapMode,
@@ -2007,8 +2010,12 @@ pub struct IdentityStatus {
     pub labels: std::collections::BTreeMap<String, String>,
     /// Core's generation of the binding `session_id` comes from.
     pub generation: Option<meerkat_mob::Generation>,
-    /// Whether Core holds an identity intent row for the identity: a host
-    /// adopted it, and Meta's lifecycle verbs refuse it.
+    /// Whether Core drives the identity itself, so Meta's lifecycle verbs
+    /// refuse it: Core holds an identity intent row for it (a host adopted
+    /// it; the verbs answer `-32053`), or it is store-owned (created at
+    /// runtime, or adopted into store custody: Core holds its created entry's
+    /// row; the verbs answer `-32603` with `data.kind`
+    /// `identity_store_owned`).
     #[serde(default)]
     pub intent_managed: bool,
     /// Core's convergence diagnostics for an intent-managed identity, when

@@ -1131,3 +1131,247 @@ async fn a_refused_credential_command_is_not_replaced_by_another_credential() {
         "{refused}"
     );
 }
+
+// ---- The in-process file tools and the engine's own files ----
+
+/// A factory with the built-in tools and no shell, as a host's default tool
+/// preset builds it, working in `root`.
+fn file_tool_factory(root: &Path) -> AgentFactory {
+    AgentFactory::new(root.join("sessions"))
+        .session_store(Arc::new(meerkat_store::MemoryStore::new()))
+        .runtime_root(root.join("runtime"))
+        .project_root(root)
+        .builtins(true)
+        .shell(false)
+}
+
+/// One run in which the scripted model calls `apply_patch` once with
+/// `patch`: whether the result it got back is an error, and its text.
+async fn apply_patch_through(factory: AgentFactory, patch: String) -> (bool, String) {
+    let client = Arc::new(ScriptedClient::new(
+        "apply_patch",
+        json!({ "patch": patch }),
+    ));
+    let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+    build.llm_client_override = Some(client.clone());
+    let mut agent = tokio::time::timeout(
+        Duration::from_secs(15),
+        factory.build_agent(build, &Config::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.run("Apply the patch".to_string().into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut results = client.returned_results();
+    assert_eq!(results.len(), 1, "one apply_patch result: {results:?}");
+    results.remove(0)
+}
+
+fn add_file_patch(path: &str) -> String {
+    format!("*** Begin Patch\n*** Add File: {path}\n+planted\n*** End Patch")
+}
+
+/// The call came back to the model as the refusal of a write into the
+/// engine's own files, an ordinary tool error.
+fn assert_engine_file_refusal(result: &(bool, String), case: &str) {
+    assert!(
+        result.0 && result.1.contains("engine's own directory"),
+        "{case}: expected the engine directory refusal as a tool error, got {result:?}"
+    );
+}
+
+/// A host that declares nothing still keeps `.rkat` from the file tools,
+/// at the project root and in any directory under it (a host started from
+/// that directory reads its `.rkat`): a session with the built-in tools and
+/// no shell cannot write the MCP servers, hooks, skills or a realm kept
+/// there, and an ordinary project file is still written.
+#[tokio::test]
+async fn file_tools_refuse_the_engine_directory_without_host_cooperation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    for path in [
+        ".rkat/mcp.toml",
+        ".rkat/config.toml",
+        ".rkat/skills/planted/SKILL.md",
+        ".rkat/realms/ws-0000000000000000/config.toml",
+        "packages/app/.rkat/mcp.toml",
+        "packages/app/.rkat/realms/ws-0000000000000000/config.toml",
+    ] {
+        let result = apply_patch_through(file_tool_factory(&root), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, path);
+        assert!(!root.join(".rkat").exists(), "{path}: .rkat was created");
+        assert!(
+            !root.join("packages").exists(),
+            "{path}: a nested .rkat was created"
+        );
+    }
+    let result = apply_patch_through(file_tool_factory(&root), add_file_patch("src/lib.rs")).await;
+    assert!(!result.0, "an ordinary project file is written: {result:?}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+        "planted\n"
+    );
+}
+
+/// The lists a stock host assembles for a project whose own state and
+/// inputs all lie inside the project root, outside `.rkat`: the realm state
+/// root (`--state-root ./state`), the user config root (its document and
+/// `mcp.toml`), a context root below the project root (its `mcp.toml`,
+/// hooks and skills), and a file credential store.
+fn declared_in_project(root: &Path) -> AgentFactory {
+    let mut inputs = HostConfinement::host_inputs(
+        &root.join("state"),
+        Some(&root.join("home/.rkat/config.toml")),
+    );
+    inputs.push((
+        meerkat::HostInput::CredentialStore,
+        root.join("credentials"),
+    ));
+    let realm_documents = HostConfinement::realm_documents(&root.join("state/realm-1"));
+    let convention_sources =
+        HostConfinement::convention_sources(Some(&root.join("service")), Some(&root.join("home")));
+    file_tool_factory(root).with_protected_host_inputs(
+        &inputs,
+        &realm_documents,
+        &convention_sources,
+    )
+}
+
+/// Every path a host declares as its own state or input inside the project
+/// root is refused by the file tools, with everything under it, existing or
+/// not; a file beside each of them is still written. A declared convention
+/// source that is a symbolic link is refused where it leads: the host reads
+/// the project skills through `service/.rkat/skills`, so the directory
+/// behind that link is not writable under its own name either.
+#[tokio::test]
+async fn file_tools_refuse_every_declared_host_input_inside_the_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    for (case, path) in [
+        (
+            "a realm config document under the state root",
+            "state/realm-1/config.toml",
+        ),
+        (
+            "another realm under the state root",
+            "state/parent/config.toml",
+        ),
+        ("a store under the state root", "state/realm-1/tasks.db"),
+        ("the user config document", "home/.rkat/config.toml"),
+        ("the user MCP file", "home/.rkat/mcp.toml"),
+        (
+            "another file of the user root's engine directory",
+            "home/.rkat/notes.txt",
+        ),
+        (
+            "the MCP file of a context root below the project root",
+            "service/.rkat/mcp.toml",
+        ),
+        (
+            "the hooks of that context root",
+            "service/.rkat/config.toml",
+        ),
+        (
+            "a skill of that context root",
+            "service/.rkat/skills/planted/SKILL.md",
+        ),
+        ("the credential store", "credentials/provider/token.json"),
+        (
+            "the engine directory, as without a declaration",
+            ".rkat/mcp.toml",
+        ),
+    ] {
+        let result = apply_patch_through(declared_in_project(&root), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, case);
+        assert!(!root.join(path).exists(), "{case}: {path} was written");
+    }
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(root.join("service/.rkat")).unwrap();
+        std::fs::create_dir_all(root.join("service/shared-skills")).unwrap();
+        std::os::unix::fs::symlink("../shared-skills", root.join("service/.rkat/skills")).unwrap();
+        let path = "service/shared-skills/planted/SKILL.md";
+        let result = apply_patch_through(declared_in_project(&root), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, "the skills directory behind a linked source");
+        assert!(!root.join(path).exists(), "{path} was written");
+    }
+    for path in [
+        "state.md",
+        "home/notes.txt",
+        "service/src/main.rs",
+        "credentials.example",
+    ] {
+        let result = apply_patch_through(declared_in_project(&root), add_file_patch(path)).await;
+        assert!(!result.0, "{path} is the project's own: {result:?}");
+        assert!(root.join(path).is_file(), "{path} was written");
+    }
+}
+
+/// A server started without a context root roots its tools in the realm
+/// directory itself. The realm's own documents are refused there; the
+/// state root as a whole contains the project root and is not applied, so
+/// an ordinary file is written as before. The stores beside the documents
+/// stay writable in this layout (a store file is written below): that is
+/// the stated limit of the rule there, and a host that wants them out of
+/// reach gives its tools a context root.
+#[tokio::test]
+async fn file_tools_keep_the_realm_documents_where_the_realm_is_the_project_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let state_root = base.join("realms");
+    let realm = state_root.join("realm-1");
+    std::fs::create_dir_all(&realm).unwrap();
+    std::fs::write(realm.join("config.toml"), "kept = true\n").unwrap();
+    let factory = || {
+        let mut inputs =
+            HostConfinement::host_inputs(&state_root, Some(&base.join("user/.rkat/config.toml")));
+        inputs.push((
+            meerkat::HostInput::CredentialStore,
+            base.join("credentials"),
+        ));
+        AgentFactory::new(realm.clone())
+            .session_store(Arc::new(meerkat_store::MemoryStore::new()))
+            .runtime_root(realm.clone())
+            .project_root(realm.clone())
+            .builtins(true)
+            .shell(false)
+            .with_protected_host_inputs(
+                &inputs,
+                &HostConfinement::realm_documents(&realm),
+                &HostConfinement::convention_sources(None, Some(&base.join("user"))),
+            )
+    };
+    let update = "*** Begin Patch\n*** Update File: config.toml\n@@\n-kept = true\n+kept = false\n*** End Patch";
+    let result = apply_patch_through(factory(), update.to_string()).await;
+    assert_engine_file_refusal(&result, "the realm config document");
+    assert_eq!(
+        std::fs::read_to_string(realm.join("config.toml")).unwrap(),
+        "kept = true\n"
+    );
+    for (case, path) in [
+        ("the config generation sidecar", "config_state.json"),
+        ("the realm manifest", "realm_manifest.json"),
+        ("the grant owner store", "authorization/grant-owner.jsonl"),
+        ("the hooks read from the project root", ".rkat/config.toml"),
+        (
+            "the skills read from the project root",
+            ".rkat/skills/planted/SKILL.md",
+        ),
+        ("an MCP file at the project root", ".rkat/mcp.toml"),
+    ] {
+        let result = apply_patch_through(factory(), add_file_patch(path)).await;
+        assert_engine_file_refusal(&result, case);
+        assert!(!realm.join(path).exists(), "{case}: {path} was written");
+    }
+    for path in ["out.txt", "notes/config.toml", "tasks.db"] {
+        let result = apply_patch_through(factory(), add_file_patch(path)).await;
+        assert!(!result.0, "{path} is written as before: {result:?}");
+        assert!(realm.join(path).is_file(), "{path} was written");
+    }
+}

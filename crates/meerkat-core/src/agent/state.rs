@@ -8145,7 +8145,14 @@ where
                 self.apply_tool_grant_open_set_at_boundary(ctx, &gate, &dispatcher_tools)
                     .await;
             }
-            let apply_result = match self.tool_scope.promote_staged_visibility() {
+            // A boundary that starts to defer keeps the tools the model
+            // already had: they are requested like loaded tools before the
+            // staged visibility promotes.
+            let apply_result = match self
+                .tool_scope
+                .adopt_visible_tools_before_deferral(&dispatcher_tools, &deferred_tool_names)
+                .and_then(|()| self.tool_scope.promote_staged_visibility())
+            {
                 Ok(visibility_state) => {
                     // Without the state read before the promotion, read the
                     // promoted one as the previous state too.

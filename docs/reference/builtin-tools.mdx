@@ -264,6 +264,12 @@ added with `mcp/add` takes it over the budget. A session with no such source
 and nothing to defer when it starts mounts no control tools and keeps tools
 that arrive later in every request for its lifetime.
 
+A session that grows past the budget, or whose source starts connecting,
+keeps the tools its model already had: they stay in the request and are
+called with no load. Only tools that arrive with or after that change wait
+behind the catalog. A resumed session starts in the mode its tools select
+at that moment.
+
 A Rust host can read this projection for a live session without a model
 request: `EphemeralSessionService::tool_catalog_view` and
 `PersistentSessionService::tool_catalog_view` (and the

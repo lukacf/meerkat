@@ -1940,6 +1940,92 @@ impl ToolScope {
         self.visibility_owner.boundary_applied()
     }
 
+    /// Keep in the model's requests every tool it had before a boundary that
+    /// starts to defer it.
+    ///
+    /// When the catalog starts to defer (its deferrable tools crossed the
+    /// byte budget, or a source started connecting), each tool the coming
+    /// projection defers, that this scope did not defer until now and that
+    /// was visible to the model, is requested like a loaded tool, so the
+    /// boundary's promotion keeps it visible and the request is durable.
+    /// Tools that arrive with or after the change wait behind the catalog.
+    /// Call it before [`Self::promote_staged_visibility`]. A scope without
+    /// generated visibility authority adopts nothing: it cannot load a
+    /// deferred tool either.
+    pub(crate) fn adopt_visible_tools_before_deferral(
+        &self,
+        new_base_tools: &[Arc<ToolDef>],
+        new_deferred_tool_names: &HashSet<ToolName>,
+    ) -> Result<(), ToolScopeApplyError> {
+        if self.visibility_authority != ToolVisibilityAuthorityKind::GeneratedMachine
+            || new_deferred_tool_names.is_empty()
+        {
+            return Ok(());
+        }
+        let visibility_state = self.visibility_owner.visibility_state()?;
+        let require_filter_witnesses = self.visibility_owner.requires_filter_witnesses();
+        let new_deferred_tool_names: ToolNameSet =
+            new_deferred_tool_names.iter().cloned().collect();
+        let newly_deferred =
+            deferred_authority_catalog_for_base_tools(new_base_tools, &new_deferred_tool_names);
+        let adopted: Vec<DeferredToolLoadAuthority> = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+            let candidates = newly_deferred
+                .iter()
+                .filter(|(name, _)| !state.deferred_tool_names.contains(name.as_str()))
+                .filter(|(name, _)| {
+                    !visibility_state
+                        .staged_requested_deferred_names
+                        .contains(name.as_str())
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                return Ok(());
+            }
+            // What the session showed, not what one turn's overlay narrowed
+            // it to: a tool a turn overlay leaves out is still the model's.
+            let mut session_state = state.clone();
+            session_state.active_turn_allow = None;
+            session_state.active_turn_deny.clear();
+            let visible_before = Self::visible_names_for_state(
+                &session_state,
+                &visibility_state,
+                require_filter_witnesses,
+            );
+            candidates
+                .into_iter()
+                .filter(|(name, _)| visible_before.contains(*name))
+                .map(|(name, witness)| {
+                    DeferredToolLoadAuthority::new(name.clone(), witness.clone())
+                })
+                .collect()
+        };
+        if adopted.is_empty() {
+            return Ok(());
+        }
+        // A request names a tool of the deferred authority catalog, so the
+        // owner learns the coming deferred set first.
+        let mut deferred_authority_catalog = std::collections::BTreeMap::new();
+        extend_deferred_authority_catalog_from_visibility_state(
+            &mut deferred_authority_catalog,
+            &visibility_state,
+        );
+        for (name, witness) in newly_deferred {
+            deferred_authority_catalog.entry(name).or_insert(witness);
+        }
+        self.visibility_owner
+            .replace_deferred_tool_authority_catalog(deferred_authority_catalog)?;
+        self.visibility_owner
+            .request_deferred_tools(adopted)
+            .map_err(|err| ToolScopeApplyError::Owner {
+                message: err.to_string(),
+            })?;
+        Ok(())
+    }
+
     /// Atomically apply refreshed projection inputs against a supplied boundary state.
     pub fn apply_staged_projection(
         &self,

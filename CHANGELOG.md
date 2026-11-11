@@ -118,6 +118,44 @@ them.
     and the WorkGraph tool surface no longer set the flag.
     `CatalogControlDispatcher::should_announce_for` (new, `meerkat-tools`)
     says whether a session's system prompt explains the control tools.
+- `meerkat-core`: a session whose catalog starts to defer keeps the tools
+  its model already had. When registered or MCP tools take a running session
+  over the byte budget, or a tool source starts connecting, the tools that
+  were in its requests stay there and are called with no load; only tools
+  that arrive with or after the change wait behind the catalog. Until now
+  every deferrable tool left the next request, and a call of one was refused
+  until the model loaded it. Crossing the budget up and down again never
+  hides a tool the model had.
+
+### Upgrade notes
+
+- Deferred tool catalog (see Changed and Breaking):
+  - Sessions with a few small MCP or registered tools: the tools are in
+    every request and are called directly. A prompt or client that tells
+    the model to call `tool_catalog_search` or `tool_catalog_load` first
+    should stop doing so for such a session: the control tools are not in
+    its requests (unless its build configured an MCP server, or a host
+    composed its own router), and a call of one returns an `access_denied`
+    error result. A load of a tool that is already in the request, where
+    the control tools are present, still answers as a no-op.
+  - RPC clients: a session's requests carry no catalog control tools until
+    something can be deferred. They appear, with one notice that says how
+    to use them, when a registration or a server added with `mcp/add` takes
+    the session over 8,192 bytes of deferrable tools, or while a server is
+    connecting.
+  - A resumed session is built in the mode its tools select at that
+    moment. If its deferrable tools are over the budget then, a tool its
+    earlier turns called directly and never loaded waits behind the
+    catalog: its first request names the deferred tools in a notice, and a
+    call before a load returns `access_denied`, once. Within a running
+    session this does not happen: the tools it had stay.
+  - Rust code that names `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` no longer
+    compiles; there is no replacement, the count rule is gone.
+  - Rust tool sources and wrappers: a wrapper around another dispatcher
+    should forward `tool_catalog_control_plane` beside
+    `tool_catalog_capabilities`. One that does not keeps today's behaviour
+    for its inner source (control tools always shown when the flag is
+    set).
 
 ## [0.9.13] - 2026-11-11
 

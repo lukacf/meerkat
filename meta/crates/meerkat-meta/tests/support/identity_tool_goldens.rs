@@ -16,7 +16,7 @@ Each agent takes a unique `name` and a `profile` of the mob, which gives its mod
 
 `peers`: nothing is wired to you unless you list your own name. The agents of one call may name each other.
 
-`first_message` runs once, as the new agent's first turn: a kickoff with no requester. It is not a message from you: the agent has nothing to reply to, and reaches you only if you are one of its peers. That turn has the same tools as any other turn of the agent. Write it as the agent's opening task. Without it the agent is created dormant: nothing runs until something is delivered to it. In a governed realm an agent is created without a first message: a create that gives one is refused, and the agent's first input comes through the host's own ingress.
+`first_message` runs once, as the new agent's first turn: a kickoff with no requester. It is not a message from you: the agent has nothing to reply to, and reaches you only if you are one of its peers. That turn has the same tools as any other turn of the agent. Write it as the agent's opening task. A create with a first message answers once the new agent's session exists; the first run continues after the answer. Without it the agent is created dormant: nothing runs until something is delivered to it. In a governed realm an agent is created without a first message: a create that gives one is refused, and the agent's first input comes through the host's own ingress.
 
 All agents of one call (1 to 256) are created together or not at all. The host's rules decide what happens, and the result's `outcome` says which:
 - `done`: created. `agents` lists each agent's `name`, `spec_digest` and `spec_revision`. `seat: "owed"` on an agent means its first message has not started: the agent exists, and it is seated and its first message runs at its next delivery.
@@ -43,7 +43,7 @@ A name that was removed is never available again (`name_taken`)."#,
             "type": "string"
           },
           "first_message": {
-            "description": "Runs once as the agent's first turn: a kickoff with no requester, not a message from you. Leave it out to create the agent dormant. In a governed realm an agent is created without a first message: a create that gives one is refused, and the agent's first input comes through the host's own ingress.",
+            "description": "Runs once as the agent's first turn: a kickoff with no requester, not a message from you. A create with a first message answers once the new agent's session exists; the first run continues after the answer. Leave it out to create the agent dormant. In a governed realm an agent is created without a first message: a create that gives one is refused, and the agent's first input comes through the host's own ingress.",
             "type": "string"
           },
           "instructions": {

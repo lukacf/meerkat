@@ -141,7 +141,9 @@ deliberate.
   with no requester: it is not a message from the creating agent, the new
   agent has nothing to reply to, and it reaches the creating agent only if
   that agent is one of its peers. The turn has the same tools as any other
-  turn of the new agent. Without a first message the agent is created dormant:
+  turn of the new agent. A create with a first message answers once the new
+  agent's session exists; the first run continues after the answer. Without a
+  first message the agent is created dormant:
   nothing is loaded and nothing runs until something is delivered to it. In a
   governed realm an agent is created without a first message: a create that
   gives one is refused (`unsupported` at `agents[i].first_message`), and the

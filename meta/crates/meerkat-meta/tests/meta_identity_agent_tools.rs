@@ -1868,6 +1868,8 @@ fn the_descriptions_say_what_a_model_must_know() {
         "nothing is wired to you unless you list your own name",
         "a kickoff with no requester",
         "That turn has the same tools as any other turn of the agent.",
+        "A create with a first message answers once the new agent's session exists; the first \
+         run continues after the answer.",
         "In a governed realm an agent is created without a first message: a create that gives \
          one is refused, and the agent's first input comes through the host's own ingress.",
         "created together or not at all",

@@ -142,6 +142,9 @@ const INSTRUCTIONS_REACH: &str = "It reaches the agent at its next run; a run th
     within moments of the change may still use the earlier instructions; earlier \
     instructions are never rewritten.";
 
+const FIRST_MESSAGE_ANSWER: &str = "A create with a first message answers once the new agent's \
+    session exists; the first run continues after the answer.";
+
 const GOVERNED_FIRST_MESSAGE: &str = "In a governed realm an agent is created without a first \
     message: a create that gives one is refused, and the agent's first input comes through \
     the host's own ingress.";
@@ -164,7 +167,8 @@ fn description(name: &str) -> String {
              `first_message` runs once, as the new agent's first turn: a kickoff with no \
              requester. It is not a message from you: the agent has nothing to reply to, \
              and reaches you only if you are one of its peers. That turn has the same tools \
-             as any other turn of the agent. Write it as the agent's opening task. Without \
+             as any other turn of the agent. Write it as the agent's opening task. \
+             {FIRST_MESSAGE_ANSWER} Without \
              it the agent is created dormant: nothing runs until something is delivered to \
              it. {GOVERNED_FIRST_MESSAGE}\n\n\
              All agents of one call (1 to {CORE_BATCH_MAX}) are created together or not at \
@@ -362,8 +366,9 @@ fn input_schema(name: &str) -> Value {
                                 "type": "string",
                                 "description": format!(
                                     "Runs once as the agent's first turn: a kickoff with no \
-                                     requester, not a message from you. Leave it out to \
-                                     create the agent dormant. {GOVERNED_FIRST_MESSAGE}"
+                                     requester, not a message from you. \
+                                     {FIRST_MESSAGE_ANSWER} Leave it out to create the agent \
+                                     dormant. {GOVERNED_FIRST_MESSAGE}"
                                 ),
                             },
                             "peers": {

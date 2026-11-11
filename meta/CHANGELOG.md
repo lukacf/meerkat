@@ -94,6 +94,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `CoreChangeExecutor::with_agent_specs` and
   `IdentityFamilyOptions::with_decision_notices`.
 
+### Added
+
+- Changes of agents that a person decides. A change whose outcome under the
+  host's identity policy is `require_approval` is held as one durable
+  decision of kind `identity.create`, `identity.update`, `identity.archive`,
+  `identity.unarchive`, `identity.remove` or `identity.adopt` and answers
+  `pending_decision`; the same request id answers the same state, and
+  nothing else is written, built or woken while it is held. One decision
+  covers the whole request: a create of several agents is one decision. Its
+  deadline is the policy's timeout for the change, and a decision nobody
+  decided by then ends `expired`. A person decides it through
+  `meta/decisions/decide` (the stdio operator, or a person an application
+  attests from its own channel), and a person cannot approve their own
+  request (`self_approval`). The requester or the host withdraws a change
+  that is still held.
+- The rendering a person approves shows, ahead of anything the requester
+  wrote, the host's consequence lines and the declared tool configuration of
+  every profile an agent of the request runs on, with its digest. An MCP
+  server is shown by its name and its configuration is never rendered. When
+  the approved change is carried out the request is rendered again: a tool
+  configuration or host lines that differ refuse it `subject_widened` and
+  close the decision, and an agent that changed meanwhile is refused
+  `stale_spec`. A refusal the same request may outlive releases the attempt
+  and keeps the approval. Consequence lines come from a Rust host
+  composition (`GatewayHostComposition::identity_consequences`); a host
+  behind an SDK supplies none in this release.
+- An approved change is carried out once: a gateway that stops between the
+  commit and the decision's settlement settles it executed at its next
+  start and commits nothing twice. An agent that asked is told the outcome
+  by a message to its own name once its decision ended.
+- On the Console, the requester of a change of an agent reads its own
+  request whole (`meta/decisions/get`, `rendering`), as the requester of a
+  tool grant does.
+- Rust: `identity_creation::IdentityDecisions` (the holder of these
+  decisions: `hold`, `held`, `withdraw`, `render`, `executors`,
+  `spawn_driver`), `HeldChangeHost`, `IdentityDecisionNotices`,
+  `KeyedSendNotices`, `HostConsequences`, `render_held_v1` with
+  `ToolConfigurations`, and `durable_decisions::DecisionExecutorDriver`,
+  which drives a runtime's decision executors: one pass at start, one after
+  each change of a decision (`RuntimeDecisions::notify_work`), and a tick
+  only while a decision of its kinds waits. A host with no such decision
+  makes no further pass.
+
 ### Changed
 
 - An access rule with the pattern `agent.*` or `*` covers the three new

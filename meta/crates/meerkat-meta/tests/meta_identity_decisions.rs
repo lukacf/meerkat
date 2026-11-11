@@ -25,21 +25,24 @@ use async_trait::async_trait;
 use meerkat_client::{LlmError, LlmEvent, LlmRequest};
 use meerkat_core::approval::ApprovalConsentDeliveryState;
 use meerkat_core::approval::decision::{
-    ApproverId, DecisionId, DecisionKind, DecisionListFilter, DecisionPhase, DecisionPrincipalKey,
-    DecisionReference, PresentationAudience, PresentationRecord, StoredDecision,
+    ApproverId, DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter,
+    DecisionOperationId, DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer,
+    DecisionRendering, DecisionRequestBody, DecisionSubjectKey, PresentationAudience,
+    PresentationRecord, StoredDecision,
 };
 use meerkat_core::types::StopReason;
 use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_meta::identity_creation::{
-    AgentTools, ChangeCommit, ChangeCommitted, ChangeConsent, ChangeRequester, ConsequenceLine,
-    CreateIdentitySpec, ExecutorError, HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal,
+    AdoptIdentitySpec, AgentTools, ArchiveIdentitySpec, ChangeCommit, ChangeCommitted,
+    ChangeConsent, ChangeRequester, ConsequenceLine, CoreChangeExecutor, CreateIdentitySpec,
+    ExecutorError, HeldChangeHost, HeldIdentityChange, HeldTarget, HookRefusal,
     IDENTITY_DECISION_KINDS, IdentityChangeExecutor, IdentityCreationPolicy,
     IdentityDecisionNotice, IdentityDecisionNotices, IdentityDecisions, IdentityEntryFacts,
     IdentityOutcome, IdentityRefusal, IdentityRequest, KeyedSendNotices, NormalizedRequest,
-    OperationId, ProfileTools, RemoveIdentitySpec, RequestAction, RequestContext, RequestEnvelope,
-    Requester, RequesterFacts, Sha256Digest, ToolConfigurations, WithdrawRequest,
-    committed_outcome, consent_of_plan, core_member_name, host_consequences_of, normalize_create,
-    normalize_remove, refusal_of_error, render_held_v1,
+    OperationId, ProfileTools, RemoveIdentitySpec, RequestContext, RequestEnvelope, Requester,
+    RequesterFacts, Sha256Digest, ToolConfigurations, UnarchiveIdentitySpec, WithdrawRequest,
+    consent_of_plan, core_member_name, host_consequences_of, normalize_adopt, normalize_archive,
+    normalize_create, normalize_remove, normalize_unarchive, render_held_v1,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -228,84 +231,6 @@ impl meerkat_client::LlmClient for RecordingClient {
     }
 }
 
-/// The seam's commit of a create and of a removal, over Core's handle.
-struct CoreSeam;
-
-#[async_trait]
-impl IdentityChangeExecutor for CoreSeam {
-    async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
-        let digest = commit
-            .request
-            .request_digest()
-            .map_err(ExecutorError::Request)?;
-        let operation =
-            meerkat_mob::IdentityOperation::new(commit.operation_id.as_str(), digest.as_str());
-        let requester = match commit.requester {
-            ChangeRequester::Host { surface, .. } => {
-                meerkat_mob::IdentityChangeRequesterInput::host(surface.as_str())
-            }
-            ChangeRequester::Human { principal } => {
-                meerkat_mob::IdentityChangeRequesterInput::Human {
-                    principal: principal.clone(),
-                }
-            }
-            other => panic!("the rows commit as the host or a person: {other:?}"),
-        };
-        let answered = match &commit.request.action {
-            RequestAction::Create { identities } => {
-                let requests = identities
-                    .iter()
-                    .map(|created| {
-                        meerkat_mob::CreatedIdentityRequest::new(
-                            meerkat_mob::CreatedIdentitySpec::new(
-                                core_member_name(created.spec.identity.as_str()).unwrap(),
-                                created.spec.profile.clone(),
-                            )
-                            .with_additional_instructions(
-                                created.spec.additional_instructions.clone(),
-                            ),
-                        )
-                    })
-                    .collect();
-                commit
-                    .mob
-                    .create_store_owned_identities(
-                        meerkat_mob::StoreOwnedIdentityCreate::new(operation, requester, requests),
-                        commit.consent,
-                    )
-                    .await
-                    .map(|_| ())
-            }
-            RequestAction::Remove {
-                identity,
-                expected_spec_digest,
-            } => commit
-                .mob
-                .remove_identity(
-                    meerkat_mob::IdentityRemoval::new(
-                        operation,
-                        requester,
-                        core_member_name(identity).unwrap(),
-                    )
-                    .with_expected_spec_digest(expected_spec_digest.as_str()),
-                    commit.consent,
-                )
-                .await
-                .map(|_| ()),
-            other => panic!("the rows create and remove: {other:?}"),
-        };
-        match answered {
-            Ok(()) => {
-                let outcome = committed_outcome(commit.mob, commit.operation_id)
-                    .await?
-                    .expect("a committed change has a receipt");
-                Ok(ChangeCommitted::new(outcome, false))
-            }
-            Err(error) => Ok(ChangeCommitted::refused(refusal_of_error(error)?)),
-        }
-    }
-}
-
 /// What the seam was asked with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Asked {
@@ -328,9 +253,9 @@ struct ObservedSeam {
 }
 
 impl ObservedSeam {
-    /// The seam over Core.
+    /// The seam's own executor over Core.
     fn over_core() -> Arc<Self> {
-        Self::new(Some(Arc::new(CoreSeam)))
+        Self::new(Some(Arc::new(CoreChangeExecutor::new())))
     }
 
     /// A seam that commits nothing and answers a committed change.
@@ -479,7 +404,7 @@ fn approval_policy(timeout_ms: u64) -> IdentityCreationPolicy {
     IdentityCreationPolicy::parse(&json!({
         "enabled": true,
         "approval": {"rules": [{
-            "change": ["create", "descriptive", "remove", "archive"],
+            "change": ["create", "descriptive", "remove", "archive", "adopt"],
             "outcome": {
                 "kind": "require_approval",
                 "approver": {"id": APPROVERS},
@@ -827,7 +752,7 @@ impl Rig {
         let normalized = normalized_create(&allow_policy(), &facts, &[spec(name)]);
         let operation_id = operation(&facts, &format!("allowed-create-{name}"));
         let mob = self.mob();
-        let committed = CoreSeam
+        let committed = CoreChangeExecutor::new()
             .commit(ChangeCommit::new(
                 &mob,
                 &operation_id,
@@ -1490,7 +1415,9 @@ async fn host_lines_that_differ_at_execution_refuse_subject_widened() {
 
 /// A host that cannot state its lines when the change is carried out does
 /// not end the decision: the attempt is released, the approval stands, and
-/// the next pass, with the host's lines back, carries the change out.
+/// the next pass, with the host's lines back, carries the change out. A
+/// host that cannot state them when a change is asked refuses it
+/// `consequences_unavailable`, and nothing is held.
 ///
 /// RED before the holder held.
 #[tokio::test(flavor = "multi_thread")]
@@ -1530,6 +1457,14 @@ async fn a_retryable_refusal_releases_and_never_burns_the_approval() {
     );
     assert!(rig.exists("scout"));
     assert_eq!(rig.seam.landed(), 1);
+
+    // The same refusal when a change is asked: the host's lines fail
+    // closed before anything is held.
+    *rig.lines.lock().unwrap() = Err("the ledger service is away".to_owned());
+    let unheld = rig.ask_create(&host_facts(), "retry-2", &["scribe"]).await;
+    assert_eq!(refused(&unheld), "consequences_unavailable");
+    assert!(unheld.refusal().expect("refused").is_retryable());
+    assert_eq!(rig.count(DecisionPhase::Open), 0, "nothing was held");
     rig.shutdown().await;
 }
 
@@ -1949,6 +1884,69 @@ async fn the_driver_is_quiet_on_an_idle_host_and_carries_out_a_decided_change() 
     rig.shutdown().await;
 }
 
+/// A decision of an `identity.*` kind that the holder did not write, whose
+/// body is another request than the one its digest binds, is never carried
+/// out: once approved, the executor refuses it `unreadable_request` without
+/// asking the seam, and neither request's agent exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_decision_whose_body_is_not_the_request_it_binds_is_never_carried_out() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let facts = host_facts();
+    let bound = normalized_create(&rig.policy, &facts, &[spec("scout")]).request;
+    let carried = normalized_create(&rig.policy, &facts, &[spec("intruder")]).request;
+    let operation_id = operation(&facts, "forged-1");
+    let mob_id = rig.mob().mob_id().as_str().to_owned();
+    let written = rig
+        .owner()
+        .hold(
+            DecisionHoldRequest::new(
+                DecisionKind::new("identity.create").expect("kind"),
+                DecisionSubjectKey::new(format!("{mob_id}/{operation_id}")).expect("subject"),
+                DecisionOperationId::new(operation_id.as_str()).expect("operation"),
+                meerkat_core::approval::decision::Sha256Digest::new(
+                    bound.request_digest().unwrap().as_str(),
+                )
+                .expect("digest"),
+                DecisionRequestBody::from_value(&json!({
+                    "format": meerkat_meta::identity_creation::HELD_CHANGE_FORMAT,
+                    "mob_id": mob_id,
+                    "request": carried,
+                }))
+                .expect("body"),
+                DecisionPrincipalKey::new(chat_person_key("U900")).expect("requester"),
+                ApproverId::new(APPROVERS).expect("approver"),
+                now_ms() + 60 * 60 * 1000,
+                DecisionRendering::new("Identity request: render-v1\n").expect("rendering"),
+                DecisionRenderer::new("identity.render-v1").expect("renderer"),
+            ),
+            false,
+        )
+        .expect("a decision written past the holder");
+    let decision_id = written.decision_id.to_string();
+    assert!(
+        HeldIdentityChange::of(&written).is_err(),
+        "the body is not the request the decision binds"
+    );
+    rig.approve(&decision_id).await;
+
+    let mut executors = rig.executor_loop();
+    assert_eq!(
+        drive(&mut executors).await,
+        vec![DecisionPassOutcome::ExecutionRefused]
+    );
+    assert_eq!(
+        rig.row(&decision_id)
+            .execution_refusal
+            .as_ref()
+            .map(DecisionReference::as_str),
+        Some("unreadable_request")
+    );
+    assert_eq!(rig.seam.asked(), Vec::new(), "the seam was not asked");
+    assert!(!rig.exists("scout") && !rig.exists("intruder"));
+    rig.shutdown().await;
+}
+
 /// A candidate launch holds nothing and carries nothing out: its holder
 /// refuses a change that needs approval `candidate_launch`, and starts no
 /// driver. A decision held by a host that acts is carried out by a host
@@ -2070,4 +2068,61 @@ fn the_rendering_names_an_mcp_server_and_never_shows_its_configuration() {
     )
     .expect_err("a profile with no declaration");
     assert_eq!(unknown.kind_token(), "profile_unknown");
+
+    // Every change of one agent shows the tools of the agent it names.
+    let digest = Sha256Digest::of(b"the spec the requester read");
+    let entry =
+        IdentityEntryFacts::new("keeper", digest.clone(), Some(1), "worker", BTreeMap::new());
+    let policy = approval_policy(1000);
+    let envelope = RequestEnvelope::default;
+    let facts = host_facts();
+    let whole = [
+        normalize_remove(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &RemoveIdentitySpec::new("keeper", digest.clone()),
+        ),
+        normalize_archive(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &ArchiveIdentitySpec::new("keeper", digest.clone()),
+        ),
+        normalize_unarchive(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &UnarchiveIdentitySpec::new("keeper", digest.clone()),
+        ),
+        normalize_adopt(
+            &policy,
+            &facts,
+            envelope(),
+            &entry,
+            &AdoptIdentitySpec::new("keeper", digest),
+        ),
+    ];
+    for normalized in whole {
+        let request = normalized.expect("the change normalizes").request;
+        let configurations = ToolConfigurations::of_request(
+            &request,
+            vec![AgentTools::new("keeper", "worker")],
+            BTreeMap::from([("worker".to_owned(), declared.clone())]),
+        )
+        .expect("the tools of the request");
+        let rendering = render_held_v1(&request, None, &configurations).expect("renders");
+        assert!(
+            rendering
+                .as_str()
+                .contains("Agent tools (1):\n- \"keeper\" profile \"worker\" tools sha256:"),
+            "a held {} shows the agent's tools:\n{}",
+            request.action.token(),
+            rendering.as_str()
+        );
+        rendering.card().expect("a structured card");
+    }
 }

@@ -285,10 +285,11 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
     assert_ne!(encoded.as_str(), "domain:calendar");
     assert_eq!(identity_name_of_member(&encoded), "domain:calendar");
     // A name in the reserved member-id namespace, which every public door
-    // refuses, and a name of a generated runtime alias's shape, whose
-    // member id stands for another identity: both are agent names in
-    // form, and neither is admitted.
-    const RESERVED: [&str; 2] = ["mk--keeper", "rt:keeper:3"];
+    // refuses, and a name in the namespace of generated runtime aliases
+    // (every name that starts with `rt:`, with or without a generation),
+    // whose public alias would be another agent's: each is an agent name
+    // in form, and none is admitted.
+    const RESERVED: [&str; 4] = ["mk--keeper", "rt:keeper:3", "rt:keeper", "rt:a:b"];
     for name in RESERVED {
         assert!(AgentIdentity::parse(name).is_ok(), "{name}");
         assert_eq!(core_member_name(name), None, "{name}");
@@ -297,14 +298,30 @@ fn a_name_the_member_id_encoding_maps_elsewhere_is_invalid_for_every_requester()
     let requesters = [
         RequesterFacts::agent("helper", "worker", BTreeMap::new()),
         RequesterFacts::host("ops"),
-        RequesterFacts {
-            requester: Requester::Human {
-                principal: "person-1".to_owned(),
-            },
-            profile: None,
-            authority_labels: BTreeMap::new(),
-        },
+        RequesterFacts::human("person-1"),
     ];
+    // An adoption of an agent of such a name is refused the same way: a
+    // configured agent of a reserved name is not released from
+    // configuration under it.
+    let adopting = policy(allow(&["adopt"]));
+    for requester in &requesters {
+        for name in ["rt:keeper", "mk--keeper"] {
+            let refused = normalize_adopt(
+                &adopting,
+                requester,
+                RequestEnvelope::default(),
+                &entry(name),
+                &AdoptIdentitySpec::new(name, digest(name)),
+            )
+            .expect_err("the name is refused");
+            assert_eq!(
+                refused.to_data(),
+                json!({"kind": "invalid_name", "field": "name"}),
+                "{name}: {:?}",
+                requester.requester
+            );
+        }
+    }
     for requester in &requesters {
         for name in RESERVED {
             let refused = create_of(requester, name).expect_err("the name is refused");
@@ -386,6 +403,15 @@ fn an_operation_id_is_namespaced_by_the_requester() {
             &ToolCallOrigin::new("mob-1", "session-1", "run-2", "round-1", "call-1")
         ),
         "the same tool call id in another run is another operation"
+    );
+    assert_ne!(
+        derived,
+        OperationId::for_tool_call(
+            &agent,
+            &ToolCallOrigin::new("mob-1", "session-1", "run-1", "round-2", "call-1")
+        ),
+        "a model numbers its calls anew in each answer: the same call id in another round of \
+         the same run is another operation"
     );
     assert_ne!(derived, OperationId::for_tool_call(&other_agent, &origin));
 
@@ -596,6 +622,19 @@ fn no_refusal_names_where_a_record_lives() {
             identity: name.clone(),
         },
         Core::NotArchived { identity: name },
+        // Core's own words for a malformed request say where a record
+        // lives; none of them is written.
+        Core::InvalidRequest {
+            problem: "'keeper' holds no store-owned spec to check the expected digest against: \
+                      its host's roster checks its spec"
+                .to_owned(),
+        },
+        Core::InvalidRequest {
+            problem: "its host's roster holds its spec".to_owned(),
+        },
+        Core::InvalidRequest {
+            problem: "apply the roster first".to_owned(),
+        },
     ];
     for refusal in &core {
         let mapped = refusal_of_core(refusal);

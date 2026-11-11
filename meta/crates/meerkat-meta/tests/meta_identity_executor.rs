@@ -26,11 +26,11 @@ use meerkat_meta::identity_creation::{
     ADOPT_NOT_BUILT, AdoptIdentitySpec, AgentChangeState, AgentSeat, ArchiveIdentitySpec,
     ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, CreateAgents,
     CreateIdentitySpec, IdentityChangeExecutor, IdentityCreationPolicy, IdentityEntryFacts,
-    IdentityOutcome, InstructionOutcome, InstructionStep, InstructionsChanged, NormalizedRequest,
-    OperationId, RemoveIdentitySpec, RequestContext, RequestEnvelope, RequesterFacts, Sha256Digest,
-    UPDATE_NOT_BUILT, UnarchiveIdentitySpec, UpdateIdentitySpec, committed_outcome,
-    consent_of_plan, normalize_adopt, normalize_archive, normalize_create, normalize_remove,
-    normalize_unarchive, normalize_update,
+    IdentityOutcome, IdentityRefusal, InstructionOutcome, InstructionStep, InstructionsChanged,
+    NormalizedRequest, OperationId, RemoveIdentitySpec, RequestContext, RequestEnvelope,
+    RequesterFacts, Sha256Digest, UPDATE_NOT_BUILT, UnarchiveIdentitySpec, UpdateIdentitySpec,
+    committed_outcome, consent_of_plan, normalize_adopt, normalize_archive, normalize_create,
+    normalize_remove, normalize_unarchive, normalize_update,
 };
 use meerkat_meta::identity_first::contracts::RosterProvider;
 use meerkat_meta::identity_first::{
@@ -297,6 +297,12 @@ impl Rig {
         self.runtime.mob_handle()
     }
 
+    /// The executor the rows commit through, with the recording step.
+    fn executor(&self) -> CoreChangeExecutor {
+        CoreChangeExecutor::new()
+            .with_instruction_step(Arc::clone(&self.step) as Arc<dyn InstructionStep>)
+    }
+
     /// The agents the instruction step was told were removed, in order.
     fn removed(&self) -> Vec<String> {
         self.step.removed.lock().unwrap().clone()
@@ -326,8 +332,7 @@ impl Rig {
         let operation_id =
             OperationId::for_request(&requester.recorded(), request_id).expect("a request id");
         let consent = consent_of_plan(&normalized.plan).expect("the policy allows the change");
-        CoreChangeExecutor::new()
-            .with_instruction_step(Arc::clone(&self.step) as Arc<dyn InstructionStep>)
+        self.executor()
             .commit(
                 ChangeCommit::new(&mob, &operation_id, requester, consent, &normalized.request)
                     .of_configured_target(configured),
@@ -837,10 +842,166 @@ async fn an_archive_an_unarchive_and_a_removal_reach_core() {
         )
         .await;
     assert_eq!(
-        reborn.outcome.refusal().map(|refusal| refusal.to_data()),
+        reborn.outcome.refusal().map(IdentityRefusal::to_data),
         Some(json!({"kind": "name_taken", "by": "removed"})),
         "a removed name is never an agent again: {reborn:?}"
     );
+    rig.shutdown().await;
+}
+
+/// A change whose Core call errs after Core committed it is answered as
+/// committed, from Core's receipt, never as refused: the name of a removed
+/// agent is a tombstone whatever its member's retirement did afterwards.
+/// The instruction step is told of a removal that committed this way. An
+/// error with no receipt is the retryable refusal it was, and an error
+/// that is Core's own refusal of the change stays that refusal.
+///
+/// RED before the receipt was read first: the committed archive and the
+/// committed removal answered `admission_unsettled`, and the step was not
+/// told of the removal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_that_erred_after_cores_commit_is_answered_as_committed() {
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let digest = rig.create(CREATED).await;
+    let facts = RequesterFacts::host(SURFACE);
+    let policy = allow_all();
+    let target = entry(CREATED, &digest);
+    let requester = host();
+    let mob = rig.mob();
+    let executor = rig.executor();
+    let operation = |request_id: &str| {
+        OperationId::for_request(&requester.recorded(), request_id).expect("a request id")
+    };
+    let pending = || meerkat_mob::MobError::LifecycleOperationPending {
+        intent: "the member's retirement is still running".to_owned(),
+    };
+
+    let archive = normalize_archive(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &target,
+        &ArchiveIdentitySpec::new(CREATED, digest.clone()),
+    )
+    .expect("the archive is allowed");
+    let consent = consent_of_plan(&archive.plan).expect("the policy allows the change");
+
+    // No receipt: Core committed nothing, and the error is the refusal.
+    let never = operation("archive-never");
+    let unsettled = executor
+        .after_core_error(
+            &ChangeCommit::new(&mob, &never, &requester, consent, &archive.request),
+            pending(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        refused(&unsettled).0,
+        "admission_unsettled",
+        "{unsettled:?}"
+    );
+    assert!(
+        unsettled
+            .outcome
+            .refusal()
+            .is_some_and(IdentityRefusal::is_retryable),
+        "{unsettled:?}"
+    );
+    assert!(rig.seated(CREATED), "nothing changed");
+
+    // The archive commits; the same error after it answers the archive.
+    let archived = rig.commit(&requester, "archive-keeper", &archive).await;
+    assert!(
+        matches!(archived.outcome, IdentityOutcome::Done { .. }),
+        "{archived:?}"
+    );
+    let archive_operation = operation("archive-keeper");
+    let late_archive = executor
+        .after_core_error(
+            &ChangeCommit::new(
+                &mob,
+                &archive_operation,
+                &requester,
+                consent,
+                &archive.request,
+            ),
+            pending(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        late_archive.outcome, archived.outcome,
+        "an archive Core committed is answered as committed"
+    );
+    assert!(
+        rig.removed().is_empty(),
+        "an archive tells the instruction step nothing"
+    );
+
+    let unarchive = normalize_unarchive(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &target,
+        &UnarchiveIdentitySpec::new(CREATED, digest.clone()),
+    )
+    .expect("the unarchive is allowed");
+    let restored = rig.commit(&requester, "unarchive-keeper", &unarchive).await;
+    assert!(
+        matches!(restored.outcome, IdentityOutcome::Done { .. }),
+        "{restored:?}"
+    );
+
+    let remove = normalize_remove(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &target,
+        &RemoveIdentitySpec::new(CREATED, digest.clone()),
+    )
+    .expect("the removal is allowed");
+    let consent = consent_of_plan(&remove.plan).expect("the policy allows the change");
+    let removed = rig.commit(&requester, "remove-keeper", &remove).await;
+    assert!(
+        matches!(removed.outcome, IdentityOutcome::Done { .. }),
+        "{removed:?}"
+    );
+    assert_eq!(rig.removed(), [CREATED]);
+    let remove_operation = operation("remove-keeper");
+    let remove_commit = ChangeCommit::new(
+        &mob,
+        &remove_operation,
+        &requester,
+        consent,
+        &remove.request,
+    );
+    let late_removal = executor
+        .after_core_error(&remove_commit, pending())
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        late_removal.outcome, removed.outcome,
+        "a removal Core committed is answered as committed: its name is a tombstone"
+    );
+    assert_eq!(
+        rig.removed(),
+        [CREATED, CREATED],
+        "the instruction step is told of a removal that committed before the error"
+    );
+
+    // Core's own refusal of the change says nothing of it was written.
+    let held = executor
+        .after_core_error(
+            &remove_commit,
+            meerkat_mob::MobError::IdentityChangeRefused {
+                refusal: meerkat_mob::IdentityChangeRefusal::ChangesHeld,
+            },
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(refused(&held).0, "changes_held", "{held:?}");
+    assert_eq!(rig.removed().len(), 2, "a refusal tells the step nothing");
     rig.shutdown().await;
 }
 
@@ -905,6 +1066,10 @@ async fn the_seam_refuses_a_private_member_and_a_configured_target_before_core()
             ("owner_read_only".to_owned(), Some("name".to_owned())),
             "{request_id}: {read_only:?}"
         );
+        assert!(
+            rig.recorded(&host(), request_id).await.is_none(),
+            "{request_id}: Core holds no receipt of the refused change"
+        );
         let detail = read_only.outcome.refusal().expect("a refusal").detail();
         assert!(
             detail.contains("configuration") && detail.contains("adopt"),
@@ -928,16 +1093,24 @@ async fn the_seam_refuses_a_private_member_and_a_configured_target_before_core()
         .await;
     assert_eq!(
         refused(&other),
-        ("invalid_request".to_owned(), Some("requester".to_owned())),
-        "the request records another requester: {other:?}"
+        ("invalid_request".to_owned(), None),
+        "the request records another requester, which is no field of the request: {other:?}"
     );
     assert!(rig.standing(CREATED).is_none(), "nothing was created");
+    assert!(
+        rig.recorded(&ChangeRequester::host("console"), "create-as-console")
+            .await
+            .is_none(),
+        "Core holds no receipt of the refused change"
+    );
 
+    // A create has no target yet: it commits whatever is said of one.
     let allowed = rig
-        .commit(
+        .commit_of(
             &host(),
             "create-as-host",
             &create_request(&host_facts, &[spec(CREATED)]),
+            true,
         )
         .await;
     assert!(
@@ -969,10 +1142,7 @@ async fn an_agent_requester_is_admitted_by_cores_grant_admission() {
         )
         .await;
     assert_eq!(
-        by_session
-            .outcome
-            .refusal()
-            .map(|refusal| refusal.to_data()),
+        by_session.outcome.refusal().map(IdentityRefusal::to_data),
         Some(json!({"kind": "profile_not_allowed", "profile": "worker"})),
         "{by_session:?}"
     );
@@ -1051,7 +1221,7 @@ async fn what_the_seam_does_not_carry_yet_is_refused_unsupported() {
     ] {
         let answered = rig.commit(&host(), request_id, request).await;
         assert_eq!(
-            answered.outcome.refusal().map(|refusal| refusal.to_data()),
+            answered.outcome.refusal().map(IdentityRefusal::to_data),
             Some(json!({"kind": "unsupported", "feature": feature})),
             "{request_id}: {answered:?}"
         );

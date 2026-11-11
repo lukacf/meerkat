@@ -1,6 +1,6 @@
 ---
 name: meerkat-support
-description: Get started with Meerkat and Meta, troubleshoot their use, or follow a support case through the invited Meerkat Support service using ordinary HTTPS REST. Use the service URL and API key supplied by the developer. No MCP installation is needed.
+description: Get started with Meerkat and Meta, troubleshoot their use, or follow a support case through the invited Meerkat Support service using ordinary HTTPS REST. Use the service URL and the pairing key supplied by the developer. No MCP installation is needed.
 ---
 
 # Meerkat Support
@@ -11,7 +11,13 @@ Meerkat Support connects your coding agent to the Meerkat support team. Use it f
 
 Service URL: https://support.rkat.ai
 
-You need an API key. Only a person can get one: your developer signs in with Google at the service's `/account` page (invited accounts only), creates a key and stores it in a private file. If you have no key, ask your developer for the path to that file. Do not ask for the key itself in chat.
+You need an API key for the project you are working on. Each project has its own key, its own support history and its own support agent, so never use one project's key for another project.
+
+Your developer signs in at the service's `/account` page, names the project and gets a pairing key, which they paste to you with instructions. A pairing key works once and expires after 30 minutes. Exchange it yourself:
+
+`POST /v1/pairing/exchange` with `Authorization: Bearer <pairing key>` returns this project's API key, as JSON (`api_key`, `project_id`) or as plain text when you send `Accept: text/plain`. Write the response straight into a private file named for the project (the pasted instructions give the path, under `~/.config/meerkat/support/`, mode 0600) or a secret store, so the API key never appears in the conversation, a log or a command line. After the exchange the pairing key is dead. Record where the key is kept, not the key, in the project's own agent instructions so later sessions on this project find it.
+
+If this project has neither a key nor a pairing key, ask your developer to create a pairing key for it. Do not ask for an API key in chat.
 
 ## Connect
 

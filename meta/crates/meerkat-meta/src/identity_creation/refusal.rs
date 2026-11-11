@@ -288,10 +288,6 @@ pub enum IdentityRefusalKind {
     /// The requester's grant does not admit the profile, as its admission
     /// checks it. Normalization never refuses it.
     ProfileNotAllowed { profile: String },
-    /// The spec sets a field only a grant with manage scope admits.
-    PrivilegedField { field: String },
-    /// The requester's grant no longer admits the change at its commit.
-    GrantRevoked,
     // Request data.
     /// The request names a reserved label key.
     ReservedKey { key: String },
@@ -333,9 +329,6 @@ pub enum IdentityRefusalKind {
     IdentityUnknown,
     /// An agent asked to change its own identity.
     SelfChangeRefused,
-    /// The requester is a member private to a person: such a member asks
-    /// for no change of agents.
-    PrivateRequester,
     /// The spec the requester read, named by its digest, is not the current
     /// one: `current_digest` is, with its revision for an identity Core's
     /// store holds.
@@ -345,18 +338,6 @@ pub enum IdentityRefusalKind {
     },
     /// The operation id was used with another request.
     OperationReused,
-    /// The agent is declared by its host's configuration, and a run-time
-    /// change does not write a host's configuration: change it there, or
-    /// release the agent from configuration first (`adopt`), after which
-    /// it is changed at run time.
-    OwnerReadOnly,
-    /// An adoption takes no agent of this shape.
-    NotAdoptable { reason: NotAdoptableReason },
-    /// The agent is not archived: there is nothing to unarchive.
-    NotArchived,
-    /// The host's configuration is being applied to the mob: an adoption
-    /// waits for it (retryable).
-    DeclaredApplyOpen,
     /// A spawn or held spawn of the name is not settled.
     AdmissionUnsettled { correlation: String },
     /// The member an adoption names is not the one the request observed:
@@ -364,9 +345,6 @@ pub enum IdentityRefusalKind {
     PredecessorMismatch,
     /// The import is refused.
     ImportRefused,
-    /// The purge of the mob's records is refused: `reason` is Core's stable
-    /// token for why.
-    PurgeRefused { reason: String },
     /// No host preparation is pending for the identity.
     PreparationNotPending,
     /// The preparation settle names another operation.
@@ -420,13 +398,38 @@ pub enum IdentityRefusalKind {
     /// The mob's storage composition cannot commit an operation in one
     /// transaction.
     StorageUnsupported,
+    /// Core refused the held construction.
+    ConstructionRefused { kind: String },
+    // Kinds added in 0.9.14. A new kind is declared after every earlier
+    // one, so that no earlier kind's implicit discriminant moves; the order
+    // of the wire tokens is the token list's below, not this one.
+    /// The spec sets a field only a grant with manage scope admits.
+    PrivilegedField { field: String },
+    /// The requester's grant no longer admits the change at its commit.
+    GrantRevoked,
+    /// The requester is a member private to a person: such a member asks
+    /// for no change of agents.
+    PrivateRequester,
+    /// The agent is declared by its host's configuration, and a run-time
+    /// change does not write a host's configuration: change it there, or
+    /// release the agent from configuration first (`adopt`), after which
+    /// it is changed at run time.
+    OwnerReadOnly,
+    /// An adoption takes no agent of this shape.
+    NotAdoptable { reason: NotAdoptableReason },
+    /// The agent is not archived: there is nothing to unarchive.
+    NotArchived,
+    /// The host's configuration is being applied to the mob: an adoption
+    /// waits for it (retryable).
+    DeclaredApplyOpen,
+    /// The purge of the mob's records is refused: `reason` is Core's stable
+    /// token for why.
+    PurgeRefused { reason: String },
     /// The mob is not running.
     MobNotRunning,
     /// The mob's records were purged before a downgrade: its changes are
     /// refused until it restarts.
     Purged,
-    /// Core refused the held construction.
-    ConstructionRefused { kind: String },
 }
 
 impl IdentityRefusalKind {

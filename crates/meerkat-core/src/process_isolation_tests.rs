@@ -103,8 +103,10 @@ where
 
 /// [`under_each_umask`] in a child whose writes to regular files are all
 /// refused, so the scenario sees each file exactly as its creation left it,
-/// before any byte. Where the platform does not refuse them the scenario
-/// does not run and the row says so on standard error.
+/// before any byte. On Linux the limit always refuses the write, so a child
+/// whose probe write succeeded fails the row. Elsewhere, where a platform
+/// may not enforce the limit this way, the scenario does not run and the
+/// row says so on standard error.
 #[cfg(unix)]
 pub(crate) fn under_each_umask_refusing_writes<Scenario, Run>(
     module: &str,
@@ -172,10 +174,20 @@ fn under_each_umask_in<Scenario, Run>(
             .unwrap_or_else(|error| panic!("{test} could not start under a umask: {error}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if output.status.success() && stdout.contains(&format!("{WRITES_NOT_REFUSED} {umask}")) {
+        let not_refused =
+            output.status.success() && stdout.contains(&format!("{WRITES_NOT_REFUSED} {umask}"));
+        if not_refused && !cfg!(target_os = "linux") {
             eprintln!("{test}: {WRITES_NOT_REFUSED} (umask {umask})");
             continue;
         }
+        // On Linux the limit always refuses the write, so a probe write that
+        // succeeded there means the recipe broke: a proof that did not run
+        // must not pass.
+        assert!(
+            !not_refused,
+            "{test} proved nothing under umask {umask}: {WRITES_NOT_REFUSED}, and Linux always \
+             does"
+        );
         assert!(
             output.status.success() && stdout.contains(&format!("{UMASK_CHILD_DONE} {umask}")),
             "{test} failed under umask {umask} ({}):\n{stdout}\n{stderr}",

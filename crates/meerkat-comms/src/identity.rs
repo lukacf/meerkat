@@ -788,8 +788,9 @@ mod tests {
         /// file size limit with `SIGXFSZ` ignored): a file can be created,
         /// and stays as its creation left it. The umask and the limit are
         /// process-wide, so the shared test process never changes them.
-        /// Where the platform does not refuse the writes the scenario does
-        /// not run and the row says so on standard error.
+        /// On Linux the limit always refuses the write, so a child whose
+        /// probe write succeeded fails the row. Elsewhere the scenario does
+        /// not run then and the row says so on standard error.
         fn with_writes_refused_under_a_permissive_umask(test: &str, scenario: impl FnOnce()) {
             if std::env::var_os(REFUSED_CHILD).is_some() {
                 let probe = TempDir::new().unwrap();
@@ -821,10 +822,18 @@ mod tests {
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if output.status.success() && stdout.contains(WRITES_NOT_REFUSED) {
+            let not_refused = output.status.success() && stdout.contains(WRITES_NOT_REFUSED);
+            if not_refused && !cfg!(target_os = "linux") {
                 eprintln!("{test}: {WRITES_NOT_REFUSED}");
                 return;
             }
+            // On Linux the limit always refuses the write, so a probe write
+            // that succeeded there means the recipe broke: a proof that did
+            // not run must not pass.
+            assert!(
+                !not_refused,
+                "{test} proved nothing: {WRITES_NOT_REFUSED}, and Linux always does"
+            );
             assert!(
                 output.status.success() && stdout.contains(REFUSED_CHILD_DONE),
                 "{test} failed with writes refused ({}):\n{stdout}\n{}",

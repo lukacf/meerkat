@@ -1412,16 +1412,21 @@ async fn init_project_config() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create or truncate the configuration document at `path` and write
-/// `bytes`, by the rule `meerkat-core` applies to the documents it writes.
-/// The document can hold credential material, so on Unix a file this creates
-/// is readable by its owner only (0600), from its creation and whatever the
+/// Create the configuration document at `path`, which must not exist, and
+/// write `bytes`, by the rule `meerkat-core` applies to the documents it
+/// writes. The document can hold credential material, so on Unix the file is
+/// readable by its owner only (0600), from its creation and whatever the
 /// process umask. In a directory whose setgid bit says it is shared through
 /// its group on purpose it is also readable by that group (0640), which the
 /// directory gives it.
+///
+/// The file is always one this call created: a file or a symbolic link
+/// already at `path` (a link to nothing included) fails the open, so the
+/// document is never written, and no mode is ever set, through a link or
+/// into a file that appeared after the caller's "already exists" check.
 async fn write_new_config_document(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     let shared = {
         use std::os::unix::fs::PermissionsExt as _;

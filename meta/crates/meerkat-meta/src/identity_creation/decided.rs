@@ -86,11 +86,6 @@ use super::request::{
     IdentityEntryFacts, IdentityRequest, NormalizedRequest, RequestAction, Requester,
 };
 
-/// Whether the holder holds changes and carries them out. While it does
-/// not, a change that needs approval is refused `approval_unavailable` and
-/// no executor is registered.
-const HOLDS: bool = false;
-
 /// The decision kinds of a held change of agents, one per action.
 pub const IDENTITY_DECISION_KINDS: [&str; 6] = [
     "identity.create",
@@ -812,11 +807,6 @@ impl IdentityDecisions {
         operation_id: &OperationId,
         normalized: &NormalizedRequest,
     ) -> Result<IdentityOutcome, IdentityRefusal> {
-        if !HOLDS {
-            return Err(IdentityRefusal::new(
-                IdentityRefusalKind::ApprovalUnavailable,
-            ));
-        }
         let PlannedOutcome::RequireApproval { approver_id } = &normalized.plan.outcome else {
             return Err(IdentityRefusal::new(IdentityRefusalKind::Unsupported {
                 feature: "a held decision for a change no person decides".to_owned(),
@@ -978,9 +968,6 @@ impl IdentityDecisions {
     /// The executors of the `identity.*` decision kinds, one per kind: what
     /// a [`DecisionExecutorLoop`] over the runtime's decisions registers.
     pub fn executors(&self) -> Vec<Arc<dyn DecisionExecutor>> {
-        if !HOLDS {
-            return Vec::new();
-        }
         IDENTITY_DECISION_KINDS
             .into_iter()
             .filter_map(|kind| DecisionKind::new(kind).ok())

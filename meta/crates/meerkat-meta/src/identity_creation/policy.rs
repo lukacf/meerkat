@@ -629,13 +629,13 @@ pub fn resolve_launch_policy(
         (None, RuntimeOptionPolicy::Disabled) => return Ok(None),
     };
     policy.check_mob_profiles(profiles)?;
-    policy.check_served()?;
     if !has_native_host && let Some(profile) = policy.constructed_profile() {
         return Err(PolicyRefusal::new(
             format!("preparation.{profile}"),
             PolicyRefusalKind::NeedsNativeHost,
         ));
     }
+    policy.check_served()?;
     Ok(Some(Arc::new(policy)))
 }
 

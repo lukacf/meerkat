@@ -199,6 +199,11 @@ impl Gateway {
     /// `meta/init` on `state` with the identity roster and, when the row
     /// gives one, the identity policy.
     fn init(&mut self, state: &Path, policy: Option<Value>) -> Value {
+        self.init_mob(state, MOB_CONFIG, policy)
+    }
+
+    /// [`Self::init`] with the mob configuration `mob_config`.
+    fn init_mob(&mut self, state: &Path, mob_config: &str, policy: Option<Value>) -> Value {
         let mut runtime_options = json!({"demo_llm": true});
         if let Some(policy) = policy {
             runtime_options["identity_creation"] = policy;
@@ -206,7 +211,7 @@ impl Gateway {
         self.rpc(
             "meta/init",
             json!({
-                "mob_config": MOB_CONFIG,
+                "mob_config": mob_config,
                 "persistent_state": state,
                 "has_roster_provider": true,
                 "runtime_options": runtime_options,
@@ -1511,6 +1516,11 @@ fn an_archive_keeps_an_agent_an_unarchive_restores_it_and_a_removal_retires_its_
     );
     assert_eq!(retaken["kind"], json!("name_taken"), "{retaken:#}");
     assert_eq!(retaken["by"], json!("removed"), "{retaken:#}");
+    assert_eq!(
+        retaken["field"],
+        json!("agents[0].name"),
+        "a removed agent's reserved name names its agent of the request: {retaken:#}"
+    );
     let again = gateway.ok("meta/identity/remove", named_scout("remove-1"));
     assert_eq!(
         outcome_agent(&again, "scout")["name"],
@@ -1602,6 +1612,114 @@ fn a_changes_hold_refuses_every_change_until_it_is_released() {
         nothing_held["kind"],
         json!("decision_not_found"),
         "{nothing_held:#}"
+    );
+}
+
+/// A name is taken whoever holds it, and the refusal names the agent of
+/// the request that asked for it: a live agent's name and an archived
+/// agent's name alike.
+#[test]
+fn a_taken_name_names_its_agent_of_the_request_whoever_holds_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut gateway = Gateway::launched(scratch.path(), Some(worker_policy()));
+    gateway.create(
+        "create-1",
+        json!([{"name": "scout", "profile": "worker"}, {"name": "ledger", "profile": "worker"}]),
+    );
+    let ledger = gateway.digest("ledger");
+    let archived = gateway.ok(
+        "meta/identity/archive",
+        json!({"request_id": "archive-1", "name": "ledger", "expected_spec_digest": ledger}),
+    );
+    assert_eq!(archived["outcome"], json!("done"), "{archived:#}");
+    for (request_id, holder) in [("taken-live", "scout"), ("taken-archived", "ledger")] {
+        let taken = gateway.refused(
+            "meta/identity/create",
+            json!({"request_id": request_id,
+                   "agents": [{"name": "fresh", "profile": "worker"},
+                              {"name": holder, "profile": "worker"}]}),
+        );
+        assert_eq!(taken["kind"], json!("name_taken"), "{holder}: {taken:#}");
+        assert_eq!(
+            taken["field"],
+            json!("agents[1].name"),
+            "{holder}: {taken:#}"
+        );
+    }
+    let nothing = gateway.refused("meta/identity/get", json!({"name": "fresh"}));
+    assert_eq!(nothing["kind"], json!("identity_unknown"), "{nothing:#}");
+}
+
+/// A change of an agent whose profile is bound to a realm profile is held
+/// like any other: the holder reads the realm profile from the realm's own
+/// store, so the rendering a person decides on shows what the profile
+/// declares. Without that read the change could not be shown, and would be
+/// refused.
+#[test]
+fn a_change_on_a_profile_bound_to_a_realm_profile_is_held() {
+    let scratch = tempfile::tempdir().unwrap();
+    let state = scratch.path().join("state");
+    let mob_config =
+        format!("{MOB_CONFIG}\n[profiles.shared]\nrealm_profile = \"shared-worker\"\n");
+    // A first launch makes the mob's storage, where the realm's profiles
+    // are kept. It builds no agent of the profile, so the realm profile the
+    // definition names need not exist yet.
+    {
+        let mut first = Gateway::start(scratch.path());
+        let init = first.init_mob(&state, &mob_config, None);
+        assert!(init["error"].is_null(), "{init:#}");
+    }
+    let shared = meerkat_mob::MobDefinition::from_toml(
+        "[mob]\nid = \"realm-profile\"\n\n[profiles.shared]\nmodel = \"gpt-5.5\"\n\
+         runtime_mode = \"turn_driven\"\n\n[profiles.shared.tools]\ncomms = true\n",
+    )
+    .expect("the realm profile's definition")
+    .profiles["shared"]
+        .as_inline()
+        .cloned()
+        .expect("an inline profile");
+    let realm_profiles =
+        meerkat_mob::store::SqliteRealmProfileStore::open(&state.join("event_log.sqlite3"))
+            .expect("the mob storage's realm profiles");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime")
+        .block_on(meerkat_mob::RealmProfileStore::create(
+            &realm_profiles,
+            "shared-worker",
+            &shared,
+        ))
+        .expect("store the realm profile");
+    drop(realm_profiles);
+
+    let policy = json!({
+        "enabled": true,
+        "approval": {"rules": [{
+            "change": ["create"],
+            "requester": {"kind": "host", "surface": "rpc"},
+            "target": {"profile": ["shared"]},
+            "outcome": {"kind": "require_approval", "approver": {"id": "owner"}},
+        }]},
+    });
+    let mut gateway = Gateway::start(scratch.path());
+    let init = gateway.init_mob(&state, &mob_config, Some(policy));
+    assert!(init["error"].is_null(), "{init:#}");
+    let held = gateway.ok(
+        "meta/identity/create",
+        json!({"request_id": "held-shared",
+               "agents": [{"name": "courier", "profile": "shared"}]}),
+    );
+    assert_eq!(held["outcome"], json!("pending_decision"), "{held:#}");
+    let plan = gateway.ok(
+        "meta/identity/plan",
+        json!({"change": "create", "request_id": "plan-shared",
+               "agents": [{"name": "runner", "profile": "shared"}]}),
+    );
+    let rendering = plan["rendering"].as_str().expect("a rendering");
+    assert!(
+        rendering.contains("shared-worker"),
+        "the rendering shows the realm profile: {rendering}"
     );
 }
 
@@ -1714,9 +1832,9 @@ fn the_plan_of_every_change_shows_the_tool_configuration_a_decision_would_hold()
         let plan = gateway.ok("meta/identity/plan", params);
         let rendering = plan["rendering"].as_str().expect("a rendering");
         assert!(
-            rendering.contains("Agent tools")
-                && rendering.contains("Tool configuration of profile")
-                && rendering.contains("Tool configuration digest"),
+            rendering.contains("Agent profiles")
+                && rendering.contains("Declaration of profile")
+                && rendering.contains("Profile digest"),
             "the plan of {change} shows the tool configuration: {rendering}"
         );
         assert!(
@@ -3942,6 +4060,163 @@ async fn a_change_after_a_create_does_not_wait_for_the_created_agents_start() {
         "an update of the agent just created waited {took:?} for its start"
     );
     let _ = runtime.shutdown().await;
+}
+
+/// An error of Core's call that comes after Core committed the change is
+/// no refusal of it: the seam reads Core's receipt first. After an adoption
+/// and after an update committed, the same error answers each as committed;
+/// under an operation nothing committed it is the retryable refusal, and
+/// under another request's operation it is `operation_reused`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_error_after_a_committed_update_or_adoption_answers_it_as_committed() {
+    use meerkat_meta::identity_creation::{
+        AdoptIdentitySpec, ChangeCommit, CoreChangeExecutor, IdentityEntryFacts, RequestContext,
+        RequestEnvelope, RequesterFacts, UpdateIdentitySpec, consent_of_plan, normalize_adopt,
+        normalize_update,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), false, None).await;
+    let host = ChangeRequester::host("ops");
+    let mob = rig.runtime.mob_handle();
+    let policy = in_process_policy();
+    let facts = RequesterFacts::host("ops");
+    let late = || meerkat_mob::MobError::LifecycleOperationPending {
+        intent: "a step of the member is still running".to_owned(),
+    };
+    let operation =
+        |request: &str| OperationId::for_request(&host.recorded(), request).expect("an id");
+    let seam = CoreChangeExecutor::new();
+
+    // The adoption, through the family, and the same request as the seam
+    // was handed it.
+    let configured = rig.digest(HOST_A).await;
+    let adopted = rig
+        .change(
+            &host,
+            "adopt-1",
+            IdentityChangeSpec::Adopt(agent_ref(HOST_A, &configured)),
+        )
+        .await;
+    assert_eq!(adopted.token(), "done", "{adopted:?}");
+    let adopt = normalize_adopt(
+        &policy,
+        &facts,
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(HOST_A, configured.clone(), None, "worker", BTreeMap::new()),
+        &AdoptIdentitySpec::new(HOST_A, configured.clone()),
+    )
+    .expect("the adoption is allowed");
+    let consent = consent_of_plan(&adopt.plan).expect("the rules allow it");
+    let answered = seam
+        .after_core_error(
+            &ChangeCommit::new(&mob, &operation("adopt-1"), &host, consent, &adopt.request),
+            late(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        answered.outcome, adopted,
+        "an adoption Core committed is answered as committed"
+    );
+    // Under an operation nothing committed, the error is the refusal.
+    let never = seam
+        .after_core_error(
+            &ChangeCommit::new(
+                &mob,
+                &operation("adopt-never"),
+                &host,
+                consent,
+                &adopt.request,
+            ),
+            late(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        refusal_of(&never.outcome).0,
+        "admission_unsettled",
+        "{never:?}"
+    );
+
+    // The update, the same way.
+    let before = rig.digest(HOST_A).await;
+    let renamed = rig
+        .change(
+            &host,
+            "update-1",
+            IdentityChangeSpec::Update(
+                serde_json::from_value(json!({
+                    "name": HOST_A, "expected_spec_digest": before.as_str(),
+                    "set": {"display_name": "Renamed"},
+                }))
+                .expect("an update as a surface writes it"),
+            ),
+        )
+        .await;
+    assert_eq!(renamed.token(), "done", "{renamed:?}");
+    let profiles: std::collections::BTreeSet<String> = [
+        "worker".to_owned(),
+        "planner".to_owned(),
+        "runner".to_owned(),
+    ]
+    .into();
+    let peers = BTreeMap::new();
+    let spec: UpdateIdentitySpec = serde_json::from_value(json!({
+        "identity": HOST_A,
+        "expected_spec_digest": before.as_str(),
+        "set": {"display_name": "Renamed"},
+    }))
+    .expect("an update");
+    let update = normalize_update(
+        &policy,
+        &RequestContext {
+            requester: &facts,
+            profiles: &profiles,
+            peers: &peers,
+        },
+        RequestEnvelope::default(),
+        &IdentityEntryFacts::new(HOST_A, before.clone(), Some(1), "worker", BTreeMap::new()),
+        &spec,
+    )
+    .expect("the update is allowed");
+    let consent = consent_of_plan(&update.plan).expect("the rules allow it");
+    let answered = seam
+        .after_core_error(
+            &ChangeCommit::new(
+                &mob,
+                &operation("update-1"),
+                &host,
+                consent,
+                &update.request,
+            ),
+            late(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        answered.outcome.token(),
+        "done",
+        "an update Core committed is answered as committed: {answered:?}"
+    );
+    assert_eq!(
+        answered.outcome.agents()[0].spec_digest,
+        renamed.agents()[0].spec_digest
+    );
+    // Another request under the update's operation is not that update.
+    let reused = seam
+        .after_core_error(
+            &ChangeCommit::new(&mob, &operation("update-1"), &host, consent, &adopt.request),
+            late(),
+        )
+        .await
+        .expect("a typed outcome");
+    assert_eq!(
+        refusal_of(&reused.outcome).0,
+        "operation_reused",
+        "{reused:?}"
+    );
+    rig.shutdown().await;
 }
 
 /// One request id names two operations for two requesters: the host and a

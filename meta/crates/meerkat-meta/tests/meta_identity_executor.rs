@@ -843,7 +843,7 @@ async fn an_archive_an_unarchive_and_a_removal_reach_core() {
         .await;
     assert_eq!(
         reborn.outcome.refusal().map(IdentityRefusal::to_data),
-        Some(json!({"kind": "name_taken", "by": "removed"})),
+        Some(json!({"kind": "name_taken", "by": "removed", "field": "agents[0].name"})),
         "a removed name is never an agent again: {reborn:?}"
     );
     rig.shutdown().await;

@@ -70,7 +70,6 @@ __all__ = [
     "CreateAgents",
     "DirectoryPeer",
     "DirectoryProfile",
-    "DirectoryVerdict",
     "IdentityChangePlan",
     "IdentityChangeRequest",
     "IdentityChangeResult",
@@ -724,41 +723,19 @@ class AgentPage:
 
 
 @dataclass(frozen=True)
-class DirectoryVerdict:
-    """What the host's rules give one entry of the directory.
+class DirectoryProfile:
+    """One profile of the directory, with what the host's rules give a
+    create of an agent of it.
 
     ``verdict`` is advisory (today ``allowed``; ``needs_decision``, with the
     ``lines`` the decision shows; ``not_allowed``, with the rule's
-    ``reason`` when it gives one). ``raw`` is the verdict as the gateway
-    sent it.
+    ``reason`` when it gives one).
     """
 
+    profile: str
     verdict: str
     lines: tuple[str, ...] = ()
     reason: str | None = None
-    raw: Mapping[str, Any] = dataclasses.field(
-        default_factory=dict, compare=False, repr=False
-    )
-
-    @classmethod
-    def from_dict(cls, raw: Any) -> DirectoryVerdict:
-        what = "a directory verdict"
-        data = _object(raw, what)
-        return cls(
-            verdict=_required(data, "verdict", str, what),
-            lines=_strings(data.get("lines")),
-            reason=_optional(data, "reason", str),
-            raw=dict(data),
-        )
-
-
-@dataclass(frozen=True)
-class DirectoryProfile:
-    """One profile of the directory, with whether the caller may create an
-    agent of it."""
-
-    profile: str
-    verdict: DirectoryVerdict
 
     @classmethod
     def from_dict(cls, raw: Any) -> DirectoryProfile:
@@ -766,19 +743,24 @@ class DirectoryProfile:
         data = _object(raw, what)
         return cls(
             profile=_required(data, "profile", str, what),
-            verdict=DirectoryVerdict.from_dict(data.get("verdict")),
+            verdict=_required(data, "verdict", str, what),
+            lines=_strings(data.get("lines")),
+            reason=_optional(data, "reason", str),
         )
 
 
 @dataclass(frozen=True)
 class DirectoryPeer:
-    """One agent of the directory, with whether the caller may list it as a
-    peer."""
+    """One agent of the directory, with what the host's rules give listing
+    it as a peer: ``verdict``, ``lines`` and ``reason`` as on a
+    :class:`DirectoryProfile`."""
 
     name: str
     profile: str
-    verdict: DirectoryVerdict
+    verdict: str
     display_name: str | None = None
+    lines: tuple[str, ...] = ()
+    reason: str | None = None
 
     @classmethod
     def from_dict(cls, raw: Any) -> DirectoryPeer:
@@ -787,8 +769,10 @@ class DirectoryPeer:
         return cls(
             name=_required(data, "name", str, what),
             profile=_required(data, "profile", str, what),
-            verdict=DirectoryVerdict.from_dict(data.get("verdict")),
+            verdict=_required(data, "verdict", str, what),
             display_name=_optional(data, "display_name", str),
+            lines=_strings(data.get("lines")),
+            reason=_optional(data, "reason", str),
         )
 
 

@@ -532,7 +532,8 @@ The gateway changes agents only under the host's policy:
 `MetaBuilder.identity_creation(policy)` sends it as
 `runtime_options.identity_creation`. Without one every change is refused
 `change_denied`. The outcomes of this release are `allow`, `require_approval`
-and `deny`; a policy that names `notify` or `review` is refused at init.
+and `deny`; a policy that names `notify` or `review` is refused at init. See
+the [policy reference](/reference/identity-policy).
 
 ### Realm MCP administration
 
@@ -1724,7 +1725,7 @@ from meerkat_meta import (
     AgentOutcome, InstructionOutcome, IdentityDone, IdentityPendingDecision,
     IdentityPendingPreparation, IdentityRefused, IdentityOperationUnknown,
     IdentityRefusal, IdentityRefusedError, IdentityWithdrawn, IdentityChangesHold,
-    AgentDirectoryPage, DirectoryProfile, DirectoryPeer, DirectoryVerdict,
+    AgentDirectoryPage, DirectoryProfile, DirectoryPeer,
     IdentityChangePlan, identity_outcome_from_dict,
     IDENTITY_REFUSAL_KINDS, IDENTITY_REFUSED_CODE, IDENTITY_OUTCOMES,
     INSTRUCTION_OUTCOME_KINDS, INSTRUCTION_NEXT_SESSION_REASONS, AGENT_SEATS,

@@ -698,41 +698,29 @@ export function parseAgentPage(raw: unknown): AgentPage {
 }
 
 /**
- * What the host's rules give one entry of the directory. `verdict` is
- * advisory (today `allowed`; `needs_decision`, with the `lines` the decision
- * shows; `not_allowed`, with the rule's `reason` when it gives one). `raw`
- * is the verdict as the gateway sent it.
+ * One profile of the directory, with what the host's rules give a create of
+ * an agent of it. `verdict` is advisory (today `allowed`; `needs_decision`,
+ * with the `lines` the decision shows; `not_allowed`, with the rule's
+ * `reason` when it gives one).
  */
-export interface DirectoryVerdict {
+export interface DirectoryProfile {
+  readonly profile: string;
   readonly verdict: string;
   readonly lines: readonly string[];
   readonly reason: string | null;
-  readonly raw: Readonly<Record<string, unknown>>;
 }
 
-function parseDirectoryVerdict(raw: unknown): DirectoryVerdict {
-  const what = "a directory verdict";
-  const data = object(raw, what);
-  return {
-    verdict: text(data, "verdict", what),
-    lines: strings(data.lines),
-    reason: optionalText(data, "reason"),
-    raw: { ...data },
-  };
-}
-
-/** One profile of the directory, with whether the caller may create an agent of it. */
-export interface DirectoryProfile {
-  readonly profile: string;
-  readonly verdict: DirectoryVerdict;
-}
-
-/** One agent of the directory, with whether the caller may list it as a peer. */
+/**
+ * One agent of the directory, with what the host's rules give listing it as
+ * a peer: `verdict`, `lines` and `reason` as on a {@link DirectoryProfile}.
+ */
 export interface DirectoryPeer {
   readonly name: string;
   readonly profile: string;
   readonly displayName: string | null;
-  readonly verdict: DirectoryVerdict;
+  readonly verdict: string;
+  readonly lines: readonly string[];
+  readonly reason: string | null;
 }
 
 /**
@@ -757,7 +745,9 @@ export function parseAgentDirectoryPage(raw: unknown): AgentDirectoryPage {
       const profile = object(entry, what);
       return {
         profile: text(profile, "profile", what),
-        verdict: parseDirectoryVerdict(profile.verdict),
+        verdict: text(profile, "verdict", what),
+        lines: strings(profile.lines),
+        reason: optionalText(profile, "reason"),
       };
     }),
     peers: peers.map((entry) => {
@@ -767,7 +757,9 @@ export function parseAgentDirectoryPage(raw: unknown): AgentDirectoryPage {
         name: text(peer, "name", what),
         profile: text(peer, "profile", what),
         displayName: optionalText(peer, "display_name"),
-        verdict: parseDirectoryVerdict(peer.verdict),
+        verdict: text(peer, "verdict", what),
+        lines: strings(peer.lines),
+        reason: optionalText(peer, "reason"),
       };
     }),
     next: optionalText(data, "next"),

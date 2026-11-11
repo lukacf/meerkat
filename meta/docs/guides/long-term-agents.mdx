@@ -76,7 +76,8 @@ decides; the rule names an `approver`) and `deny`. A policy that names
 `notify` or `review` is refused at init.
 
 The SDK sends the policy unchanged and models none of it: the gateway owns
-its shape and refuses the init for a policy it cannot read.
+its shape and refuses the init for a policy it cannot read. The
+[policy reference](/reference/identity-policy) has the whole shape.
 
 ## 2. Adopt an agent your configuration declares
 
@@ -347,7 +348,8 @@ await identities.remove("editor", { expectedSpecDigest: digest, requestId: "remo
   agent can reach them. Archive an agent that may be needed later.
 
 `directory` lists the profiles you may name and the agents you may list as
-peers, each with the verdict your rules give it. `plan` answers the outcome
+peers, each with the verdict your rules give it (`allowed`, `needs_decision`
+with the lines the decision shows, or `not_allowed`). `plan` answers the outcome
 and the rendering a change would get, and holds and writes nothing.
 `changes_hold` holds every change for a while, for example during a deploy:
 each change is refused the retryable `changes_held`. The hold is not durable,
@@ -407,10 +409,12 @@ gateway newer than your SDK may still send a kind the SDK does not list. It
 is the same error, with the kind's token in `kind` and `known_kind`
 (`knownKind`) false, so handle an unknown kind by `retryable` and `detail`.
 
-Two cases are not this error. Params the gateway cannot read are: they are
-refused `invalid_request`. A candidate launch is not: it refuses every change
-before the family is reached, with the gateway-wide `-32047` and kind
-`candidate_launch` (`AnnouncementRefusedError` in both SDKs).
+Params the gateway cannot read are this error too, with kind
+`invalid_request`: problem `malformed` for an unknown member or a wrong type,
+`empty` for a change without its `request_id`. One case is not this error: a
+candidate launch refuses every change before the family is reached, with the
+gateway-wide `-32047` and kind `candidate_launch` (`AnnouncementRefusedError`
+in both SDKs). It still answers the reads.
 
 Advisory values are open. An agent's `readiness`, a change's `state`, a
 provenance's `entered` and a directory verdict may take values your SDK does

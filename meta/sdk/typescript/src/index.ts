@@ -111,7 +111,6 @@ export type {
   DirectoryOptions,
   DirectoryPeer,
   DirectoryProfile,
-  DirectoryVerdict,
   IdentityChange,
   IdentityChangeOptions,
   IdentityChangePlan,

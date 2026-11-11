@@ -159,9 +159,10 @@ ANNOUNCEMENT_NOT_FOUND_CODE: int = -32048
 # The long-term agent family (``meta/identity/*``) refused a request; nothing
 # of it was written. Every refusal of the family rides this one code, and the
 # error data is the typed refusal: ``{"kind", "field"?, "retryable",
-# "detail", ...the kind's own members}``. Params the gateway cannot read (an
-# unknown member, a wrong type, a missing ``request_id``) are this error too,
-# with kind ``invalid_request``, never JSON-RPC invalid params. One refusal
+# "detail", ...the kind's own members}``. Params the gateway cannot read are
+# this error too, with kind ``invalid_request``, never JSON-RPC invalid
+# params: problem ``malformed`` for an unknown member or a wrong type,
+# ``empty`` for a change without its ``request_id``. One refusal
 # is not the family's: a candidate launch refuses every writer before the
 # family is reached, with the gateway-wide ``-32047`` and data ``kind``
 # ``candidate_launch``.

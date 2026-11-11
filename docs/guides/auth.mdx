@@ -841,15 +841,38 @@ static API key's (the OpenAI `Authorization` bearer, Azure OpenAI's `api-key`,
 the compatible client's bearer, Anthropic's `x-api-key`, Gemini's
 `x-goog-api-key`). A value that is not a valid HTTP header value fails the
 request as an authentication failure ("a credential header value is not a
-valid HTTP header value") before it is sent. The OpenAI and Anthropic clients
-also pass what they read from a text generation
-response (a rejection body, a stream error event, a data line that does not
-parse, the provider error fields they log) through the authorizer's
-`HttpAuthorizer::redact_response_diagnostic` before it reaches a caller or a
-log; its default changes nothing, and the Copilot authorizer redacts the
-bearers it signed with. Only a verbatim echo is redacted, and nothing redacts
-a static API key a gateway echoes back. `LlmError::redact_diagnostics`,
-`meerkat_llm_core::streaming::redact_stream_diagnostics` and
+valid HTTP header value") before it is sent.
+
+A provider, proxy or gateway can repeat a request's headers in an error. The
+OpenAI, OpenAI-compatible, Anthropic and Gemini clients therefore remove the
+credential that signed a request from what they read from its response (a
+rejection body, a stream error event, a data line that does not parse, an
+OpenAI image request's failure, the provider error fields they log) before
+it reaches a caller or a log:
+
+- With an authorizer, through `HttpAuthorizer::redact_response_diagnostic`.
+  Its default removes every value the authorizer names through
+  `visit_signed_credentials`: the static bearer and static header
+  authorizers, the AWS, Azure AD and Google ones and the managed OAuth ones
+  name what they sign with, a token a refresh replaced included.
+- Without one (an API-key route, a self-hosted server's static bearer), the
+  client's own key or bearer.
+
+Each value is replaced by `[REDACTED]`, as sent and without its `Bearer` or
+`Basic` scheme; a value shorter than 8 bytes is not replaced. A second step
+then replaces values that look like credentials (at least 8 credential
+characters with a digit among them, or at least 32) after `Bearer` or
+`Basic`, in an `authorization` header and after a secret-looking key
+(`api_key=`, `x-api-key:`), and well-known token prefixes, JSON web tokens,
+URL userinfo and PEM private-key blocks. That step is a second line only: a
+credential a route declares is always removed, while a secret no route
+declares, made of letters only and shorter than 32 bytes, may not be. Only a
+verbatim echo is caught: one a gateway escaped, encoded or cut can keep part
+of a credential. The GitHub Copilot authorizer keeps its own redaction (the
+bearers it signed with, shown as `<redacted>`).
+
+`meerkat_core::redact::redact_credentials`, `LlmError::redact_diagnostics`,
+`meerkat_llm_core::streaming::redact_stream_errors` and
 `meerkat_llm_core::http::sensitive_header_value` serve an embedder's own
 client.
 

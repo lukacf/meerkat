@@ -624,13 +624,24 @@ Responses, Chat Completions and Anthropic Messages request: the values a
 dynamic authorizer supplies and a static API key's (`Authorization`,
 `api-key`, `x-api-key`; the Gemini client's are not marked). A value that is
 not a valid header value fails the request as an authentication failure
-before it is sent. Those clients pass what they read from a text generation
-response (rejection bodies, stream errors, unparsable data lines, logged
-provider error fields) through `HttpAuthorizer::redact_response_diagnostic`
-before it reaches a caller or a log. The GitHub Copilot authorizer redacts
-the last four bearers its account signed with (shown as `<redacted>`); other
-authorizers change nothing unless they implement it, and nothing redacts a
-static API key a gateway echoes back. Only a verbatim echo is caught: an
+before it is sent. Those clients and the Gemini client remove the credential
+that signed a request from what they read from its response (rejection
+bodies, stream errors, unparsable data lines, an OpenAI image request's
+failure, logged provider error fields) before it reaches a caller or a log:
+with an authorizer through `HttpAuthorizer::redact_response_diagnostic`,
+whose default removes every value the authorizer names
+(`visit_signed_credentials`: the static bearer and header, AWS, Azure AD,
+Google and managed OAuth authorizers, a refreshed-out token included);
+without one, the client's own API key or static bearer. Values are replaced
+by `[REDACTED]`, as sent and without a `Bearer`/`Basic` scheme (not a value
+under 8 bytes). A second step replaces credential-looking values (8 or more
+credential characters with a digit, or 32 or more) after `Bearer`/`Basic`,
+in an `authorization` header and after a secret-looking key, plus known
+token prefixes, JWTs, URL userinfo and PEM private-key blocks. It is a
+second line only: a credential a route declares is always removed, an
+undeclared all-letter secret under 32 bytes may not be. The GitHub Copilot
+authorizer keeps its own redaction: the last four bearers its account
+signed with (shown as `<redacted>`). Only a verbatim echo is caught: an
 echo a provider or gateway truncated, re-encoded or otherwise transformed
 can keep part of a credential.
 

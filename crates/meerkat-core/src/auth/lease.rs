@@ -208,6 +208,55 @@ pub enum HttpRequestInitiator {
     Agent,
 }
 
+/// The secret values an authorizer recently signed requests with, for
+/// [`HttpAuthorizer::visit_signed_credentials`]. An authorizer whose
+/// credential rotates (a refreshed access token) records each value as it
+/// signs with it. The last [`Self::HISTORY`] distinct values are kept, so a
+/// response to a request signed just before a rotation still loses the
+/// value it repeats. `Debug` shows no value.
+#[derive(Default)]
+pub struct SignedCredentials {
+    values: parking_lot::Mutex<std::collections::VecDeque<String>>,
+}
+
+impl SignedCredentials {
+    /// How many distinct values are kept.
+    pub const HISTORY: usize = 4;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Keep `value`, a secret a request was just signed with.
+    pub fn record(&self, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        let mut values = self.values.lock();
+        if values.back().is_some_and(|last| last == value) {
+            return;
+        }
+        values.retain(|known| known != value);
+        values.push_back(value.to_string());
+        while values.len() > Self::HISTORY {
+            values.pop_front();
+        }
+    }
+
+    /// Call `visit` with every kept value, oldest first.
+    pub fn visit(&self, visit: &mut dyn FnMut(&str)) {
+        for value in self.values.lock().iter() {
+            visit(value);
+        }
+    }
+}
+
+impl std::fmt::Debug for SignedCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedCredentials").finish_non_exhaustive()
+    }
+}
+
 /// Dynamic authorizer trait. Used when auth artifacts need to be computed
 /// per request (ADC, refreshed OAuth bearer, etc.).
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -241,14 +290,32 @@ pub trait HttpAuthorizer: Send + Sync {
         self.observe_response(response).await
     }
 
+    /// Call `visit` with every secret value this authorizer put on a
+    /// request, as sent: a bearer token, an API key, or a whole secret
+    /// header value (`Basic <pair>`). An authorizer whose credential rotates
+    /// keeps the values it signed with in a [`SignedCredentials`] and visits
+    /// those. The default visits nothing.
+    ///
+    /// The default [`Self::redact_response_diagnostic`] removes each visited
+    /// value from what a provider client reads from a response, so an
+    /// authorizer that signs with a secret implements this.
+    fn visit_signed_credentials(&self, _visit: &mut dyn FnMut(&str)) {}
+
     /// Remove the credential material this authorizer signed requests with
     /// from `diagnostic`: a response body, a message decoded from one, or a
     /// field a provider client logs. A proxy, gateway or provider can echo a
     /// request's headers in an error, the bearer included, so provider
     /// clients pass what they read from a response through this before they
     /// parse, log or return it; successful content is never passed. The
-    /// default leaves `diagnostic` unchanged.
-    fn redact_response_diagnostic(&self, _diagnostic: &mut String) {}
+    /// default removes every value [`Self::visit_signed_credentials`]
+    /// visits, by exact match, and then credential shapes
+    /// ([`crate::redact::redact_credentials`]), so an authorizer that visits
+    /// nothing still loses a credential a response repeats in a known shape.
+    fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+        crate::redact::redact_credentials(diagnostic, |visit| {
+            self.visit_signed_credentials(visit);
+        });
+    }
 
     fn label(&self) -> &str;
 
@@ -379,6 +446,78 @@ mod tests {
         let mut diagnostic = ordinary.to_string();
         RequiredMethodsOnly.redact_response_diagnostic(&mut diagnostic);
         assert_eq!(diagnostic, ordinary);
+    }
+
+    /// The default redaction removes what `visit_signed_credentials`
+    /// visits: as sent, without its scheme, and a value a rotation replaced.
+    #[test]
+    fn default_redaction_removes_the_visited_credentials() {
+        struct Rotating {
+            signed: SignedCredentials,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HttpAuthorizer for Rotating {
+            async fn authorize(
+                &self,
+                _req: &mut HttpAuthorizationRequest<'_>,
+            ) -> Result<(), AuthError> {
+                Ok(())
+            }
+
+            fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+                self.signed.visit(visit);
+            }
+
+            fn label(&self) -> &'static str {
+                "rotating"
+            }
+        }
+
+        let earlier = "madeupearliertoken".repeat(2);
+        let current = "madeupcurrenttoken".repeat(2);
+        let authorizer = Rotating {
+            signed: SignedCredentials::new(),
+        };
+        authorizer.signed.record(&earlier);
+        authorizer.signed.record(&current);
+        let mut diagnostic = format!(
+            "upstream echo: authorization: Bearer {earlier}, then credential {current} in http://upstream.invalid/?session={current}"
+        );
+        authorizer.redact_response_diagnostic(&mut diagnostic);
+        assert_eq!(
+            diagnostic,
+            "upstream echo: authorization: Bearer [REDACTED], then credential [REDACTED] in http://upstream.invalid/?session=[REDACTED]"
+        );
+    }
+
+    /// The history keeps the last distinct values, drops the oldest past
+    /// its bound, ignores an empty value, and prints none of them.
+    #[test]
+    fn signed_credentials_keep_a_bounded_history_and_print_nothing() {
+        let signed = SignedCredentials::new();
+        let visited = |signed: &SignedCredentials| {
+            let mut values = Vec::new();
+            signed.visit(&mut |value| values.push(value.to_string()));
+            values
+        };
+        signed.record("");
+        assert!(visited(&signed).is_empty());
+        for value in ["value-1", "value-2", "value-2", "value-1", "value-3"] {
+            signed.record(value);
+        }
+        assert_eq!(visited(&signed), ["value-2", "value-1", "value-3"]);
+        for value in ["value-4", "value-5"] {
+            signed.record(value);
+        }
+        assert_eq!(visited(&signed).len(), SignedCredentials::HISTORY);
+        assert_eq!(
+            visited(&signed),
+            ["value-1", "value-3", "value-4", "value-5"]
+        );
+        let rendered = format!("{signed:?} {signed:#?}");
+        assert!(!rendered.contains("value-"), "{rendered}");
     }
 
     #[test]

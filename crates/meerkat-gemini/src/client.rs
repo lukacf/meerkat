@@ -959,6 +959,19 @@ impl GeminiClient {
         Ok(request)
     }
 
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own API key. A provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                visit(&self.api_key);
+            }),
+        }
+    }
+
     async fn post_gemini_json(
         &self,
         endpoint: &str,
@@ -2430,7 +2443,12 @@ impl GeminiClient {
             }
         });
 
-        streaming::ensure_terminal_done(inner)
+        // Every error the stream ends with is redacted here, whichever path
+        // built it (a rejection body, a Files API answer, a parse failure).
+        streaming::redact_stream_errors(
+            streaming::ensure_terminal_done(inner),
+            move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
+        )
     }
 }
 

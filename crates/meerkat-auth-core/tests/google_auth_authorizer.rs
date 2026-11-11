@@ -763,7 +763,7 @@ fn _ensure_imports() {
     let _: fn() -> axum::response::Response = || ().into_response();
 }
 
-/// Pass every echo of the request `authorizer` just signed (each header it
+/// Run every echo of the request `authorizer` just signed (each header it
 /// added, as sent, in a header line and alone; each credential bare and in
 /// a URL) through its redaction: none of `credentials` is left, and the
 /// text around them is.

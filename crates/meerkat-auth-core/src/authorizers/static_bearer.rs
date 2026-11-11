@@ -44,6 +44,10 @@ impl HttpAuthorizer for StaticBearerAuthorizer {
         Ok(())
     }
 
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        visit(&self.token);
+    }
+
     fn label(&self) -> &str {
         self.label
     }
@@ -89,7 +93,7 @@ mod tests {
         echoes
     }
 
-    /// Sign one request with `authorizer`, then pass every echo of it
+    /// Sign one request with `authorizer`, then run every echo of it
     /// through the authorizer's redaction: none of `credentials` is left,
     /// and the text around them is.
     async fn assert_redacts_what_it_signed(authorizer: &dyn HttpAuthorizer, credentials: &[&str]) {

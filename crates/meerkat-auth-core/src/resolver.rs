@@ -2377,6 +2377,13 @@ impl HttpAuthorizer for StaticHeadersAuthorizer {
         Ok(())
     }
 
+    /// Every header value: the resolver does not say which are secret.
+    fn visit_signed_credentials(&self, visit: &mut dyn FnMut(&str)) {
+        for (_, value) in &self.headers {
+            visit(value);
+        }
+    }
+
     fn label(&self) -> &str {
         &self.label
     }

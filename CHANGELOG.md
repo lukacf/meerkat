@@ -35,6 +35,61 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-core`, `meerkat-llm-core`: for embedders that sign provider
+  requests themselves (see Security).
+  `meerkat_core::redact::redact_credentials` removes credentials from text
+  read from a response: the values it is given, by exact match, then values
+  that look like credentials in known positions;
+  `redact::MIN_REDACTED_CREDENTIAL_BYTES` is the shortest value it replaces
+  by exact match. `HttpAuthorizer::visit_signed_credentials` is a provided
+  method through which an authorizer names the secret values it signs with;
+  the default `redact_response_diagnostic` now removes them, and an
+  authorizer that overrides `redact_response_diagnostic` behaves as before.
+  `meerkat_core::auth::SignedCredentials` keeps the last values an
+  authorizer with a rotating token signed with.
+  `meerkat_llm_core::streaming::redact_stream_errors` redacts the error a
+  stream ends with through any redaction, for a client that signs with a
+  key of its own.
+
+### Changed
+
+- Provider error text (see Security): on every route except GitHub
+  Copilot's, whose error text is as before, a value that looks like a
+  credential (at least 8 credential characters with a digit among them, or
+  at least 32) is now replaced by `[REDACTED]` where it follows `Bearer` or
+  `Basic`, is the value of an `authorization` header, or is assigned to a
+  secret-looking key (`api_key=`, `x-api-key:`, `token:`); so are well-known
+  token prefixes, JSON web tokens, URL userinfo and PEM private-key blocks.
+  Only the value is replaced, never the text around it, and an error without
+  one is unchanged.
+
+### Security
+
+- `meerkat-openai`, `meerkat-anthropic`, `meerkat-gemini`,
+  `meerkat-auth-core`, `meerkat-core`: when a provider, or a proxy or
+  gateway in front of one, answered a request with an error that repeated
+  the request's credential (its `Authorization` or API-key header, or the
+  bare value), the credential stayed in the error text. It reached the turn
+  failure message (`rkat run` prints it on stderr), the typed turn error's
+  `detail` and `reason.provider_error.message` in RPC error data and events,
+  retry events, and whatever stores or shows them. Since 0.9.9 the clients
+  ask the route's authorizer to remove it, but only the GitHub Copilot
+  authorizers did; a route whose client signs with a key of its own (an API
+  key, a self-hosted server's static bearer) asked no one, and the Gemini
+  client had no such step. Now every route removes the credential it signed
+  the request with, by exact value, as sent and bare, a token a refresh
+  replaced included: API-key and static-bearer routes of the OpenAI,
+  OpenAI-compatible (self-hosted), Anthropic and Gemini clients, an OpenAI
+  image request's failure, and the static-header, AWS, Azure AD, Google and
+  managed OAuth authorizers. A second step then removes values that look
+  like credentials in known positions (see Changed). That step is a second
+  line only: a credential a route declares is always removed (a value
+  shorter than 8 bytes is left to the second step), while a secret no route
+  declares, made of letters only and shorter than 32 bytes, may not be.
+  Affects 0.3.0 through 0.9.12.
+
 ## [0.9.12] - 2026-11-10
 
 ### Highlights

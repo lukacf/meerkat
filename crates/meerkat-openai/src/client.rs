@@ -1133,12 +1133,18 @@ impl OpenAiClient {
             .map(|(request, _)| request)
     }
 
-    /// Remove from `diagnostic`, text a response carried, any credential the
-    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own API key. A provider, proxy or gateway can
     /// echo the request's headers in an error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
-        if let Some(authorizer) = &self.authorizer {
-            authorizer.redact_response_diagnostic(diagnostic);
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                if let Some(api_key) = &self.api_key {
+                    visit(api_key);
+                }
+            }),
         }
     }
 
@@ -2747,6 +2753,29 @@ impl ImageGenerationExecutor for OpenAiClient {
         &self,
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        // What a failed image request reports comes from the response (a
+        // rejection body, a stream error event): it is redacted as every
+        // other response diagnostic is.
+        let mut result = self.execute_image_plan(request).await;
+        match &mut result {
+            Ok(output) => {
+                for warning in &mut output.warnings {
+                    if let ImageGenerationWarning::ProviderExecutionFailed { message } = warning {
+                        self.redact_diagnostic(message);
+                    }
+                }
+            }
+            Err(error) => error.redact_diagnostics(|message| self.redact_diagnostic(message)),
+        }
+        result
+    }
+}
+
+impl OpenAiClient {
+    async fn execute_image_plan(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
         match request.execution_plan.clone() {
             plan if OpenAiImageGenerationProfile.matches_provider_id(&plan.provider.0) => {
                 match plan.backend {
@@ -3563,9 +3592,9 @@ impl OpenAiClient {
 
         // Every error the stream ends with is redacted here, whichever path
         // built it (a rejection body, an error event, a parse failure).
-        streaming::redact_stream_diagnostics(
+        streaming::redact_stream_errors(
             streaming::ensure_terminal_done(inner),
-            self.authorizer.as_deref(),
+            move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
         )
     }
 }

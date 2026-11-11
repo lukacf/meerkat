@@ -101,6 +101,88 @@ pub const SECRET_REDACTION_MARKER: &str = "[REDACTED]";
 /// value that matches no rule passes through unchanged, so treat the output
 /// with the same care as its input.
 pub fn redact_secret_shapes(text: &str) -> String {
+    redact_shapes(text, ShapeRules::Diagnostic)
+}
+
+/// Shortest credential value [`redact_credentials`] replaces by exact match.
+/// A real credential is far longer; a shorter value is a placeholder
+/// (`none`, `dummy`, `EMPTY`) or a common word, and replacing every
+/// occurrence of it would mangle ordinary text. It is also the length the
+/// shape rules require of a credential after `Bearer` or `Basic`.
+pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
+
+/// Remove credentials from `diagnostic`, text read from a response (a body,
+/// a message decoded from one, a log field): first every value
+/// `credentials` gives its visitor, by exact match, then credential
+/// shapes. Each is replaced by [`SECRET_REDACTION_MARKER`], which shows
+/// neither a value's length nor any part of it. Applying it again changes
+/// nothing.
+///
+/// A value is what was sent: a key, a token, or a whole header value. A
+/// header value with a scheme (`Bearer <token>`, `Basic <pair>`) is also
+/// replaced without the scheme, so the credential goes whether a response
+/// repeats the header or the bare value. A value shorter than
+/// [`MIN_REDACTED_CREDENTIAL_BYTES`] is not replaced by exact match.
+///
+/// The shape rules are the ones [`redact_secret_shapes`] applies, bounded
+/// for text a provider wrote for a reader: after `Bearer` or `Basic`, in an
+/// `authorization` header and after a secret-looking key (`api_key=`,
+/// `x-api-key:`, `token:`), only a value that looks like a credential is
+/// replaced (at least eight credential bytes with a digit among them, or at
+/// least 32), and only that value, never the rest of the line. So "an
+/// Authorization header using Bearer auth (i.e. Authorization: Bearer
+/// YOUR_KEY)" stays as it is. Well-known token prefixes, JSON web tokens,
+/// URL userinfo and PEM private-key blocks are replaced as there.
+///
+/// The shape rules are a second line only. A credential a caller names is
+/// always removed (from the minimum length up); a secret no caller names,
+/// made of letters only and shorter than 32 bytes, may not be, and neither
+/// is one a response repeats in another encoding (percent-encoded, base64,
+/// cut short).
+///
+/// This is the one owner of response redaction:
+/// [`crate::HttpAuthorizer::redact_response_diagnostic`] calls it with the
+/// credentials the authorizer signed with, and a provider client that signs
+/// requests with a key of its own calls it with that key.
+pub fn redact_credentials(diagnostic: &mut String, credentials: impl FnOnce(&mut dyn FnMut(&str))) {
+    credentials(&mut |credential| redact_credential_value(diagnostic, credential));
+    let shaped = redact_shapes(diagnostic, ShapeRules::ResponseText);
+    if shaped != *diagnostic {
+        *diagnostic = shaped;
+    }
+}
+
+/// Replace `credential` in `text` as sent and, when it is a header value
+/// with a scheme, without the scheme.
+fn redact_credential_value(text: &mut String, credential: &str) {
+    let credential = credential.trim();
+    replace_credential(text, credential);
+    if let Some((scheme, value)) = credential.split_once(char::is_whitespace)
+        && !scheme.is_empty()
+        && scheme.bytes().all(is_credential_byte)
+    {
+        replace_credential(text, value.trim_start());
+    }
+}
+
+fn replace_credential(text: &mut String, credential: &str) {
+    if credential.len() >= MIN_REDACTED_CREDENTIAL_BYTES && text.contains(credential) {
+        *text = text.replace(credential, SECRET_REDACTION_MARKER);
+    }
+}
+
+/// Which text the shape rules read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShapeRules {
+    /// Process diagnostics (a server's stderr): every value in a secret
+    /// position goes, an authorization header's to the end of its line.
+    Diagnostic,
+    /// Text a provider wrote for a reader: in a secret position only a
+    /// value that looks like a credential goes, and only that value.
+    ResponseText,
+}
+
+fn redact_shapes(text: &str, rules: ShapeRules) -> String {
     let mut output = String::with_capacity(text.len());
     let mut in_private_key = false;
     for line in text.split_inclusive('\n') {
@@ -121,7 +203,7 @@ pub fn redact_secret_shapes(text: &str) -> String {
             in_private_key = !is_private_key_end(content);
             continue;
         }
-        redact_line(content, &mut output);
+        redact_line(content, &mut output, rules);
         output.push_str(newline);
     }
     output
@@ -146,30 +228,73 @@ fn at_left_boundary(bytes: &[u8], start: usize) -> bool {
 
 /// One line: every rule applies at each position, left to right; a quoted
 /// value never reaches past the line.
-fn redact_line(line: &str, output: &mut String) {
+fn redact_line(line: &str, output: &mut String, rules: ShapeRules) {
     let bytes = line.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
         if at_left_boundary(bytes, cursor) {
-            // An authorization header: its whole value (scheme and
-            // credentials) to the end of the line.
             if let Some(value_start) = authorization_header_at(line, cursor) {
-                output.push_str(&line[cursor..value_start]);
-                output.push_str(SECRET_REDACTION_MARKER);
-                return;
+                match rules {
+                    // An authorization header: its whole value (scheme and
+                    // credentials) to the end of the line.
+                    ShapeRules::Diagnostic => {
+                        output.push_str(&line[cursor..value_start]);
+                        output.push_str(SECRET_REDACTION_MARKER);
+                        return;
+                    }
+                    // Its credential, when the value holds one.
+                    ShapeRules::ResponseText => {
+                        if let Some((start, end)) = header_credential_at(line, value_start) {
+                            output.push_str(&line[cursor..start]);
+                            output.push_str(SECRET_REDACTION_MARKER);
+                            cursor = end;
+                            continue;
+                        }
+                    }
+                }
             }
             if let Some(value_start) = credential_scheme_at(line, cursor) {
-                output.push_str(&line[cursor..value_start]);
-                cursor = crate::panic_payload::push_redacted_value(output, line, value_start);
-                continue;
+                match rules {
+                    ShapeRules::Diagnostic => {
+                        output.push_str(&line[cursor..value_start]);
+                        cursor =
+                            crate::panic_payload::push_redacted_value(output, line, value_start);
+                        continue;
+                    }
+                    ShapeRules::ResponseText => {
+                        if let Some(end) = credential_like_end(line, value_start) {
+                            output.push_str(&line[cursor..value_start]);
+                            output.push_str(SECRET_REDACTION_MARKER);
+                            cursor = end;
+                            continue;
+                        }
+                    }
+                }
             }
             if let Some(key_end) = secret_key_at(line, cursor)
                 && let Some(value_start) =
                     crate::panic_payload::assignment_value_start(line, key_end)
             {
-                output.push_str(&line[cursor..value_start]);
-                cursor = crate::panic_payload::push_redacted_value(output, line, value_start);
-                continue;
+                match rules {
+                    ShapeRules::Diagnostic => {
+                        output.push_str(&line[cursor..value_start]);
+                        cursor =
+                            crate::panic_payload::push_redacted_value(output, line, value_start);
+                        continue;
+                    }
+                    // The value, quoted or not, when it looks like a
+                    // credential: "token: expected a comma" is a sentence.
+                    ShapeRules::ResponseText => {
+                        let content_start =
+                            value_start + usize::from(matches!(bytes[value_start], b'"' | b'\''));
+                        if let Some(end) = credential_like_end(line, content_start) {
+                            output.push_str(&line[cursor..content_start]);
+                            output.push_str(SECRET_REDACTION_MARKER);
+                            cursor = end;
+                            continue;
+                        }
+                    }
+                }
             }
             if let Some(end) = secret_token_at(line, cursor) {
                 output.push_str(SECRET_REDACTION_MARKER);
@@ -225,9 +350,50 @@ fn credential_scheme_at(line: &str, start: usize) -> Option<usize> {
     }
     let credential = bytes[value_start..]
         .iter()
-        .take_while(|byte| byte.is_ascii_alphanumeric() || b"-._~+/=".contains(byte))
+        .take_while(|byte| is_credential_byte(**byte))
         .count();
-    (credential >= 8).then_some(value_start)
+    (credential >= MIN_REDACTED_CREDENTIAL_BYTES).then_some(value_start)
+}
+
+/// Bytes a bearer token, a Basic pair or an API key is made of.
+fn is_credential_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-._~+/=".contains(&byte)
+}
+
+/// A run of credential bytes at `start` that looks like a credential, not a
+/// word: at least [`MIN_REDACTED_CREDENTIAL_BYTES`] with a digit among them,
+/// or at least 32. Its end.
+fn credential_like_end(line: &str, start: usize) -> Option<usize> {
+    let run = line.as_bytes().get(start..)?;
+    let len = run
+        .iter()
+        .take_while(|byte| is_credential_byte(**byte))
+        .count();
+    let looks_like_a_credential = len >= 32
+        || (len >= MIN_REDACTED_CREDENTIAL_BYTES && run[..len].iter().any(u8::is_ascii_digit));
+    looks_like_a_credential.then_some(start + len)
+}
+
+/// The credential in an authorization header's value at `value_start`: the
+/// value itself, or what follows its scheme word (`Bearer`, `Basic`,
+/// `Token`), when that looks like a credential. Its start and end.
+fn header_credential_at(line: &str, value_start: usize) -> Option<(usize, usize)> {
+    if let Some(end) = credential_like_end(line, value_start) {
+        return Some((value_start, end));
+    }
+    let bytes = line.as_bytes();
+    let scheme = bytes[value_start..]
+        .iter()
+        .take_while(|byte| is_credential_byte(**byte))
+        .count();
+    let mut start = value_start + scheme;
+    if scheme == 0 || !bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+        return None;
+    }
+    while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start += 1;
+    }
+    credential_like_end(line, start).map(|end| (start, end))
 }
 
 /// The words a secret-looking key is or ends with.
@@ -448,6 +614,190 @@ mod tests {
             redacted.contains("\nthe exception line\n"),
             "a quote never reaches into the next line: {redacted:?}"
         );
+    }
+
+    /// The credentials a caller passes are replaced by exact value: as
+    /// sent, without their scheme, in a header line, alone and in a URL.
+    #[test]
+    fn redact_credentials_replaces_each_value_as_sent_and_bare() {
+        let token = format!("madeup{}", "bearertoken".repeat(3));
+        let pair = format!("{}==", "bWFkZXVwOnBhaXI".repeat(2));
+        let key = format!("madeup{}", "apikey".repeat(4));
+        let values = [
+            format!("Bearer {token}"),
+            format!("Basic {pair}"),
+            key.clone(),
+        ];
+        for text in [
+            format!("rejected request with header authorization: Bearer {token}"),
+            format!("rejected request with header proxy-authorization: Basic {pair}"),
+            format!("rejected request with header x-api-key: {key}"),
+            format!("credential {token} was refused"),
+            format!("pair {pair} was refused"),
+            format!("GET http://upstream.invalid/v1/models?session={key}&page=2 failed"),
+            format!("{token}{key}"),
+        ] {
+            let mut redacted = text.clone();
+            redact_credentials(&mut redacted, |visit| {
+                for value in &values {
+                    visit(value);
+                }
+            });
+            for secret in [&token, &pair, &key] {
+                assert!(
+                    !redacted.contains(secret.as_str()),
+                    "{text:?} -> {redacted:?}"
+                );
+            }
+            assert!(redacted.contains(SECRET_REDACTION_MARKER), "{redacted:?}");
+        }
+        let mut redacted =
+            format!("GET http://upstream.invalid/v1/models?session={key}&page=2 failed");
+        redact_credentials(&mut redacted, |visit| visit(&key));
+        assert_eq!(
+            redacted,
+            "GET http://upstream.invalid/v1/models?session=[REDACTED]&page=2 failed"
+        );
+    }
+
+    /// The marker is one fixed text: two credentials of different lengths
+    /// and prefixes leave the same output.
+    #[test]
+    fn redact_credentials_marker_shows_no_length_or_prefix() {
+        let redact = |credential: &str| {
+            let mut text = format!("credential {credential} was refused");
+            redact_credentials(&mut text, |visit| visit(credential));
+            text
+        };
+        assert_eq!(
+            redact("madeup-short-1"),
+            "credential [REDACTED] was refused"
+        );
+        assert_eq!(
+            redact(&"another-much-longer-madeup-value".repeat(4)),
+            "credential [REDACTED] was refused"
+        );
+    }
+
+    /// A value shorter than the minimum is not replaced by exact match: a
+    /// placeholder key equal to an ordinary word would otherwise mangle
+    /// every text that uses the word. At the minimum it is replaced.
+    #[test]
+    fn redact_credentials_leaves_values_below_the_minimum() {
+        let text = "model none is not served; dummy runs are free; no key";
+        for short in ["none", "dummy", "key", "EMPTY", "1234567"] {
+            assert!(short.len() < MIN_REDACTED_CREDENTIAL_BYTES);
+            let mut redacted = text.to_string();
+            redact_credentials(&mut redacted, |visit| visit(short));
+            assert_eq!(redacted, text, "{short}");
+        }
+        let mut redacted = "the value 12345678 was refused".to_string();
+        redact_credentials(&mut redacted, |visit| visit("12345678"));
+        assert_eq!(redacted, "the value [REDACTED] was refused");
+    }
+
+    /// With no credential named, the shape rules still remove a
+    /// credential a response repeats in a known position, and only it.
+    #[test]
+    fn redact_credentials_removes_credential_shapes_and_nothing_else() {
+        // (The made-up header value without a scheme is assembled here so no
+        // scanner reads the source as a secret.)
+        let bare_header = ["authorization: abcdef", "0123456789 (no scheme)"].concat();
+        for (text, expected) in [
+            (
+                r#"{"error":{"message":"rejected request with header authorization: Bearer abcdef0123456789","type":"invalid_request_error"}}"#,
+                r#"{"error":{"message":"rejected request with header authorization: Bearer [REDACTED]","type":"invalid_request_error"}}"#,
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYXNzd29yZDEyMw== was refused",
+                "Authorization: Basic [REDACTED] was refused",
+            ),
+            (
+                "proxy-authorization: Token zyxwvutsrq987654, then retried",
+                "proxy-authorization: Token [REDACTED], then retried",
+            ),
+            (
+                bare_header.as_str(),
+                "authorization: [REDACTED] (no scheme)",
+            ),
+            (
+                "header x-api-key: abc123secretvalue; next",
+                "header x-api-key: [REDACTED]; next",
+            ),
+            (
+                r#"{"api_key":"abc123secretvalue","model":"m"}"#,
+                r#"{"api_key":"[REDACTED]","model":"m"}"#,
+            ),
+            (
+                "GET /v1/models?key=AbCdEfGh12345678&alt=sse",
+                "GET /v1/models?key=[REDACTED]&alt=sse",
+            ),
+            ("used sk-ABCDEFGHIJKLMNOPQRSTU here", "used [REDACTED] here"),
+            (
+                "connect https://user:pa55word@example.com/path",
+                "connect https://[REDACTED]@example.com/path",
+            ),
+        ] {
+            let mut redacted = text.to_string();
+            redact_credentials(&mut redacted, |_| {});
+            assert_eq!(redacted, expected, "{text:?}");
+        }
+    }
+
+    /// Ordinary provider errors that only talk about credentials (a
+    /// message, a type, a code, a request id, a URL) are returned byte for
+    /// byte.
+    #[test]
+    fn redact_credentials_leaves_ordinary_provider_errors_unchanged() {
+        for text in [
+            r#"{"error":{"message":"You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser. You can obtain an API key from https://docs.upstream.invalid/account/api-keys.","type":"invalid_request_error","param":null,"code":null}}"#,
+            r#"{"error":{"message":"Incorrect API key provided: sk-proj-********************abcd. You can find your API key at https://docs.upstream.invalid/account/api-keys.","type":"invalid_request_error","param":null,"code":"invalid_api_key"},"request_id":"req_0123456789abcdef"}"#,
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CSHoEeqs5C35K2UUqR7Fy"}"#,
+            "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"API key not valid. Please pass a valid API key.\",\n    \"status\": \"INVALID_ARGUMENT\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"API_KEY_INVALID\"\n      }\n    ]\n  }\n}\n",
+            r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130112 tokens.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#,
+            r#"{"error":{"message":"Rate limit reached for model in organization org-0123456789 on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.","type":"tokens","param":null,"code":"rate_limit_exceeded"}}"#,
+            "Missing bearer authentication in header; basic authentication is not supported. See https://docs.upstream.invalid/v1/auth?section=2#tokens",
+            "Unexpected token: expected a comma. The security token included in the request is invalid. password: must be longer.",
+            "Access denied due to invalid subscription key or wrong API endpoint. Make sure to provide a valid key for an active subscription.",
+        ] {
+            let mut redacted = text.to_string();
+            redact_credentials(&mut redacted, |visit| {
+                visit("a-credential-that-does-not-occur-0123");
+            });
+            assert_eq!(redacted, text);
+        }
+    }
+
+    /// Redacting again changes nothing: a client redacts a body, then the
+    /// error built from it.
+    #[test]
+    fn redact_credentials_is_idempotent() {
+        let credential = format!("madeup{}", "bearertoken".repeat(3));
+        for text in [
+            format!(r#"{{"error":{{"message":"header authorization: Bearer {credential}"}}}}"#),
+            format!("api_key={credential} token: {credential}, key=[{credential}]"),
+            "authorization: Bearer abcdef0123456789 and x-api-key: abc123secretvalue".to_string(),
+            r#"{"api_key":"abc123secretvalue"} https://user:pa55word@example.com/"#.to_string(),
+        ] {
+            let mut once = text;
+            redact_credentials(&mut once, |visit| visit(&credential));
+            assert!(!once.contains(&credential), "{once:?}");
+            let mut twice = once.clone();
+            redact_credentials(&mut twice, |visit| visit(&credential));
+            assert_eq!(twice, once);
+        }
+    }
+
+    /// The diagnostic rules are unchanged by the response-text rules: an
+    /// authorization header still loses its whole value, and a secret-key
+    /// assignment its value whatever it looks like.
+    #[test]
+    fn redact_secret_shapes_keeps_the_diagnostic_rules() {
+        assert_eq!(
+            redact_secret_shapes("Authorization: Bearer YOUR_KEY) and more"),
+            "Authorization: [REDACTED]"
+        );
+        assert_eq!(redact_secret_shapes("token: expected"), "token: [REDACTED]");
     }
 
     #[test]

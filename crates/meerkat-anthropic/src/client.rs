@@ -2108,12 +2108,16 @@ impl AnthropicClient {
             .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
     }
 
-    /// Remove from `diagnostic`, text a response carried, any credential the
-    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own API key. A provider, proxy or gateway can
     /// echo the request's headers in an error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
-        if let Some(authorizer) = &self.authorizer {
-            authorizer.redact_response_diagnostic(diagnostic);
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                visit(&self.api_key);
+            }),
         }
     }
 
@@ -3146,9 +3150,9 @@ impl AnthropicClient {
 
         // Every error the stream ends with is redacted here, whichever path
         // built it (a rejection body, an error event, a parse failure).
-        streaming::redact_stream_diagnostics(
+        streaming::redact_stream_errors(
             streaming::ensure_terminal_done(inner),
-            self.authorizer.as_deref(),
+            move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
         )
     }
 }

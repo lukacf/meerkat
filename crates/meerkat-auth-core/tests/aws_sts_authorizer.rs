@@ -391,7 +391,7 @@ async fn sigv4_expired_lease_blocks_signing_with_typed_disposition() {
     );
 }
 
-/// Pass every echo of the request `authorizer` just signed (each header it
+/// Run every echo of the request `authorizer` just signed (each header it
 /// added, as sent, in a header line and alone; each credential bare and in
 /// a URL) through its redaction: none of `credentials` is left, and the
 /// text around them is.

@@ -261,12 +261,18 @@ impl OpenAiCompatibleClient {
         self
     }
 
-    /// Remove from `diagnostic`, text a response carried, any credential the
-    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// Remove from `diagnostic`, text a response carried, the credential
+    /// that signed the request: the authorizer's, or without an authorizer
+    /// this client's own static bearer. A provider, proxy or gateway can
     /// echo the request's headers in an error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
-        if let Some(authorizer) = &self.authorizer {
-            authorizer.redact_response_diagnostic(diagnostic);
+        match &self.authorizer {
+            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
+            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+                if let Some(bearer_token) = &self.bearer_token {
+                    visit(bearer_token);
+                }
+            }),
         }
     }
 
@@ -915,9 +921,9 @@ impl OpenAiCompatibleClient {
                         }
                     }
                 });
-                streaming::redact_stream_diagnostics(
+                streaming::redact_stream_errors(
                     streaming::ensure_terminal_done(inner),
-                    self.authorizer.as_deref(),
+                    move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
                 )
             }
             OpenAiCompatibleMode::ChatCompletions => {
@@ -1398,9 +1404,9 @@ impl OpenAiCompatibleClient {
                 // Every error the stream ends with is redacted here, whichever
                 // path built it (a rejection body, an error envelope, a data
                 // line that does not parse, an incomplete buffer).
-                streaming::redact_stream_diagnostics(
+                streaming::redact_stream_errors(
                     streaming::ensure_terminal_done(inner),
-                    self.authorizer.as_deref(),
+                    move |diagnostic: &mut String| self.redact_diagnostic(diagnostic),
                 )
             }
         }

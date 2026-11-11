@@ -245,4 +245,94 @@ async fn the_registration_follows_a_row_after_its_change() {
         "a name Core holds for no identity registers nothing"
     );
     assert!(!identities.contains(&unknown).await);
+
+    // An update: the row's spec replaces the registered one, with one more
+    // row read.
+    bridge.hold_created(&name, "analyst");
+    assert!(
+        identities
+            .register_from_row(&name)
+            .await
+            .expect("the row reads"),
+        "the updated row is served"
+    );
+    assert_eq!(
+        registered_profile(&identities, &name).await,
+        Some("analyst".to_string()),
+        "the registration follows the row's update"
+    );
+    assert_eq!(bridge.row_reads.load(Ordering::SeqCst), 2);
+
+    // A removal: the registration is gone, and the seam answers that the
+    // runtime no longer serves the name, not an error.
+    bridge.remove_created(&name);
+    assert!(
+        !identities
+            .register_from_row(&name)
+            .await
+            .expect("a committed removal is no error"),
+        "the removed identity is no longer served"
+    );
+    assert!(!identities.contains(&name).await);
+}
+
+/// The profile of `name`'s registration, if it is registered.
+async fn registered_profile(identities: &IdentityRuntime, name: &AgentIdentity) -> Option<String> {
+    identities
+        .registered_spec(name)
+        .await
+        .ok()
+        .map(|registered| registered.spec.profile.as_str().to_string())
+}
+
+/// After an adoption into the store the row is the identity's one owner,
+/// also while the host's roster still lists its name: the registration the
+/// roster made gives way to the row's spec when the change path follows the
+/// row, and a roster pass that still lists the name keeps the row's.
+#[tokio::test]
+async fn after_an_adoption_the_row_is_registered_and_the_rosters_listing_gives_way() {
+    let bridge = Arc::new(CoreReadsBridge::default());
+    let identities = runtime_over(&bridge, "adopted-row-wins");
+    let name = id("adopted");
+    register_live(&identities, &bridge.core, spec(&name), 1, SessionId::new())
+        .await
+        .expect("the roster's identity is registered and live");
+    assert_eq!(
+        registered_profile(&identities, &name).await,
+        Some(spec(&name).profile.as_str().to_string()),
+        "registered from the roster"
+    );
+
+    // The host adopts it into the store, and its row then moves on.
+    bridge.hold_created(&name, "analyst");
+    assert!(
+        identities
+            .register_from_row(&name)
+            .await
+            .expect("the row reads"),
+        "the adopted identity is served"
+    );
+    assert_eq!(
+        registered_profile(&identities, &name).await,
+        Some("analyst".to_string()),
+        "the row's spec is the registration, though the roster registered the name"
+    );
+    assert_eq!(
+        identities
+            .roster_without_row_identities(&[spec(&name)])
+            .await
+            .len(),
+        0,
+        "a pass no longer registers or declares the roster's listing of it"
+    );
+    assert_eq!(
+        identities
+            .tracked_row_identities()
+            .await
+            .iter()
+            .map(|spec| spec.identity.clone())
+            .collect::<Vec<_>>(),
+        vec![name.clone()],
+        "and tracks it from its row"
+    );
 }

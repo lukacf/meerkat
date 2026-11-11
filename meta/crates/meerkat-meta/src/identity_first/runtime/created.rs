@@ -360,38 +360,33 @@ impl IdentityRuntime {
     /// registered.
     ///
     /// Answers the specs of the identities this runtime serves from their
-    /// rows that `roster` does not list: the pass tracks them beside the
-    /// roster's.
-    pub(super) async fn register_created_identities(
-        &self,
-        roster: &[DurableAgentSpec],
-    ) -> Vec<DurableAgentSpec> {
-        let listed = roster
-            .iter()
-            .map(|spec| &spec.identity)
-            .collect::<BTreeSet<_>>();
+    /// rows: the pass tracks them beside the roster's. A row is its
+    /// identity's one owner, also while the host's roster still lists its
+    /// name (a host adopted it into the store): such a name is registered
+    /// from its row, replacing a registration the roster made.
+    pub(super) async fn register_created_identities(&self) -> Vec<DurableAgentSpec> {
         if let Some(bridge) = self.bridge.clone() {
             match bridge.created_identity_names().await {
                 Ok(names) => {
                     let held = names.iter().cloned().collect::<BTreeSet<_>>();
                     for name in names {
-                        // The roster's own listing of an identity its row
-                        // holds (one a host adopted into the store that its
-                        // roster still lists) keeps the roster's
-                        // registration.
-                        if listed.contains(&name) {
-                            continue;
-                        }
-                        let from_row = self
+                        let registered = self
                             .entries
                             .read()
                             .await
                             .get(&name)
-                            .is_some_and(|entry| entry.created);
-                        if from_row {
+                            .map(|entry| entry.created);
+                        if registered == Some(true) {
                             continue;
                         }
                         match bridge.created_identity(&name).await {
+                            // A name not registered yet waits on no lock:
+                            // nothing is replaced.
+                            Ok(Some(spec)) if registered.is_none() => {
+                                self.register_created_if_absent(spec).await;
+                            }
+                            // The roster's registration of a name a row
+                            // holds gives way to the row's.
                             Ok(Some(spec)) => {
                                 let lifecycle_lock = self.lifecycle_lock_for(&name).await;
                                 let _lifecycle_guard = lifecycle_lock.lock().await;
@@ -412,9 +407,7 @@ impl IdentityRuntime {
                         .read()
                         .await
                         .iter()
-                        .filter(|(identity, entry)| {
-                            entry.created && !held.contains(*identity) && !listed.contains(identity)
-                        })
+                        .filter(|(identity, entry)| entry.created && !held.contains(*identity))
                         .map(|(identity, _)| identity.clone())
                         .collect::<Vec<_>>();
                     for identity in stale {
@@ -429,25 +422,38 @@ impl IdentityRuntime {
                 ),
             }
         }
-        self.row_registered_specs(roster).await
+        self.row_registered_specs().await
     }
 
-    /// The specs of the identities this runtime serves from their rows that
-    /// `roster` does not list, as registered: no read of Core or of a row.
-    pub(super) async fn row_registered_specs(
-        &self,
-        roster: &[DurableAgentSpec],
-    ) -> Vec<DurableAgentSpec> {
-        let listed = roster
-            .iter()
-            .map(|spec| &spec.identity)
-            .collect::<BTreeSet<_>>();
+    /// The specs of the identities this runtime serves from their rows, as
+    /// registered: no read of Core or of a row.
+    pub(super) async fn row_registered_specs(&self) -> Vec<DurableAgentSpec> {
         self.entries
             .read()
             .await
+            .values()
+            .filter(|entry| entry.created)
+            .map(|entry| entry.spec.clone())
+            .collect()
+    }
+
+    /// `roster` without the identities this runtime serves from their rows:
+    /// a row is its identity's one owner, also while the host's roster
+    /// still lists its name, so a pass neither registers nor declares the
+    /// roster's listing of it. No read of Core or of a row.
+    pub(super) async fn roster_without_row_identities(
+        &self,
+        roster: &[DurableAgentSpec],
+    ) -> Vec<DurableAgentSpec> {
+        let entries = self.entries.read().await;
+        roster
             .iter()
-            .filter(|(identity, entry)| entry.created && !listed.contains(identity))
-            .map(|(_, entry)| entry.spec.clone())
+            .filter(|spec| {
+                !entries
+                    .get(&spec.identity)
+                    .is_some_and(|entry| entry.created)
+            })
+            .cloned()
             .collect()
     }
 
@@ -456,12 +462,9 @@ impl IdentityRuntime {
     /// row but an archived one, which keeps no member until its unarchive
     /// (read from Core's entry of its name: the machine state its actor
     /// published).
-    pub(super) async fn tracked_row_identities(
-        &self,
-        roster: &[DurableAgentSpec],
-    ) -> Vec<DurableAgentSpec> {
+    pub(super) async fn tracked_row_identities(&self) -> Vec<DurableAgentSpec> {
         let mut tracked = Vec::new();
-        for spec in self.register_created_identities(roster).await {
+        for spec in self.register_created_identities().await {
             let archived = matches!(
                 self.core_entry_of_name(&spec.identity).await,
                 Ok(Some(entry))
@@ -572,18 +575,42 @@ impl IdentityRuntime {
     /// store, an archive, a removal): a row this runtime has not registered
     /// is registered now, with its customizer tool dispatcher, so the
     /// member's next build carries the host customizer's tools; a row that
-    /// changed is registered again; and the registration of a row Core no
+    /// changed is registered again; a name the host's roster registered
+    /// that a row holds now (an adoption) is registered from its row, which
+    /// is its one owner from then on; and the registration of a row Core no
     /// longer holds is forgotten. `Ok(true)` when the runtime serves the
-    /// name afterwards. It reads one row, sends Core no command and wakes
-    /// nothing. The change path calls it once the change committed.
-    // The seam of the identity change executor, which is not in this crate
-    // yet: until it calls this, only the rows do.
+    /// name afterwards, `Ok(false)` when it does not (the change removed the
+    /// identity, or Core holds the name for no identity). It reads one row,
+    /// sends Core no command and wakes nothing. The change path calls it
+    /// once the change committed.
+    ///
+    /// The caller must NOT hold the identity's lifecycle lock: a row that
+    /// changed or left is registered or forgotten under that lock, which is
+    /// not reentrant.
+    // Called by the identity change path, which is not in this crate yet:
+    // until it is, only the rows call it.
     #[allow(dead_code)]
     pub(crate) async fn register_from_row(
         &self,
         name: &AgentIdentity,
     ) -> Result<bool, IdentityRuntimeError> {
-        self.admit_at_delivery_door(name).await
+        let registered_by_roster = self
+            .entries
+            .read()
+            .await
+            .get(name)
+            .is_some_and(|entry| !entry.created);
+        let followed = if registered_by_roster && self.row_holds_name(name).await? {
+            self.refresh_created_registration(name).await
+        } else {
+            self.admit_at_delivery_door(name).await
+        };
+        match followed {
+            // Core holds the name for no identity this runtime serves (the
+            // change removed it): the registration is gone, as asked.
+            Err(IdentityRuntimeError::UnknownIdentity(_)) => Ok(false),
+            followed => followed,
+        }
     }
 
     /// Whether a door to `name` is the door of an identity this runtime
@@ -657,23 +684,15 @@ impl IdentityRuntime {
                     .await
                     .get(name)
                     .map(|entry| (entry.created, entry.spec == spec));
-                // Registered from this very row, or by the host's roster
-                // meanwhile: nothing to change.
-                if matches!(current, Some((true, true) | (false, _))) {
+                // Registered from this very row: nothing to change.
+                if matches!(current, Some((true, true))) {
                     return Ok(true);
                 }
+                // The row is the identity's one owner: its spec replaces
+                // what was registered, a roster's registration included.
                 let lifecycle_lock = self.lifecycle_lock_for(name).await;
                 let _lifecycle_guard = lifecycle_lock.lock().await;
-                // A registration the host's roster made meanwhile stands.
-                let roster_registered = self
-                    .entries
-                    .read()
-                    .await
-                    .get(name)
-                    .is_some_and(|entry| !entry.created);
-                if !roster_registered {
-                    self.register_created_locked(spec).await;
-                }
+                self.register_created_locked(spec).await;
                 Ok(true)
             }
             Ok(None) => {

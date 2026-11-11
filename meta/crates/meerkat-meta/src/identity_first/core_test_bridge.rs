@@ -785,6 +785,16 @@ impl CoreReadsBridge {
             .insert(identity.clone());
     }
 
+    /// Core removed `identity`, which it held as a created entry: its row
+    /// carries no spec any more, and its name is a removed identity's.
+    pub(crate) fn remove_created(&self, identity: &AgentIdentity) {
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(identity);
+        self.hold_removed(identity);
+    }
+
     /// Core reserves `identity`'s name as one whose record it cannot read.
     /// Core's read names no member of it.
     pub(crate) fn hold_unreadable(&self, identity: &AgentIdentity) {

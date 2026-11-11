@@ -2460,9 +2460,14 @@ impl IdentityFirstRuntimeContext {
             .await
             .map_err(|error| IdentityRuntimeError::Internal(format!("roster provider: {error}")))?;
         // Every identity the runtime serves: the roster's, and the ones
-        // registered from their rows in the mob's identity store.
-        let served_from_rows = self.runtime.row_registered_specs(&roster).await;
-        let roster = roster
+        // registered from their rows in the mob's identity store, each once
+        // (a row is its identity's one owner, also while the roster still
+        // lists its name).
+        let served_from_rows = self.runtime.row_registered_specs().await;
+        let roster = self
+            .runtime
+            .roster_without_row_identities(&roster)
+            .await
             .into_iter()
             .chain(served_from_rows)
             .collect::<Vec<_>>();
@@ -3261,12 +3266,15 @@ impl IdentityFirstRuntimeContext {
             return Err(error);
         }
         // The identities whose record is their row in the mob's identity
-        // store, which the host's roster never lists, are registered from
-        // their rows first: the pass tracks them beside the roster's, and the
-        // topology provider is asked about every identity the runtime
-        // serves. The roster's declaration below names the roster's
-        // identities only.
-        let row_specs = self.runtime.tracked_row_identities(roster).await;
+        // store are registered from their rows first: the pass tracks them
+        // beside the roster's, and the topology provider is asked about
+        // every identity the runtime serves. A row is its identity's one
+        // owner, also while the host's roster still lists its name (a host
+        // adopted it into the store): the roster's declaration below names
+        // the other identities only.
+        let row_specs = self.runtime.tracked_row_identities().await;
+        let roster_held = self.runtime.roster_without_row_identities(roster).await;
+        let roster = roster_held.as_slice();
         let tracked = roster
             .iter()
             .chain(row_specs.iter())

@@ -155,6 +155,21 @@ describe("identity family on a real gateway", () => {
     });
   });
 
+  it("an agent without a display name has none", { skip }, async () => {
+    // The wire leaves `display_name` out for an agent that has none: it is
+    // never the agent's name in its place.
+    await withGateway(async (identities) => {
+      await created(identities);
+      assert.equal((await identities.get("editor")).displayName, null);
+      const listed = new Map((await identities.list()).agents.map((agent) => [agent.name, agent]));
+      assert.equal(listed.get("editor")?.displayName, null);
+      assert.equal(listed.get("scout")?.displayName, "Scout");
+      const peers = new Map((await identities.directory()).peers.map((peer) => [peer.name, peer]));
+      assert.equal(peers.get("editor")?.displayName, null);
+      assert.equal(peers.get("scout")?.displayName, "Scout");
+    });
+  });
+
   it("get reads one agent in full", { skip }, async () => {
     await withGateway(async (identities) => {
       const record = await identities.get("scout");

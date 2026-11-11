@@ -194,6 +194,20 @@ async def test_list_names_every_agent_the_same_way(tmp_path):
         assert [agent.name for agent in only.agents] == ["editor"]
 
 
+async def test_an_agent_without_a_display_name_has_none(tmp_path):
+    """The wire leaves ``display_name`` out for an agent that has none: it
+    is never the agent's name in its place."""
+    async with gateway(tmp_path) as identities:
+        await _created(identities)
+        assert (await identities.get("editor")).display_name is None
+        listed = {agent.name: agent for agent in (await identities.list()).agents}
+        assert listed["editor"].display_name is None
+        assert listed["scout"].display_name == "Scout"
+        peers = {peer.name: peer for peer in (await identities.directory()).peers}
+        assert peers["editor"].display_name is None
+        assert peers["scout"].display_name == "Scout"
+
+
 async def test_get_reads_one_agent_in_full(tmp_path):
     async with gateway(tmp_path) as identities:
         record = await identities.get("scout")

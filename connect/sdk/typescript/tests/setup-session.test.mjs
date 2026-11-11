@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { Session, EventStream, MeerkatClient } from "@rkat/sdk";
 // Only test transport plumbing uses this installed SDK internal queue. The
 // product imports public types and calls public Session methods exclusively.
@@ -229,9 +229,14 @@ test("original sending view shows the notice wait after its joined completion wi
   assert.deepEqual(h.sends, ["Inspect this frontend"]); assert.equal(h.stops.length, 0);
 });
 
-test("component controls use exact released SDK Session, parser and EventStream", async () => {
+test("component controls use the same commit's SDK Session, parser and EventStream", async () => {
+  // The development dependency links the SDK built from this checkout, never a
+  // published release of another version.
+  const installed = await realpath(new URL("../node_modules/@rkat/sdk", import.meta.url));
+  assert.equal(installed, await realpath(new URL("../../../../sdks/typescript", import.meta.url)));
   const metadata = JSON.parse(await readFile(new URL("../node_modules/@rkat/sdk/package.json", import.meta.url)));
-  assert.equal(metadata.version, "0.9.10");
+  const source = JSON.parse(await readFile(new URL("../../../../sdks/typescript/package.json", import.meta.url)));
+  assert.equal(metadata.version, source.version);
   const h = harness(), events = [];
   assert.ok(h.session instanceof Session);
   const message = "  Set up Gmail and a Slack frontend.\nKeep my complete request.  ";

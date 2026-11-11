@@ -384,7 +384,7 @@ fn lock_table_first_call(read: usize) -> usize {
 #[cfg(target_os = "linux")]
 fn read_lock_table(read: usize) -> Option<String> {
     #[cfg(test)]
-    if let Some(table) = tests::scripted_lock_table() {
+    if let Some(tests::ScriptedRead(table)) = tests::scripted_lock_table() {
         return table;
     }
     let table = std::fs::File::open("/proc/locks").ok()?;
@@ -1678,11 +1678,15 @@ mod tests {
             const { std::cell::RefCell::new(None) };
     }
 
-    /// The answer to this thread's next read of the lock table when a test
-    /// supplies the tables (`Some(None)`: that read fails), `None` when
-    /// none does.
+    /// What a test supplies for one read of the lock table: the table, or
+    /// `None` for a read that fails.
     #[cfg(target_os = "linux")]
-    pub(super) fn scripted_lock_table() -> Option<Option<String>> {
+    pub(super) struct ScriptedRead(pub(super) Option<String>);
+
+    /// The answer to this thread's next read of the lock table when a test
+    /// supplies the tables, `None` when none does.
+    #[cfg(target_os = "linux")]
+    pub(super) fn scripted_lock_table() -> Option<ScriptedRead> {
         LOCK_TABLES.with(|script| {
             let mut script = script.borrow_mut();
             let script = script.as_mut()?;
@@ -1692,7 +1696,7 @@ mod tests {
                 .or_else(|| script.tables.last())
                 .cloned();
             script.reads += 1;
-            table
+            table.map(ScriptedRead)
         })
     }
 
@@ -1959,9 +1963,7 @@ mod tests {
     /// not text as a table that cannot be read.
     #[test]
     fn the_lock_table_reader_reads_to_the_end_and_shortens_only_its_first_call() {
-        let table: String = (1..=300)
-            .map(|n| format!("{n}: FLOCK  ADVISORY  READ {n} fd:01:{n} 0 EOF\n"))
-            .collect();
+        let table = "7: FLOCK  ADVISORY  READ 100 fd:01:4242 0 EOF\n".repeat(300);
         let read = |first_call: usize,
                     per_call: usize,
                     fail: Option<(usize, std::io::ErrorKind)>,

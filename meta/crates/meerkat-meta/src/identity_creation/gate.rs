@@ -551,6 +551,16 @@ fn no_policy(change: ChangeClass) -> IdentityRefusal {
     )
 }
 
+/// An entry of the mob whose record this build cannot read is left out of
+/// a page, and said once per read in the log: it is no agent this family
+/// can show or change.
+fn unreadable(view: &IdentityEntryView) {
+    tracing::warn!(
+        identity = %identity_name_of_member(&view.identity),
+        "an agent's record cannot be read by this build: it is left out of the page"
+    );
+}
+
 /// Whether a directory entry of `name` and `display_name` is one `query`
 /// selects: every entry without a query, else one whose name or display
 /// name contains it, whatever the case.
@@ -629,6 +639,41 @@ impl IdentityGate {
         Self {
             seen: Some(seen),
             ..self.clone()
+        }
+    }
+
+    /// Whether the caller may see the agent `name`.
+    fn sees(&self, name: &str) -> bool {
+        self.seen.as_ref().is_none_or(|seen| seen.sees(name))
+    }
+
+    /// `summary` as the caller is shown it: who asked for the agent is left
+    /// out when that is an agent the caller may not see.
+    fn shown_summary(&self, mut summary: AgentSummary) -> AgentSummary {
+        if summary.provenance.as_ref().is_some_and(|asked| {
+            asked.requester_kind == RequesterKind::Agent && !self.sees(&asked.requester)
+        }) {
+            summary.provenance = None;
+        }
+        summary
+    }
+
+    /// `record` as the caller is shown it: its peers are the ones the
+    /// caller may see.
+    fn shown_record(&self, mut record: AgentRecord) -> AgentRecord {
+        record.peers.retain(|peer| self.sees(peer));
+        record.agent = self.shown_summary(record.agent);
+        record
+    }
+
+    /// The cursor of a page whose last shown agent is `last`, when the mob
+    /// has more after `next`: the mob's own for a caller that sees every
+    /// agent, and the last agent the caller was shown otherwise, so a
+    /// cursor never names an agent the caller may not see.
+    fn cursor(&self, last: &str, next: &meerkat_mob::AgentIdentity) -> String {
+        match self.seen {
+            Some(_) => last.to_owned(),
+            None => identity_name_of_member(next),
         }
     }
 
@@ -1280,30 +1325,39 @@ impl IdentityGate {
             })?),
             None => None,
         };
-        let page = mob
-            .identity_entries(after.as_ref(), PAGE_MAX)
-            .map_err(read_failed)?;
-        let mut agents = Vec::with_capacity(page.entries.len());
-        for view in &page.entries {
-            let Some(agent) = self.agent_of_entry(mob, view).await? else {
-                continue;
-            };
-            if agent.archived && !list.include_archived {
-                continue;
+        let mut after = after;
+        let mut agents: Vec<AgentSummary> = Vec::new();
+        // A page of the mob none of whose agents is shown (filtered out, or
+        // not the caller's to see) is passed over: the caller's page starts
+        // further on.
+        let next = loop {
+            let page = mob
+                .identity_entries(after.as_ref(), PAGE_MAX)
+                .map_err(read_failed)?;
+            for view in &page.entries {
+                let Some(agent) = self.agent_of_entry(mob, view).await? else {
+                    unreadable(view);
+                    continue;
+                };
+                if !self.sees(&agent.name) || (agent.archived && !list.include_archived) {
+                    continue;
+                }
+                if list
+                    .profile
+                    .as_deref()
+                    .is_some_and(|profile| profile != agent.spec.profile.as_str())
+                {
+                    continue;
+                }
+                agents.push(self.shown_summary(agent.summary()));
             }
-            if list
-                .profile
-                .as_deref()
-                .is_some_and(|profile| profile != agent.spec.profile.as_str())
-            {
-                continue;
+            match (page.next, agents.last()) {
+                (Some(next), Some(last)) => break Some(self.cursor(&last.name, &next)),
+                (Some(next), None) => after = Some(next),
+                (None, _) => break None,
             }
-            agents.push(agent.summary());
-        }
-        Ok(AgentPage {
-            agents,
-            next: page.next.as_ref().map(identity_name_of_member),
-        })
+        };
+        Ok(AgentPage { agents, next })
     }
 
     /// What the rules of `policy` give a create of an agent of `profile`
@@ -1375,47 +1429,63 @@ impl IdentityGate {
             })?),
             None => None,
         };
-        let page = mob
-            .identity_entries(after.as_ref(), PAGE_MAX)
-            .map_err(read_failed)?;
-        let mut peers = Vec::with_capacity(page.entries.len());
-        for view in &page.entries {
-            let Some(agent) = self.agent_of_entry(mob, view).await? else {
-                continue;
-            };
-            if agent.archived
-                || !query_selects(query, &agent.name, agent.spec.display_name.as_deref())
-            {
-                continue;
-            }
-            let verdict = match &rules {
-                Some((policy, _)) => {
-                    match evaluate_peer(policy.peers(), &agent.name, &agent.peer(policy)) {
-                        PeerVerdict::Allowed { .. } => DirectoryVerdict::Allowed,
-                        PeerVerdict::NeedsApproval { reason, .. } => {
-                            DirectoryVerdict::NeedsDecision {
-                                lines: reason.into_iter().collect(),
-                            }
-                        }
-                        PeerVerdict::Denied { reason, .. } => {
-                            DirectoryVerdict::NotAllowed { reason }
-                        }
-                    }
+        let mut after = after;
+        let mut peers: Vec<DirectoryPeer> = Vec::new();
+        let next = loop {
+            let page = mob
+                .identity_entries(after.as_ref(), PAGE_MAX)
+                .map_err(read_failed)?;
+            for view in &page.entries {
+                let Some(agent) = self.agent_of_entry(mob, view).await? else {
+                    unreadable(view);
+                    continue;
+                };
+                if agent.archived
+                    || !self.sees(&agent.name)
+                    || !query_selects(query, &agent.name, agent.spec.display_name.as_deref())
+                {
+                    continue;
                 }
-                None => not_allowed(),
-            };
-            peers.push(DirectoryPeer {
-                name: agent.name.clone(),
-                display_name: agent.spec.display_name.clone(),
-                profile: agent.spec.profile.as_str().to_owned(),
-                verdict,
-            });
-        }
+                peers.push(Self::directory_peer(
+                    rules.as_ref().map(|(policy, _)| *policy),
+                    &agent,
+                ));
+            }
+            match (page.next, peers.last()) {
+                (Some(next), Some(last)) => break Some(self.cursor(&last.name, &next)),
+                (Some(next), None) => after = Some(next),
+                (None, _) => break None,
+            }
+        };
         Ok(DirectoryPage {
             profiles,
             peers,
-            next: page.next.as_ref().map(identity_name_of_member),
+            next,
         })
+    }
+
+    /// The directory entry of `agent` as a peer, under `policy`'s peer
+    /// rules; not allowed without a policy.
+    fn directory_peer(
+        policy: Option<&IdentityCreationPolicy>,
+        agent: &AgentFacts,
+    ) -> DirectoryPeer {
+        let verdict = match policy {
+            Some(policy) => match evaluate_peer(policy.peers(), &agent.name, &agent.peer(policy)) {
+                PeerVerdict::Allowed { .. } => DirectoryVerdict::Allowed,
+                PeerVerdict::NeedsApproval { reason, .. } => DirectoryVerdict::NeedsDecision {
+                    lines: reason.into_iter().collect(),
+                },
+                PeerVerdict::Denied { reason, .. } => DirectoryVerdict::NotAllowed { reason },
+            },
+            None => DirectoryVerdict::NotAllowed { reason: None },
+        };
+        DirectoryPeer {
+            name: agent.name.clone(),
+            display_name: agent.spec.display_name.clone(),
+            profile: agent.spec.profile.as_str().to_owned(),
+            verdict,
+        }
     }
 
     /// The plan of `call`: the outcome its rules give it and the rendering
@@ -1556,7 +1626,9 @@ impl IdentityFamily for IdentityGate {
             IdentityRead::List(list) => Ok(IdentityReadAnswer::List(self.list(mob, &list).await?)),
             IdentityRead::Get(GetAgent { name, .. }) => {
                 let agent = self.target(mob, &name).await?;
-                Ok(IdentityReadAnswer::Get(Box::new(agent.record())))
+                Ok(IdentityReadAnswer::Get(Box::new(
+                    self.shown_record(agent.record()),
+                )))
             }
             IdentityRead::Operation(operation_id) => {
                 let state = match committed_outcome(mob, &operation_id).await {
@@ -1590,8 +1662,9 @@ impl IdentityFamily for IdentityGate {
 pub struct IdentityFamilyOptions {
     /// The host's own check of each request, and its consequence lines.
     pub hooks: Option<Arc<dyn IdentityHostHooks>>,
-    /// What follows an update of an agent's instructions and a removal, in
-    /// place of the identity runtime's own step.
+    /// What follows an update of an agent's instructions and a removal.
+    /// Without it nothing follows them here: an update answers no
+    /// instruction outcome.
     pub instruction_step: Option<Arc<dyn InstructionStep>>,
     /// Where the notice of a decision that ended goes: without it no
     /// requester is told, and each reads its operation's state.

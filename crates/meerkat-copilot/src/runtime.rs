@@ -1145,13 +1145,13 @@ impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
     }
 }
 
-/// What a prepared Copilot route of `provider`'s family states for the
+/// What a Copilot route of `provider`'s family states for the
 /// provider-neutral `reasoning_effort` option: the Copilot backend of the
 /// family, the API of the endpoint the route serves, and the effort levels
 /// the account's model list states for the route's model. It reads only the
-/// route the client already prepared: the capabilities are those of the
-/// entry the route resolved for the session's model, and nothing is looked
-/// up or fetched.
+/// route it is given, as the account's cached list resolved it: the
+/// capabilities are those of the entry the route resolved for the session's
+/// model, and nothing is looked up or fetched.
 ///
 /// - A route the account's list does not serve (the model is absent, more
 ///   than one entry matches it, its policy is not enabled, or the family has
@@ -1413,12 +1413,20 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.sync_client().prompt_token_limit(output_budget)
     }
 
-    /// What the prepared route states ([`reasoning_route_observation`]).
-    /// This client answers for the route: the adapter it wraps knows the
-    /// backend and the API but not the account's list. No I/O, and no lock
-    /// is held past the read of the prepared route.
+    /// What the route the account's list resolves now states
+    /// ([`reasoning_route_observation`]), not the route this client last
+    /// prepared a request on: a level that is refused prepares no request,
+    /// so nothing else would bring the answer up to date once the account's
+    /// list has loaded or changed. This client answers for the route: the
+    /// adapter it wraps knows the backend and the API but not the account's
+    /// list. No I/O: the same read of the account's cached entry a request
+    /// preparation makes, with no lock held past it. An account whose state
+    /// is gone has no route to report.
     fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
-        reasoning_route_observation(self.provider, &self.prepared_route.read().fingerprint)
+        let current = self
+            .runtime
+            .resolve_route(&self.connection, self.provider, &self.model)?;
+        reasoning_route_observation(self.provider, &CopilotRouteFingerprint::from(&current))
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -15685,9 +15693,9 @@ mod tests {
             );
         }
 
-        /// R2.7: an observation reads the route the client already prepared.
-        /// It sends nothing, with a loaded list and without one, however
-        /// often it is asked.
+        /// R2.7: an observation reads the route the account's cached list
+        /// resolves. It sends nothing, with a loaded list and without one,
+        /// however often it is asked.
         #[tokio::test]
         async fn observation_does_no_io() {
             for (script, requests) in [

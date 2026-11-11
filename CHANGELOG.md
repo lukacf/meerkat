@@ -155,9 +155,13 @@ them.
     is then on its family's optimistic endpoint). The entry is the one the
     route resolved for the session's model, so a catalog ID the account
     writes with a dot reads that entry. A model the list does not serve
-    has no route to report. On the Messages endpoint an entry that states
-    levels and also states `adaptive_thinking: false` is reported as
-    `NotStated`.
+    has no route to report. The report is of the route the account's list
+    resolves when it is asked, not of the route the session last sent a
+    request on: a session built before the list loaded reports the list's
+    statement once it has loaded, and a refreshed list's statement once it
+    has changed, with no new session. On the Messages endpoint an entry
+    that states levels and also states `adaptive_thinking: false` is
+    reported as `NotStated`.
   - Wrappers forward: the fallback client reports its active candidate's
     route, and the selected-target wrapper and the Copilot account
     capability gate report their client's. `TestClient` reports a route a

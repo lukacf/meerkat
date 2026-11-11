@@ -297,6 +297,8 @@ impl IdentityRuntime {
     /// marked created, while the caller holds its lifecycle lock. A wake
     /// refusal recorded for it survives, as for any re-registration.
     pub(super) async fn register_created_locked(&self, spec: DurableAgentSpec) {
+        self.append_changed_instructions_on_registration(&spec)
+            .await;
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {

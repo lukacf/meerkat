@@ -76,7 +76,8 @@ mod tool_grant_seat;
 use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
 pub use instruction_append::{
-    InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
+    INSTRUCTIONS_NAMESPACE, InstructionNextSessionReason, InstructionOutcome, InstructionsChanged,
+    RESERVED_INSTRUCTION_NAMESPACE_PREFIX, is_reserved_instruction_namespace,
 };
 pub(crate) use records::host_pending_members_before_build;
 
@@ -3322,6 +3323,9 @@ impl IdentityFirstRuntimeContext {
         // The identities created at runtime, which the host's roster never
         // lists, are registered from their rows in the mob's identity store.
         self.runtime.register_created_identities(roster).await;
+        self.runtime
+            .append_changed_instructions_at_start(generation)
+            .await;
         self.runtime
             .install_identity_bootstrap(generation, self.bootstrap_mode.clone(), roster, &result)
             .await;
@@ -7549,6 +7553,8 @@ impl IdentityRuntime {
         spec: DurableAgentSpec,
         declaration_refused: Option<bool>,
     ) {
+        self.append_changed_instructions_on_registration(&spec)
+            .await;
         let identity = spec.identity.clone();
         let bootstrap_generation = self.identity_bootstrap_status_with_generation().0;
         {

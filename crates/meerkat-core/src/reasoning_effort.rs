@@ -257,8 +257,8 @@ pub struct ReasoningEffortRefusal {
     /// The model the request would use.
     pub model: String,
     /// The route the request would be served on. `None` when the client
-    /// that serves the request reports no route and the model's provider
-    /// has no direct route to name: a route is never guessed.
+    /// that serves the request reports no route: a route nobody observed
+    /// is never guessed.
     pub route: Option<ReasoningRoute>,
     /// Why the level is refused.
     pub reason: ReasoningEffortRefusalReason,
@@ -747,10 +747,9 @@ mod tests {
             conflict
         );
 
-        // A refusal that names no route (no client observation, and a
-        // provider with no direct route to name) writes `route` as an
-        // explicit `null`, in its place, and reads back. A document that
-        // leaves the key out reads as the same refusal.
+        // A refusal that names no route (no client observation) writes
+        // `route` as an explicit `null`, in its place, and reads back. A
+        // document that leaves the key out reads as the same refusal.
         let unrouted = ReasoningEffortRefusal {
             provider: Provider::Other,
             model: "<model id>".to_owned(),

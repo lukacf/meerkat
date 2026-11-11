@@ -10,7 +10,7 @@
 use super::{
     AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningEffortDecidedBy,
     ReasoningEffortRefusal, ReasoningEffortRefusalReason, ReasoningEffortResolution,
-    ReasoningFactsSource, ReasoningRoute, ReasoningRouteObservation,
+    ReasoningFactsSource, ReasoningRouteObservation,
 };
 use crate::Provider;
 use crate::lifecycle::run_primitive::{
@@ -19,12 +19,11 @@ use crate::lifecycle::run_primitive::{
     ReasoningMode,
 };
 use crate::model_profile::capabilities::{EffortLevel, ModelCapabilities, ThinkingSupport};
-use crate::provider_matrix::{
-    AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
-};
+use crate::provider_matrix::{AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind};
 
 /// How a requested level is judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ReasoningResolveMode {
     /// The level a request names: every conflict with another reasoning
     /// setting of the request is refused.
@@ -82,6 +81,7 @@ impl<'a> ReasoningResolveInput<'a> {
 /// What the source of a route's levels states for a model: the facts step
 /// of the resolution, on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReasoningLevelFacts {
     /// The levels the route accepts for the model: the levels the source
     /// states that the route can also express, lowest first and without
@@ -487,49 +487,15 @@ fn refusal(
         requested: input.requested,
         provider: input.provider,
         model: input.model.to_owned(),
-        route: match input.observation {
-            Some(observation) => Some(observation.route()),
-            None => unobserved_route(input.provider),
-        },
+        // The route a client observed. A client that reports none is on a
+        // route nobody observed, and none is guessed for it.
+        route: input.observation.map(ReasoningRouteObservation::route),
         reason,
         supported: facts.supported().map(<[EffortLevel]>::to_vec),
         facts: facts.source(),
         conflicting_param,
         conflicting_level,
     }
-}
-
-/// The route of a provider family when no client observes one: the direct
-/// backend of the OpenAI, Anthropic and Gemini families on its own API, and
-/// the self-hosted backend on Chat Completions. `None` for a provider
-/// outside the families, which has no route of its own.
-fn family_route(provider: Provider) -> Option<(ReasoningBackend, ModelApi)> {
-    match provider {
-        Provider::OpenAI => Some((
-            ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
-            ModelApi::Responses,
-        )),
-        Provider::Anthropic => Some((
-            ReasoningBackend::Anthropic(AnthropicBackendKind::AnthropicApi),
-            ModelApi::Messages,
-        )),
-        Provider::Gemini => Some((
-            ReasoningBackend::Google(GoogleBackendKind::GoogleGenAi),
-            ModelApi::GenerateContent,
-        )),
-        Provider::SelfHosted => Some((
-            ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
-            ModelApi::ChatCompletions,
-        )),
-        Provider::Other => None,
-    }
-}
-
-/// The route a refusal names when the client reports none: the family's
-/// own route. `None` for a provider outside the families: a route nobody
-/// observed is never guessed.
-fn unobserved_route(provider: Provider) -> Option<ReasoningRoute> {
-    family_route(provider).map(|(backend, api)| ReasoningRoute::new(backend, api))
 }
 
 /// The observation of a provider family's direct route
@@ -540,7 +506,18 @@ fn unobserved_route(provider: Provider) -> Option<ReasoningRoute> {
 /// families.
 pub fn direct_route_observation(provider: Provider) -> Option<ReasoningRouteObservation> {
     let (backend, api) = match provider {
-        Provider::OpenAI | Provider::Anthropic | Provider::Gemini => family_route(provider)?,
+        Provider::OpenAI => (
+            ReasoningBackend::OpenAi(OpenAiBackendKind::OpenAiApi),
+            ModelApi::Responses,
+        ),
+        Provider::Anthropic => (
+            ReasoningBackend::Anthropic(AnthropicBackendKind::AnthropicApi),
+            ModelApi::Messages,
+        ),
+        Provider::Gemini => (
+            ReasoningBackend::Google(GoogleBackendKind::GoogleGenAi),
+            ModelApi::GenerateContent,
+        ),
         Provider::SelfHosted | Provider::Other => return None,
     };
     Some(ReasoningRouteObservation {

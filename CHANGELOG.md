@@ -136,11 +136,14 @@ them.
     routes included, where that field was accepted and had no effect
     before; remove the budget or the level.
   - `ReasoningResolveInput` is built with `ReasoningResolveInput::new` (it
-    is `#[non_exhaustive]`). `direct_route_observation` gives the
-    observation of a provider family's direct route, for a client that
-    reports none. A refusal raised with no observation names the family's
-    own route; for a provider outside the four families it names none
-    (`route: null`).
+    is `#[non_exhaustive]`). `ReasoningResolveMode` and
+    `ReasoningLevelFacts` are `#[non_exhaustive]` enums: a match on either
+    outside `meerkat-core` needs a wildcard arm. `direct_route_observation`
+    gives the observation of a provider family's direct route; it is used
+    by the reasoning preference and for a model's direct-route levels, and
+    a client that reports no route is still resolved as unknown. A refusal
+    raised with no observation names no route (`route: null`): the route
+    of a client that reports none is never guessed.
 
 ### Changed
 

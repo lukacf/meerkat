@@ -30,6 +30,34 @@ pub(super) enum EntryChange {
     Remove,
 }
 
+/// The spec `spec` in the form an agent's record holds it: field for field,
+/// under the name Core's mob holds the agent by. `None` for a name the
+/// encoding does not admit. Its digest is the one spec digest every surface
+/// names, before and after the agent's adoption.
+pub(crate) fn row_spec(
+    spec: &crate::identity_first::DurableAgentSpec,
+) -> Option<CreatedIdentitySpec> {
+    let member = super::core_member_name(spec.identity.as_str())?;
+    let mut row = CreatedIdentitySpec::new(member, spec.profile.clone())
+        .with_labels(spec.labels.clone())
+        .with_additional_instructions(spec.additional_instructions.clone());
+    row.addressability = match spec.addressability {
+        AgentAddressability::Addressable => IdentityAddressability::Addressable,
+        AgentAddressability::InternalOnly => IdentityAddressability::InternalOnly,
+    };
+    row.display_name = spec
+        .display_name
+        .as_ref()
+        .map(|name| name.as_str().to_owned());
+    row.context = spec.context.clone();
+    row.initial_message = spec.initial_message.clone();
+    row.runtime_mode_override = spec.runtime_mode_override;
+    row.backend = spec.backend;
+    row.binding = spec.binding.clone();
+    row.placement = spec.placement.clone();
+    Some(row)
+}
+
 /// What a step of a commit answers: its value, or the typed refusal the
 /// commit ends with.
 type Step<T> = Result<Result<T, IdentityRefusal>, ExecutorError>;
@@ -44,7 +72,7 @@ pub(super) fn committed(
 
 /// The answer of a change Core did not commit: its typed refusal, with the
 /// request field it concerns, or the error that is none.
-fn not_committed(
+pub(super) fn not_committed(
     commit: &ChangeCommit<'_>,
     error: meerkat_mob::MobError,
 ) -> Result<ChangeCommitted, ExecutorError> {
@@ -189,7 +217,7 @@ fn create_request(
 /// How the host prepares an agent of `profile` before its first use, as
 /// Core's create takes it: the mode the commit was given for the profile,
 /// and none for a profile it names no mode for.
-fn preparation_of(commit: &ChangeCommit<'_>, profile: &str) -> IdentityPreparationMode {
+pub(super) fn preparation_of(commit: &ChangeCommit<'_>, profile: &str) -> IdentityPreparationMode {
     match commit
         .preparations
         .and_then(|rules| rules.get(profile))

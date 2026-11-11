@@ -113,9 +113,9 @@ pub use decided::{
 };
 pub use digest::Sha256Digest;
 pub use executor::{
-    ADOPT_NOT_BUILT, AgentAdmission, ChangeCommit, ChangeCommitted, ChangeConsent, ChangeRequester,
-    CoreChangeExecutor, ExecutorError, IdentityChangeExecutor, InstructionStep, UPDATE_NOT_BUILT,
-    committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
+    AGENT_SPECS_NOT_GIVEN, AgentAdmission, AgentSpecs, ChangeCommit, ChangeCommitted,
+    ChangeConsent, ChangeRequester, CoreChangeExecutor, ExecutorError, IdentityChangeExecutor,
+    InstructionStep, committed_outcome, consent_of_plan, refusal_of_core, refusal_of_error,
 };
 pub use family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentRef, AgentSet,

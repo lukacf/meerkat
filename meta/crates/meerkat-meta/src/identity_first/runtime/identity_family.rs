@@ -42,6 +42,14 @@ impl IdentityRuntime {
         self.identity_family.attach_gate(gate, changes_enabled);
     }
 
+    /// The mob this runtime serves, as the handle its composition gave
+    /// its services: one that does not keep the mob owned. The family's
+    /// background work (a change carried out after a person approved it)
+    /// acts through it.
+    pub(crate) fn family_mob_handle(&self) -> Option<meerkat_mob::MobHandle> {
+        self.runtime_services.mob_handle()
+    }
+
     /// The attached family as a caller that sees the agents `seen` admits
     /// calls it: a peer that caller may not see is answered as a name no
     /// agent holds.
@@ -84,7 +92,7 @@ impl IdentityRuntime {
         let Ok(identity) = AgentIdentity::parse(name) else {
             return;
         };
-        if let Err(error) = self.admit_at_delivery_door(&identity).await {
+        if let Err(error) = self.register_from_row(&identity).await {
             tracing::debug!(
                 identity = %identity,
                 %error,

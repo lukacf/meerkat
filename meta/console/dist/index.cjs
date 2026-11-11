@@ -75148,6 +75148,10 @@ function LifecycleConfirm({
 
 // src/lib/identity-changes.ts
 var IDENTITY_REFUSED_CODE = -32058;
+function agentShownName(agent) {
+  const display = agent.displayName?.trim();
+  return display && display !== agent.name ? display : agentDisplayTitle({ label: "", identity: agent.name, member_id: agent.name, agent_id: agent.name });
+}
 function identityChangeFlags(experience) {
   const section = experience?.identity_changes;
   const available = section?.available === true;
@@ -75362,9 +75366,12 @@ function createAgentsRequest(draft) {
     }]
   };
 }
+function ownDisplayName(record10) {
+  return record10.displayName && record10.displayName !== record10.name ? record10.displayName : "";
+}
 function editDraftOf(record10) {
   return {
-    displayName: record10.displayName ?? "",
+    displayName: ownDisplayName(record10),
     instructions: record10.instructions.length ? [...record10.instructions] : [""],
     context: record10.context === void 0 ? "" : JSON.stringify(record10.context, null, 2),
     labels: Object.entries(record10.labels).map(([key, value]) => ({ key, value })),
@@ -75378,7 +75385,7 @@ function sameJson(left, right) {
 function updateAgentRequest(record10, draft) {
   const set3 = {};
   const displayName = draft.displayName.trim();
-  if (displayName !== (record10.displayName ?? "")) set3.display_name = displayName;
+  if (displayName !== ownDisplayName(record10)) set3.display_name = displayName;
   const instructions = draft.instructions.filter((section) => section.trim().length > 0);
   if (!sameJson(instructions, record10.instructions)) set3.instructions = instructions;
   const contextText = draft.context.trim();
@@ -75691,7 +75698,7 @@ function PeerPicker({
             "data-testid": "identity-peer:".concat(peer.name)
           }
         ),
-        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__option-name", title: peer.name, children: peer.displayName || peer.name }),
+        /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__option-name", title: peer.name, children: agentShownName(peer) }),
         /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-form__option-meta", children: humanizeEnum(peer.profile) }),
         peer.verdict !== "allowed" ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Verdict, { entry: peer }) : null
       ] }, peer.name);
@@ -76271,7 +76278,7 @@ function ArchivedAgents({
       /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "cc-count", children: agents.length })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("ul", { className: "identity-archived__list", children: agents.map((agent) => /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("li", { className: "identity-archived__row", "data-testid": "roster-archived:".concat(agent.name), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agent.displayName || agent.name }),
+      /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__name", title: agent.name, children: agentShownName(agent) }),
       /* @__PURE__ */ (0, import_jsx_runtime107.jsx)("span", { className: "identity-archived__meta", children: humanizeEnum(agent.profile) }),
       /* @__PURE__ */ (0, import_jsx_runtime107.jsxs)("span", { className: "cc-btn-row identity-archived__actions", children: [
         controls.unarchive ? /* @__PURE__ */ (0, import_jsx_runtime107.jsx)(Button, { size: "sm", onClick: () => onOpen(agent, "unarchive"), "data-testid": "roster-archived-action:".concat(agent.name, ":unarchive"), children: "Unarchive" }) : null,
@@ -76918,7 +76925,7 @@ function RosterPanel({
               roster: agents,
               onOpen: (agent, change) => {
                 setCreating(false);
-                setAgentChange({ name: agent.name, displayName: agent.displayName || agent.name, change, controls: { archive: false } });
+                setAgentChange({ name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false } });
               }
             }
           ) : null

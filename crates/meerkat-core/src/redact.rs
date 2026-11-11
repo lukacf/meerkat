@@ -1117,6 +1117,58 @@ mod tests {
         );
     }
 
+    /// A password or a user name that holds a quoting byte (`'`, `"`, `\`,
+    /// `<`, `>`) is still userinfo: both rule sets replace it. The
+    /// diagnostic rules (a process's stderr) keep the authority they have
+    /// always read, to whitespace, `/`, `?` or `#`. The response-text rules
+    /// end it at a quoting byte only where that byte closes a bare host
+    /// and another one follows before the `@`.
+    #[test]
+    fn a_quoting_byte_in_url_userinfo_is_still_userinfo() {
+        let replaced = "connect postgres://[REDACTED]@db.internal/app failed";
+        let mut userinfos: Vec<String> = ["'", "\"", "\\", "<", ">"]
+            .iter()
+            .map(|quoting| format!("app:pa{quoting}ss99word"))
+            .collect();
+        userinfos.extend(
+            [
+                // Two quoting bytes after a `:` that is no port.
+                "app:pa'ss\"99word",
+                // A quoting byte in the user name.
+                "o'brien:pa55word",
+                // A password that starts with digits, as a port would.
+                "app:1234'rest",
+            ]
+            .map(String::from),
+        );
+        for userinfo in userinfos {
+            let text = format!("connect postgres://{userinfo}@db.internal/app failed");
+            let mut redacted = text.clone();
+            redact_credentials(&mut redacted, |_| {});
+            assert_eq!(redacted, replaced, "response text: {text}");
+            assert_eq!(redact_secret_shapes(&text), replaced, "diagnostic: {text}");
+        }
+        // The diagnostic rules are the released ones: a quoting byte ends
+        // no authority there.
+        assert_eq!(
+            redact_secret_shapes(
+                r#"{"docs":"https://platform.upstream.invalid","support":"help@upstream.invalid"}"#
+            ),
+            r#"{"docs":"https://[REDACTED]@upstream.invalid"}"#
+        );
+        // The declared limit of the response-text rules: userinfo whose
+        // start reads as a bare host (no `:`, or `:` and digits only) and
+        // that holds two quoting bytes is read as a quoted host. The
+        // diagnostic rules replace it.
+        for userinfo in ["app:1234're'st", "o'bri'en:pa55word"] {
+            let text = format!("connect postgres://{userinfo}@db.internal/app failed");
+            let mut redacted = text.clone();
+            redact_credentials(&mut redacted, |_| {});
+            assert_eq!(redacted, text, "response text: {text}");
+            assert_eq!(redact_secret_shapes(&text), replaced, "diagnostic: {text}");
+        }
+    }
+
     /// What a second application shows, the first one showed: it never
     /// brings a value back, and it adds no text. It can replace more (an
     /// identifier left of a replaced value can itself look like a token).

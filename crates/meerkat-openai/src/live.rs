@@ -7129,6 +7129,226 @@ mod tests {
         );
     }
 
+    /// The line the opt-in frame trace prints for a `frame` this process
+    /// sends on a connection of `client`.
+    fn traced_sent_frame_line(client: &OpenAiLiveClient, frame: &ClientEvent) -> Option<String> {
+        let _ = client;
+        trace_client_event_json(frame)
+    }
+
+    /// A sent frame is traced through the same redaction as a received
+    /// one: conversation content that holds the connection's API key (a
+    /// tool result that printed it) is traced without it.
+    #[test]
+    fn traced_sent_frames_carry_no_api_key() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let client = OpenAiLiveClient::new(key.clone());
+        let frame = ClientEvent::ConversationItemCreate {
+            event_id: Some("evt_sent".to_string()),
+            previous_item_id: None,
+            item: Box::new(Item::Message {
+                id: None,
+                status: None,
+                phase: None,
+                role: Role::User,
+                content: vec![ContentPart::InputText {
+                    text: format!("the tool printed authorization: Bearer {key} and stopped"),
+                }],
+            }),
+        };
+        let line = traced_sent_frame_line(&client, &frame).expect("a sent frame is traced");
+        assert!(
+            !line.contains(&key),
+            "the traced frame leaked the API key: {line}"
+        );
+        assert!(
+            line.contains("evt_sent") && line.contains("the tool printed"),
+            "the frame is traced as it was sent: {line}"
+        );
+    }
+
+    /// The session reads two fixed phrases in a provider error's message to
+    /// tell an acknowledgement from a failure. Those decisions belong to
+    /// the message as received: a message that also repeats the API key and
+    /// holds the begin marker of a private-key block (which the redaction
+    /// replaces with its whole line) still reads as the same phrase, and
+    /// carries no key.
+    #[tokio::test]
+    async fn realtime_error_phrases_are_read_from_the_message_as_received() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        // (The marker is assembled here so no scanner reads the source as a
+        // secret.)
+        let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+        let active = format!(
+            "Conversation already has an active response in progress: resp_1. Header \
+             authorization: Bearer {key} {marker}"
+        );
+        let cancel = format!(
+            "Cancellation failed: no active response found. Header authorization: Bearer \
+             {key} {marker}"
+        );
+        let error_event = |message: &str| {
+            Ok(Some(ServerEvent::Error {
+                event_id: "evt_phrase".to_string(),
+                error: ServerError {
+                    error_type: ApiErrorType::InvalidRequestError,
+                    code: None,
+                    message: message.to_string(),
+                    param: None,
+                    event_id: None,
+                },
+            }))
+        };
+        let next_events: FakeEventQueue = Arc::new(Mutex::new(VecDeque::from([
+            error_event(&active),
+            error_event(&cancel),
+            Err(LlmError::InvalidRequest {
+                message: active.clone(),
+            }),
+        ])));
+        let client = OpenAiLiveClient::new(key.clone());
+        let mut session = client_session_over(
+            &client,
+            FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events,
+            },
+        );
+        let mut messages = Vec::new();
+        for _ in 0..2 {
+            let event = session.next_event().await.expect("the error event arrives");
+            let Some(ServerEvent::Error { error, .. }) = event else {
+                panic!("the error event arrives: {event:?}");
+            };
+            messages.push(error.message);
+        }
+        let Err(LlmError::InvalidRequest { message }) = session.next_event().await else {
+            panic!("the refused request arrives as an invalid request");
+        };
+        messages.push(message);
+        for message in &messages {
+            assert!(
+                !message.contains(&key),
+                "the message leaked the key: {message}"
+            );
+        }
+        assert!(
+            openai_response_already_active_message(&messages[0]),
+            "an active-response acknowledgement stays one: {}",
+            messages[0]
+        );
+        assert!(
+            openai_response_cancel_no_active_response_message(&messages[1]),
+            "a cancel answered with no active response stays one: {}",
+            messages[1]
+        );
+        assert!(
+            openai_response_already_active_message(&messages[2]),
+            "an active-response acknowledgement that arrives as an error stays one: {}",
+            messages[2]
+        );
+    }
+
+    /// A realtime error's `code` and `param`, and a failed response's
+    /// `reason`, are provider text too: a key repeated there is replaced.
+    /// The codes and reasons the session decides on pass unchanged.
+    #[tokio::test]
+    async fn echoed_api_key_stays_out_of_realtime_error_codes_and_reasons() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let echoing_error = || ServerError {
+            error_type: ApiErrorType::InvalidRequestError,
+            code: Some(format!("rejected_credential:{key}")),
+            message: "upstream echo: the request was refused".to_string(),
+            param: Some(format!("authorization: Bearer {key}")),
+            event_id: None,
+        };
+        let mut failed = fake_response("resp_echo", ResponseStatus::Failed);
+        failed.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+            reason: Some(format!("credential {key} was refused")),
+            error: Some(echoing_error()),
+        });
+        let mut frames: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::from([
+            Ok(Some(ServerEvent::Error {
+                event_id: "evt_echo".to_string(),
+                error: echoing_error(),
+            })),
+            Ok(Some(ServerEvent::ResponseDone {
+                event_id: "evt_done".to_string(),
+                response: failed,
+            })),
+        ]);
+        let decided_on = [
+            "insufficient_quota",
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "response_cancel_not_active",
+            "model_not_found",
+            "max_output_tokens",
+            "content_filter",
+        ];
+        for fixed in decided_on {
+            let mut incomplete = fake_response("resp_fixed", ResponseStatus::Incomplete);
+            incomplete.status_details = Some(oai_rt_rs::protocol::models::ResponseStatusDetails {
+                reason: Some(fixed.to_string()),
+                error: Some(ServerError {
+                    error_type: ApiErrorType::InvalidRequestError,
+                    code: Some(fixed.to_string()),
+                    message: "upstream echo".to_string(),
+                    param: None,
+                    event_id: None,
+                }),
+            });
+            frames.push_back(Ok(Some(ServerEvent::ResponseDone {
+                event_id: "evt_fixed".to_string(),
+                response: incomplete,
+            })));
+        }
+        let client = OpenAiLiveClient::new(key.clone());
+        let mut session = client_session_over(
+            &client,
+            FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(frames)),
+            },
+        );
+
+        let event = session.next_event().await.expect("the error event arrives");
+        let Some(ServerEvent::Error { error, .. }) = event else {
+            panic!("the error event arrives: {event:?}");
+        };
+        let rendered = format!("{error:?}");
+        assert!(
+            !rendered.contains(&key),
+            "the error event leaked the API key: {rendered}"
+        );
+        let done = session
+            .next_event()
+            .await
+            .expect("the failed response arrives");
+        let Some(ServerEvent::ResponseDone { response, .. }) = done else {
+            panic!("the failed response arrives: {done:?}");
+        };
+        let failure = openai_response_failure(&response, LiveResponseFailureStatus::Failed);
+        let rendered = format!("{failure:?} {:?}", response.status_details);
+        assert!(
+            !rendered.contains(&key),
+            "the failed response leaked the API key: {rendered}"
+        );
+        assert!(rendered.contains("upstream echo"), "{rendered}");
+        for fixed in decided_on {
+            let done = session.next_event().await.expect("the response arrives");
+            let Some(ServerEvent::ResponseDone { response, .. }) = done else {
+                panic!("the response arrives: {done:?}");
+            };
+            let details = response.status_details.expect("status details");
+            assert_eq!(details.reason.as_deref(), Some(fixed));
+            assert_eq!(
+                details.error.and_then(|error| error.code).as_deref(),
+                Some(fixed)
+            );
+        }
+    }
+
     /// A realtime endpoint, or a gateway in front of one, that repeats the
     /// connection's API key (in an `error` event, in the error of a failed
     /// response, or in a transport error) never puts it in what the session

@@ -3105,6 +3105,71 @@ mod tests {
         server.abort();
     }
 
+    /// A refused health check is classified from the body as received, like
+    /// a refused model request: an exhausted-quota body that repeats the
+    /// request's credential and holds the begin marker of a private-key
+    /// block stays an exhausted quota, and carries no credential.
+    #[tokio::test]
+    async fn a_refused_health_check_keeps_its_class_whatever_the_redaction_removes() {
+        let credential = format!("selfhosted-{}", "madeupcredential".repeat(3));
+        let app = Router::new().route(
+            "/models",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                // (The marker is assembled here so no scanner reads the
+                // source as a secret.)
+                let marker = format!("-----BEGIN {}-----", "PRIVATE KEY");
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "You exceeded your current quota. Request header \
+                                 authorization: {authorization} {marker}"
+                            ),
+                            "type": "insufficient_quota",
+                            "code": "insufficient_quota",
+                        },
+                    })),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind quota refusal server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve quota refusal server");
+        });
+        for signer in [
+            CredentialSigner::ClientBearer,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client =
+                credential_signed_chat_client(signer, format!("http://{addr}"), &credential);
+            let error = client
+                .health_check()
+                .await
+                .expect_err("the health check is refused");
+            assert!(
+                matches!(error, LlmError::QuotaExhausted { .. }),
+                "{signer:?}: an exhausted quota stays one: {error:?}"
+            );
+            let rendered = rendered_forms(&error);
+            assert!(
+                !rendered.contains(&credential),
+                "{signer:?}: the error leaked the credential: {rendered}"
+            );
+        }
+        server.abort();
+    }
+
     /// An ordinary provider error that carries no credential (a message, a
     /// type, a code, a request id, a URL without credentials) reaches the
     /// caller byte for byte, whoever signed the request.

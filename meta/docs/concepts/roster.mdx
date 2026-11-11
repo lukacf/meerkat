@@ -408,6 +408,13 @@ What to know:
   written at start, and it keeps its first prompt's text, as before 0.9.14,
   until the running gateway observes a change (a roster refresh, an update)
   or the conversation is rebuilt.
+- **One edit made while the gateway was down is not seen** in this release:
+  an edit that only removes sections from the end of the text, or removes
+  all of them, for an agent with no record yet. The sections a conversation
+  was built with also hold what the host's build customizer and the agent's
+  memory added after the agent's own, so a text those sections start with
+  reads as unchanged. Make such an edit while the gateway runs (a roster
+  refresh or an update records it), or reset the agent.
 
 Limits of this release, each reported by `meta/instruction_status` or by the
 update's result:

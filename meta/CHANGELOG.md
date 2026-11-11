@@ -146,7 +146,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   observes a change of it (a roster refresh with other text, an update) or
   its conversation is rebuilt: such a conversation may not record the
   sections it was built with. A conversation built on 0.9.14 or later
-  does, and the change is recorded at the next start.
+  does, and the change is recorded when the gateway next registers the
+  agent, with one exception: an edit that only removes sections from the
+  end of the text, or removes all of them, is not seen then for an agent
+  with no instruction record yet (the sections a conversation was built
+  with also hold what the host's build customizer and the agent's memory
+  added after the agent's own, so a text they start with reads as
+  unchanged). Make such an edit while the gateway runs, or reset the
+  agent.
 
 - `meta/compact_member` with a compaction floor answers
   `identity_store_owned` for an identity whose record is its row in the

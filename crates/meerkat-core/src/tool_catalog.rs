@@ -8,8 +8,16 @@ use std::sync::Arc;
 pub const TOOL_CATALOG_SEARCH_NAME: &str = "tool_catalog_search";
 pub const TOOL_CATALOG_LOAD_NAME: &str = "tool_catalog_load";
 
-pub const DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD: usize = 2;
-pub const DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD: usize = 160;
+/// The deferred catalog's byte budget: an exact catalog defers once the name,
+/// description and schema text of its deferred-eligible tools reach this
+/// many bytes ([`deferred_session_schema_volume`]).
+///
+/// The mode adds about 1.2 KB to every request (the two control tools, a
+/// system prompt line and a notice) and two model requests to a tool's first
+/// use. At 8,192 bytes a request shrinks by at least 7 KB, which repays one
+/// search-and-load pair within a handful of requests; below it the tools
+/// stay inline.
+pub const DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD: usize = 8_192;
 
 /// Which projection plane a catalog entry belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +293,12 @@ pub fn deferred_session_schema_volume(catalog: &[ToolCatalogEntry]) -> usize {
 }
 
 /// Select inline vs deferred-catalog mode from the current exact catalog snapshot.
+///
+/// An inexact catalog is always inline. An exact one is deferred while a
+/// source is still connecting (so the model can search what arrives), or
+/// when its deferred-eligible definitions reach the byte budget
+/// ([`DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD`]). The number of tools alone
+/// never starts the mode: a few small tools cost more to defer than to send.
 pub fn select_catalog_mode_from_snapshot(
     exact_catalog: bool,
     catalog: &[ToolCatalogEntry],
@@ -298,14 +312,7 @@ pub fn select_catalog_mode_from_snapshot(
         return ToolCatalogMode::Deferred;
     }
 
-    let deferred_count = deferred_session_entry_count(catalog);
-    if deferred_count == 0 {
-        return ToolCatalogMode::Inline;
-    }
-
-    if deferred_count >= DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD
-        || deferred_session_schema_volume(catalog) >= DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD
-    {
+    if deferred_session_schema_volume(catalog) >= DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD {
         ToolCatalogMode::Deferred
     } else {
         ToolCatalogMode::Inline

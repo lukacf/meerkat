@@ -5,6 +5,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- A service approved without catalog visibility now has its approved
+  operations offered to the agent directly when the session's deferrable
+  tools are under Meerkat's deferred catalog budget (8,192 bytes of names,
+  descriptions and schemas; see Core's changelog). Before, they were offered
+  directly only when tiny (one tool under 160 bytes); otherwise they waited
+  behind the catalog and could not be used without the catalog grant. After
+  the upgrade such an approval works as approved: the agent sees the
+  approved operations and calls them, each call still checked against its
+  own grant. Over the budget nothing changes: the operations wait behind the
+  catalog, and using them needs the catalog selection. What
+  `tool_catalog_search` and `tool_catalog_load` can reveal is unchanged, and
+  they still need the catalog selection. An operation outside the reviewed
+  set is still in no request, and a call of it is refused.
+
 ## [0.9.13] - 2026-11-11
 
 Meerkat Connect 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13

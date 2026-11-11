@@ -350,9 +350,10 @@ example after a logout in another process) is released the same way. No
 
 Deferred tools: MCP tools and registered callback tools are deferred-eligible.
 A session switches to the deferred catalog while a server is still connecting,
-or when there are 2 or more eligible tools, or when their names, descriptions
-and schemas total 160 characters or more. In practice a server with two or
-more tools is deferred. The model then gets two control tools instead of the
+or when the names, descriptions and schemas of its eligible tools total 8,192
+bytes or more (0.9.14; before: 2 or more eligible tools, or 160 bytes). In
+practice a few small tools stay in every request and a server with many or
+large tools is deferred. The model then gets two control tools instead of the
 deferred schemas:
 
 - `tool_catalog_search {query?, limit?}` (limit 1-50, default 10). Results

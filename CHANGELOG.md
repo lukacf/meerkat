@@ -35,6 +35,42 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-core`: the constant `DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD` is
+  removed (`meerkat_core::tool_catalog::DEFERRED_CATALOG_TOOL_COUNT_THRESHOLD`):
+  the number of deferred-eligible tools no longer starts the deferred tool
+  catalog. `DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD` keeps its name and type
+  and changes from 160 to 8,192. See Changed.
+
+### Changed
+
+- `meerkat-core`: the deferred tool catalog now starts at a byte budget. A
+  session with an exact tool catalog leaves its deferrable tools out of the
+  model request (and sends `tool_catalog_search` and `tool_catalog_load`
+  instead) while a tool source is still connecting, as before, or when the
+  names, descriptions and schemas of those tools together reach 8,192 bytes.
+  Until now two such tools, or one of 160 bytes, were enough. The budget
+  counts every deferrable tool whatever its source: MCP server tools, tools
+  a client registered over RPC (`tools/register`, `external_tools`) and a
+  host's own deferred-eligible tools.
+  - Who changes: a session whose deferrable tools are under the budget (a
+    few small MCP or registered tools) now gets them in every request and
+    calls them directly, where before the model had to search and load them
+    first. Measured in the test rows: two small tools (294 bytes) and ten
+    medium ones (4,260 bytes) stay in the request; twenty medium ones (8,530
+    bytes) are deferred. The same holds for a session whose only deferrable
+    tools are WorkGraph's `workgraph_attention_reassign` and
+    `workgraph_policy_escalate`: both are in every request now, and their
+    calls are still refused outside an attention turn.
+  - Who does not change: a session over the budget, a session with a source
+    still connecting, and a session whose tool sources do not report an
+    exact catalog. No session is moved to the deferred catalog by this
+    change.
+  - Why: the mode adds about 1.2 KB to every request and two model requests
+    to a tool's first use, so below the budget it cost more than it saved.
+  - The number is a constant, not a setting.
+
 ## [0.9.13] - 2026-11-11
 
 ### Changed

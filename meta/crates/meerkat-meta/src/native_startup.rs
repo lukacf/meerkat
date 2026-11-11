@@ -379,16 +379,23 @@ fn lock_table_first_call(read: usize) -> usize {
 }
 
 /// The kernel's lock table as the probe's `read`-th read of it (from 0),
-/// `None` when it cannot be read. A test on this thread may supply the
-/// table of each read instead (see `tests::with_lock_tables`).
+/// `None` when it cannot be opened or read.
 #[cfg(target_os = "linux")]
 fn read_lock_table(read: usize) -> Option<String> {
+    read_table_text(open_lock_table()?, lock_table_first_call(read))
+}
+
+/// The kernel's lock table, opened for one read of it, `None` when it
+/// cannot be opened. A test on this thread may supply what each read reads
+/// from instead (see `tests::with_lock_tables`).
+#[cfg(target_os = "linux")]
+fn open_lock_table() -> Option<Box<dyn std::io::Read>> {
     #[cfg(test)]
-    if let Some(tests::ScriptedRead(table)) = tests::scripted_lock_table() {
-        return table;
+    if let Some(tests::ScriptedRead(source)) = tests::scripted_lock_table() {
+        return source;
     }
     let table = std::fs::File::open("/proc/locks").ok()?;
-    read_table_text(table, lock_table_first_call(read))
+    Some(Box::new(table))
 }
 
 /// `table` read to its end as text, `None` when a read call fails or the
@@ -1660,31 +1667,57 @@ mod tests {
         assert!(!lock_table_names_another_holder("", file, own));
     }
 
-    /// The lock tables a test supplies instead of `/proc/locks`, and how
-    /// many reads they have answered.
+    /// The lock tables a test supplies instead of `/proc/locks`, how many
+    /// reads they have answered, and the size the first read call of each
+    /// of those reads asked for.
     #[cfg(target_os = "linux")]
     struct ScriptedLockTables {
         /// One table per read, in order; the last one answers every read
         /// after it. `None` is a table that cannot be read.
         tables: Vec<Option<String>>,
         reads: usize,
+        first_calls: Vec<usize>,
     }
 
     #[cfg(target_os = "linux")]
     thread_local! {
-        /// The lock tables `read_lock_table` returns on this thread, when
+        /// The lock tables `open_lock_table` hands out on this thread, when
         /// set.
         static LOCK_TABLES: std::cell::RefCell<Option<ScriptedLockTables>> =
             const { std::cell::RefCell::new(None) };
     }
 
-    /// What a test supplies for one read of the lock table: the table, or
-    /// `None` for a read that fails.
+    /// What a test supplies for one read of the lock table: what the read
+    /// reads from, or `None` for a table that cannot be opened.
     #[cfg(target_os = "linux")]
-    pub(super) struct ScriptedRead(pub(super) Option<String>);
+    pub(super) struct ScriptedRead(pub(super) Option<Box<dyn std::io::Read>>);
 
-    /// The answer to this thread's next read of the lock table when a test
-    /// supplies the tables, `None` when none does.
+    /// One scripted table as the probe reads it: its bytes, handed out as
+    /// each read call asks, and whether the first call of this read has
+    /// been recorded in this thread's script.
+    #[cfg(target_os = "linux")]
+    struct ScriptedLockTable {
+        table: std::io::Cursor<Vec<u8>>,
+        first_call_recorded: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl std::io::Read for ScriptedLockTable {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.first_call_recorded {
+                self.first_call_recorded = true;
+                LOCK_TABLES.with(|script| {
+                    if let Some(script) = script.borrow_mut().as_mut() {
+                        script.first_calls.push(buffer.len());
+                    }
+                });
+            }
+            std::io::Read::read(&mut self.table, buffer)
+        }
+    }
+
+    /// What this thread's next read of the lock table reads from when a
+    /// test supplies the tables, `None` when none does.
     #[cfg(target_os = "linux")]
     pub(super) fn scripted_lock_table() -> Option<ScriptedRead> {
         LOCK_TABLES.with(|script| {
@@ -1696,27 +1729,51 @@ mod tests {
                 .or_else(|| script.tables.last())
                 .cloned();
             script.reads += 1;
-            table.map(ScriptedRead)
+            table.map(|table| {
+                ScriptedRead(table.map(|table| {
+                    Box::new(ScriptedLockTable {
+                        table: std::io::Cursor::new(table.into_bytes()),
+                        first_call_recorded: false,
+                    }) as Box<dyn std::io::Read>
+                }))
+            })
         })
     }
 
     /// Run the probe on this thread against `tables` instead of
     /// `/proc/locks`: one table per read of the lock table, in order, the
-    /// last one for every read after it (`None`: that read fails). Returns
+    /// last one for every read after it (`None`: that read fails). Each
+    /// table goes through the probe's own read of it. Returns the probe's
+    /// outcome, how many reads of the table it made, and the size the first
+    /// read call of each read asked for.
+    #[cfg(target_os = "linux")]
+    async fn with_lock_tables_and_first_calls<T>(
+        tables: Vec<Option<String>>,
+        probe: impl std::future::Future<Output = T>,
+    ) -> (T, usize, Vec<usize>) {
+        assert!(!tables.is_empty(), "a scripted lock table needs a table");
+        LOCK_TABLES.with(|current| {
+            *current.borrow_mut() = Some(ScriptedLockTables {
+                tables,
+                reads: 0,
+                first_calls: Vec::new(),
+            });
+        });
+        let outcome = probe.await;
+        let (reads, first_calls) = LOCK_TABLES
+            .with(|current| current.borrow_mut().take())
+            .map_or((0, Vec::new()), |script| (script.reads, script.first_calls));
+        (outcome, reads, first_calls)
+    }
+
+    /// As [`with_lock_tables_and_first_calls`], for a row that only needs
     /// the probe's outcome and how many reads of the table it made.
     #[cfg(target_os = "linux")]
     async fn with_lock_tables<T>(
         tables: Vec<Option<String>>,
         probe: impl std::future::Future<Output = T>,
     ) -> (T, usize) {
-        assert!(!tables.is_empty(), "a scripted lock table needs a table");
-        LOCK_TABLES.with(|current| {
-            *current.borrow_mut() = Some(ScriptedLockTables { tables, reads: 0 });
-        });
-        let outcome = probe.await;
-        let reads = LOCK_TABLES
-            .with(|current| current.borrow_mut().take())
-            .map_or(0, |script| script.reads);
+        let (outcome, reads, _first_calls) = with_lock_tables_and_first_calls(tables, probe).await;
         (outcome, reads)
     }
 
@@ -1899,13 +1956,15 @@ mod tests {
 
     /// The probe reads the lock table a fixed number of times before it
     /// answers that no other holder is named: three, and a table that would
-    /// name one in a fourth read is not read a fourth time.
+    /// name one in a fourth read is not read a fourth time. Each of the
+    /// three reads starts with a first read call of its own size: a full
+    /// buffer, then 1024 bytes, then 2048.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_lock_table_is_read_three_times_before_no_other_holder_is_the_answer() {
         let (dir, _held, own_only, another_too) = predecessor_held_custody();
 
-        let (outcome, reads) = with_lock_tables(
+        let (outcome, reads, first_calls) = with_lock_tables_and_first_calls(
             vec![
                 Some(own_only.clone()),
                 Some(own_only.clone()),
@@ -1916,6 +1975,11 @@ mod tests {
         )
         .await;
         assert_eq!(reads, 3, "the reads are bounded");
+        assert_eq!(
+            first_calls,
+            [65_536, 1024, 2048],
+            "each read ends its first read call elsewhere"
+        );
         outcome.expect("no read of the three names another holder");
     }
 

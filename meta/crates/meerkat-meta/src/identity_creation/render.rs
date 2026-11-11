@@ -95,7 +95,9 @@ pub mod labels {
     pub const IDENTITIES: &str = "Identities";
     /// The identity an update or a remove names.
     pub const IDENTITY: &str = "Identity";
-    /// The digest of the spec an update or a remove was asked of.
+    /// The digest of the spec a change of one identity was asked of. No
+    /// rendering writes this label since 0.9.14: the spec a requester read
+    /// is no part of what a decider is shown.
     pub const EXPECTED_SPEC_DIGEST: &str = "Expected spec digest";
     /// An update's change classes.
     pub const CHANGES: &str = "Changes";
@@ -310,21 +312,15 @@ pub fn render_v1(
             text.block();
             update_text(&mut text, update);
         }
-        // An archive, an unarchive and an adoption name the identity. The
-        // spec the requester read is no part of what is shown: a spec that
-        // moved since is refused `stale_spec` at the commit.
-        RequestAction::Archive { identity, .. }
+        // A change of one identity as a whole names the identity. The spec
+        // the requester read is no part of what is shown, for any action: a
+        // spec that moved since is refused `stale_spec` at the commit, and
+        // the request digest a decision's permit binds covers it.
+        RequestAction::Remove { identity, .. }
+        | RequestAction::Archive { identity, .. }
         | RequestAction::Unarchive { identity, .. }
         | RequestAction::Adopt { identity, .. } => {
             text.field(labels::IDENTITY, &quoted(identity));
-            consequence_blocks(&mut text, &request.consequences, &host_lines);
-        }
-        RequestAction::Remove {
-            identity,
-            expected_spec_digest,
-        } => {
-            text.field(labels::IDENTITY, &quoted(identity));
-            text.field(labels::EXPECTED_SPEC_DIGEST, expected_spec_digest.as_str());
             consequence_blocks(&mut text, &request.consequences, &host_lines);
         }
     }
@@ -537,10 +533,6 @@ fn created_text(
 
 fn update_header(text: &mut Text, update: &UpdatedSpec) {
     text.field(labels::IDENTITY, &quoted(&update.identity));
-    text.field(
-        labels::EXPECTED_SPEC_DIGEST,
-        update.expected_spec_digest.as_str(),
-    );
     let changes: Vec<&str> = update
         .change_classes()
         .into_iter()

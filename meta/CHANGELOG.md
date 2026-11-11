@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
   variants `Declared` and `Created` and gains `Identity`. A `name_taken`
   refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
+  With two variants gone the three that stay each moved up one place:
+  the implicit discriminants of `Removed`, `Worker` and `Unreadable` are 1, 2
+  and 3 (they were 2, 3 and 4), and their places in the derived order
+  (`PartialOrd`, `Ord`) moved with them. The order among the three is
+  unchanged; `Identity` sorts first, where `Declared` did.
 - Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
   (`IdentityRecordFacts`), so a struct literal of it needs the member
   (`record: Default::default()`). The status as written on the wire is
@@ -64,8 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `normalize_adopt`), and ten refusal kinds: `privileged_field`,
     `grant_revoked`, `private_requester`, `owner_read_only`,
     `not_adoptable`, `not_archived`, `declared_apply_open`, `purge_refused`,
-    `mob_not_running`, `purged`. A refusal carries a detail sentence
-    (`IdentityRefusal::detail`, `to_refused`).
+    `mob_not_running`, `purged`. Their variants of `IdentityRefusalKind`
+    (which is `non_exhaustive`) are declared after every earlier one, so no
+    earlier variant's implicit discriminant moves. A refusal carries a
+    detail sentence (`IdentityRefusal::detail`, `to_refused`).
 - Rust API of `meerkat-meta`: `IdentityRecordFacts`, the record facts of an
   identity's status (spec digest and revision, archived, preparation
   pending, provenance, open operations), each absent on the wire while

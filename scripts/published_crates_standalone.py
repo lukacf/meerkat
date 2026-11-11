@@ -61,7 +61,9 @@ scripts/release-rust-crates.sh lists.
       way a downloader resolves them:
         - package: a product with a publish order packages those crates
           (`cargo package --no-verify`, every in-repo crate patched to its
-          path so packaging resolves); an unpublished product's manifests are
+          path so packaging resolves) and weighs each crate file (see
+          package-size below; a crate above the allowed size fails here,
+          stage `package`); an unpublished product's manifests are
           normalized the same way (workspace inheritance resolved, `path`
           dropped from every dependency outside the product);
         - unpack them into a scratch workspace whose [patch.crates-io] covers
@@ -84,6 +86,17 @@ scripts/release-rust-crates.sh lists.
       verifies that the declared versions resolve, and to which lock; like
       every stage it publishes nothing and writes its files only under --out.
 
+  published_crates_standalone.py package-size --product NAME --package-dir DIR
+
+      Weigh the crate files another step packaged into DIR (a Cargo target
+      directory's `package/`): one archive for each crate the product
+      publishes (ci/products.json), none for a product that publishes none.
+      It packages nothing. crates.io refuses a crate file above 10 MiB; a
+      file above 9.5 MiB fails here, with the heaviest top-level entries of
+      its package. A missing archive is a usage error, never a pass. The
+      census and the floor check weigh the archives they package the same
+      way, before they unpack them.
+
 Exit 0 = proven, 1 = a crate fails, 2 = usage error or unreadable input.
 """
 
@@ -99,6 +112,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zlib
 
 try:
     import tomllib
@@ -812,8 +826,100 @@ def build_env(stack: str, target_dir: pathlib.Path, rust_toolchain: str | None) 
     return env
 
 
+# ---------------------------------------------------------------------------
+# Package size (the registry's upload limit)
+# ---------------------------------------------------------------------------
+
+# The largest crate file crates.io accepts. The figure is the registry's own,
+# from its refusal of an upload (HTTP 413): "max upload size is: 10485760".
+REGISTRY_MAX_CRATE_BYTES = 10_485_760
+# The largest crate file these checks accept: 9.5 MiB. Below the registry's
+# limit, so the failure comes while the package can still be trimmed in an
+# ordinary change, not at a release.
+ALLOWED_MAX_CRATE_BYTES = 9_961_472
+LARGEST_ENTRIES_SHOWN = 6
+
+
+class OversizedPackage(Exception):
+    """A packaged crate file is above ALLOWED_MAX_CRATE_BYTES; `problems` are
+    package_size_problems' lines."""
+
+    def __init__(self, problems: list[str]):
+        super().__init__("\n".join(problems))
+        self.problems = problems
+
+
+def packaged_archives(package_dir: pathlib.Path, crates: list[str]) -> dict[str, pathlib.Path]:
+    """The one crate file `cargo package` wrote into `package_dir` for each
+    crate."""
+    found: dict[str, pathlib.Path] = {}
+    for name in crates:
+        archives = sorted(package_dir.glob(f"{name}-[0-9]*.crate"))
+        if len(archives) != 1:
+            raise UsageError(f"expected one archive for {name} in {package_dir}, found {len(archives)}")
+        found[name] = archives[0]
+    return found
+
+
+def largest_entries(archive: pathlib.Path) -> list[tuple[str, int, int]]:
+    """The top-level directories and files of a package that weigh most in
+    its crate file: (name, bytes unpacked, bytes compressed), heaviest
+    compressed first. Each file is compressed on its own, so the compressed
+    figures are approximate (a little above its share of the archive)."""
+    totals: dict[str, list[int]] = {}
+    with tarfile.open(archive, "r:gz") as bundle:
+        for member in bundle:
+            parts = pathlib.PurePosixPath(member.name).parts[1:]
+            if not member.isfile() or not parts:
+                continue
+            total = totals.setdefault(f"{parts[0]}/" if len(parts) > 1 else parts[0], [0, 0])
+            total[0] += member.size
+            total[1] += len(zlib.compress(bundle.extractfile(member).read(), 6))
+    ranked = sorted(totals.items(), key=lambda item: (-item[1][1], item[0]))
+    return [(name, unpacked, packed) for name, (unpacked, packed) in ranked[:LARGEST_ENTRIES_SHOWN]]
+
+
+def package_size_problems(archives: dict[str, pathlib.Path]) -> list[str]:
+    """Why crates.io would refuse, or soon refuse, a crate file for its size:
+    for each one above ALLOWED_MAX_CRATE_BYTES a line with the crate, its
+    size and both limits, then the heaviest top-level entries of its package
+    (what to trim). Empty when every crate file fits."""
+    problems: list[str] = []
+    for crate, archive in archives.items():
+        size = archive.stat().st_size
+        if size <= ALLOWED_MAX_CRATE_BYTES:
+            continue
+        problems.append(
+            f"{crate}: {archive.name} is {size} bytes, {size - ALLOWED_MAX_CRATE_BYTES} above the allowed maximum of "
+            f"{ALLOWED_MAX_CRATE_BYTES} bytes ({ALLOWED_MAX_CRATE_BYTES / 1048576:g} MiB); crates.io refuses a crate "
+            f"file above {REGISTRY_MAX_CRATE_BYTES} bytes ({REGISTRY_MAX_CRATE_BYTES / 1048576:g} MiB). Trim the "
+            f"package ([package] exclude in the crate's Cargo.toml). Its heaviest top-level entries:"
+        )
+        problems += [f"    {name:<24} about {packed} bytes compressed, {unpacked} unpacked"
+                     for name, unpacked, packed in largest_entries(archive)]
+    return problems
+
+
+def package_size(root: pathlib.Path, product_name: str, package_dir: pathlib.Path) -> int:
+    order = load_product(root, product_name).get("publish_order")
+    if not isinstance(order, list) or not order:
+        print(f"{product_name} publishes no crate: no package to weigh")
+        return 0
+    archives = packaged_archives(package_dir, order)
+    for crate, archive in archives.items():
+        print(f"  {crate:<36}{archive.stat().st_size} bytes "
+              f"(allowed {ALLOWED_MAX_CRATE_BYTES}, registry limit {REGISTRY_MAX_CRATE_BYTES})")
+    problems = package_size_problems(archives)
+    for problem in problems:
+        print(f"FAIL {problem}", file=sys.stderr)
+    return 1 if problems else 0
+
+
 def package_and_unpack(root: pathlib.Path, crates: list[str], all_crates: list[str], dirs: dict[str, pathlib.Path],
                        out: pathlib.Path, allow_dirty: bool, env: dict[str, str]) -> dict[str, pathlib.Path]:
+    """Package `crates` and unpack their archives into out/ws. Raises
+    OversizedPackage, before anything is unpacked, when a crate file is above
+    the allowed size."""
     patch = out / "package-patch.toml"
     patch.write_text(
         "[patch.crates-io]\n"
@@ -828,18 +934,18 @@ def package_and_unpack(root: pathlib.Path, crates: list[str], all_crates: list[s
     if rc != 0:
         raise UsageError(f"cargo package failed (see {out / 'package.log'})")
     version = None
-    package_dir = pathlib.Path(env["CARGO_TARGET_DIR"]) / "package"
+    archives = packaged_archives(pathlib.Path(env["CARGO_TARGET_DIR"]) / "package", crates)
+    problems = package_size_problems(archives)
+    if problems:
+        raise OversizedPackage(problems)
     ws = out / "ws"
     ws.mkdir()
     unpacked: dict[str, pathlib.Path] = {}
-    for name in crates:
-        archives = sorted(package_dir.glob(f"{name}-[0-9]*.crate"))
-        if len(archives) != 1:
-            raise UsageError(f"expected one archive for {name} in {package_dir}, found {len(archives)}")
-        with tarfile.open(archives[0], "r:gz") as bundle:
+    for name, archive in archives.items():
+        with tarfile.open(archive, "r:gz") as bundle:
             bundle.extractall(ws, filter="data") if hasattr(tarfile, "data_filter") else bundle.extractall(ws)
-        unpacked[name] = ws / archives[0].name[: -len(".crate")]
-        version = version or archives[0].name[len(name) + 1 : -len(".crate")]
+        unpacked[name] = ws / archive.name[: -len(".crate")]
+        version = version or archive.name[len(name) + 1 : -len(".crate")]
     members = "".join(f'    "{path.name}",\n' for path in unpacked.values())
     patches = "".join(f'{name} = {{ path = "{path.name}" }}\n' for name, path in unpacked.items())
     (ws / "Cargo.toml").write_text(
@@ -1157,7 +1263,16 @@ def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, a
             raise UsageError(f"{PRODUCTS}: {product_name} publishes unknown crates {', '.join(unknown)}")
         dirs = {name: pathlib.Path(pkg["manifest_path"]).parent for name, pkg in in_repo.items()}
         patched = [name for name, pkg in in_repo.items() if pkg.get("publish") is None or pkg.get("publish")]
-        unpacked = package_and_unpack(root, publish_order, sorted(set(patched) | set(publish_order)), dirs, out, allow_dirty, env)
+        try:
+            unpacked = package_and_unpack(root, publish_order, sorted(set(patched) | set(publish_order)), dirs, out, allow_dirty, env)
+        except OversizedPackage as err:
+            # A crate file the registry would refuse: nothing to resolve or
+            # build, whatever its dependencies.
+            return finish("package", err.problems)
+        report["package_bytes"] = {
+            name: archive.stat().st_size
+            for name, archive in packaged_archives(pathlib.Path(env["CARGO_TARGET_DIR"]) / "package", publish_order).items()
+        }
         floor_members = {name: path for name, path in unpacked.items()}
     else:
         # An unpublished product: its manifests normalized as cargo package
@@ -1235,10 +1350,16 @@ def main(argv: list[str]) -> int:
     floor_parser.add_argument("--allow-dirty", action="store_true")
     floor_parser.add_argument("--no-build", action="store_true",
                               help="stop after resolution: package, unpack and resolve, build nothing")
+    size_parser = sub.add_parser("package-size")
+    size_parser.add_argument("--product", required=True)
+    size_parser.add_argument("--package-dir", required=True, type=pathlib.Path,
+                             help="the directory the crate files were packaged into (<target>/package)")
     args = parser.parse_args(argv)
     try:
         if args.command == "floor":
             return floor(ROOT, args.product, args.out, args.mode, args.allow_dirty, resolve_only=args.no_build)
+        if args.command == "package-size":
+            return package_size(ROOT, args.product, args.package_dir)
         crates = release_crates(ROOT)
         if args.crate:
             unknown = sorted(set(args.crate) - set(crates))
@@ -1253,6 +1374,10 @@ def main(argv: list[str]) -> int:
         k, n = int(match.group(1)), int(match.group(2))
         crates = crates[k - 1 :: n]
         return census(ROOT, crates, args.out, args.stack, args.allow_dirty)
+    except OversizedPackage as err:
+        for problem in err.problems:
+            print(f"FAIL {problem}", file=sys.stderr)
+        return 1
     except UsageError as err:
         print(f"published_crates_standalone: {err}", file=sys.stderr)
         return 2

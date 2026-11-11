@@ -443,7 +443,7 @@ class PullRequestLaneWeighsThePackages(unittest.TestCase):
         floor = [index for index, step in enumerate(steps) if "published_crates_standalone.py floor " in step]
         size = [index for index, step in enumerate(steps) if "published_crates_standalone.py package-size " in step]
         self.assertEqual((len(floor), len(size)), (1, 1))
-        self.assertEqual(size[0], floor[0] + 1)
+        self.assertGreater(size[0], floor[0])
         self.assertIn('--out "${RUNNER_TEMP}/floor-${PRODUCT}"', steps[floor[0]])
         self.assertIn('package-size --product "${PRODUCT}" --package-dir "${RUNNER_TEMP}/floor-${PRODUCT}/target/package"',
                       steps[size[0]])

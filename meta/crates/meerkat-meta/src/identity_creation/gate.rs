@@ -34,9 +34,16 @@
 //!    adoption (`owner_read_only`);
 //! 6. the host's own check of the normalized request
 //!    (`validation_refused`);
-//! 7. the outcome: `allow` commits through the seam at once; a human
-//!    decision is held by the decision owner, when the launch has one, and
-//!    refused `approval_unavailable` otherwise.
+//! 7. the outcome: `allow` commits through the seam at once; a change
+//!    that needs a person's approval is held as a durable decision
+//!    ([`IdentityDecisions`]) and answers `pending_decision`. The same
+//!    operation asked again answers the decision as it stands; once a
+//!    person approved it, the decisions' driver commits it through the same
+//!    seam. The driver runs exactly while the launch serves changes.
+//!
+//! Whoever commits a change (the gate at once, the driver after a
+//! decision), the launch's executor then has the identity runtime register
+//! each agent the change wrote from its record.
 //!
 //! A caller names only the peers it may see. A surface whose callers see
 //! some of the mob's agents (the Console, under its access rules) asks the
@@ -55,23 +62,24 @@ use std::sync::{Arc, PoisonError, RwLock, Weak};
 
 use async_trait::async_trait;
 use meerkat_mob::{
-    CreatedIdentityObservation, CreatedIdentitySpec, EntryStanding, IdentityAddressability,
-    IdentityChangeConsent, IdentityChangeKind, IdentityChangeReceipt, IdentityChangeRefusal,
-    IdentityChangeRequester, IdentityEntered, IdentityEntryOrigin, IdentityEntryRead,
-    IdentityEntryView, IdentityPolicyOutcome, MobError, MobHandle, UnseatedEntryCause,
+    CreatedIdentityObservation, CreatedIdentitySpec, EntryStanding, IdentityChangeConsent,
+    IdentityChangeKind, IdentityChangeReceipt, IdentityChangeRefusal, IdentityChangeRequester,
+    IdentityEntered, IdentityEntryOrigin, IdentityEntryRead, IdentityEntryView,
+    IdentityPolicyOutcome, MobError, MobHandle, UnseatedEntryCause,
 };
 
-use crate::identity_first::{
-    AgentAddressability, AgentIdentity, DurableAgentSpec, IdentityRuntime,
-};
+use crate::durable_decisions::DecisionExecutorDriver;
+use crate::identity_first::{AgentIdentity, DurableAgentSpec, IdentityRuntime};
 
 use super::approval::{PlanRequest, PlanTarget, PlannedOutcome, plan_approval};
 use super::config::{ChangeClass, RequesterKind};
-use super::consequences::{ConsequenceHook, ConsequenceLine, HookRefusal};
+use super::consequences::{ConsequenceHook, ConsequenceLine, HookRefusal, host_consequences_of};
+use super::decided::{HeldChangeHost, HeldTarget, IdentityDecisionNotices, IdentityDecisions};
 use super::digest::Sha256Digest;
 use super::executor::{
-    ChangeCommit, ChangeRequester, CoreChangeExecutor, ExecutorError, IdentityChangeExecutor,
-    InstructionStep, committed_outcome, consent_of_plan, refusal_of_error,
+    AgentSpecs, ChangeCommit, ChangeCommitted, ChangeRequester, CoreChangeExecutor, ExecutorError,
+    IdentityChangeExecutor, InstructionStep, committed_outcome, consent_of_plan, refusal_of_error,
+    row_spec,
 };
 use super::family::{
     AgentEntered, AgentPage, AgentProvenance, AgentReadiness, AgentRecord, AgentSummary,
@@ -259,6 +267,12 @@ pub(crate) struct IdentityGate {
     /// Which agents the caller may see: every agent, unless the family is
     /// one caller's view of it ([`Self::seen_by`]).
     seen: Option<Arc<dyn PeerVisibility>>,
+    /// The holder of the changes a person decides: on a launch that serves
+    /// changes.
+    decisions: Option<IdentityDecisions>,
+    /// The driver that carries out the changes a person approved. It ends
+    /// with the family: when the mob stops, or the runtime is dropped.
+    _driver: Option<Arc<DecisionExecutorDriver>>,
 }
 
 impl std::fmt::Debug for IdentityGate {
@@ -351,31 +365,6 @@ impl AgentFacts {
             peers: self.peers.clone(),
         }
     }
-}
-
-/// The spec `spec` in the form an agent's record holds it: field for field,
-/// under the name Core's mob holds the agent by. `None` for a name the
-/// encoding does not admit.
-pub(crate) fn row_spec(spec: &DurableAgentSpec) -> Option<CreatedIdentitySpec> {
-    let member = core_member_name(spec.identity.as_str())?;
-    let mut row = CreatedIdentitySpec::new(member, spec.profile.clone())
-        .with_labels(spec.labels.clone())
-        .with_additional_instructions(spec.additional_instructions.clone());
-    row.addressability = match spec.addressability {
-        AgentAddressability::Addressable => IdentityAddressability::Addressable,
-        AgentAddressability::InternalOnly => IdentityAddressability::InternalOnly,
-    };
-    row.display_name = spec
-        .display_name
-        .as_ref()
-        .map(|name| name.as_str().to_owned());
-    row.context = spec.context.clone();
-    row.initial_message = spec.initial_message.clone();
-    row.runtime_mode_override = spec.runtime_mode_override;
-    row.backend = spec.backend;
-    row.binding = spec.binding.clone();
-    row.placement = spec.placement.clone();
-    Some(row)
 }
 
 /// The digest of `spec`: the one spec digest every surface names. `None`
@@ -580,7 +569,22 @@ impl IdentityGate {
             private_members: None,
             governed_runtime: false,
             seen: None,
+            decisions: None,
+            _driver: None,
         }
+    }
+
+    /// This family, holding the changes a person decides in `decisions`,
+    /// which `driver` carries out.
+    #[must_use]
+    pub(crate) fn with_decisions(
+        mut self,
+        decisions: IdentityDecisions,
+        driver: Option<DecisionExecutorDriver>,
+    ) -> Self {
+        self.decisions = Some(decisions);
+        self._driver = driver.map(Arc::new);
+        self
     }
 
     /// This family as a caller that sees the agents `seen` admits calls it.
@@ -1036,6 +1040,31 @@ impl IdentityGate {
         if let Some(receipt) = Self::receipt(mob, &call.operation_id).await? {
             return self.replayed(mob, policy, requester, call, &receipt).await;
         }
+        // An operation a decision holds, or held: the same request answers
+        // the decision as it stands, and another request under it is
+        // `operation_reused` (the holder compares them). A request that no
+        // longer normalizes because the agent moved since it was held is
+        // the same request, asked again.
+        if let Some(decisions) = &self.decisions
+            && let Some(state) = decisions.held(mob, &call.operation_id).await?
+        {
+            return match self.judge(mob, policy, requester, &call.change).await {
+                Ok(judged) if consent_of_plan(&judged.normalized.plan).is_none() => Ok(decisions
+                    .hold(mob, &call.operation_id, &judged.normalized)
+                    .await),
+                Ok(_) => Ok(state),
+                Err(refusal)
+                    if matches!(
+                        refusal.kind,
+                        IdentityRefusalKind::StaleSpec { .. }
+                            | IdentityRefusalKind::IdentityUnknown
+                    ) =>
+                {
+                    Ok(state)
+                }
+                Err(refusal) => Err(refusal),
+            };
+        }
         let judged = self.judge(mob, policy, requester, &call.change).await?;
         let request = &judged.normalized.request;
         let adopts_or_creates = matches!(
@@ -1049,26 +1078,25 @@ impl IdentityGate {
             hooks.validate(request)?;
         }
         let Some(consent) = consent_of_plan(&judged.normalized.plan) else {
-            // A human decision: held by the decision owner, when the launch
-            // has one.
-            return Err(IdentityRefusal::new(
-                IdentityRefusalKind::ApprovalUnavailable,
-            ));
+            // A person decides: the change is held, and nothing is written
+            // but its decision.
+            return match &self.decisions {
+                Some(decisions) => Ok(decisions
+                    .hold(mob, &call.operation_id, &judged.normalized)
+                    .await),
+                None => Err(IdentityRefusal::new(
+                    IdentityRefusalKind::ApprovalUnavailable,
+                )),
+            };
         };
         let commit = ChangeCommit::new(mob, &call.operation_id, requester, consent, request)
-            .of_configured_target(judged.configured_target);
+            .of_configured_target(judged.configured_target)
+            .with_preparations(policy.preparations());
         let committed = self
             .executor
             .commit(commit)
             .await
             .map_err(|error| unsettled(&call.operation_id, &error))?;
-        // Each agent the change wrote is served from its record from now
-        // on: registered, registered again or forgotten, with no wake.
-        if let Some(identities) = self.identities.upgrade() {
-            for agent in committed.outcome.agents() {
-                identities.note_agent_record_changed(&agent.name).await;
-            }
-        }
         Ok(committed.outcome)
     }
 
@@ -1250,7 +1278,12 @@ impl IdentityGate {
             Some(hooks) => hooks.consequences(request),
             None => Ok(Vec::new()),
         };
-        let rendering = render_v1(request, Some(&lines as &dyn ConsequenceHook))?;
+        // What a plan shows is what a decision of the request would hold,
+        // so the digest it names is the one a decision binds.
+        let rendering = match &self.decisions {
+            Some(decisions) => decisions.render(mob, request).await?,
+            None => render_v1(request, Some(&lines as &dyn ConsequenceHook))?,
+        };
         let approver_id = match &plan.outcome {
             PlannedOutcome::Notify { approver_id }
             | PlannedOutcome::Review { approver_id, .. }
@@ -1290,15 +1323,17 @@ impl IdentityFamily for IdentityGate {
 
     async fn withdraw(
         &self,
-        _mob: &MobHandle,
-        _requester: &ChangeRequester,
-        _request: WithdrawRequest,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        request: WithdrawRequest,
     ) -> Result<Withdrawn, IdentityRefusal> {
         if self.policy.is_none() {
             return Err(no_policy(ChangeClass::Create));
         }
-        // No decision is held without a decision owner.
-        Err(IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound))
+        match &self.decisions {
+            Some(decisions) => decisions.withdraw(mob, requester, &request),
+            None => Err(IdentityRefusal::new(IdentityRefusalKind::DecisionNotFound)),
+        }
     }
 
     async fn changes_hold(
@@ -1348,7 +1383,14 @@ impl IdentityFamily for IdentityGate {
             IdentityRead::Operation(operation_id) => {
                 let state = match committed_outcome(mob, &operation_id).await {
                     Ok(Some(outcome)) => OperationState::Outcome(outcome),
-                    Ok(None) => OperationState::Unknown,
+                    // No change committed under it: a decision may hold it.
+                    Ok(None) => match &self.decisions {
+                        Some(decisions) => match decisions.held(mob, &operation_id).await? {
+                            Some(outcome) => OperationState::Outcome(outcome),
+                            None => OperationState::Unknown,
+                        },
+                        None => OperationState::Unknown,
+                    },
                     Err(error) => return Err(unsettled(&operation_id, &error)),
                 };
                 Ok(IdentityReadAnswer::Operation(state))
@@ -1373,6 +1415,9 @@ pub struct IdentityFamilyOptions {
     /// What follows an update of an agent's instructions and a removal, in
     /// place of the identity runtime's own step.
     pub instruction_step: Option<Arc<dyn InstructionStep>>,
+    /// Where the notice of a decision that ended goes: without it no
+    /// requester is told, and each reads its operation's state.
+    pub decision_notices: Option<Arc<dyn IdentityDecisionNotices>>,
 }
 
 impl IdentityFamilyOptions {
@@ -1395,6 +1440,14 @@ impl IdentityFamilyOptions {
         self.instruction_step = Some(step);
         self
     }
+
+    /// These options, telling the requester of a decision that ended
+    /// through `notices`.
+    #[must_use]
+    pub fn with_decision_notices(mut self, notices: Arc<dyn IdentityDecisionNotices>) -> Self {
+        self.decision_notices = Some(notices);
+        self
+    }
 }
 
 impl std::fmt::Debug for IdentityFamilyOptions {
@@ -1403,22 +1456,108 @@ impl std::fmt::Debug for IdentityFamilyOptions {
             .debug_struct("IdentityFamilyOptions")
             .field("hooks", &self.hooks.is_some())
             .field("instruction_step", &self.instruction_step.is_some())
+            .field("decision_notices", &self.decision_notices.is_some())
             .finish()
+    }
+}
+
+/// What the seam asks the launch about its agents: the spec the identity
+/// runtime serves an agent under, and the policy's authority fields.
+struct GateSpecs {
+    policy: Option<Arc<IdentityCreationPolicy>>,
+    /// A back-edge, as the gate's own.
+    identities: Weak<IdentityRuntime>,
+}
+
+#[async_trait]
+impl AgentSpecs for GateSpecs {
+    async fn configured_spec(&self, _mob: &MobHandle, name: &str) -> Option<DurableAgentSpec> {
+        let identity = AgentIdentity::parse(name).ok()?;
+        let identities = self.identities.upgrade()?;
+        let registered = identities.registered_spec(&identity).await.ok()?;
+        Some(registered.spec)
+    }
+
+    fn is_authority_field(&self, key: &str) -> bool {
+        self.policy
+            .as_deref()
+            .is_some_and(|policy| policy.authority_field(key).is_some())
+    }
+}
+
+/// The launch's executor: Core's change path, and after each change that
+/// committed, the identity runtime's registration of each agent it wrote.
+/// It is the one place that registration is asked from, whoever commits:
+/// the gate at once, or the decisions' driver after a person approved.
+struct LaunchExecutor {
+    core: CoreChangeExecutor,
+    /// A back-edge, as the gate's own.
+    identities: Weak<IdentityRuntime>,
+}
+
+#[async_trait]
+impl IdentityChangeExecutor for LaunchExecutor {
+    async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
+        let committed = self.core.commit(commit).await?;
+        // Each agent the change wrote is served from its record from now
+        // on: registered, registered again or forgotten, with no wake.
+        if let Some(identities) = self.identities.upgrade() {
+            for agent in committed.outcome.agents() {
+                identities.note_agent_record_changed(&agent.name).await;
+            }
+        }
+        Ok(committed)
     }
 }
 
 /// The executor a launch's family commits through, and every holder of a
 /// decision's permit commits through too: Core's change path, with what the
-/// seam asks of the identity runtime wired once, here.
+/// seam asks of the launch wired once, here.
 pub(crate) fn change_executor(
-    _policy: Option<&Arc<IdentityCreationPolicy>>,
-    _identities: &Arc<IdentityRuntime>,
+    policy: Option<&Arc<IdentityCreationPolicy>>,
+    identities: &Arc<IdentityRuntime>,
     instruction_step: Option<Arc<dyn InstructionStep>>,
-) -> CoreChangeExecutor {
-    let executor = CoreChangeExecutor::new();
-    match instruction_step {
-        Some(step) => executor.with_instruction_step(step),
-        None => executor,
+) -> Arc<dyn IdentityChangeExecutor> {
+    let core = CoreChangeExecutor::new().with_agent_specs(Arc::new(GateSpecs {
+        policy: policy.cloned(),
+        identities: Arc::downgrade(identities),
+    }));
+    Arc::new(LaunchExecutor {
+        core: match instruction_step {
+            Some(step) => core.with_instruction_step(step),
+            None => core,
+        },
+        identities: Arc::downgrade(identities),
+    })
+}
+
+/// What the holder of decisions reads through: the mob the identity
+/// runtime serves, and an agent as the gate reads it.
+struct HeldReads(IdentityGate);
+
+#[async_trait]
+impl HeldChangeHost for HeldReads {
+    fn mob(&self, mob_id: &str) -> Option<MobHandle> {
+        self.0
+            .identities
+            .upgrade()?
+            .family_mob_handle()
+            .filter(|mob| mob.mob_id().as_str() == mob_id)
+    }
+
+    async fn target(
+        &self,
+        mob: &MobHandle,
+        identity: &str,
+    ) -> Result<Option<HeldTarget>, IdentityRefusal> {
+        let Some(policy) = self.0.policy.as_deref() else {
+            return Ok(None);
+        };
+        Ok(self
+            .0
+            .agent(mob, identity)
+            .await?
+            .map(|agent| HeldTarget::new(agent.entry(policy), agent.configured)))
     }
 }
 
@@ -1459,11 +1598,49 @@ impl crate::UnifiedRuntime {
     ) {
         let changes_enabled = policy.is_some();
         let executor = change_executor(policy.as_ref(), identities, options.instruction_step);
-        let mut gate = IdentityGate::new(policy, identities, Arc::new(executor))
+        let mut gate = IdentityGate::new(policy, identities, Arc::clone(&executor))
             .with_private_members(Arc::new(self.mob_runtime().private_owners().clone()))
             .on_governed_runtime(self.mob_runtime().native_work_governed());
-        if let Some(hooks) = options.hooks {
+        if let Some(hooks) = options.hooks.clone() {
             gate = gate.with_host_hooks(hooks);
+        }
+        if changes_enabled {
+            // The changes a person decides: held in the runtime's durable
+            // decisions, and carried out through the same executor by a
+            // driver that runs only on a launch that serves changes. The
+            // holder reads through a copy of the gate that holds no
+            // decisions, so nothing here holds itself.
+            let held: Arc<dyn HeldChangeHost> = Arc::new(HeldReads(gate.clone()));
+            let mut decisions = IdentityDecisions::new(self.durable_decisions(), executor, held);
+            if let Some(hooks) = options.hooks {
+                decisions = decisions.with_consequences(host_consequences_of(
+                    move |request: &IdentityRequest| hooks.consequences(request),
+                ));
+            }
+            if let Some(notices) = options.decision_notices {
+                decisions = decisions.with_notices(notices);
+            }
+            let driver = if tokio::runtime::Handle::try_current().is_ok() {
+                match decisions.spawn_driver(
+                    self.decision_approver_currentness(),
+                    DecisionExecutorDriver::DEFAULT_TICK,
+                ) {
+                    Ok(driver) => driver,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = ?error,
+                            "approved changes of agents are not carried out: their driver did                              not start"
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "approved changes of agents are not carried out: the identity policy was                      attached outside an async runtime"
+                );
+                None
+            };
+            gate = gate.with_decisions(decisions, driver);
         }
         identities.attach_identity_gate(Arc::new(gate), changes_enabled);
     }

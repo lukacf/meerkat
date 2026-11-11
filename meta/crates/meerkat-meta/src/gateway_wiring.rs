@@ -226,8 +226,20 @@ impl MemberBuildWiring {
         runtime: &Arc<IdentityRuntime>,
         session_service: Option<Arc<dyn meerkat_mob::MobSessionService>>,
     ) {
+        self.watch_identity_entries(runtime);
         if let Some(preparer) = self.preparer.as_ref() {
             preparer.bind(runtime, session_service).await;
+        }
+    }
+
+    /// From now on the spawn customizer attaches an identity's dispatcher to
+    /// each build of a member Core holds as an identity entry, read through
+    /// `runtime`'s session bridge
+    /// ([`CustomizerToolsSpawnCustomizer::watch_identity_entries`]).
+    fn watch_identity_entries(&self, runtime: &IdentityRuntime) {
+        if let (Some(customizer), Some(bridge)) = (self.spawn_customizer.as_ref(), runtime.bridge())
+        {
+            customizer.watch_identity_entries(bridge);
         }
     }
 
@@ -308,6 +320,7 @@ impl MemberBuildWiring {
         if let Some(customizer) = self.spawn_customizer.as_ref() {
             customizer.arm(registry);
         }
+        self.watch_identity_entries(runtime);
         if let Some(preparer) = self.preparer.as_ref() {
             preparer.bind_publishing(runtime, session_service).await;
         }

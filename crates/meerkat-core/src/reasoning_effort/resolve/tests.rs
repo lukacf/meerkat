@@ -337,10 +337,6 @@ fn owned(fields: &[&str]) -> Vec<String> {
     fields.iter().map(|field| (*field).to_owned()).collect()
 }
 
-// ---------------------------------------------------------------------
-// R1.9
-// ---------------------------------------------------------------------
-
 /// The facts policy, kind by kind: which source states the levels of a
 /// route on each backend kind. Every kind of every family is listed, so a
 /// new kind fails here until it has decided.
@@ -422,10 +418,6 @@ fn policy_methods_are_exhaustive_per_kind() {
         );
     }
 }
-
-// ---------------------------------------------------------------------
-// R1.1
-// ---------------------------------------------------------------------
 
 /// What the translation table gives one route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -656,10 +648,6 @@ fn the_realtime_api_takes_no_effort() {
     }
 }
 
-// ---------------------------------------------------------------------
-// R1.2, R1.3
-// ---------------------------------------------------------------------
-
 /// The direct routes of the three catalog-backed families.
 fn direct_routes() -> Vec<(ReasoningBackend, ModelApi, &'static [EffortLevel])> {
     let mut routes = Vec::new();
@@ -825,6 +813,19 @@ fn uncatalogued_model_on_a_catalog_route_is_unknown() {
             }
         }
     }
+
+    // A catalog row is read only on a backend of the model's own family: an
+    // Anthropic model with a row of its own, observed on an OpenAI backend,
+    // has no source there.
+    let anthropic_row = row(Provider::Anthropic, &LADDER);
+    assert_eq!(
+        supported_reasoning_levels(
+            Provider::Anthropic,
+            Some(&observation(OPENAI_API, ModelApi::Responses)),
+            Some(&anthropic_row),
+        ),
+        ReasoningLevelFacts::Unknown
+    );
 }
 
 /// A Gemini thinking-level row that records no levels is unknown, not
@@ -843,10 +844,6 @@ fn a_gemini_thinking_level_row_without_levels_is_unknown() {
     assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
     assert_eq!((refusal.supported, refusal.facts), (None, None));
 }
-
-// ---------------------------------------------------------------------
-// R1.6, R1.7
-// ---------------------------------------------------------------------
 
 /// The Copilot routes of the three families and the levels each can
 /// express.
@@ -1122,10 +1119,6 @@ fn supported_levels_are_in_ladder_order_without_repeats() {
     assert_eq!(ReasoningLevelFacts::Unavailable.source(), None);
 }
 
-// ---------------------------------------------------------------------
-// R1.8
-// ---------------------------------------------------------------------
-
 /// A level resolved on an OpenAI-family route is written with the resolved
 /// marker, in both modes; a refused resolve leaves the request copy
 /// byte-identical, marker included.
@@ -1216,14 +1209,11 @@ fn the_openai_translation_marks_the_level_resolved() {
     }
 }
 
-// ---------------------------------------------------------------------
-// R1.10
-// ---------------------------------------------------------------------
-
 /// With no observation (a client that reports none) the levels are unknown
-/// and the refusal names the family's direct route.
+/// and the refusal names no route: the route of such a client is one nobody
+/// observed, and none is guessed, for the four families either.
 #[test]
-fn a_refusal_without_an_observation_names_the_direct_route() {
+fn a_refusal_without_an_observation_names_no_route() {
     let direct = [
         (Provider::OpenAI, OPENAI_API, ModelApi::Responses),
         (Provider::Anthropic, ANTHROPIC_API, ModelApi::Messages),
@@ -1249,26 +1239,19 @@ fn a_refusal_without_an_observation_names_the_direct_route() {
                 let refusal = resolve(mode, High, None, provider, catalog_row, &mut params)
                     .expect_err("no observation, no source");
                 assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
-                assert_eq!((refusal.supported, refusal.facts), (None, None));
-                assert_eq!(refusal.route, Some(ReasoningRoute::new(backend, api)));
+                assert_eq!((refusal.supported.clone(), refusal.facts), (None, None));
+                assert_eq!(refusal.route, None, "{provider:?}");
                 assert_eq!(refusal.provider, provider);
                 assert_eq!(params, None);
+                assert_names_no_route(&refusal);
             }
         }
     }
 
     // The self-hosted family and a provider outside the families have no
-    // direct observation; their levels are unknown all the same. The
-    // self-hosted refusal names that family's own route. A provider outside
-    // the families has no route to name, and none is guessed: `route: null`.
-    let self_hosted = ReasoningRoute::new(
-        ReasoningBackend::SelfHosted(SelfHostedBackendKind::SelfHosted),
-        ModelApi::ChatCompletions,
-    );
-    for (provider, route) in [
-        (Provider::SelfHosted, Some(self_hosted)),
-        (Provider::Other, None),
-    ] {
+    // direct observation; their levels are unknown all the same, and their
+    // refusals name no route either: `route: null`.
+    for provider in [Provider::SelfHosted, Provider::Other] {
         assert_eq!(direct_route_observation(provider), None);
         assert_eq!(
             supported_reasoning_levels(provider, None, None),
@@ -1283,31 +1266,21 @@ fn a_refusal_without_an_observation_names_the_direct_route() {
                 .expect_err("no observation, no source");
             assert_eq!(refusal.reason, Reason::SupportedLevelsUnknown);
             assert_eq!((refusal.supported.clone(), refusal.facts), (None, None));
-            assert_eq!(refusal.route, route, "{provider:?}");
+            assert_eq!(refusal.route, None, "{provider:?}");
             assert_eq!(params, None);
-
-            let value = serde_json::to_value(&refusal).expect("a refusal serializes");
-            let text = refusal.to_string();
-            match &route {
-                Some(route) => {
-                    assert_eq!(
-                        value["route"],
-                        serde_json::json!({"backend": "self_hosted", "api": "chat_completions"})
-                    );
-                    assert!(text.contains(&format!(" on {route}:")), "{text}");
-                }
-                None => {
-                    assert!(value["route"].is_null(), "{value}");
-                    assert!(!text.contains(" on "), "{text}");
-                }
-            }
+            assert_names_no_route(&refusal);
         }
     }
 }
 
-// ---------------------------------------------------------------------
-// R1.11
-// ---------------------------------------------------------------------
+/// A refusal that names no route writes `route` as `null` and leaves the
+/// route out of its text.
+fn assert_names_no_route(refusal: &ReasoningEffortRefusal) {
+    let value = serde_json::to_value(refusal).expect("a refusal serializes");
+    assert!(value["route"].is_null(), "{value}");
+    let text = refusal.to_string();
+    assert!(!text.contains(" on "), "{text}");
+}
 
 /// On `copilot/messages` a level is sent as the pair `thinking: adaptive`
 /// plus the effort, never as the effort alone, and a baseline that sets
@@ -1461,10 +1434,6 @@ fn copilot_messages_writes_the_adaptive_pair_or_refuses() {
         assert_eq!(params, budget);
     }
 }
-
-// ---------------------------------------------------------------------
-// R1.4
-// ---------------------------------------------------------------------
 
 fn conflict(
     reason: Reason,
@@ -2525,13 +2494,8 @@ fn check_outcome(context: &str, case: &Case<'_>, seen: &mut std::collections::BT
                 Some(observation) => {
                     assert_eq!(refusal.route, Some(observation.route()), "{context}");
                 }
-                // Without an observation the refusal names the family's own
-                // route; a provider outside the families has none to name.
-                None => assert_eq!(
-                    refusal.route.is_none(),
-                    provider == Provider::Other,
-                    "{context}"
-                ),
+                // Without an observation the refusal names no route.
+                None => assert_eq!(refusal.route, None, "{context}"),
             }
             // `facts` is absent exactly when `supported` is.
             assert_eq!(

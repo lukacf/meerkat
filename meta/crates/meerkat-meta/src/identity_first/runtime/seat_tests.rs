@@ -10843,3 +10843,138 @@ async fn a_grant_seat_core_refuses_answers_the_typed_refusal_a_delivery_answers(
     );
     assert_eq!(core.session_of(&refused), None, "nothing is bound");
 }
+
+/// Which record holds an identity's spec, for each identity management Core
+/// answers: the host's roster for a command-driven identity, its row for one
+/// whose record is its row in the mob's identity store, and the typed
+/// refusal for an identity a host adopted through an identity intent row
+/// (`IdentityHostAdopted`) or whose row does not read (history unavailable).
+/// Every lifecycle verb asks this first, so the first two are served and the
+/// last two are refused, as they always were.
+#[test]
+fn the_record_that_holds_an_identitys_spec_is_read_from_cores_management() {
+    use meerkat_mob::MemberIdentityManagement as Management;
+    let alice = identity("personal:alice");
+    assert_eq!(
+        IdentityRuntime::spec_record_of(Management::CommandDriven, &alice).ok(),
+        Some(created::SpecRecord::Roster)
+    );
+    assert_eq!(
+        IdentityRuntime::spec_record_of(Management::CreatedEntry, &alice).ok(),
+        Some(created::SpecRecord::Store)
+    );
+    assert!(matches!(
+        IdentityRuntime::spec_record_of(Management::IntentManaged, &alice),
+        Err(IdentityRuntimeError::IdentityHostAdopted { identity }) if identity == alice
+    ));
+    assert!(matches!(
+        IdentityRuntime::spec_record_of(Management::IntentUnreadable, &alice),
+        Err(IdentityRuntimeError::IdentityHistoryUnavailable { .. })
+    ));
+}
+
+/// Source guard: where an identity's record lives is asked in one module,
+/// `runtime/created.rs` (through the session bridge's reads of Core). No
+/// other production code of the identity runtime, its topology, its grants,
+/// its build wiring or its surfaces reads an entry's origin, the management
+/// kind of an identity whose record is its row, or the registration's own
+/// note of the record it was read from: every verb, read, grant, wake and
+/// delivery has one path for every identity. The offline identity reset
+/// keeps its typed refusal and is not listed.
+#[test]
+fn where_an_identitys_record_lives_is_asked_in_one_module() {
+    let files = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        (
+            "identity_first/runtime/lifecycle_projection.rs",
+            include_str!("lifecycle_projection.rs"),
+        ),
+        (
+            "identity_first/runtime/records.rs",
+            include_str!("records.rs"),
+        ),
+        (
+            "identity_first/runtime/build_preparation.rs",
+            include_str!("build_preparation.rs"),
+        ),
+        (
+            "identity_first/runtime/tool_grant_seat.rs",
+            include_str!("tool_grant_seat.rs"),
+        ),
+        (
+            "identity_first/orchestrator.rs",
+            include_str!("../orchestrator.rs"),
+        ),
+        (
+            "identity_first/build_preparer.rs",
+            include_str!("../build_preparer.rs"),
+        ),
+        (
+            "identity_first/customizer_tools.rs",
+            include_str!("../customizer_tools.rs"),
+        ),
+        (
+            "identity_first/held_bootstrap.rs",
+            include_str!("../held_bootstrap.rs"),
+        ),
+        (
+            "topology_control.rs",
+            include_str!("../../topology_control.rs"),
+        ),
+        (
+            "rpc/tool_grant_methods.rs",
+            include_str!("../../rpc/tool_grant_methods.rs"),
+        ),
+        ("gateway_wiring.rs", include_str!("../../gateway_wiring.rs")),
+        ("http_console.rs", include_str!("../../http_console.rs")),
+        ("rpc.rs", include_str!("../../rpc.rs")),
+        (
+            "rpc/operator_methods.rs",
+            include_str!("../../rpc/operator_methods.rs"),
+        ),
+        (
+            "rpc/mob_methods.rs",
+            include_str!("../../rpc/mob_methods.rs"),
+        ),
+        (
+            "schedule_wiring.rs",
+            include_str!("../../schedule_wiring.rs"),
+        ),
+    ];
+    for (file, source) in files {
+        let production = production_code(source);
+        for read in [
+            "is_created_entry(",
+            "is_declared_entry(",
+            "IdentityEntryOrigin::",
+            "MemberIdentityManagement::CreatedEntry",
+            ".created_identities()",
+            ".created_identity(",
+            ".created_identity_names()",
+        ] {
+            assert!(
+                !production.contains(read),
+                "{file} asks where an identity's record lives (`{read}`): only \
+                 runtime/created.rs does"
+            );
+        }
+        // The registration's own note of the record it was read from: a
+        // field read `.created`, never a name that merely starts with it.
+        let noted = production
+            .match_indices(".created")
+            .filter(|(at, read)| {
+                !production[at + read.len()..]
+                    .starts_with(|next: char| next.is_alphanumeric() || next == '_')
+            })
+            .count();
+        assert_eq!(
+            noted, 0,
+            "{file} reads the registration's note of where its record lives in {noted} places: \
+             only runtime/created.rs does"
+        );
+    }
+}

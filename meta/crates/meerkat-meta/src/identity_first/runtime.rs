@@ -781,17 +781,13 @@ enum LifecycleRetireIntent {
     /// generation; its next delivery materializes it again. A release is no
     /// retirement: no memory harvest hook runs.
     Release,
-    /// The incarnation ends in Core (the roster no longer lists the
-    /// identity): Core retires it and keeps its history. The memory harvest
-    /// hooks (session tail distillation, exit interview) and the retirement
-    /// hook run in the lifecycle projection once Core journaled the
-    /// retirement.
-    Retire,
-    /// Non-destructive reload: Core retires the incarnation and the same
-    /// durable session is seated again right after, under the same lifecycle
-    /// lock, so nothing rotates and no side effect is owed (an exit
-    /// interview for a member that stays would be a lie).
-    Reload,
+    /// Non-destructive reload: the incarnation ends in Core and its
+    /// successor is seated on the same durable session right after, under
+    /// the same lifecycle lock, so nothing rotates and no side effect is
+    /// owed (an exit interview for a member that stays would be a lie). The
+    /// cause says what the successor is for
+    /// ([`IdentityRuntime::end_incarnation_for_successor_locked`]).
+    Reload(created::SuccessorCause),
 }
 
 /// Which fresh life [`IdentityRuntime::start_fresh_life_locked`] starts.
@@ -1225,14 +1221,16 @@ pub enum IdentityRuntimeError {
     IdentityHostAdopted {
         identity: AgentIdentity,
     },
-    /// The identity is store-owned: created at runtime, or adopted into store
-    /// custody, its record is its row in the mob's identity store, and Core's
-    /// MobMachine drives its lifecycle (Core answers its identity management
-    /// `CreatedEntry`). Meta's lifecycle verbs refuse it before anything
-    /// acts, and nothing was changed; a send, a dispatch or a schedule fire
-    /// still goes through its door, which delivers to its member while Core
-    /// holds one. Final. JSON-RPC internal-error code with `data.kind`
-    /// `identity_store_owned`.
+    /// The identity's record is its row in the mob's identity store (it was
+    /// created at run time, or adopted into the store), and the maintenance
+    /// rebuild that was asked for changes its member's compaction floor,
+    /// which only a build this runtime lowers carries: Core's same-session
+    /// successor of such an identity takes none, so the rebuild is refused
+    /// before anything acts, and nothing was changed. Every lifecycle verb
+    /// (retire, reload, respawn, reset, delete, warm, a scoped retire, a
+    /// grant's seat) serves such an identity as any other and never answers
+    /// this; through 0.9.13 each of them did. Final. JSON-RPC internal-error
+    /// code with `data.kind` `identity_store_owned`.
     IdentityStoreOwned {
         identity: AgentIdentity,
     },
@@ -1594,9 +1592,9 @@ impl std::fmt::Display for IdentityRuntimeError {
             ),
             Self::IdentityStoreOwned { identity } => write!(
                 f,
-                "identity {identity} is store-owned: its record is its row in the mob's \
-                 identity store and Core drives its lifecycle, so Meta's lifecycle verbs \
-                 refuse it"
+                "identity {identity}'s record is its row in the mob's identity store: a \
+                 maintenance rebuild cannot carry a compaction floor to its member, so nothing \
+                 was changed"
             ),
             Self::IdentityNameHeldByRawMember {
                 identity,
@@ -2151,8 +2149,9 @@ impl IdentityRuntimeError {
             Self::IdentityHostAdopted { identity } => Some(serde_json::json!({
                 "kind": "identity_host_adopted", "identity": identity, "retryable": false,
             })),
-            // A store-owned identity keeps the internal-error code; the kind
-            // tells its caller that Core, not a Meta verb, drives it.
+            // The refusal keeps the internal-error code; the kind tells its
+            // caller that the identity's record is its row, which the
+            // maintenance rebuild asked for cannot serve.
             Self::IdentityStoreOwned { identity } => Some(serde_json::json!({
                 "kind": "identity_store_owned", "identity": identity, "retryable": false,
             })),
@@ -2468,6 +2467,13 @@ impl IdentityFirstRuntimeContext {
             })
             .await
             .map_err(|error| IdentityRuntimeError::Internal(format!("roster provider: {error}")))?;
+        // Every identity the runtime serves: the roster's, and the ones
+        // registered from their rows in the mob's identity store.
+        let served_from_rows = self.runtime.row_registered_specs(&roster).await;
+        let roster = roster
+            .into_iter()
+            .chain(served_from_rows)
+            .collect::<Vec<_>>();
         let identities = roster
             .iter()
             .map(|spec| spec.identity.clone())
@@ -3003,6 +3009,12 @@ impl IdentityFirstRuntimeContext {
         // An identity Core holds an identity intent row for is the host's:
         // no Meta verb adds it.
         self.runtime.refuse_host_adopted(&identity).await?;
+        // A name an identity holds through its row in the mob's identity
+        // store is taken, whether or not Core ever seated it: the add names
+        // no new roster member.
+        if self.runtime.row_holds_name(&identity).await? {
+            return Err(refused(Refusal::ExistingContinuity { identity }));
+        }
         // Fresh means what it means for a held roster bootstrap: Core never
         // spawned the identity (no binding since the latest mob reset) and no
         // first-boot row names a session for it. A read fault is never taken
@@ -3256,11 +3268,23 @@ impl IdentityFirstRuntimeContext {
             self.runtime.fail_identity_bootstrap(generation, &error);
             return Err(error);
         }
+        // The identities whose record is their row in the mob's identity
+        // store, which the host's roster never lists, are registered from
+        // their rows first: the pass tracks them beside the roster's, and the
+        // topology provider is asked about every identity the runtime
+        // serves. The roster's declaration below names the roster's
+        // identities only.
+        let row_specs = self.runtime.tracked_row_identities(roster).await;
+        let tracked = roster
+            .iter()
+            .chain(row_specs.iter())
+            .cloned()
+            .collect::<Vec<_>>();
         // Publish the new pass before any provider/restore await. RPC dispatch
         // is concurrent, so retaining the previous complete/ready snapshot here
         // would let a readiness waiter falsely pass while reconcile is active.
         self.runtime
-            .begin_identity_bootstrap(generation, self.bootstrap_mode.clone(), roster)
+            .begin_identity_bootstrap(generation, self.bootstrap_mode.clone(), &tracked)
             .await;
         // A candidate launch applies no roster change: Core refuses its
         // declarations, and the pass logs what the authoritative launch
@@ -3286,6 +3310,7 @@ impl IdentityFirstRuntimeContext {
                 super::orchestrator::restore_roster(
                     &self.runtime,
                     roster,
+                    &row_specs,
                     self.topology_provider.as_deref(),
                     self.customizer.as_deref(),
                     true,
@@ -3297,6 +3322,7 @@ impl IdentityFirstRuntimeContext {
                 super::orchestrator::lazy_register_roster(
                     &self.runtime,
                     roster,
+                    &row_specs,
                     self.topology_provider.as_deref(),
                     true,
                 )
@@ -3316,11 +3342,8 @@ impl IdentityFirstRuntimeContext {
             self.runtime.fail_identity_bootstrap(generation, &error);
             return Err(error);
         }
-        // The identities created at runtime, which the host's roster never
-        // lists, are registered from their rows in the mob's identity store.
-        self.runtime.register_created_identities(roster).await;
         self.runtime
-            .install_identity_bootstrap(generation, self.bootstrap_mode.clone(), roster, &result)
+            .install_identity_bootstrap(generation, self.bootstrap_mode.clone(), &tracked, &result)
             .await;
         Ok(result)
     }
@@ -3741,6 +3764,12 @@ pub struct IdentityRuntime {
     /// restart the host holds an identity again through its held bootstrap
     /// or a held add.
     host_held: StdMutex<BTreeSet<AgentIdentity>>,
+    /// The identities whose live incarnation Core replaced by its successor
+    /// in one step, until the wake that materializes the successor announces
+    /// it as a new member (`end_incarnation_for_successor_locked`). Kept in
+    /// memory and never read as truth: it only decides whether that wake
+    /// tells the identity's subscribers.
+    seated_successors: StdMutex<BTreeSet<AgentIdentity>>,
     /// Where this runtime writes the held-completion marks: the mirror for
     /// a rollback to 0.9.10, whose runtime reads them back after a restart,
     /// kept only while that rollback is supported (until 0.9.12). Nothing
@@ -4202,9 +4231,10 @@ struct CoreViewFacts {
     generation: Option<meerkat_mob::Generation>,
     /// The runtime mode Core runs the live member in.
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
-    /// Core drives the identity itself: it holds an identity intent row for
-    /// it (host-adopted), or its created entry's row (store-owned), or a row
-    /// this build cannot read: any management other than command-driven.
+    /// The host's verbs refuse the identity, because Core drives it itself:
+    /// it holds an identity intent row for it (a host adopted it), or a row
+    /// this build cannot read. An identity whose record is its row in the
+    /// mob's identity store is served as any identity, and reads false.
     intent_managed: bool,
     /// Core refused the identity's last declaration for good
     /// ([`IdentityEntry::declaration_refused`]): no member is read for it,
@@ -4237,11 +4267,12 @@ impl CoreViewFacts {
     ) -> Self {
         let core_identity =
             crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        // The host's verbs refuse the identity: Core's identity management
+        // of its name is one this runtime never acts on (a host adopted it
+        // through an identity intent row, or its row does not read).
         let intent_managed = history.is_some_and(|history| {
-            !matches!(
-                history.identity_management(&core_identity),
-                meerkat_mob::MemberIdentityManagement::CommandDriven
-            )
+            IdentityRuntime::spec_record_of(history.identity_management(&core_identity), identity)
+                .is_err()
         });
         if declaration_refused {
             return Self {
@@ -4405,12 +4436,14 @@ fn retired_member_release_failed(
     }
 }
 
-/// Whether an identity-first spawn made `binding`'s member for `identity`:
-/// it carries the identity's durable-identity marker, or its spawn labels
-/// carry the `agent_identity` label naming the identity, which every
+/// Whether `binding`'s member is `identity`'s own: an identity-first spawn
+/// made it (it carries the identity's durable-identity marker, or its spawn
+/// labels carry the `agent_identity` label naming the identity, which every
 /// identity-first spawn writes (Meta 0.9.3's included) and the raw member
-/// creation surfaces refuse. A member the host made directly on the mob
-/// under the identity's member id has neither.
+/// creation surfaces refuse), or the identity's record is its row in the
+/// mob's identity store, under whose name Core seats the identity's own
+/// member only. A member the host made directly on the mob under a roster
+/// identity's member id has none of them.
 pub(crate) fn binding_spawned_for_identity(
     binding: &meerkat_mob::MemberBinding,
     identity: &AgentIdentity,
@@ -4418,6 +4451,7 @@ pub(crate) fn binding_spawned_for_identity(
     binding_carries_identity_marker(binding, identity)
         || crate::member_comms_id::durable_identity_label(binding.labels())
             == Some(identity.as_str())
+        || created::binding_is_a_rows(binding)
 }
 
 impl IdentityRuntime {
@@ -4706,6 +4740,7 @@ impl IdentityRuntime {
             bootstrap_controller: Mutex::new(()),
             held_create_pass: StdMutex::new(None),
             host_held: StdMutex::new(BTreeSet::new()),
+            seated_successors: StdMutex::new(BTreeSet::new()),
             held_completion_marks: StdMutex::new(None),
             first_boot: StdMutex::new(FirstBootRows::NoStateDir),
             first_boot_writer: Arc::new(Mutex::new(())),
@@ -5259,6 +5294,20 @@ impl IdentityRuntime {
                     _ => (IdentityBootstrapState::Dormant, None),
                 },
                 (None, None) => (IdentityBootstrapState::Dormant, None),
+            };
+            // An identity the pass declared nothing for (its record is its
+            // row in the mob's identity store) that Core holds no member of
+            // is settled by Core's entry of its name: it awaits its host's
+            // preparation, its held creation or its seat, which this pass
+            // does not end, so it reads broken with that cause rather than
+            // keeping a readiness barrier open.
+            let (state, error) = if state == IdentityBootstrapState::Dormant
+                && !result.outcomes.contains_key(&spec.identity)
+                && let Some(refusal) = self.unseated_refusal(&spec.identity).await
+            {
+                (IdentityBootstrapState::Broken, Some(refusal.to_string()))
+            } else {
+                (state, error)
             };
             // The eager pass's typed per-member progress survives into the
             // settled snapshot.
@@ -6554,6 +6603,71 @@ impl IdentityRuntime {
             .collect()
     }
 
+    /// Of `edges`, the edges a row in the mob's identity store declares as
+    /// an owned edge of one of their ends: they are the row's (its owner's
+    /// change declares and ends them, and Core realizes them), so the
+    /// topology never prunes them. One row read per end named, no actor
+    /// command and no wake. An end whose row does not read keeps its edges:
+    /// an edge whose owner could not be read is never pruned.
+    async fn row_declared_identity_edges(
+        &self,
+        edges: &BTreeSet<(AgentIdentity, AgentIdentity)>,
+    ) -> BTreeSet<(AgentIdentity, AgentIdentity)> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return BTreeSet::new();
+        };
+        let mut owned: BTreeMap<AgentIdentity, Option<BTreeSet<AgentIdentity>>> = BTreeMap::new();
+        for end in edges.iter().flat_map(|(a, b)| [a, b]) {
+            if owned.contains_key(end) {
+                continue;
+            }
+            let peers = match bridge.owned_peers(end).await {
+                Ok(peers) => Some(peers),
+                Err(error) => {
+                    tracing::warn!(
+                        identity = %end,
+                        %error,
+                        "the edges an identity's row declares could not be read; the topology \
+                         keeps its live edges this time"
+                    );
+                    None
+                }
+            };
+            owned.insert(end.clone(), peers);
+        }
+        let declares = |owner: &AgentIdentity, peer: &AgentIdentity| match owned.get(owner) {
+            Some(Some(peers)) => peers.contains(peer),
+            Some(None) => true,
+            None => false,
+        };
+        edges
+            .iter()
+            .filter(|(a, b)| declares(a, b) || declares(b, a))
+            .cloned()
+            .collect()
+    }
+
+    /// Of `edges`, live edges between two of this runtime's identities,
+    /// those no other owner declares: neither the mob definition's wiring
+    /// nor a row in the mob's identity store. When a topology provider owns
+    /// the topology, these are the edges it may prune, between any two
+    /// identities alike.
+    pub(crate) async fn edges_without_another_owner(
+        &self,
+        edges: BTreeSet<(AgentIdentity, AgentIdentity)>,
+    ) -> BTreeSet<(AgentIdentity, AgentIdentity)> {
+        if edges.is_empty() {
+            return edges;
+        }
+        let definition_declared = self.definition_declared_identity_edges().await;
+        let unclaimed = edges
+            .difference(&definition_declared)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let row_declared = self.row_declared_identity_edges(&unclaimed).await;
+        unclaimed.difference(&row_declared).cloned().collect()
+    }
+
     pub(crate) fn set_identity_edge_ownership(&self, ownership: IdentityEdgeOwnership) {
         *self
             .identity_edge_ownership
@@ -6775,15 +6889,11 @@ impl IdentityRuntime {
         }
         let owned = match self.identity_edge_ownership() {
             IdentityEdgeOwnership::TopologyProvider => {
-                let declared = self.definition_declared_identity_edges().await;
-                let created = self.created_registrations().await;
+                let unwanted = wired.difference(&desired).cloned().collect();
+                let prunable = self.edges_without_another_owner(unwanted).await;
                 managed
                     .iter()
-                    .chain(
-                        wired
-                            .difference(&declared)
-                            .filter(|(a, b)| !created.contains(a) && !created.contains(b)),
-                    )
+                    .chain(prunable.iter())
                     .cloned()
                     .collect::<BTreeSet<_>>()
             }
@@ -7146,31 +7256,42 @@ impl IdentityRuntime {
         // edge to a member that is not one of this runtime's identities never
         // appears here.
         // A live edge the mob definition's wiring declares has its own
-        // owner; it is never the topology's to prune. Nor is an edge of an
-        // identity created at runtime: its row's owned edges and the
-        // definition's wiring are Core's.
+        // owner; it is never the topology's to prune. Nor is an edge a row
+        // in the mob's identity store declares as its identity's owned edge:
+        // its owner's change ends it, and Core realizes it.
         let live_owned_edges: BTreeSet<(AgentIdentity, AgentIdentity)> = match (
             self.identity_edge_ownership(),
             current_logical_edges.as_ref(),
         ) {
             (IdentityEdgeOwnership::TopologyProvider, Some(live)) => {
-                let definition_declared = self.definition_declared_identity_edges().await;
-                let created = self.created_registrations().await;
-                live.iter()
+                let unwanted = live
+                    .iter()
                     .filter(|edge| in_scope(edge))
-                    .filter(|edge| !definition_declared.contains(*edge))
-                    .filter(|(a, b)| !created.contains(a) && !created.contains(b))
+                    .filter(|edge| !desired.contains(*edge))
                     .cloned()
-                    .collect()
+                    .collect();
+                self.edges_without_another_owner(unwanted).await
             }
             (IdentityEdgeOwnership::TopologyProvider, None)
             | (IdentityEdgeOwnership::WiredByThisProcess, _) => BTreeSet::new(),
         };
+        // A managed edge a row has come to declare since this runtime wired
+        // it is the row's now: it leaves the managed set and stays wired.
+        let handed_to_rows = self
+            .row_declared_identity_edges(
+                &managed_snapshot
+                    .iter()
+                    .filter(|edge| !desired.contains(*edge))
+                    .cloned()
+                    .collect(),
+            )
+            .await;
         let stale: Vec<(AgentIdentity, AgentIdentity)> = managed_snapshot
             .iter()
             .chain(live_owned_edges.iter())
             .filter(|edge| !desired.contains(*edge))
             .filter(|edge| !unsettled.contains(*edge))
+            .filter(|edge| !handed_to_rows.contains(*edge))
             .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -7330,6 +7451,9 @@ impl IdentityRuntime {
                 }
                 for edge in unsettled_without_members {
                     managed.remove(&edge);
+                }
+                for edge in &handed_to_rows {
+                    managed.remove(edge);
                 }
                 for (a, b, result) in unwire_results {
                     result?.map_err(|e| {
@@ -8900,17 +9024,17 @@ impl IdentityRuntime {
             })
     }
 
-    /// On every lifecycle verb: refuse an identity a host adopted. A read
+    /// On every lifecycle verb: refuse an identity a host adopted through an
+    /// identity intent row, which Core's identity reconciler drives. A read
     /// fault refuses too (history unavailable): Meta never acts on an
-    /// identity it could not prove is its own.
+    /// identity it could not prove is its own. Every other identity is
+    /// served, whichever record holds its spec
+    /// ([`Self::spec_record`]).
     pub(crate) async fn refuse_host_adopted(
         &self,
         identity: &AgentIdentity,
     ) -> Result<(), IdentityRuntimeError> {
-        if self.bridge.is_none() {
-            return Ok(());
-        }
-        Self::host_adoption_refusal(self.core_identity_management(identity).await?, identity)
+        self.spec_record(identity).await.map(|_| ())
     }
 
     // -----------------------------------------------------------------------
@@ -9525,11 +9649,14 @@ impl IdentityRuntime {
             )
             .await;
         match &result {
-            Ok(outcome) if !outcome.already_active => {
-                self.settle_successful_wake(identity).await;
-            }
-            Ok(_) => {
-                if let Some(entry) = self.entries.write().await.get_mut(identity) {
+            // A member this wake seated, or the successor Core seated in the
+            // previous incarnation's place, is a new member to the
+            // identity's subscribers.
+            Ok(outcome) => {
+                let successor = self.take_seated_successor(identity);
+                if !outcome.already_active || successor {
+                    self.settle_successful_wake(identity).await;
+                } else if let Some(entry) = self.entries.write().await.get_mut(identity) {
                     entry.wake_refusal = None;
                 }
             }
@@ -9663,6 +9790,13 @@ impl IdentityRuntime {
             match bridge.ensure_member_live(identity).await {
                 Ok(Some(binding)) => break binding,
                 Ok(None) => {
+                    // Core holds no member of the identity, and its
+                    // declaration seated none: Core's entry of its name says
+                    // why (archived, or awaiting its preparation, its held
+                    // creation or its seat).
+                    if let Some(refusal) = self.unseated_refusal(identity).await {
+                        return Err(refusal);
+                    }
                     return Err(IdentityRuntimeError::IdentityHistoryUnavailable {
                         identity: identity.clone(),
                         detail: "Core holds no member for the identity after its seat; \
@@ -9851,16 +9985,7 @@ impl IdentityRuntime {
         AgentIdentity,
         Result<Option<meerkat_mob::MemberDeliveryScope>, IdentityRuntimeError>,
     )> {
-        // An identity created at runtime is Core's to drive: Meta's wake
-        // refuses it, and Core materializes its member on its first delivery.
-        let identities: Vec<AgentIdentity> = self
-            .entries
-            .read()
-            .await
-            .iter()
-            .filter(|(_, entry)| !entry.created)
-            .map(|(identity, _)| identity.clone())
-            .collect();
+        let identities: Vec<AgentIdentity> = self.entries.read().await.keys().cloned().collect();
         stream::iter(identities.into_iter().map(|identity| async move {
             let result = self.materialize(&identity).await;
             (identity, result)
@@ -9873,8 +9998,8 @@ impl IdentityRuntime {
     /// Materialize every identity registered with the runtime (Core's wake,
     /// cause Operator), returning Core's delivery scope of each
     /// session-backed member. An explicit operator request: nothing in Meta
-    /// calls it to deliver. An identity created at runtime is left to Core,
-    /// which drives it and materializes its member on its first delivery.
+    /// calls it to deliver. An archived identity has no member to
+    /// materialize and is skipped.
     ///
     /// Best-effort: one member that cannot build is skipped and surfaced
     /// through logs and the error hook rather than aborting unrelated
@@ -9888,6 +10013,15 @@ impl IdentityRuntime {
             .into_iter()
             .filter_map(|(identity, result)| match result {
                 Ok(scope) => scope,
+                // An archived identity keeps no member until its unarchive:
+                // no materialization failure.
+                Err(IdentityRuntimeError::IdentityArchived { .. }) => {
+                    tracing::debug!(
+                        %identity,
+                        "identity materialization skipped: the identity is archived"
+                    );
+                    None
+                }
                 // A candidate launch defers a roster change to the
                 // authoritative launch: no materialization failure.
                 Err(error) if candidate_deferral_of(&error).is_some() => {
@@ -10140,20 +10274,12 @@ impl IdentityRuntime {
     }
 
     /// Whether the roster compile may change `identity`'s Core member: only
-    /// a command-driven identity. A host-adopted identity, or one whose
-    /// intent row Core cannot read, is read-only and never retired by
-    /// the compile.
+    /// an identity the roster holds ([`Self::roster_pass_acts_on`]).
     async fn compile_may_act_on(
         &self,
         identity: &AgentIdentity,
     ) -> Result<bool, IdentityRuntimeError> {
-        if self.bridge.is_none() {
-            return Ok(false);
-        }
-        Ok(matches!(
-            self.core_identity_management(identity).await?,
-            meerkat_mob::MemberIdentityManagement::CommandDriven
-        ))
+        self.roster_pass_acts_on(identity).await
     }
 
     /// Identities of Core's live Meta-marked members that the roster
@@ -14052,8 +14178,11 @@ impl IdentityRuntime {
         // The floor reaches the member only through a build Meta lowers: the
         // incarnation retires in Core, and the wake below seats it again on
         // the same session with the floor, then materializes it.
-        self.retire_locked_with_intent(identity, LifecycleRetireIntent::Reload)
-            .await?;
+        self.retire_locked_with_intent(
+            identity,
+            LifecycleRetireIntent::Reload(created::SuccessorCause::CompactionFloor),
+        )
+        .await?;
         match change.floor {
             Some(floor) => {
                 change
@@ -14132,17 +14261,13 @@ impl IdentityRuntime {
         }
     }
 
-    /// Release or retire the identity's Core member while the caller holds
-    /// the lifecycle lock ([`LifecycleRetireIntent`]). A release keeps the
-    /// member seated on its session at its generation, and runs no memory
-    /// hook; a retire ends the incarnation, and Core keeps its history, so a
-    /// later seat resumes the same session at a new generation. A retire
-    /// records what it owes before Core is asked, and its memory hooks and
-    /// retirement hook run in the lifecycle projection once Core journaled
-    /// the retirement. `Reload` is the first half of a non-destructive
-    /// reload and owes no side effect, because the same session is seated
-    /// and woken right after (nothing rotates, no exit). Nothing changes for
-    /// a release or retire Core refuses.
+    /// Release the identity's Core member, or end its incarnation for a
+    /// successor on the same session, while the caller holds the lifecycle
+    /// lock ([`LifecycleRetireIntent`]). A release keeps the member seated
+    /// on its session at its generation, and runs no memory hook. `Reload`
+    /// is the first half of a non-destructive reload and owes no side
+    /// effect, because the same session is seated and woken right after
+    /// (nothing rotates, no exit). Nothing changes for a step Core refuses.
     async fn retire_locked_with_intent(
         &self,
         identity: &AgentIdentity,
@@ -14161,54 +14286,31 @@ impl IdentityRuntime {
             });
         };
         let bridge = self.core_bridge(identity)?;
-        if intent == LifecycleRetireIntent::Release {
-            // The identity stays a member of Core's mob, seated on the same
-            // session at the same generation: its views keep reading it
-            // active, and its saved delivery scopes stay valid. A release is
-            // no retirement: nothing is distilled and no exit interview is
-            // queued. A release Core refuses changes nothing.
-            bridge
-                .release_member(identity)
-                .await
-                .map_err(|err| release_error(identity, live.session_id.as_ref(), err))?;
-            self.clear_wake_notes_of_live_member(identity).await;
-            self.entries.notify_binding_changed();
-            return Ok(());
-        }
-        // The roster's unlisting owes the retired session's distillation,
-        // the exit interview and the retirement hook; a reload keeps the
-        // session and owes none of them. Recorded before Core is asked.
-        let prepared = if intent == LifecycleRetireIntent::Retire {
-            self.prepare_lifecycle_retirement(
-                identity,
-                crate::runtime::LifecycleEffectVerb::Unlisted,
-                None,
-            )
-            .await?
-        } else {
-            self.prepare_lifecycle_retirement(
-                identity,
-                crate::runtime::LifecycleEffectVerb::Reload,
-                None,
-            )
-            .await?
+        let cause = match intent {
+            LifecycleRetireIntent::Release => {
+                // The identity stays a member of Core's mob, seated on the
+                // same session at the same generation: its views keep
+                // reading it active, and its saved delivery scopes stay
+                // valid. A release is no retirement: nothing is distilled
+                // and no exit interview is queued. A release Core refuses
+                // changes nothing.
+                bridge
+                    .release_member(identity)
+                    .await
+                    .map_err(|err| release_error(identity, live.session_id.as_ref(), err))?;
+                self.clear_wake_notes_of_live_member(identity).await;
+                self.entries.notify_binding_changed();
+                return Ok(());
+            }
+            LifecycleRetireIntent::Reload(cause) => cause,
         };
-        // The roster's unlisting ends the incarnation's session: a
-        // compaction projection it still owes is settled before Core is
-        // asked, and its batch waits for the retirement's side effects.
-        if intent == LifecycleRetireIntent::Retire {
-            self.settle_owed_compaction_for_retirement(identity, prepared.as_ref())
-                .await;
-        }
-        // A failed retire keeps what it recorded: the retirement may have
-        // started, and Core finishes it; one that did not is asked again by
-        // the next roster pass, which records the same.
-        bridge
-            .retire_member(&live.agent_runtime_id)
-            .await
-            .map_err(|err| IdentityRuntimeError::Internal(format!("bridge retire: {err}")))?;
+        // A reload ends the incarnation for its successor on the same
+        // session, which owes none of a retirement's side effects: the one
+        // seat request that depends on the record holding the identity's
+        // spec.
+        self.end_incarnation_for_successor_locked(identity, &live, cause, "retire")
+            .await?;
         self.clear_wake_notes_of_live_member(identity).await;
-        self.settle_lifecycle_retirement(prepared).await;
         self.entries.notify_binding_changed();
         self.mark_bootstrap_from_lifecycle(identity, IdentityLifecycleState::Dormant, None);
         self.emit_event(
@@ -14360,8 +14462,11 @@ impl IdentityRuntime {
             "reload_member: retiring the live member and waking it onto the same session \
              (non-destructive; Core's generation advances)"
         );
-        self.retire_locked_with_intent(identity, LifecycleRetireIntent::Reload)
-            .await?;
+        self.retire_locked_with_intent(
+            identity,
+            LifecycleRetireIntent::Reload(created::SuccessorCause::Reload),
+        )
+        .await?;
         let outcome = self.wake_onto_last_session_locked(identity).await?;
         Ok(outcome)
     }
@@ -14811,21 +14916,16 @@ impl IdentityRuntime {
                     .await;
             }
             // A replacement on the same session owes no lifecycle side
-            // effect: recorded before Core is asked, as a reload's.
-            let prepared = self
-                .prepare_lifecycle_retirement(
-                    identity,
-                    crate::runtime::LifecycleEffectVerb::Reload,
-                    None,
-                )
-                .await?;
-            self.core_bridge(identity)?
-                .retire_member(&live.agent_runtime_id)
-                .await
-                .map_err(|err| {
-                    IdentityRuntimeError::Internal(format!("bridge retire before respawn: {err}"))
-                })?;
-            self.settle_lifecycle_retirement(prepared).await;
+            // effect, as a reload's. How the successor's seat is requested
+            // depends on the record that holds the identity's spec: the one
+            // selection of this runtime.
+            self.end_incarnation_for_successor_locked(
+                identity,
+                &live,
+                created::SuccessorCause::Respawn,
+                "retire before respawn",
+            )
+            .await?;
             self.entries.notify_binding_changed();
         }
         let mut trace = EmbodimentTrace::default();
@@ -14975,8 +15075,9 @@ impl IdentityRuntime {
         self.refuse_host_adopted(identity).await?;
         self.refuse_pending_first_boot_row(identity, "reset")
             .await?;
-        // Re-profile first so the fresh session uses the current roster spec.
-        self.adopt_current_roster_spec_for_reset(identity).await?;
+        // Read the spec again from the record that holds it, so the fresh
+        // session is seated with the identity's current spec.
+        self.adopt_current_spec_locked(identity).await?;
         // The identity's previous life is Core's last binding only when an
         // identity-first spawn made it, as for the wake: a member the host
         // made directly on the mob under the identity's member id, since
@@ -15111,6 +15212,14 @@ impl IdentityRuntime {
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
         let bridge = Arc::clone(self.core_bridge(identity)?);
+        // An archived identity has no life to start again: its unarchive
+        // seats it. Read only for an identity Core holds no live member of.
+        if last.as_ref().is_none_or(|binding| !binding.is_live())
+            && let Some(refusal @ IdentityRuntimeError::IdentityArchived { .. }) =
+                self.unseated_refusal(identity).await
+        {
+            return Err(refusal);
+        }
         let spec = self
             .entries
             .read()
@@ -15601,8 +15710,9 @@ impl IdentityRuntime {
     /// the name for an identity this runtime does not serve; `None` when it
     /// holds the name for none (no entry, and no legacy member waiting for
     /// this runtime's first roster pass): the name is then a member of the
-    /// mob's raw plane, if anything. A created entry is no refusal's: the
-    /// door registers it from its row ([`Self::admit_unregistered_name`]).
+    /// mob's raw plane, if anything. An entry whose record is its row is no
+    /// refusal's, and never reaches here: the door registers it from its row
+    /// ([`Self::admit_unregistered_name`]).
     ///
     /// Retryable only when this runtime's next roster pass registers the
     /// name: an entry a host declared (an earlier process declared it, and
@@ -15617,7 +15727,7 @@ impl IdentityRuntime {
         entry: &super::bridge::CoreIdentityEntry,
     ) -> Option<IdentityRuntimeError> {
         match entry.kind {
-            super::bridge::CoreNameKind::Entry if entry.is_declared_entry() => {
+            super::bridge::CoreNameKind::Entry => {
                 Some(IdentityRuntimeError::IdentityHistoryUnavailable {
                     identity: name.clone(),
                     detail: "Core holds the identity's entry, and this runtime has not \
@@ -15626,7 +15736,7 @@ impl IdentityRuntime {
                         .to_string(),
                 })
             }
-            super::bridge::CoreNameKind::Entry | super::bridge::CoreNameKind::Removed => {
+            super::bridge::CoreNameKind::Removed => {
                 Some(IdentityRuntimeError::UnknownIdentity(name.clone()))
             }
             super::bridge::CoreNameKind::Reserved => {
@@ -15989,19 +16099,18 @@ impl IdentityRuntime {
     }
 
     /// [`Self::refuse_inactive_delivery`] with the identity's view state. An
-    /// identity created at runtime is answered from Core's entry first
-    /// ([`Self::unseated_created_refusal`]): archived, final; awaiting its
-    /// host's preparation, its held creation or its seat, retryable.
+    /// identity Core holds no member of is answered from Core's entry of its
+    /// name first ([`Self::unseated_refusal`]): archived, final; awaiting
+    /// its host's preparation, its held creation or its seat, retryable.
     async fn inactive_delivery_refusal(
         &self,
         identity: &AgentIdentity,
         operation: &'static str,
     ) -> IdentityRuntimeError {
-        let created = match self.entries.read().await.get(identity) {
-            Some(entry) => entry.created,
-            None => return IdentityRuntimeError::UnknownIdentity(identity.clone()),
-        };
-        if created && let Some(refusal) = self.unseated_created_refusal(identity).await {
+        if !self.entries.read().await.contains_key(identity) {
+            return IdentityRuntimeError::UnknownIdentity(identity.clone());
+        }
+        if let Some(refusal) = self.unseated_refusal(identity).await {
             return refusal;
         }
         match self.member_less_view_state(identity).await {
@@ -19470,11 +19579,14 @@ mod admission_first_topology_tests {
         seated: StdTestMutex<Vec<AgentIdentity>>,
         /// The members Core holds.
         core: crate::identity_first::core_test_members::CoreTestMembers,
+        /// The peer edges each identity's row declares.
+        row_edges: StdTestMutex<BTreeMap<AgentIdentity, BTreeSet<AgentIdentity>>>,
     }
 
     impl WedgeableTopologyBridge {
         fn new(gate: watch::Receiver<bool>) -> Self {
             Self {
+                row_edges: StdTestMutex::new(BTreeMap::new()),
                 gate,
                 wedge_inspection: false,
                 wedge_first_wire: false,
@@ -19570,6 +19682,19 @@ mod admission_first_topology_tests {
 
     #[async_trait::async_trait]
     impl SessionBridge for WedgeableTopologyBridge {
+        async fn owned_peers(
+            &self,
+            identity: &AgentIdentity,
+        ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
+            Ok(self
+                .row_edges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(identity)
+                .cloned()
+                .unwrap_or_default())
+        }
+
         async fn create_session(
             &self,
             identity: &AgentIdentity,
@@ -20430,14 +20555,13 @@ model = "gpt-5.5"
         Ok(())
     }
 
-    /// With a topology provider, a live edge of an identity created at
-    /// runtime (registered from its row in the mob's identity store) is
-    /// Core's: its row's owned edges and the mob definition's wiring wire it,
-    /// so the topology never prunes it, though its desired set does not
-    /// contain it. An edge between two of the host's identities that no
-    /// declared owner wants is pruned.
+    /// With a topology provider, a live peer edge an identity's row declares
+    /// is that row's: the topology never prunes it, though its desired set
+    /// does not contain it. Any other live edge no declared owner wants is
+    /// pruned, between two of the host's identities and between one of them
+    /// and an identity registered from its row alike.
     #[tokio::test]
-    async fn an_edge_of_an_identity_created_at_runtime_is_not_the_topologys_to_prune()
+    async fn the_topology_keeps_an_edge_a_row_declares_and_prunes_any_other_undeclared_edge()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let planner = AgentIdentity::parse("identity:planner")?;
         let member = AgentIdentity::parse("identity:member")?;
@@ -20448,8 +20572,8 @@ model = "gpt-5.5"
         runtime.set_identity_edge_ownership(IdentityEdgeOwnership::TopologyProvider);
         let planner_rt = register_active(&runtime, &bridge, &planner, 0).await?;
         let member_rt = register_active(&runtime, &bridge, &member, 0).await?;
-        // Core holds the created identity's member, and the runtime
-        // registered it from its row.
+        // Core holds the created identity's member, the runtime registered
+        // it from its row, and its row declares its edge to `member`.
         let created_rt = AgentRuntimeId::parse(&format!("rt:{}:0", created.as_str()))?;
         let session_id = SessionId::new();
         bridge.bind_session(&created_rt, &session_id);
@@ -20466,6 +20590,11 @@ model = "gpt-5.5"
             let _lifecycle_guard = lifecycle_lock.lock().await;
             runtime.register_created_locked(spec(&created)).await;
         }
+        bridge
+            .row_edges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(created.clone(), BTreeSet::from([member.clone()]));
         bridge.land_wire(&planner_rt, &member_rt);
         bridge.land_wire(&member_rt, &created_rt);
         bridge.land_wire(&planner_rt, &created_rt);
@@ -20479,12 +20608,13 @@ model = "gpt-5.5"
                 .any(|(a, b)| (a == x && b == y) || (a == y && b == x))
         };
         assert!(
-            unwired_pair(&planner_rt, &member_rt),
-            "the edge no declared owner wants is pruned: {unwired:?}"
+            unwired_pair(&planner_rt, &member_rt) && unwired_pair(&planner_rt, &created_rt),
+            "an edge no declared owner wants is pruned, whichever identities it joins: \
+             {unwired:?}"
         );
         assert!(
-            !unwired_pair(&member_rt, &created_rt) && !unwired_pair(&planner_rt, &created_rt),
-            "the created identity's edges are kept: {unwired:?}"
+            !unwired_pair(&member_rt, &created_rt),
+            "the edge the row declares is kept: {unwired:?}"
         );
         Ok(())
     }

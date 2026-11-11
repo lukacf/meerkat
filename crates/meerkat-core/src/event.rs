@@ -712,10 +712,11 @@ impl TurnErrorMetadata {
     /// reason of `error`, the failure that ended the retries, in the fields
     /// [`Self::from_agent_error`] fills for a failure that is not retried.
     ///
-    /// `retryable` is `true`: the failure is of a class that was retried
-    /// until the budget ran out, so the same request may succeed later. It is
-    /// advice for the caller; nothing in the agent loop reads it, and the
-    /// retries a run makes are decided before this is built.
+    /// `retryable` is `true`: it names the class of the failure, one the
+    /// retry policy retries, which can succeed on a later attempt. It does
+    /// not say that this failure will. It is advice for the caller; nothing
+    /// in the agent loop reads it, and the retries a run makes are decided
+    /// before this is built.
     ///
     /// `None` unless `error` is an LLM failure of a retried class
     /// ([`crate::retry::LlmRetryFailure::from_agent_error`]). The kind is
@@ -5992,10 +5993,16 @@ mod tests {
     /// The retry-exhausted facts are built only from an LLM failure of a
     /// retried class, always under the `retry_exhausted` cause and with
     /// `retryable: true`; every retried class keeps its own typed reason.
+    ///
+    /// `retryable` is written as a constant, so the row also holds the two
+    /// classifiers together: every class the retry policy retries
+    /// ([`crate::retry::LlmRetryFailure::from_agent_error`], the guard of
+    /// these facts) is one [`AgentError::is_recoverable`] accepts, and no
+    /// class outside it is.
     #[test]
     fn retry_exhausted_facts_keep_the_typed_reason_of_each_retried_class() {
         let details = serde_json::json!({ "status": 503 });
-        for (reason, expected_reason) in [
+        let mut retried_classes = vec![
             (
                 LlmFailureReason::RateLimited {
                     retry_after: Some(std::time::Duration::from_secs(7)),
@@ -6030,11 +6037,35 @@ mod tests {
                 AgentErrorReason::LlmProviderError {
                     provider_error_kind: LlmProviderErrorKind::ServerOverloaded,
                     provider_error_retryability: LlmProviderErrorRetryability::Retryable,
-                    provider_error: details,
+                    provider_error: details.clone(),
                 },
             ),
+        ];
+        // The other provider error kinds a provider client reports as
+        // retryable.
+        for kind in [
+            LlmProviderErrorKind::ServerError,
+            LlmProviderErrorKind::ConnectionReset,
+            LlmProviderErrorKind::Unknown,
+            LlmProviderErrorKind::IncompleteResponse,
+            LlmProviderErrorKind::AuthorizationRouteChanged,
         ] {
+            retried_classes.push((
+                LlmFailureReason::ProviderError(crate::error::LlmProviderError::retryable(
+                    kind,
+                    details.clone(),
+                )),
+                AgentErrorReason::LlmProviderError {
+                    provider_error_kind: kind,
+                    provider_error_retryability: LlmProviderErrorRetryability::Retryable,
+                    provider_error: details.clone(),
+                },
+            ));
+        }
+        assert_eq!(retried_classes.len(), 11);
+        for (reason, expected_reason) in retried_classes {
             let error = AgentError::llm("self_hosted", reason, "provider diagnostic");
+            assert!(error.is_recoverable(), "{error}");
             let metadata = TurnErrorMetadata::retry_exhausted_from_llm_error(&error)
                 .expect("a retried class has retry-exhausted facts");
             assert_eq!(metadata.kind, TurnTerminalCauseKind::RetryExhausted);
@@ -6045,6 +6076,18 @@ mod tests {
             assert_eq!(metadata.model, None);
             assert_eq!(metadata.retryable, Some(true));
             assert_eq!(metadata.reason, Some(expected_reason));
+
+            // A failure that carries settlement failures of its dispatch is
+            // classified by the failure itself.
+            let wrapped = AgentError::WithSettlementFailures {
+                error: Box::new(error),
+                failures: Vec::new(),
+            };
+            assert_eq!(
+                TurnErrorMetadata::retry_exhausted_from_llm_error(&wrapped),
+                Some(metadata),
+                "{wrapped}"
+            );
         }
 
         // A failure that is not retried has no retry-exhausted facts: it
@@ -6063,6 +6106,7 @@ mod tests {
             },
         ] {
             let error = AgentError::llm("self_hosted", reason, "provider diagnostic");
+            assert!(!error.is_recoverable(), "{error}");
             assert_eq!(
                 TurnErrorMetadata::retry_exhausted_from_llm_error(&error),
                 None,

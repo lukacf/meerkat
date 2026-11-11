@@ -1539,3 +1539,6 @@ mod tests {
             .unwrap_or_else(|error| panic!("valid projection: {error}"));
     }
 }
+
+#[cfg(test)]
+mod continuity_issuer_tests;

@@ -955,14 +955,17 @@ mod tests {
 
     /// The shape step reads one long line in time proportional to its
     /// length: the token runs it measures add up to a small multiple of the
-    /// line, whatever the line holds. A rejection body is read whole, and a
-    /// request with an inline image is a megabyte of base64 on one line.
+    /// line, whatever the line holds, a line that repeats a token prefix at
+    /// every boundary of one run included. A rejection body is read whole,
+    /// and a request with an inline image is a megabyte of base64 on one
+    /// line.
     #[test]
     fn redact_credentials_reads_a_long_line_in_linear_time() {
         const LEN: usize = 512 * 1024;
         for (name, line) in [
             ("a/ repeated", "a/".repeat(LEN / 2)),
             ("base64-like text", base64_like_line(LEN)),
+            ("a web token prefix repeated", "eyJ/".repeat(LEN / 4)),
         ] {
             let budget = 4 * line.len();
             MEASURED_TOKEN_RUNS.with(|measured| measured.set((0, budget)));

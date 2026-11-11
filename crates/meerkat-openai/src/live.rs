@@ -7081,6 +7081,43 @@ mod tests {
         Box::new(client.session_over(connection))
     }
 
+    /// The line the opt-in frame trace prints for `frame` on a connection
+    /// of `client`.
+    fn traced_frame_line(client: &OpenAiLiveClient, frame: &ServerEvent) -> Option<String> {
+        let _ = client;
+        trace_server_event_json(frame)
+    }
+
+    /// The opt-in frame trace prints a frame without the connection's API
+    /// key, wherever the frame repeats it (an error's message, its `param`),
+    /// and still as the frame the server sent.
+    #[test]
+    fn traced_frames_carry_no_api_key() {
+        let key = format!("realtime-{}", "madeupcredential".repeat(3));
+        let client = OpenAiLiveClient::new(key.clone());
+        let frame = ServerEvent::Error {
+            event_id: "evt_echo".to_string(),
+            error: ServerError {
+                error_type: ApiErrorType::InvalidRequestError,
+                code: None,
+                message: format!(
+                    "upstream echo: rejected request with header authorization: Bearer {key}"
+                ),
+                param: Some(format!("credential {key} was refused")),
+                event_id: None,
+            },
+        };
+        let line = traced_frame_line(&client, &frame).expect("an error frame is traced");
+        assert!(
+            !line.contains(&key),
+            "the traced frame leaked the API key: {line}"
+        );
+        assert!(
+            line.contains("evt_echo") && line.contains("upstream echo"),
+            "the frame is traced as the server sent it: {line}"
+        );
+    }
+
     /// A realtime endpoint, or a gateway in front of one, that repeats the
     /// connection's API key (in an `error` event, in the error of a failed
     /// response, or in a transport error) never puts it in what the session

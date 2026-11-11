@@ -35,6 +35,8 @@ them.
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-11-11
+
 ### Changed
 
 - No code changes. Core 0.9.13 is released so that Core, Meta and Connect keep
@@ -47869,7 +47871,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/lukacf/meerkat/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/lukacf/meerkat/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/lukacf/meerkat/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10

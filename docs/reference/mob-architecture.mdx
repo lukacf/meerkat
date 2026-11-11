@@ -320,7 +320,11 @@ the replayed facts:
   carried their spec seats the entry from its member's last spawn row, its
   roster labels included, as any revive keeps its member's spec, and only on
   its archived session. An entry it cannot seat stays owed its seat, and the
-  failure is logged. The start also carries out what a row keeps owed: the
+  failure is logged. A host that does not wait for the next start runs the
+  same pass while the mob runs
+  (`MobHandle::seat_owed_store_owned_identities`), which answers the
+  identities still owed their seat. The start also carries out what a row
+  keeps owed: the
   role migration of a store-owned update whose restamp a crash prevented.
 - A row pending its host's preparation records the entry unseated
   (`PreparationPending`), and no dormant seat takes it. A row whose held
@@ -681,7 +685,9 @@ composition without the built-in identity and member store commits no change
   kickoff is spawned once the change committed and runs its kickoff once,
   and the create answers each such spawn (`IdentityCreateOutcome::embodied`):
   embodied, or failed, the change still committed and the identity owed its
-  seat, which the mob's next start embodies once. A placed or externally
+  seat, which the mob's next start, or its host's
+  `MobHandle::seat_owed_store_owned_identities` while the mob runs, embodies
+  once. A placed or externally
   bound identity is hosted on its first use,
   one whose creation its host holds (`CreatedIdentityRequest::held_creation`)
   awaits it, and one whose host prepares it first waits unseated; their

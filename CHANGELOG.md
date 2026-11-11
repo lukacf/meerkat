@@ -35,6 +35,14 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `MobHandle::seat_owed_store_owned_identities` seats, while the mob runs,
+  every store-owned identity that is owed its seat (the spawn of its
+  create's kickoff failed), and answers the identities still owed
+  afterwards. It runs the pass a start runs, so a host need not restart the
+  mob to seat such an identity; its kickoff then runs once.
+
 ### Changed
 
 - `meerkat-mob-mcp`: the text of the agent mob tools `delegate` and

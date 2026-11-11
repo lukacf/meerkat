@@ -31,7 +31,9 @@
 //! roster labels of its member's last spawn row, as any revive keeps its
 //! member's spec, and only on its archived session: an entry with none, or
 //! whose archived session cannot be revived, stays owed its seat, and its
-//! reads say so.
+//! reads say so. A host seats the entries owed their seat while the mob runs
+//! with [`super::MobHandle::seat_owed_store_owned_identities`], which runs
+//! the same pass.
 //!
 //! The start also carries out what the rows keep owed: the role migration
 //! of a store-owned update whose restamp a crash prevented, and the
@@ -390,6 +392,33 @@ impl super::MobHandle {
                 }
             }
         });
+    }
+
+    /// Seat, while the mob runs, every store-owned identity that is owed its
+    /// seat, and realize the owned edges its seat completes: the pass a
+    /// start runs ([`Self::reseat_owed_created_entries`]), for a host that
+    /// does not wait for the next start. An identity is owed its seat when
+    /// the spawn of its create's kickoff failed
+    /// ([`super::IdentityCreateOutcome::embodied`] answered it failed): it
+    /// is seated from its row's spec, and a spec that owes a kickoff is
+    /// embodied, so its kickoff runs once. It decides nothing new: each seat
+    /// is the declared apply's own verdict under created custody. A mob
+    /// that is not running, and a candidate composition, seat nothing.
+    ///
+    /// Answers the identities still owed their seat afterwards, in identity
+    /// order: empty when every one was seated. It never fails its caller;
+    /// an identity it could not seat stays owed its seat, and the failure
+    /// is logged.
+    pub async fn seat_owed_store_owned_identities(&self) -> Vec<AgentIdentity> {
+        self.reseat_owed_created_entries().await;
+        self.realize_owned_identity_edges().await;
+        let mut owed: Vec<AgentIdentity> =
+            owed_created_seats(&self.machine_state_watch_rx.borrow())
+                .into_iter()
+                .map(|(identity, _)| identity)
+                .collect();
+        owed.sort();
+        owed
     }
 
     /// Seat every created entry owed its seat again, Dormant, under created

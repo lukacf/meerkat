@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Rust API of `meerkat-meta`, `identity_creation`: `ChangeClass` gains the
+  variants `Archive` (an archive and an unarchive) and `Adopt`. A match on it
+  needs both arms.
+- Rust API of `meerkat-meta`, `identity_creation`: `NameTakenBy` loses the
+  variants `Declared` and `Created` and gains `Identity`. A `name_taken`
+  refusal names its holder as `identity`, `removed`, `worker` or `unreadable`.
+- Rust API of `meerkat-meta`: `IdentityStatus` gains the member `record`
+  (`IdentityRecordFacts`), so a struct literal of it needs the member
+  (`record: Default::default()`). The status as written on the wire is
+  unchanged while the record's members are unset.
+
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

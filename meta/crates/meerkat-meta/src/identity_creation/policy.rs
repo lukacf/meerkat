@@ -285,6 +285,10 @@ pub struct Timeouts {
     pub profile: u64,
     /// A remove.
     pub remove: u64,
+    /// An archive or an unarchive.
+    pub archive: u64,
+    /// An adoption.
+    pub adopt: u64,
     /// The largest timeout.
     pub max: u64,
 }
@@ -300,6 +304,8 @@ impl Timeouts {
             ChangeClass::Authority => self.authority,
             ChangeClass::Profile => self.profile,
             ChangeClass::Remove => self.remove,
+            ChangeClass::Archive => self.archive,
+            ChangeClass::Adopt => self.adopt,
         }
     }
 }
@@ -1182,6 +1188,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         ("authority", config.authority),
         ("profile", config.profile),
         ("remove", config.remove),
+        ("archive", config.archive),
+        ("adopt", config.adopt),
     ] {
         if !(1..=config.max).contains(&value) {
             return Err(refusal(
@@ -1202,6 +1210,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         authority: config.authority,
         profile: config.profile,
         remove: config.remove,
+        archive: config.archive,
+        adopt: config.adopt,
         max: config.max,
     })
 }

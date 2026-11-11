@@ -1249,7 +1249,7 @@ fn normalization_refuses_typed() {
         create(&policy(), &lead(), &[spec("helper"), spec("helper")]).expect_err("a duplicate");
     assert_eq!(
         refusal.to_data(),
-        json!({"kind": "name_taken", "by": "created", "field": "identities[1].spec.identity"})
+        json!({"kind": "name_taken", "by": "identity", "field": "identities[1].spec.identity"})
     );
 
     let refusal = create(&policy(), &lead(), &[]).expect_err("nothing to create");
@@ -3239,6 +3239,10 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ProfileNotAllowed {
             profile: "p".to_owned(),
         },
+        IdentityRefusalKind::PrivilegedField {
+            field: "backend".to_owned(),
+        },
+        IdentityRefusalKind::GrantRevoked,
         IdentityRefusalKind::ReservedKey {
             key: "k".to_owned(),
         },
@@ -3252,7 +3256,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ConsequencesUnavailable,
         IdentityRefusalKind::InvalidName,
         IdentityRefusalKind::NameTaken {
-            by: NameTakenBy::Declared,
+            by: NameTakenBy::Identity,
         },
         IdentityRefusalKind::PeerNotAllowed {
             identity: "p".to_owned(),
@@ -3273,16 +3277,26 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         },
         IdentityRefusalKind::IdentityUnknown,
         IdentityRefusalKind::SelfChangeRefused,
+        IdentityRefusalKind::PrivateRequester,
         IdentityRefusalKind::StaleSpec {
             current_digest: Sha256Digest::of(b"s"),
             current_revision: Some(1),
         },
         IdentityRefusalKind::OperationReused,
+        IdentityRefusalKind::OwnerReadOnly,
+        IdentityRefusalKind::NotAdoptable {
+            reason: NotAdoptableReason::HostedOnFirstUse,
+        },
+        IdentityRefusalKind::NotArchived,
+        IdentityRefusalKind::DeclaredApplyOpen,
         IdentityRefusalKind::AdmissionUnsettled {
             correlation: "c".to_owned(),
         },
         IdentityRefusalKind::PredecessorMismatch,
         IdentityRefusalKind::ImportRefused,
+        IdentityRefusalKind::PurgeRefused {
+            reason: "changes_not_held".to_owned(),
+        },
         IdentityRefusalKind::PreparationNotPending,
         IdentityRefusalKind::PreparationMismatch,
         IdentityRefusalKind::ConstructionOpen,
@@ -3310,6 +3324,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::CandidateLaunch,
         IdentityRefusalKind::IdentityMember,
         IdentityRefusalKind::StorageUnsupported,
+        IdentityRefusalKind::MobNotRunning,
+        IdentityRefusalKind::Purged,
         IdentityRefusalKind::ConstructionRefused {
             kind: "controller_route_refused".to_owned(),
         },
@@ -3318,6 +3334,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         match kind {
             IdentityRefusalKind::ProfileUnknown { .. }
             | IdentityRefusalKind::ProfileNotAllowed { .. }
+            | IdentityRefusalKind::PrivilegedField { .. }
+            | IdentityRefusalKind::GrantRevoked
             | IdentityRefusalKind::ReservedKey { .. }
             | IdentityRefusalKind::AuthorityFieldNeedsApproval { .. }
             | IdentityRefusalKind::AuthorityFieldInvalid { .. }
@@ -3334,11 +3352,17 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::Unsupported { .. }
             | IdentityRefusalKind::IdentityUnknown
             | IdentityRefusalKind::SelfChangeRefused
+            | IdentityRefusalKind::PrivateRequester
             | IdentityRefusalKind::StaleSpec { .. }
             | IdentityRefusalKind::OperationReused
+            | IdentityRefusalKind::OwnerReadOnly
+            | IdentityRefusalKind::NotAdoptable { .. }
+            | IdentityRefusalKind::NotArchived
+            | IdentityRefusalKind::DeclaredApplyOpen
             | IdentityRefusalKind::AdmissionUnsettled { .. }
             | IdentityRefusalKind::PredecessorMismatch
             | IdentityRefusalKind::ImportRefused
+            | IdentityRefusalKind::PurgeRefused { .. }
             | IdentityRefusalKind::PreparationNotPending
             | IdentityRefusalKind::PreparationMismatch
             | IdentityRefusalKind::ConstructionOpen
@@ -3362,6 +3386,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::CandidateLaunch
             | IdentityRefusalKind::IdentityMember
             | IdentityRefusalKind::StorageUnsupported
+            | IdentityRefusalKind::MobNotRunning
+            | IdentityRefusalKind::Purged
             | IdentityRefusalKind::ConstructionRefused { .. } => {}
         }
     }
@@ -3378,6 +3404,8 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Profile.
             "profile_unknown",
             "profile_not_allowed",
+            "privileged_field",
+            "grant_revoked",
             // Request data.
             "reserved_key",
             "authority_field_needs_approval",
@@ -3399,11 +3427,17 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Identities and operations.
             "identity_unknown",
             "self_change_refused",
+            "private_requester",
             "stale_spec",
             "operation_reused",
+            "owner_read_only",
+            "not_adoptable",
+            "not_archived",
+            "declared_apply_open",
             "admission_unsettled",
             "predecessor_mismatch",
             "import_refused",
+            "purge_refused",
             "preparation_not_pending",
             "preparation_mismatch",
             "construction_open",
@@ -3430,12 +3464,14 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "candidate_launch",
             "identity_member",
             "storage_unsupported",
+            "mob_not_running",
+            "purged",
             "construction_refused",
         ],
         "one vocabulary for every identity: no template, creator or limit kind"
     );
     let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
-    assert_eq!(distinct.len(), 47);
+    assert_eq!(distinct.len(), 57);
     let retryable: BTreeSet<&str> = kinds
         .iter()
         .filter(|kind| kind.is_retryable())
@@ -3444,9 +3480,12 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         retryable,
         BTreeSet::from([
+            "admission_unsettled",
             "changes_held",
             "consequences_unavailable",
+            "declared_apply_open",
             "host_preparation_pending",
+            "not_adoptable",
         ])
     );
     let problems: Vec<&str> = [
@@ -3459,8 +3498,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     .collect();
     assert_eq!(problems, ["empty", "conflicting", "malformed"]);
     let takers: Vec<&str> = [
-        NameTakenBy::Declared,
-        NameTakenBy::Created,
+        NameTakenBy::Identity,
         NameTakenBy::Removed,
         NameTakenBy::Worker,
         NameTakenBy::Unreadable,
@@ -3468,10 +3506,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     .into_iter()
     .map(NameTakenBy::token)
     .collect();
-    assert_eq!(
-        takers,
-        ["declared", "created", "removed", "worker", "unreadable"]
-    );
+    assert_eq!(takers, ["identity", "removed", "worker", "unreadable"]);
 }
 
 #[test]

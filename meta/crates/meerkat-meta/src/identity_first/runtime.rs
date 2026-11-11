@@ -13818,6 +13818,7 @@ impl IdentityRuntime {
             replaced_session: None,
             session_repair_required,
             customizer_tools_pending: self.customizer_tools_pending_given(identity, tools_held),
+            record: Default::default(),
         })
     }
 

@@ -2,9 +2,9 @@
 //! policy makes of it. The normalized request is what a decision holds,
 //! what `render_v1` renders and what the executor runs.
 //!
-//! A request creates identities, or changes or removes one, whatever its
-//! origin. A create takes the declared spec a host's roster declares an
-//! identity with (`DurableAgentSpec`) and its peers; an update changes
+//! A request creates identities, or changes, archives, unarchives, removes
+//! or adopts one. A create takes the declared spec a host's roster declares
+//! an identity with (`DurableAgentSpec`) and its peers; an update changes
 //! fields of that spec. Normalization checks everything the policy decides
 //! on its own: the profile against the mob's profiles, reserved keys,
 //! authority fields, peers against the peer rules, the batch, and the
@@ -23,7 +23,7 @@ use meerkat_mob::{MobRuntimeMode, ProfileName};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::identity_first::{AgentAddressability, DisplayName, DurableAgentSpec};
+use crate::identity_first::{AgentAddressability, AgentIdentity, DisplayName, DurableAgentSpec};
 
 use super::approval::{ApprovalPlan, PlanRequest, PlanTarget, plan_approval};
 use super::config::{ChangeClass, PeerOutcome, RequesterKind};
@@ -203,6 +203,27 @@ pub struct IdentityEntryFacts {
     pub authority_labels: BTreeMap<String, String>,
 }
 
+impl IdentityEntryFacts {
+    /// The identity `identity` of `profile`, at the spec whose digest is
+    /// `spec_digest`, with its spec revision when its record counts one and
+    /// its authority labels.
+    pub fn new(
+        identity: impl Into<String>,
+        spec_digest: Sha256Digest,
+        revision: Option<u64>,
+        profile: impl Into<String>,
+        authority_labels: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            identity: identity.into(),
+            spec_digest,
+            revision,
+            profile: profile.into(),
+            authority_labels,
+        }
+    }
+}
+
 /// Host-attested facts about where a request came from: provenance only,
 /// never authority. An agent request never carries it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -376,6 +397,89 @@ pub struct RemoveIdentitySpec {
     pub identity: String,
     /// The digest of the spec the requester read.
     pub expected_spec_digest: Sha256Digest,
+}
+
+impl RemoveIdentitySpec {
+    /// A removal of `identity`, at the spec whose digest the requester
+    /// read.
+    pub fn new(identity: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            identity: identity.into(),
+            expected_spec_digest,
+        }
+    }
+}
+
+/// An archive of one identity: it keeps its name, its record, its
+/// conversation and its memory, has no member, and deliveries to it are
+/// refused until its unarchive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ArchiveIdentitySpec {
+    /// The identity.
+    pub identity: String,
+    /// The digest of the spec the requester read.
+    pub expected_spec_digest: Sha256Digest,
+}
+
+impl ArchiveIdentitySpec {
+    /// An archive of `identity`, at the spec whose digest the requester
+    /// read.
+    pub fn new(identity: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            identity: identity.into(),
+            expected_spec_digest,
+        }
+    }
+}
+
+/// An unarchive of one archived identity: it comes back on its archived
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct UnarchiveIdentitySpec {
+    /// The identity.
+    pub identity: String,
+    /// The digest of the spec the requester read.
+    pub expected_spec_digest: Sha256Digest,
+}
+
+impl UnarchiveIdentitySpec {
+    /// An unarchive of `identity`, at the spec whose digest the requester
+    /// read.
+    pub fn new(identity: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            identity: identity.into(),
+            expected_spec_digest,
+        }
+    }
+}
+
+/// An adoption of one identity: it is released from configuration. From
+/// the adoption on it is changed at run time and configuration no longer
+/// declares it. It keeps its name, its member, its session and its history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AdoptIdentitySpec {
+    /// The identity.
+    pub identity: String,
+    /// The digest of the spec the requester read: the identity's
+    /// `spec_digest` then, which is the spec the adoption records.
+    pub expected_spec_digest: Sha256Digest,
+}
+
+impl AdoptIdentitySpec {
+    /// An adoption of `identity`, at the spec whose digest the requester
+    /// read.
+    pub fn new(identity: impl Into<String>, expected_spec_digest: Sha256Digest) -> Self {
+        Self {
+            identity: identity.into(),
+            expected_spec_digest,
+        }
+    }
 }
 
 /// Why an edge to a peer exists: the peer rule that allowed it. Who asked,
@@ -617,6 +721,58 @@ pub enum RequestAction {
         /// The digest of the spec the requester read.
         expected_spec_digest: Sha256Digest,
     },
+    /// Archive one identity.
+    Archive {
+        /// The identity.
+        identity: String,
+        /// The digest of the spec the requester read.
+        expected_spec_digest: Sha256Digest,
+    },
+    /// Unarchive one archived identity.
+    Unarchive {
+        /// The identity.
+        identity: String,
+        /// The digest of the spec the requester read.
+        expected_spec_digest: Sha256Digest,
+    },
+    /// Adopt one identity: release it from configuration.
+    Adopt {
+        /// The identity.
+        identity: String,
+        /// The digest of the spec the requester read, which the adoption
+        /// records.
+        expected_spec_digest: Sha256Digest,
+    },
+}
+
+impl RequestAction {
+    /// The action's stable token: `create`, `update`, `remove`, `archive`,
+    /// `unarchive` or `adopt`.
+    pub fn token(&self) -> &'static str {
+        match self {
+            Self::Create { .. } => "create",
+            Self::Update(_) => "update",
+            Self::Remove { .. } => "remove",
+            Self::Archive { .. } => "archive",
+            Self::Unarchive { .. } => "unarchive",
+            Self::Adopt { .. } => "adopt",
+        }
+    }
+
+    /// The identities the action names, in the order it names them.
+    pub fn identities(&self) -> Vec<&str> {
+        match self {
+            Self::Create { identities } => identities
+                .iter()
+                .map(|created| created.spec.identity.as_str())
+                .collect(),
+            Self::Update(update) => vec![update.identity.as_str()],
+            Self::Remove { identity, .. }
+            | Self::Archive { identity, .. }
+            | Self::Unarchive { identity, .. }
+            | Self::Adopt { identity, .. } => vec![identity.as_str()],
+        }
+    }
 }
 
 /// A normalized identity request: what a decision holds, what `render_v1`
@@ -639,12 +795,16 @@ pub struct IdentityRequest {
 
 impl IdentityRequest {
     /// The decision kind a decision on it holds: `identity.create`,
-    /// `identity.update` or `identity.remove`.
+    /// `identity.update`, `identity.remove`, `identity.archive`,
+    /// `identity.unarchive` or `identity.adopt`.
     pub fn decision_kind(&self) -> &'static str {
         match self.action {
             RequestAction::Create { .. } => "identity.create",
             RequestAction::Update(_) => "identity.update",
             RequestAction::Remove { .. } => "identity.remove",
+            RequestAction::Archive { .. } => "identity.archive",
+            RequestAction::Unarchive { .. } => "identity.unarchive",
+            RequestAction::Adopt { .. } => "identity.adopt",
         }
     }
 
@@ -674,6 +834,35 @@ pub struct NormalizedRequest {
 
 fn refused(kind: IdentityRefusalKind, field: impl Into<String>) -> IdentityRefusal {
     IdentityRefusal::new(kind).at(field)
+}
+
+/// The name Core's mob holds the identity `name` under: its member id, in
+/// Meta's one encoding of an identity into a member id. `None` for a name
+/// that is no identity name, and for one the encoding maps to another
+/// member id (a name that starts with the reserved `mk--` marker without
+/// being an encoding, or one of a generated runtime alias's shape): the
+/// identity's doors would act on another member than the one the change
+/// names. Normalization refuses such a name `invalid_name`, whoever asks,
+/// and the executor names every identity to Core through here.
+pub fn core_member_name(name: &str) -> Option<meerkat_mob::AgentIdentity> {
+    AgentIdentity::parse(name).ok()?;
+    let member = crate::member_comms_id::mob_member_id(name);
+    (crate::member_comms_id::durable_identity_for_roster_member(member.as_str()) == name)
+        .then_some(member)
+}
+
+/// The identity name Core's member id `member` stands for: the inverse of
+/// [`core_member_name`] for every name it admits.
+pub fn identity_name_of_member(member: &meerkat_mob::AgentIdentity) -> String {
+    crate::member_comms_id::durable_identity_for_roster_member(member.as_str())
+}
+
+/// Refuse a name [`core_member_name`] does not admit.
+fn check_name(name: &str, field: &str) -> Result<(), IdentityRefusal> {
+    match core_member_name(name) {
+        Some(_) => Ok(()),
+        None => Err(refused(IdentityRefusalKind::InvalidName, field)),
+    }
 }
 
 /// `normalized`, unless its request's JSON text is past
@@ -1000,10 +1189,11 @@ pub fn normalize_create(
         let path = format!("identities[{index}].spec");
         let spec = &request.spec;
         let identity = spec.identity.as_str();
+        check_name(identity, &format!("{path}.identity"))?;
         if checked.contains_key(identity) {
             return Err(refused(
                 IdentityRefusalKind::NameTaken {
-                    by: NameTakenBy::Created,
+                    by: NameTakenBy::Identity,
                 },
                 format!("{path}.identity"),
             ));
@@ -1087,7 +1277,8 @@ pub fn normalize_create(
     })
 }
 
-/// The identity an update or a remove names: the entry's, at the spec the
+/// The identity a change of one identity names (an update, a removal, an
+/// archive, an unarchive or an adoption): the entry's, at the spec the
 /// requester read, by its digest. An agent never changes its own identity;
 /// who created the identity is never asked.
 fn check_entry(
@@ -1327,4 +1518,110 @@ pub fn normalize_remove(
         },
         plan,
     })
+}
+
+/// One identity as a whole, changed by a request of one change class: what
+/// a removal, an archive, an unarchive and an adoption share.
+fn normalize_whole_identity(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    envelope: RequestEnvelope,
+    entry: &IdentityEntryFacts,
+    named: (&str, &Sha256Digest),
+    class: ChangeClass,
+    action: RequestAction,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    check_envelope(&requester.requester, &envelope)?;
+    check_entry(&requester.requester, entry, named.0, named.1)?;
+    let classes = BTreeSet::from([class]);
+    let targets = [entry_target(entry)];
+    let plan = plan_approval(
+        policy.approval(),
+        requester,
+        &PlanRequest {
+            classes: &classes,
+            targets: &targets,
+            raise: false,
+            authority_field: None,
+        },
+    )?;
+    within_body_limit(NormalizedRequest {
+        request: IdentityRequest {
+            requester: requester.requester.clone(),
+            proposer: envelope.proposer,
+            source_evidence: envelope.source_evidence,
+            action,
+            consequences: BTreeSet::new(),
+        },
+        plan,
+    })
+}
+
+/// Normalize an archive of the identity `entry`, under the rules of the
+/// `archive` change class. An agent never archives its own identity.
+pub fn normalize_archive(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    envelope: RequestEnvelope,
+    entry: &IdentityEntryFacts,
+    spec: &ArchiveIdentitySpec,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    normalize_whole_identity(
+        policy,
+        requester,
+        envelope,
+        entry,
+        (&spec.identity, &spec.expected_spec_digest),
+        ChangeClass::Archive,
+        RequestAction::Archive {
+            identity: entry.identity.clone(),
+            expected_spec_digest: spec.expected_spec_digest.clone(),
+        },
+    )
+}
+
+/// Normalize an unarchive of the identity `entry`, under the rules of the
+/// `archive` change class.
+pub fn normalize_unarchive(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    envelope: RequestEnvelope,
+    entry: &IdentityEntryFacts,
+    spec: &UnarchiveIdentitySpec,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    normalize_whole_identity(
+        policy,
+        requester,
+        envelope,
+        entry,
+        (&spec.identity, &spec.expected_spec_digest),
+        ChangeClass::Archive,
+        RequestAction::Unarchive {
+            identity: entry.identity.clone(),
+            expected_spec_digest: spec.expected_spec_digest.clone(),
+        },
+    )
+}
+
+/// Normalize an adoption of the identity `entry`, under the rules of the
+/// `adopt` change class.
+pub fn normalize_adopt(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    envelope: RequestEnvelope,
+    entry: &IdentityEntryFacts,
+    spec: &AdoptIdentitySpec,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    normalize_whole_identity(
+        policy,
+        requester,
+        envelope,
+        entry,
+        (&spec.identity, &spec.expected_spec_digest),
+        ChangeClass::Adopt,
+        RequestAction::Adopt {
+            identity: entry.identity.clone(),
+            expected_spec_digest: spec.expected_spec_digest.clone(),
+        },
+    )
 }

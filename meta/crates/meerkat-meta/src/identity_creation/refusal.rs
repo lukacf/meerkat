@@ -4,10 +4,17 @@
 //! Every identity refusal is one kind of a closed list, with the request
 //! field it concerns as a path (`identities[1].spec.labels`). The list is
 //! closed: a client must handle every kind, and a new kind is a vocabulary
-//! change. It is one vocabulary for every identity, whatever its origin.
-//! Normalization produces the request kinds (request data, name, peers,
-//! policy); the executor, the decision ingresses and Core's commit path
-//! produce the others through the same type.
+//! change. It is one vocabulary for every identity, and no kind or detail
+//! names where an identity's record lives. Normalization produces the request
+//! kinds (request data, name, peers, policy); the executor, the decision
+//! ingresses and Core's commit path produce the others through the same
+//! type: every refusal of Core's change path has its kind here, under Core's
+//! own token (`executor::refusal_of_core`).
+//!
+//! A refusal is what a typed outcome's `refused {kind, field?, retryable,
+//! detail}` carries ([`IdentityRefusal::to_refused`]): the kind, the request
+//! field, whether the same request may succeed later unchanged, and one
+//! sentence a caller, a model included, can act on.
 
 use std::fmt;
 
@@ -26,12 +33,20 @@ pub struct IdentityRefusal {
     /// The request field the refusal concerns, as a path such as
     /// `identities[1].spec.labels`; `None` for the request as a whole.
     pub field: Option<String>,
+    /// What was wrong and what to send instead, in one sentence, when the
+    /// refusal's source gave one (Core's commit path does). `None` leaves
+    /// [`Self::detail`] to describe the kind.
+    pub detail: Option<String>,
 }
 
 impl IdentityRefusal {
     /// A refusal of the request as a whole.
     pub fn new(kind: IdentityRefusalKind) -> Self {
-        Self { kind, field: None }
+        Self {
+            kind,
+            field: None,
+            detail: None,
+        }
     }
 
     /// This refusal, about the request field `field`.
@@ -41,16 +56,44 @@ impl IdentityRefusal {
         self
     }
 
+    /// This refusal, with `detail` as what was wrong and what to send
+    /// instead.
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
     /// The kind's stable token (`reserved_key`, ...).
     pub fn kind_token(&self) -> &'static str {
         self.kind.token()
     }
 
-    /// Whether the same request may succeed later unchanged: changes held,
-    /// host preparation pending, or consequence lines the host could not
-    /// produce. Every other kind is permanent.
+    /// Whether the same request may succeed later unchanged
+    /// ([`IdentityRefusalKind::is_retryable`]). Every other kind is
+    /// permanent.
     pub fn is_retryable(&self) -> bool {
         self.kind.is_retryable()
+    }
+
+    /// What was wrong and what to send instead: the sentence the refusal's
+    /// source gave, or the kind's own ([`IdentityRefusalKind::describe`]).
+    pub fn detail(&self) -> String {
+        self.detail
+            .clone()
+            .unwrap_or_else(|| self.kind.describe().to_owned())
+    }
+
+    /// The refusal as a typed outcome carries it: [`Self::to_data`] with
+    /// `retryable` and `detail`. This is the `refused {kind, field?,
+    /// retryable, detail}` of every surface.
+    pub fn to_refused(&self) -> Value {
+        let mut data = self.to_data();
+        if let Value::Object(map) = &mut data {
+            map.insert("retryable".to_owned(), Value::from(self.is_retryable()));
+            map.insert("detail".to_owned(), Value::from(self.detail()));
+        }
+        data
     }
 
     /// The refusal as the wire's `error.data`: `kind`, the kind's details,
@@ -123,17 +166,14 @@ impl fmt::Display for ValidationRefusal {
 
 impl std::error::Error for ValidationRefusal {}
 
-/// Who holds a name a request asked for. `declared` and `created` name
-/// where the identity's desired record lives, the host's roster or Core's
-/// store, and nothing else.
+/// Who holds a name a request asked for. It says nothing else about the
+/// holder: not where its record lives, and not whether the requester may see
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum NameTakenBy {
-    /// An identity a host's roster declares.
-    Declared,
-    /// An identity Core's store holds, created at run time, or another
-    /// identity of the same request.
-    Created,
+    /// An identity of the mob, or another identity of the same request.
+    Identity,
     /// A removed identity: its name is a tombstone, never reused.
     Removed,
     /// A worker member that is no identity.
@@ -143,15 +183,66 @@ pub enum NameTakenBy {
 }
 
 impl NameTakenBy {
-    /// The stable token (`declared`, `created`, ...).
+    /// The stable token (`identity`, `removed`, ...).
     pub fn token(self) -> &'static str {
         match self {
-            Self::Declared => "declared",
-            Self::Created => "created",
+            Self::Identity => "identity",
             Self::Removed => "removed",
             Self::Worker => "worker",
             Self::Unreadable => "unreadable",
         }
+    }
+}
+
+/// Why an adoption takes no agent of a shape (`not_adoptable`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum NotAdoptableReason {
+    /// The agent is changed at run time already: there is nothing to adopt.
+    NothingToAdopt,
+    /// The name is no agent an adoption takes: nothing holds it, or what
+    /// holds it is not what the adoption named.
+    NotAnAgent,
+    /// The agent's member lives on a member host.
+    Placed,
+    /// The agent's member is bound to no session.
+    NoSession,
+    /// The agent is hosted on its first use: retryable once its first use
+    /// seated it.
+    HostedOnFirstUse,
+    /// The agent awaits its held creation: retryable once its host released
+    /// it.
+    AwaitingHeldCreation,
+    /// The agent awaits its host's preparation: retryable once it settled.
+    AwaitingHostPreparation,
+    /// The member was spawned with a profile or model override, which an
+    /// agent's spec does not carry.
+    ProfileOverride,
+}
+
+impl NotAdoptableReason {
+    /// The stable token (`nothing_to_adopt`, `placed`, ...).
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::NothingToAdopt => "nothing_to_adopt",
+            Self::NotAnAgent => "not_an_agent",
+            Self::Placed => "placed",
+            Self::NoSession => "no_session",
+            Self::HostedOnFirstUse => "hosted_on_first_use",
+            Self::AwaitingHeldCreation => "awaiting_held_creation",
+            Self::AwaitingHostPreparation => "awaiting_host_preparation",
+            Self::ProfileOverride => "profile_override",
+        }
+    }
+
+    /// Whether an adoption refused for this reason may commit later
+    /// unchanged: only the host's own step settles it (the first use, the
+    /// held creation's release, the preparation).
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::HostedOnFirstUse | Self::AwaitingHeldCreation | Self::AwaitingHostPreparation
+        )
     }
 }
 
@@ -191,6 +282,10 @@ pub enum IdentityRefusalKind {
     /// The requester's grant does not admit the profile, as its admission
     /// checks it. Normalization never refuses it.
     ProfileNotAllowed { profile: String },
+    /// The spec sets a field only a grant with manage scope admits.
+    PrivilegedField { field: String },
+    /// The requester's grant no longer admits the change at its commit.
+    GrantRevoked,
     // Request data.
     /// The request names a reserved label key.
     ReservedKey { key: String },
@@ -232,6 +327,9 @@ pub enum IdentityRefusalKind {
     IdentityUnknown,
     /// An agent asked to change its own identity.
     SelfChangeRefused,
+    /// The requester is a member private to a person: such a member asks
+    /// for no change of agents.
+    PrivateRequester,
     /// The spec the requester read, named by its digest, is not the current
     /// one: `current_digest` is, with its revision for an identity Core's
     /// store holds.
@@ -241,6 +339,18 @@ pub enum IdentityRefusalKind {
     },
     /// The operation id was used with another request.
     OperationReused,
+    /// The agent is declared by its host's configuration, and a run-time
+    /// change does not write a host's configuration: change it there, or
+    /// release the agent from configuration first (`adopt`), after which
+    /// it is changed at run time.
+    OwnerReadOnly,
+    /// An adoption takes no agent of this shape.
+    NotAdoptable { reason: NotAdoptableReason },
+    /// The agent is not archived: there is nothing to unarchive.
+    NotArchived,
+    /// The host's configuration is being applied to the mob: an adoption
+    /// waits for it (retryable).
+    DeclaredApplyOpen,
     /// A spawn or held spawn of the name is not settled.
     AdmissionUnsettled { correlation: String },
     /// The member an adoption names is not the one the request observed:
@@ -248,6 +358,9 @@ pub enum IdentityRefusalKind {
     PredecessorMismatch,
     /// The import is refused.
     ImportRefused,
+    /// The purge of the mob's records is refused: `reason` is Core's stable
+    /// token for why.
+    PurgeRefused { reason: String },
     /// No host preparation is pending for the identity.
     PreparationNotPending,
     /// The preparation settle names another operation.
@@ -301,6 +414,11 @@ pub enum IdentityRefusalKind {
     /// The mob's storage composition cannot commit an operation in one
     /// transaction.
     StorageUnsupported,
+    /// The mob is not running.
+    MobNotRunning,
+    /// The mob's records were purged before a downgrade: its changes are
+    /// refused until it restarts.
+    Purged,
     /// Core refused the held construction.
     ConstructionRefused { kind: String },
 }
@@ -311,6 +429,8 @@ impl IdentityRefusalKind {
         match self {
             Self::ProfileUnknown { .. } => "profile_unknown",
             Self::ProfileNotAllowed { .. } => "profile_not_allowed",
+            Self::PrivilegedField { .. } => "privileged_field",
+            Self::GrantRevoked => "grant_revoked",
             Self::ReservedKey { .. } => "reserved_key",
             Self::AuthorityFieldNeedsApproval { .. } => "authority_field_needs_approval",
             Self::AuthorityFieldInvalid { .. } => "authority_field_invalid",
@@ -327,11 +447,17 @@ impl IdentityRefusalKind {
             Self::Unsupported { .. } => "unsupported",
             Self::IdentityUnknown => "identity_unknown",
             Self::SelfChangeRefused => "self_change_refused",
+            Self::PrivateRequester => "private_requester",
             Self::StaleSpec { .. } => "stale_spec",
             Self::OperationReused => "operation_reused",
+            Self::OwnerReadOnly => "owner_read_only",
+            Self::NotAdoptable { .. } => "not_adoptable",
+            Self::NotArchived => "not_archived",
+            Self::DeclaredApplyOpen => "declared_apply_open",
             Self::AdmissionUnsettled { .. } => "admission_unsettled",
             Self::PredecessorMismatch => "predecessor_mismatch",
             Self::ImportRefused => "import_refused",
+            Self::PurgeRefused { .. } => "purge_refused",
             Self::PreparationNotPending => "preparation_not_pending",
             Self::PreparationMismatch => "preparation_mismatch",
             Self::ConstructionOpen => "construction_open",
@@ -355,16 +481,172 @@ impl IdentityRefusalKind {
             Self::CandidateLaunch => "candidate_launch",
             Self::IdentityMember => "identity_member",
             Self::StorageUnsupported => "storage_unsupported",
+            Self::MobNotRunning => "mob_not_running",
+            Self::Purged => "purged",
             Self::ConstructionRefused { .. } => "construction_refused",
         }
     }
 
-    /// Whether the same request may succeed later unchanged.
+    /// Whether the same request may succeed later unchanged: changes held,
+    /// host preparation pending, consequence lines the host could not
+    /// produce, a member step or a declaration in flight, and an adoption of
+    /// an agent its host still settles.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::ChangesHeld | Self::HostPreparationPending | Self::ConsequencesUnavailable
-        )
+        match self {
+            Self::ChangesHeld
+            | Self::HostPreparationPending
+            | Self::ConsequencesUnavailable
+            | Self::AdmissionUnsettled { .. }
+            | Self::DeclaredApplyOpen => true,
+            Self::NotAdoptable { reason } => reason.is_retryable(),
+            _ => false,
+        }
+    }
+
+    /// What was wrong and what to send instead, in one sentence a caller, a
+    /// model included, can act on. The kind's details ([`Self::token`]'s
+    /// payload) carry the values the sentence refers to.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::ProfileUnknown { .. } => {
+                "The mob has no profile of this name: name one of the mob's profiles."
+            }
+            Self::ProfileNotAllowed { .. } => {
+                "Your grant does not admit this profile: ask for a profile your grant covers."
+            }
+            Self::PrivilegedField { .. } => {
+                "The spec sets a field that needs manage scope: leave the field out."
+            }
+            Self::GrantRevoked => {
+                "Your grant no longer admits this change: it was not made, and asking again \
+                 needs a grant that admits it."
+            }
+            Self::ReservedKey { .. } => "The request names a reserved label key: use another key.",
+            Self::AuthorityFieldNeedsApproval { .. } => {
+                "This label is an authority field, which only a human decision sets: leave it \
+                 out, or ask under a rule that requires approval."
+            }
+            Self::AuthorityFieldInvalid { .. } => {
+                "The authority field is not declared, or its value is not one the host allows."
+            }
+            Self::TextTooLarge { .. } => {
+                "A text is larger than its limit in bytes: shorten it. Text is never cut."
+            }
+            Self::ConsequencesUnavailable => {
+                "The host could not state the request's consequences: retry the same request \
+                 later."
+            }
+            Self::InvalidRequest { .. } => {
+                "The request has nothing to act on, contradicts itself or holds a malformed \
+                 value: correct the named field."
+            }
+            Self::InvalidName => "The name is not a valid agent name: choose another.",
+            Self::NameTaken { .. } => {
+                "The name is taken: choose another. A removed agent's name is never available \
+                 again."
+            }
+            Self::PeerNotAllowed { .. } => "The host's peer rules refuse this peer: leave it out.",
+            Self::PeerUnknown => {
+                "The peer is no agent you may name: list agents of the mob, or other agents of \
+                 the same request."
+            }
+            Self::BatchTooLarge { .. } => {
+                "The request names more agents than one change commits: split it."
+            }
+            Self::ValidationRefused { .. } => {
+                "The host's own check refused the request for the quoted reason."
+            }
+            Self::ChangeDenied { .. } => {
+                "The host's rules deny this change for you: it was not made, and repeating it \
+                 changes nothing."
+            }
+            Self::Unsupported { .. } => {
+                "The request needs something this release does not support: leave it out."
+            }
+            Self::IdentityUnknown => "No agent has this name: list the agents and name one.",
+            Self::SelfChangeRefused => "An agent never changes itself: name another agent.",
+            Self::PrivateRequester => {
+                "A member private to a person asks for no change of agents: nothing was made."
+            }
+            Self::StaleSpec { .. } => {
+                "The agent changed since you read it: read it again and send the current spec \
+                 digest."
+            }
+            Self::OperationReused => {
+                "This operation id was used with another request: send a new id for a new \
+                 request, or the same request to read its result."
+            }
+            Self::OwnerReadOnly => {
+                "This agent is declared by the host's configuration, and a run-time change does \
+                 not write the host's configuration: change it there, or release the agent from \
+                 configuration first (adopt), after which it is changed at run time."
+            }
+            Self::NotAdoptable { .. } => {
+                "An adoption does not take this agent, for the reason given."
+            }
+            Self::NotArchived => "The agent is not archived: there is nothing to unarchive.",
+            Self::DeclaredApplyOpen => {
+                "The host's configuration is being applied: retry the same request shortly."
+            }
+            Self::AdmissionUnsettled { .. } => {
+                "A step of this agent is still in flight: retry the same request once it settled."
+            }
+            Self::PredecessorMismatch => {
+                "The member is not the one the request observed: observe it again."
+            }
+            Self::ImportRefused => "The import is refused: only the host operator imports.",
+            Self::PurgeRefused { .. } => "The purge is refused, for the reason given.",
+            Self::PreparationNotPending => "No host preparation is pending for the agent.",
+            Self::PreparationMismatch => "The preparation settle names another operation.",
+            Self::ConstructionOpen => "A held construction is open for the agent.",
+            Self::StaleAttempt { .. } => "The settle names an attempt that is not the current one.",
+            Self::NotConstructed => "The agent has no held construction.",
+            Self::ConstructionRequired => {
+                "The agent's preparation holds a construction: a settle names the held attempt."
+            }
+            Self::ActivationPending { .. } => {
+                "The attempt's activation is in flight: nothing aborts or replaces it."
+            }
+            Self::ApprovalUnavailable => {
+                "The change needs a decision and nobody can be asked to decide it: nothing was \
+                 written."
+            }
+            Self::DecisionOpen { .. } => {
+                "A decision is already open for this agent: wait for its outcome."
+            }
+            Self::SubjectWidened => {
+                "The request is no longer what was approved: ask again with the current request."
+            }
+            Self::DecisionClosed { .. } => "The decision has ended: ask again.",
+            Self::DecisionNotFound => "No such decision.",
+            Self::EvidenceRequired => "The decide carries no attested evidence.",
+            Self::SubjectChanged => "The presented digest is not the decision's subject digest.",
+            Self::PresentationIncomplete => "The presentation did not cover every part.",
+            Self::RequesterCannotDecide => "The requester cannot decide its own request.",
+            Self::ApproverNotEligible => "The approver is not eligible.",
+            Self::DecidedBeforePresentation => {
+                "The decide was observed before the decision was first presented."
+            }
+            Self::ChangesHeld => {
+                "The host holds changes of agents for now: retry the same request later."
+            }
+            Self::HostPreparationPending => {
+                "The host is still preparing the agent: retry the same request later."
+            }
+            Self::CandidateLaunch => "A candidate launch changes nothing.",
+            Self::IdentityMember => {
+                "The member is a long-term agent: the worker tools do not act on it."
+            }
+            Self::StorageUnsupported => {
+                "The mob's storage cannot commit a change of agents in one transaction."
+            }
+            Self::MobNotRunning => "The mob is not running.",
+            Self::Purged => {
+                "The mob's records were purged before a downgrade: changes are refused until \
+                 it restarts."
+            }
+            Self::ConstructionRefused { .. } => "The held construction could not be made.",
+        }
     }
 
     /// The kind's details, as the members of the wire's `error.data` beside
@@ -374,6 +656,9 @@ impl IdentityRefusalKind {
             Self::ProfileUnknown { profile } | Self::ProfileNotAllowed { profile } => {
                 json!({ "profile": profile })
             }
+            Self::PrivilegedField { field } => json!({ "privileged": field }),
+            Self::NotAdoptable { reason } => json!({ "reason": reason.token() }),
+            Self::PurgeRefused { reason } => json!({ "reason": reason }),
             Self::ReservedKey { key }
             | Self::AuthorityFieldNeedsApproval { key }
             | Self::AuthorityFieldInvalid { key } => json!({ "key": key }),
@@ -406,7 +691,14 @@ impl IdentityRefusalKind {
             | Self::PeerUnknown
             | Self::IdentityUnknown
             | Self::SelfChangeRefused
+            | Self::PrivateRequester
             | Self::OperationReused
+            | Self::GrantRevoked
+            | Self::OwnerReadOnly
+            | Self::NotArchived
+            | Self::DeclaredApplyOpen
+            | Self::MobNotRunning
+            | Self::Purged
             | Self::PredecessorMismatch
             | Self::ImportRefused
             | Self::PreparationNotPending

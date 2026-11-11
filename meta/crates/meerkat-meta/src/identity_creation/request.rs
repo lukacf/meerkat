@@ -151,6 +151,18 @@ impl RequesterFacts {
     pub fn console() -> Self {
         Self::host(CONSOLE_SURFACE)
     }
+
+    /// The authenticated human `principal`: no profile and no authority
+    /// labels.
+    pub fn human(principal: impl Into<String>) -> Self {
+        Self {
+            requester: Requester::Human {
+                principal: principal.into(),
+            },
+            profile: None,
+            authority_labels: BTreeMap::new(),
+        }
+    }
 }
 
 /// What normalization knows of an existing identity a request names as a
@@ -857,15 +869,19 @@ fn refused(kind: IdentityRefusalKind, field: impl Into<String>) -> IdentityRefus
 /// Meta's one encoding of an identity into a member id. `None` for a name
 /// that is no identity name; for a name in the reserved member-id
 /// namespace (one that starts with the `mk--` marker), which every public
-/// door refuses, so an identity of that name could never be addressed; and
-/// for a name the encoding maps to another identity (one of a generated
-/// runtime alias's shape), whose doors would act on another member than
-/// the one the change names. Normalization refuses such a name
-/// `invalid_name`, whoever asks, and the executor names every identity to
-/// Core through here.
+/// door refuses, so an identity of that name could never be addressed; for
+/// a name in the namespace of generated runtime aliases (every name that
+/// starts with `rt:`, with or without a generation), whose public alias
+/// would be another identity's; and for a name the encoding maps to
+/// another identity, whose doors would act on another member than the one
+/// the change names. Normalization refuses such a name `invalid_name`,
+/// whoever asks, for a create and for an adoption, and the executor names
+/// every identity to Core through here.
 pub fn core_member_name(name: &str) -> Option<meerkat_mob::AgentIdentity> {
     AgentIdentity::parse(name).ok()?;
-    if crate::member_comms_id::uses_reserved_roster_marker(name) {
+    if crate::member_comms_id::uses_reserved_roster_marker(name)
+        || crate::member_comms_id::is_reserved_generated_alias(name)
+    {
         return None;
     }
     let member = crate::member_comms_id::mob_member_id(name);
@@ -1634,6 +1650,9 @@ pub fn normalize_adopt(
     entry: &IdentityEntryFacts,
     spec: &AdoptIdentitySpec,
 ) -> Result<NormalizedRequest, IdentityRefusal> {
+    // An adoption gives the name its record: a name no create may take is
+    // not released from configuration under it either.
+    check_name(&spec.identity, "name")?;
     normalize_whole_identity(
         policy,
         requester,

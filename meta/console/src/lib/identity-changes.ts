@@ -7,9 +7,22 @@
 // each agent's two affordances), never the console's.
 
 import type { ConsoleAgentAffordances, ConsoleExperience } from "../types";
+import { agentDisplayTitle } from "../../../packages/console-core/src/agent-title";
 
 /** The JSON-RPC code of every refusal of the family. */
 export const IDENTITY_REFUSED_CODE = -32058;
+
+/**
+ * An agent as people read it: its display name, or, where it has none (the
+ * gateway then writes the name in its place), its name in words, as the
+ * roster names it. The name itself stays a tooltip.
+ */
+export function agentShownName(agent: { name: string; displayName?: string }): string {
+  const display = agent.displayName?.trim();
+  return display && display !== agent.name
+    ? display
+    : agentDisplayTitle({ label: "", identity: agent.name, member_id: agent.name, agent_id: agent.name });
+}
 
 // ---------------------------------------------------------------------------
 // What the gateway lets this caller do
@@ -421,10 +434,17 @@ export interface AgentEditDraft {
   peers: string[];
 }
 
+/** The display name an agent has of its own: none where the record's is
+ * only the agent's name, which the gateway writes for an agent without
+ * one. */
+function ownDisplayName(record: Pick<AgentSummary, "name" | "displayName">): string {
+  return record.displayName && record.displayName !== record.name ? record.displayName : "";
+}
+
 /** The form of an agent as its record reads now. */
 export function editDraftOf(record: AgentRecord): AgentEditDraft {
   return {
-    displayName: record.displayName ?? "",
+    displayName: ownDisplayName(record),
     instructions: record.instructions.length ? [...record.instructions] : [""],
     context: record.context === undefined ? "" : JSON.stringify(record.context, null, 2),
     labels: Object.entries(record.labels).map(([key, value]) => ({ key, value })),
@@ -451,7 +471,7 @@ export function updateAgentRequest(record: AgentRecord, draft: AgentEditDraft): 
   // A display name the form emptied is sent as it is: the gateway says
   // what is wrong with it, at its field.
   const displayName = draft.displayName.trim();
-  if (displayName !== (record.displayName ?? "")) set.display_name = displayName;
+  if (displayName !== ownDisplayName(record)) set.display_name = displayName;
   const instructions = draft.instructions.filter((section) => section.trim().length > 0);
   if (!sameJson(instructions, record.instructions)) set.instructions = instructions;
   const contextText = draft.context.trim();

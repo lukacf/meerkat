@@ -22,7 +22,7 @@ import {
 } from "../lib/agent-activity";
 import { useMeasuredWidth } from "../lib/use-element-width";
 import { LifecycleConfirm, type ConfirmedLifecycleAction } from "./LifecycleConfirm";
-import { agentIdentityControls, type AgentIdentityControls } from "../lib/identity-changes";
+import { agentIdentityControls, agentShownName, type AgentIdentityControls } from "../lib/identity-changes";
 import type { IdentityChangesApi } from "../lib/use-identity-changes";
 import {
   AgentChangeButtons,
@@ -718,7 +718,7 @@ export function RosterPanel({
                 roster={agents}
                 onOpen={(agent, change) => {
                   setCreating(false);
-                  setAgentChange({ name: agent.name, displayName: agent.displayName || agent.name, change, controls: { archive: false } });
+                  setAgentChange({ name: agent.name, displayName: agentShownName(agent), change, controls: { archive: false } });
                 }}
               />
             ) : null}

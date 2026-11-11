@@ -4,6 +4,7 @@ import {
   EMPTY_NEW_AGENT_DRAFT,
   agentChangeConfirmWords,
   agentRefRequest,
+  agentShownName,
   archivedAgentControls,
   consentWords,
   createAgentsRequest,
@@ -180,7 +181,7 @@ function PeerPicker({
               onChange={(event) => toggle(peer.name, event.target.checked)}
               data-testid={`identity-peer:${peer.name}`}
             />
-            <span className="identity-form__option-name" title={peer.name}>{peer.displayName || peer.name}</span>
+            <span className="identity-form__option-name" title={peer.name}>{agentShownName(peer)}</span>
             <span className="identity-form__option-meta">{humanizeEnum(peer.profile)}</span>
             {peer.verdict !== "allowed" ? <Verdict entry={peer} /> : null}
           </label>
@@ -906,7 +907,7 @@ export function ArchivedAgents({
       <ul className="identity-archived__list">
         {agents.map((agent) => (
           <li key={agent.name} className="identity-archived__row" data-testid={`roster-archived:${agent.name}`}>
-            <span className="identity-archived__name" title={agent.name}>{agent.displayName || agent.name}</span>
+            <span className="identity-archived__name" title={agent.name}>{agentShownName(agent)}</span>
             <span className="identity-archived__meta">{humanizeEnum(agent.profile)}</span>
             <span className="cc-btn-row identity-archived__actions">
               {controls.unarchive ? (

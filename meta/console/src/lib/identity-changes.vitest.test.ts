@@ -186,6 +186,18 @@ describe("the requests a form writes", () => {
     expect("request" in built && built.request.set).toEqual({ display_name: "" });
   });
 
+  it("treats a display name that is only the agent's name as none", () => {
+    // The gateway writes the name where an agent has no display name: the
+    // form opens with an empty display name and, left alone, sends none.
+    const unnamed = record({ name: "night-desk", displayName: "night-desk" });
+    const draft = editDraftOf(unnamed);
+    expect(draft.displayName).toBe("");
+    const untouched = updateAgentRequest(unnamed, draft);
+    expect("request" in untouched && untouched.changed).toBe(false);
+    const named = updateAgentRequest(unnamed, { ...draft, displayName: "Night desk" });
+    expect("request" in named && named.request.set).toEqual({ display_name: "Night desk" });
+  });
+
   it("names the agent and the digest its record reads for a change of the whole agent", () => {
     expect(agentRefRequest(record())).toEqual({ name: "keeper", expected_spec_digest: DIGEST });
   });

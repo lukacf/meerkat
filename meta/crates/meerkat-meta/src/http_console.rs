@@ -1296,10 +1296,36 @@ pub async fn console_json_handler(
                 .as_ref()
                 .and_then(MobRuntime::installed_identity_runtime)
                 .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
+        // The agents whose record is their row in the mob's identity
+        // store: the ones a run-time change can change. An agent its host
+        // configures is offered no control.
+        let mut changed_at_run_time = std::collections::BTreeSet::new();
+        if identity_changes_available
+            && let Some(identity_runtime) = state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+        {
+            let listed: Vec<String> = response
+                .body
+                .pointer("/agent_sidebar/live_snapshot/agents")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|agent| agent.get("identity").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect();
+            for name in listed {
+                if identity_runtime.record_is_store_owned(&name).await {
+                    changed_at_run_time.insert(name);
+                }
+            }
+        }
         crate::runtime::apply_identity_changes_to_experience(
             &mut response.body,
             caller.as_ref().map(|caller| &caller.audience),
             identity_changes_available,
+            &|name| changed_at_run_time.contains(name),
         );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
         if let Some(runtimes) = panel_runtimes {

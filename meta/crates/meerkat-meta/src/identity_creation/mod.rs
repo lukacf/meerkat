@@ -90,7 +90,11 @@ pub use family::{
     ListAgents, OperationRef, OperationState, ReadDirectory, UpdateAgent, WithdrawRequest,
     Withdrawn,
 };
-pub use gate::IdentityFamilySlot;
+pub(crate) use gate::IdentityGate;
+pub use gate::{
+    FIRST_MESSAGE_IN_GOVERNED_REALM, IdentityFamilyOptions, IdentityFamilySlot, IdentityHostHooks,
+    PeerVisibility,
+};
 pub use operation::{OperationId, REQUEST_ID_MAX_BYTES, ToolCallOrigin};
 pub use outcome::{
     AgentChangeState, AgentOutcome, AgentSeat, IdentityOutcome, InstructionNextSessionReason,

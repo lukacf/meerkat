@@ -3347,9 +3347,6 @@ impl IdentityFirstRuntimeContext {
             return Err(error);
         }
         self.runtime
-            .append_changed_instructions_at_start(generation)
-            .await;
-        self.runtime
             .install_identity_bootstrap(generation, self.bootstrap_mode.clone(), &tracked, &result)
             .await;
         Ok(result)
@@ -3686,6 +3683,9 @@ pub struct IdentityRuntime {
     has_runtime_store: bool,
     bridge: Option<Arc<dyn SessionBridge>>,
     reset_roster_source: StdRwLock<Option<ResetRosterSource>>,
+    /// The mob's instruction records as this process first read them
+    /// ([`instruction_append::InstructionRecordsAtStart`]).
+    instruction_records_at_start: instruction_append::InstructionRecordsAtStart,
     runtime_services: AgentRuntimeServices,
     managed_peer_edges: RwLock<BTreeSet<(AgentIdentity, AgentIdentity)>>,
     /// Who owns the live edges between this runtime's identities; see
@@ -4714,6 +4714,7 @@ impl IdentityRuntime {
             has_runtime_store: config.has_runtime_store,
             bridge: config.bridge,
             reset_roster_source: StdRwLock::new(None),
+            instruction_records_at_start: Default::default(),
             runtime_services: AgentRuntimeServices::empty(),
             managed_peer_edges: RwLock::new(BTreeSet::new()),
             identity_edge_ownership: StdRwLock::new(IdentityEdgeOwnership::WiredByThisProcess),

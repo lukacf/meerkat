@@ -1674,10 +1674,15 @@ async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
 }
 
 /// An agent the host's configuration drops and lists again with other
-/// instructions, in later roster passes of the same process: its next run
-/// is on the listed text, as the first prompt of a fresh conversation or as
-/// the entry appended to the conversation it comes back on. The comparison
-/// is not tied to the process's first roster pass.
+/// instructions, in later roster passes of the same process: the listing
+/// records the listed text against the conversation the agent comes back
+/// on, and the agent runs on it. The comparison is not tied to the
+/// process's first roster pass.
+///
+/// The agent's first run after the listing loads its conversation again,
+/// and the mob delivers the record to it then: that run carries the entry
+/// when the delivery lands before it starts, and the run after it carries
+/// it in any case.
 ///
 /// RED while only a replaced registration and the first pass were compared:
 /// the agent came back on its conversation with the dropped text.
@@ -1696,28 +1701,82 @@ async fn an_agent_listed_again_with_other_instructions_runs_on_them() {
         .remove(&AgentIdentity::parse(CONFIGURED).expect("an identity"));
     rig.roster_pass().await;
     rig.configure(&["Answer in GAMMA style."]).await;
-    rig.turn(CONFIGURED, "AFTER-RELISTING").await;
+    let record = rig.record(CONFIGURED).await;
+    assert_eq!(
+        record
+            .as_ref()
+            .map(|record| (record["revision"].clone(), record["effect"].clone())),
+        Some((json!(1), json!("active"))),
+        "the listing recorded the listed text: {record:#?}"
+    );
 
-    let request = rig.request_messages("AFTER-RELISTING");
-    let whole = Value::Array(request.clone()).to_string();
-    let appended = entries(&request);
-    let fresh = appended.is_empty()
-        && whole.contains("Answer in GAMMA style.")
-        && !whole.contains("Answer in ALPHA style.");
-    let appended_to_its_conversation = appended
-        .last()
-        .is_some_and(|entry| carries(entry, &["Answer in GAMMA style."]));
+    rig.turn(CONFIGURED, "FIRST-AFTER-RELISTING").await;
     assert!(
-        fresh || appended_to_its_conversation,
+        entries(&rig.request_messages("FIRST-AFTER-RELISTING")).len() <= 1,
+        "the first run carries the entry or none"
+    );
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-AFTER-RELISTING").await;
+    let request = entries(&rig.request_messages("SECOND-AFTER-RELISTING"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(
+        carries(&request[0], &["Answer in GAMMA style."]),
+        "the relisted agent runs on the listed text: {}",
+        request[0]
+    );
+    rig.shutdown().await;
+}
+
+/// An agent listed again with the text its conversation was built with,
+/// after a change of it was recorded in this process: the listing is
+/// compared with the mob's record as it is now, not with what the process
+/// read at its start, so the listed text is recorded as the record's next
+/// revision and the agent runs on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_listed_again_with_its_first_text_gets_it_recorded() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(
+        temp.path(),
+        &fresh_mob_id(),
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+
+    rig.roster
+        .remove(&AgentIdentity::parse(CONFIGURED).expect("an identity"));
+    rig.roster_pass().await;
+    rig.configure(&["Answer in ALPHA style."]).await;
+    let record = rig.record(CONFIGURED).await.expect("the agent's record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(2), json!("active")),
+        "the listing recorded the listed text: {record:#?}"
+    );
+    rig.turn(CONFIGURED, "FIRST-AFTER-RELISTING").await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-AFTER-RELISTING").await;
+    let request = entries(&rig.request_messages("SECOND-AFTER-RELISTING"));
+    assert!(
+        request
+            .last()
+            .is_some_and(|entry| carries(entry, &["Answer in ALPHA style."])),
         "the relisted agent runs on the listed text: {request:#?}"
     );
     rig.shutdown().await;
 }
 
 /// An edit of an archived agent, which has a conversation and no seated
-/// member: the change is recorded, the answer `applies_at_next_run` is
-/// true, nothing is woken, and the agent's first run after its unarchive
-/// carries the entry.
+/// member: the change is recorded, nothing is woken, and the agent runs on
+/// it after its unarchive.
+///
+/// The agent's first run after the unarchive loads its conversation again,
+/// and the mob delivers the record to it then: that run carries the entry
+/// when the delivery lands before it starts, and the run after it carries
+/// it in any case.
 ///
 /// RED while an agent with no seated member was read as never built: the
 /// step answered `applies_at_next_run`, wrote nothing, and the unarchived
@@ -1777,13 +1836,19 @@ async fn an_edit_of_an_archived_agent_reaches_it_after_its_unarchive() {
         ),
         "{unarchived:?}"
     );
+    rig.turn(CREATED, "FIRST-AFTER-UNARCHIVE").await;
+    assert!(
+        entries(&rig.request_messages("FIRST-AFTER-UNARCHIVE")).len() <= 1,
+        "the first run carries the entry or none"
+    );
     rig.recorded(CREATED).await;
-    rig.turn(CREATED, "AFTER-UNARCHIVE").await;
-    let request = entries(&rig.request_messages("AFTER-UNARCHIVE"));
+    rig.turn(CREATED, "SECOND-AFTER-UNARCHIVE").await;
+    let request = entries(&rig.request_messages("SECOND-AFTER-UNARCHIVE"));
     assert_eq!(request.len(), 1, "{request:#?}");
     assert!(
         carries(&request[0], &["Keep BETA records."]),
-        "the unarchived agent's next run carries the change"
+        "the unarchived agent runs on the change: {}",
+        request[0]
     );
     rig.shutdown().await;
 }
@@ -2585,8 +2650,8 @@ fn one_function_owns_the_instruction_records() {
             ],
         ),
         (
-            ".append_changed_instructions_at_start(",
-            &[("identity_first/runtime.rs", 1)],
+            ".append_changed_instructions_at_first_door(",
+            &[("identity_first/runtime/created.rs", 1)],
         ),
         (
             ".revoke_instruction_record_for_fresh_life(",

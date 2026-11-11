@@ -398,8 +398,11 @@ What to know:
   fresh conversation. A model whose wire carries no system row besides its
   prompt applies it only with a fresh conversation.
 - **A change made while the gateway was down** (the usual way to edit a
-  configuration) is recorded at the next start: the gateway compares each
-  agent's current text with its record, or, for an agent with no record
+  configuration) is recorded when the gateway next registers the agent: at
+  its start for the agents its roster lists and the rows it serves, and
+  later for an agent it first registers later (one listed again after it
+  was dropped, a row first named at a delivery door). The gateway compares
+  the agent's current text with its record, or, for an agent with no record
   yet, with the sections its conversation was built with. A conversation
   built before 0.9.14 may not record those sections: for it nothing is
   written at start, and it keeps its first prompt's text, as before 0.9.14,

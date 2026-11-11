@@ -535,7 +535,15 @@ impl IdentityRuntime {
         match created {
             Some(true) => self.refresh_created_registration(name).await,
             Some(false) => Ok(true),
-            None => self.admit_unregistered_name(name).await,
+            None => {
+                let served = self.admit_unregistered_name(name).await?;
+                if served {
+                    // The agent's first registration in this process: its
+                    // instructions are compared with what the mob holds.
+                    self.append_changed_instructions_at_first_door(name).await;
+                }
+                Ok(served)
+            }
         }
     }
 

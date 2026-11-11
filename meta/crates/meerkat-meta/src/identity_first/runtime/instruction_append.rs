@@ -24,31 +24,38 @@
 //! neither loses nor repeats it.
 //!
 //! The comparison runs where a change of the text is observed with the old
-//! and the new text in hand, and once at start:
+//! and the new text in hand, and once per agent in a process:
 //!
 //! - after the commit of an update of a store-owned agent
 //!   ([`IdentityRuntime::after_update`]);
 //! - when a registration replaces another with other instructions: a roster
 //!   pass that reads an edited configuration, a door or a pass that reads a
-//!   changed row again
+//!   changed row again, a spec the runtime's own update replaces
 //!   ([`IdentityRuntime::append_changed_instructions_on_registration`]);
-//! - at this process's first roster pass, for every registered agent
-//!   ([`IdentityRuntime::append_changed_instructions_at_start`]): a text
-//!   that changed before a stop, or while the gateway was down, without its
-//!   record written is recorded then.
+//! - when an agent is registered and no registration is replaced: its
+//!   first registration in this process, by whichever roster pass or
+//!   delivery door makes it, or its first since its host's configuration
+//!   listed it again
+//!   ([`IdentityRuntime::append_changed_instructions_at_first_door`] for a
+//!   door). A text that changed before a stop, or while the gateway was
+//!   down, without its record written is recorded then. One read of the
+//!   mob's records per process serves all of them
+//!   ([`InstructionRecordsAtStart`]): an agent whose record already holds
+//!   its text, or whose conversation was built with it, costs no
+//!   comparison and no lock.
 //!
 //! An agent the mob holds no record of takes its first record from an
-//! observed change, or, at start, when the sections its conversation's
-//! build state records are not the current ones (the session service's
-//! `recorded_build_instructions`: committed metadata, no transcript row). A
-//! session whose build state does not say (one built or resumed before
-//! 0.9.14) gets nothing written at start: its text changes with the next
-//! observed change or a fresh session, as before. An agent whose session no
-//! build created yet needs no record: its first build takes the current
-//! text. An agent with a conversation and no seated member (archived, or
-//! dropped from its host's configuration) is compared against the session
-//! its retirement kept, and its record is delivered when its member is
-//! seated again.
+//! observed change, or, at its first registration, when the sections its
+//! conversation's build state records are not the current ones (the
+//! session service's `recorded_build_instructions`: committed metadata, no
+//! transcript row). A session whose build state does not say (one built or
+//! resumed before 0.9.14) gets nothing written then: its text changes with
+//! the next observed change or a fresh session, as before. An agent whose
+//! session no build created yet needs no record: its first build takes the
+//! current text. An agent with a conversation and no seated member
+//! (archived, or dropped from its host's configuration) is compared against
+//! the session its retirement kept, and its record is delivered when its
+//! member is seated again.
 //!
 //! The removal of an agent revokes its record
 //! ([`IdentityRuntime::after_removal`]). An archive keeps it. A fresh life
@@ -56,8 +63,11 @@
 //! session's first prompt is built from the current text, and nothing is
 //! appended to it
 //! ([`IdentityRuntime::revoke_instruction_record_for_fresh_life`]). A removal
-//! whose step never ran is completed at the next start: the start check
-//! revokes the record of every agent the mob holds as removed.
+//! whose step never ran is completed by the next process: its one read of
+//! the mob's records revokes the record of every agent the mob holds as
+//! removed.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use meerkat_core::types::SessionId;
 use meerkat_core::{
@@ -153,6 +163,21 @@ mod interface_stand_in {
 /// await these inside futures that are deep already.
 type BoxedStep<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+/// What the mob held in the platform's namespace when this process first
+/// compared an agent no change was observed for: the digest of each active
+/// record, by its slot's key, and the agents that read has served. It is
+/// read once per process and kept for the process's life as a reason to
+/// skip: an agent whose record already held its text needs no comparison,
+/// the first time it is registered. It is not a copy of the mob's truth:
+/// every write reads the record again from the mob, under the identity's
+/// lifecycle lock, and an agent registered a second time is compared with
+/// the mob's record as it is then.
+#[derive(Default)]
+pub(super) struct InstructionRecordsAtStart {
+    held: tokio::sync::OnceCell<BTreeMap<InstructionKey, Option<InstructionContentDigest>>>,
+    compared: std::sync::Mutex<BTreeSet<AgentIdentity>>,
+}
+
 /// What the caller observed of an agent's instructions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InstructionCheck<'a> {
@@ -169,9 +194,10 @@ pub(crate) enum InstructionCheck<'a> {
         current: &'a [String],
     },
     /// No change was observed: `current` is the agent's text now, compared
-    /// with the mob's record, else with the sections the agent's session
-    /// was built with. The caller holds no lifecycle lock.
-    Reconcile { current: &'a [String] },
+    /// with the mob's record, else with the sections the agent's
+    /// conversation was built with. `locked` says whether the caller holds
+    /// the identity's lifecycle lock.
+    Reconcile { current: &'a [String], locked: bool },
 }
 
 impl InstructionCheck<'_> {
@@ -179,8 +205,16 @@ impl InstructionCheck<'_> {
         match self {
             Self::Changed { current, .. }
             | Self::Registered { current, .. }
-            | Self::Reconcile { current } => current,
+            | Self::Reconcile { current, .. } => current,
         }
+    }
+
+    /// Whether the caller holds the identity's lifecycle lock.
+    fn caller_holds_the_lock(&self) -> bool {
+        matches!(
+            self,
+            Self::Registered { .. } | Self::Reconcile { locked: true, .. }
+        )
     }
 
     /// Whether the caller observed the text itself change.
@@ -337,11 +371,10 @@ impl IdentityRuntime {
             return InstructionOutcome::Unchanged;
         };
         let lifecycle_lock = self.lifecycle_lock_for(identity).await;
-        let _lifecycle_guard = match check {
-            InstructionCheck::Registered { .. } => None,
-            InstructionCheck::Changed { .. } | InstructionCheck::Reconcile { .. } => {
-                Some(lifecycle_lock.lock().await)
-            }
+        let _lifecycle_guard = if check.caller_holds_the_lock() {
+            None
+        } else {
+            Some(lifecycle_lock.lock().await)
         };
 
         // What the mob holds for the agent.
@@ -390,7 +423,7 @@ impl IdentityRuntime {
                     InstructionCheck::Changed { .. } | InstructionCheck::Registered { .. } => {
                         check.text_changed()
                     }
-                    InstructionCheck::Reconcile { current } => match conversation.as_ref() {
+                    InstructionCheck::Reconcile { current, .. } => match conversation.as_ref() {
                         Some(session_id) => {
                             self.built_with_other_sections(session_id, identity, current)
                                 .await
@@ -627,137 +660,215 @@ impl IdentityRuntime {
         }
     }
 
-    /// A registration of `spec` is about to replace `spec.identity`'s
-    /// registration, under the identity's lifecycle lock: when the one it
-    /// replaces holds other instructions, the comparison runs with both
-    /// texts. A first registration observes no change.
+    /// `spec` is about to become `spec.identity`'s registration, under the
+    /// identity's lifecycle lock. When it replaces a registration that
+    /// holds other instructions, the comparison runs with both texts. When
+    /// it replaces none (the agent's first registration in this process,
+    /// or its first since its host's configuration listed it again), no
+    /// change was observed: the comparison runs only for an agent whose
+    /// text may be one the mob has no record of
+    /// ([`Self::unrecorded_change`]).
     pub(super) fn append_changed_instructions_on_registration<'a>(
         &'a self,
         spec: &'a DurableAgentSpec,
     ) -> BoxedStep<'a, ()> {
         Box::pin(async move {
-            let Some(previous) = self
+            let current = spec.additional_instructions.as_slice();
+            let previous = self
                 .entries
                 .read()
                 .await
                 .get(&spec.identity)
-                .map(|entry| entry.spec.additional_instructions.clone())
-            else {
-                return;
-            };
-            if sections(&previous) == sections(&spec.additional_instructions) {
+                .map(|entry| entry.spec.additional_instructions.clone());
+            if previous
+                .as_ref()
+                .is_some_and(|previous| sections(previous) == sections(current))
+            {
                 return;
             }
             let Some(mob) = self.runtime_services.mob_handle() else {
                 return;
             };
+            let check = match previous.as_deref() {
+                Some(previous) => InstructionCheck::Registered { previous, current },
+                None => {
+                    if !self.unrecorded_change(&mob, &spec.identity, current).await {
+                        return;
+                    }
+                    InstructionCheck::Reconcile {
+                        current,
+                        locked: true,
+                    }
+                }
+            };
+            self.append_changed_instructions(&mob, &spec.identity, check)
+                .await;
+        })
+    }
+
+    /// A delivery door registered `name` from its row, which nothing had
+    /// registered in this process, and holds no lifecycle lock: the agent
+    /// is compared as at any first registration, and the comparison takes
+    /// the identity's lifecycle lock itself.
+    pub(super) fn append_changed_instructions_at_first_door<'a>(
+        &'a self,
+        name: &'a AgentIdentity,
+    ) -> BoxedStep<'a, ()> {
+        Box::pin(async move {
+            let Some(current) = self
+                .entries
+                .read()
+                .await
+                .get(name)
+                .map(|entry| entry.spec.additional_instructions.clone())
+            else {
+                return;
+            };
+            let Some(mob) = self.runtime_services.mob_handle() else {
+                return;
+            };
+            if !self.unrecorded_change(&mob, name, &current).await {
+                return;
+            }
             self.append_changed_instructions(
                 &mob,
-                &spec.identity,
-                InstructionCheck::Registered {
-                    previous: &previous,
-                    current: &spec.additional_instructions,
+                name,
+                InstructionCheck::Reconcile {
+                    current: &current,
+                    locked: false,
                 },
             )
             .await;
         })
     }
 
-    /// The start check, after this process's first roster pass
-    /// (`generation` 1): every registered agent is compared, so a text that
-    /// changed before the stop without its record written is recorded now.
-    /// Per agent it reads the mob's record of the agent from the mob's
-    /// state and, for an agent with no record whose session a build
-    /// created, the sections that session's build state records. No
-    /// transcript is read, and nothing is woken. Then the records of
-    /// removed agents are revoked (`revoke_records_of_removed_agents`).
-    pub(crate) fn append_changed_instructions_at_start(
+    /// Whether `identity`, for which no change was observed, may hold a
+    /// text the mob has no record of: its record, as the mob held it when
+    /// this process first looked ([`InstructionRecordsAtStart`]), is active
+    /// with another text; or it had no active record and its conversation
+    /// was built with other sections than `current`.
+    ///
+    /// It takes no lifecycle lock, sends the mob no command and copies none
+    /// of the mob's state per agent: the records are read once per process,
+    /// the agent's session comes from the mob's roster (or, with no seated
+    /// member, from the mob's entry of the agent), and its build sections
+    /// from the session's committed metadata. `true` is a reason to run the
+    /// comparison, which reads the record again under the identity's
+    /// lifecycle lock; it is never the base of a write.
+    async fn unrecorded_change(
         &self,
-        generation: u64,
-    ) -> BoxedStep<'_, ()> {
-        Box::pin(async move {
-            if generation != 1 || self.is_candidate_launch() {
-                return;
+        mob: &MobHandle,
+        identity: &AgentIdentity,
+        current: &[String],
+    ) -> bool {
+        if self.is_candidate_launch() {
+            return false;
+        }
+        let Some(slot) = instruction_slot(identity.as_str()) else {
+            return false;
+        };
+        // The read at start serves each agent once: an agent registered
+        // again later in this process (its host's configuration dropped it
+        // and listed it again) is compared with the mob's record as it is
+        // now.
+        let first = self
+            .instruction_records_at_start
+            .compared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity.clone());
+        if !first {
+            return true;
+        }
+        let Some(records) = self.instruction_records_at_start(mob).await else {
+            // The records did not read: the comparison reads the agent's.
+            return true;
+        };
+        if let Some(held) = records.get(&slot.key) {
+            return held.as_ref()
+                != Some(&InstructionContentDigest::for_body(&record_body(current)));
+        }
+        let member = crate::member_comms_id::roster_member_id_for_identity(identity.as_str());
+        let conversation = match mob.resolve_bridge_session_id_observation(&member).await {
+            Some(session_id) => Some(session_id),
+            None => match mob.identity_entry(&member) {
+                Ok(meerkat_mob::IdentityEntryRead::Entry(entry)) => entry.archived_session,
+                _ => None,
+            },
+        };
+        match conversation {
+            Some(session_id) => {
+                self.built_with_other_sections(&session_id, identity, current)
+                    .await
             }
-            let Some(mob) = self.runtime_services.mob_handle() else {
-                return;
-            };
-            let registered = self
-                .entries
-                .read()
-                .await
-                .iter()
-                .map(|(identity, entry)| {
-                    (identity.clone(), entry.spec.additional_instructions.clone())
-                })
-                .collect::<Vec<_>>();
-            for (identity, current) in registered {
-                self.append_changed_instructions(
-                    &mob,
-                    &identity,
-                    InstructionCheck::Reconcile { current: &current },
-                )
-                .await;
-            }
-            self.revoke_records_of_removed_agents(&mob).await;
-        })
+            None => false,
+        }
     }
 
-    /// The other half of the start check, from what the mob holds: every
-    /// record of the platform's namespace whose agent the mob holds as
-    /// removed is revoked, as [`Self::after_removal`] revokes it. So a
-    /// removal that committed while the step after it never ran (the
-    /// process stopped in between; a replayed removal is answered from the
-    /// mob's receipt and does not repeat the step) still ends with its
-    /// record revoked. An archived agent is not removed: its record stays.
-    /// A record revoked already is left as it is, so a later start writes
-    /// nothing. One read of the mob's records and one read of the mob's
-    /// state per active record; no session is read.
-    async fn revoke_records_of_removed_agents(&self, mob: &MobHandle) {
-        let Ok(namespace) = InstructionNamespace::new(INSTRUCTIONS_NAMESPACE) else {
-            return;
-        };
-        let records = match mob
-            .operator_instruction_status(OperatorInstructionStatusQuery {
-                namespace: Some(namespace),
-                key: None,
-                agent_identity: None,
-                profile: None,
-                offset: usize::MAX,
-                limit: Some(1),
+    /// The mob's active records of the platform's namespace, as this
+    /// process first read them: one read of the mob's records for the
+    /// process's life, which reads no session. `None` when the read failed;
+    /// the next caller reads again.
+    ///
+    /// That first read also completes removals: every record whose agent
+    /// the mob holds as removed is revoked, as [`Self::after_removal`]
+    /// revokes it. So a removal that committed while the step after it
+    /// never ran (the process stopped in between; a replayed removal is
+    /// answered from the mob's receipt and does not repeat the step) still
+    /// ends with its record revoked. An archived agent is not removed: its
+    /// record stays. A record revoked already is left as it is, so a later
+    /// start writes nothing.
+    async fn instruction_records_at_start(
+        &self,
+        mob: &MobHandle,
+    ) -> Option<&BTreeMap<InstructionKey, Option<InstructionContentDigest>>> {
+        self.instruction_records_at_start
+            .held
+            .get_or_try_init(|| async {
+                let namespace =
+                    InstructionNamespace::new(INSTRUCTIONS_NAMESPACE).map_err(|_| ())?;
+                let records = mob
+                    .operator_instruction_status(OperatorInstructionStatusQuery {
+                        namespace: Some(namespace),
+                        key: None,
+                        agent_identity: None,
+                        profile: None,
+                        offset: usize::MAX,
+                        limit: Some(1),
+                    })
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            "the mob's instruction records could not be read; the next                              registration reads them again"
+                        );
+                    })?
+                    .desired;
+                let mut held = BTreeMap::new();
+                for record in records {
+                    if record.effect != InstructionEffect::Active {
+                        continue;
+                    }
+                    if let OperatorInstructionTarget::Member {
+                        agent_identity: member,
+                    } = &record.target
+                        && matches!(
+                            mob.identity_entry(member),
+                            Ok(meerkat_mob::IdentityEntryRead::Removed)
+                        )
+                    {
+                        let identity = crate::member_comms_id::durable_identity_for_roster_member(
+                            member.as_str(),
+                        );
+                        self.after_removal(mob, &identity).await;
+                        continue;
+                    }
+                    held.insert(record.slot.key, record.content_sha256);
+                }
+                Ok::<_, ()>(held)
             })
             .await
-        {
-            Ok(page) => page.desired,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "the mob's instruction records could not be read; the records of removed \
-                     agents are revoked at the next start"
-                );
-                return;
-            }
-        };
-        for record in records {
-            if record.effect != InstructionEffect::Active {
-                continue;
-            }
-            let OperatorInstructionTarget::Member {
-                agent_identity: member,
-            } = &record.target
-            else {
-                continue;
-            };
-            if !matches!(
-                mob.identity_entry(member),
-                Ok(meerkat_mob::IdentityEntryRead::Removed)
-            ) {
-                continue;
-            }
-            let identity =
-                crate::member_comms_id::durable_identity_for_roster_member(member.as_str());
-            self.after_removal(mob, &identity).await;
-        }
+            .ok()
     }
 }
 

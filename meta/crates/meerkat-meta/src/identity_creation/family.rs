@@ -713,6 +713,30 @@ pub struct AgentSummary {
     pub open_operations: Vec<OperationId>,
 }
 
+impl AgentSummary {
+    /// The agent `name` of `profile`, at the spec whose digest is
+    /// `spec_digest`, with its member standing at `readiness`: not
+    /// archived, with nothing else said of it.
+    pub fn new(
+        name: impl Into<String>,
+        profile: impl Into<String>,
+        spec_digest: Sha256Digest,
+        readiness: AgentReadiness,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            display_name: None,
+            profile: profile.into(),
+            spec_digest,
+            spec_revision: None,
+            archived: false,
+            readiness,
+            provenance: None,
+            open_operations: Vec::new(),
+        }
+    }
+}
+
 /// Where an agent's member stands. Advisory: a client tolerates a value it
 /// does not know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -749,6 +773,26 @@ pub struct AgentProvenance {
     pub at_ms: u64,
     /// The consent it committed under. Advisory.
     pub consent: ConsentSummary,
+}
+
+impl AgentProvenance {
+    /// How (`entered`), at whose request (`requester_kind`, `requester`),
+    /// when (`at_ms`) and under what consent an agent came to exist.
+    pub fn new(
+        entered: AgentEntered,
+        requester_kind: RequesterKind,
+        requester: impl Into<String>,
+        at_ms: u64,
+        consent: ConsentSummary,
+    ) -> Self {
+        Self {
+            entered,
+            requester_kind,
+            requester: requester.into(),
+            at_ms,
+            consent,
+        }
+    }
 }
 
 /// How an agent's record entered. Advisory: a client tolerates a value it
@@ -800,6 +844,20 @@ pub struct AgentRecord {
     pub peers: Vec<String>,
 }
 
+impl AgentRecord {
+    /// The record of `agent`, with no instructions, context, labels or
+    /// peers yet.
+    pub fn new(agent: AgentSummary) -> Self {
+        Self {
+            agent,
+            instructions: Vec::new(),
+            context: None,
+            labels: BTreeMap::new(),
+            peers: Vec::new(),
+        }
+    }
+}
+
 /// The state of one operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -838,6 +896,17 @@ pub struct DirectoryProfile {
     pub verdict: DirectoryVerdict,
 }
 
+impl DirectoryProfile {
+    /// The profile `profile`, with what the host's rules give the caller
+    /// for it.
+    pub fn new(profile: impl Into<String>, verdict: DirectoryVerdict) -> Self {
+        Self {
+            profile: profile.into(),
+            verdict,
+        }
+    }
+}
+
 /// One agent of the directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -853,6 +922,23 @@ pub struct DirectoryPeer {
     /// entry: `verdict`, with `lines` or `reason` beside it.
     #[serde(flatten)]
     pub verdict: DirectoryVerdict,
+}
+
+impl DirectoryPeer {
+    /// The agent `name` of `profile`, with what the host's rules give the
+    /// caller for it as a peer.
+    pub fn new(
+        name: impl Into<String>,
+        profile: impl Into<String>,
+        verdict: DirectoryVerdict,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            display_name: None,
+            profile: profile.into(),
+            verdict,
+        }
+    }
 }
 
 /// What the host's rules give one entry of the directory. An entry
@@ -899,6 +985,30 @@ pub struct ChangePlan {
     pub subject_digest: Sha256Digest,
     /// The canonical rendering a decider would be shown, whole.
     pub rendering: String,
+}
+
+impl ChangePlan {
+    /// The plan of a change: the outcome the rules give it, the change
+    /// class that decided, the decision's timeout, the digests of the
+    /// request and of its rendering, and the rendering.
+    pub fn new(
+        outcome: ApprovalKind,
+        change: ChangeClass,
+        timeout_ms: u64,
+        request_digest: Sha256Digest,
+        subject_digest: Sha256Digest,
+        rendering: impl Into<String>,
+    ) -> Self {
+        Self {
+            outcome,
+            change,
+            approver_id: None,
+            timeout_ms,
+            request_digest,
+            subject_digest,
+            rendering: rendering.into(),
+        }
+    }
 }
 
 /// The family: what every surface calls. Each method takes the mob as a

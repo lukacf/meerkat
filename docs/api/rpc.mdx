@@ -1466,7 +1466,18 @@ A mob member's session belongs to its mob: `session/set_instruction` and
 `{"kind":"member","agent_identity":"worker-1"}`. A target is a predicate over
 the roster: a member added later, or moved to the profile later, receives the
 record then, and a target that names a missing profile or member selects
-nobody.
+nobody. A member's snapshot is the shared records (targeted at every member
+or at a profile) plus the member-targeted records that name it; another
+member's member-targeted record is not in it. The limits bound one member's
+snapshot: at most 64 records and 1 MiB of Active bodies, the shared records
+and the member's own together (`slot_limit_exceeded`,
+`active_set_budget_exceeded`). A mob therefore holds a member-targeted
+record for each of any number of members, while the shared records, which
+are in every snapshot, stay within 64 and 1 MiB. The limits count a
+member-targeted record under the member it names, seated or not, and a
+shared record must fit beside the most any one name holds; a refused shared
+write does not name that member (the status read's `desired` list shows each
+record's target).
 
 <CodeGroup>
 ```json Request
@@ -1504,7 +1515,12 @@ absent; `next_offset` names the next page), optionally for one `namespace`,
 `key`, `agent_identity` or `profile`. Each member carries its `residency`
 (`live`, `dormant` or `unborn`), its `delivery` (the `recorded_generation`,
 and `state` `current`, `owed` with the `generation` and the `last_failure`,
-or `blocked` with a `reason`), per slot the `desired`, `recorded` and
+or `blocked` with a `reason`), per slot of its snapshot (the shared records
+and the member-targeted records that name it, plus a record that moved to
+another member until the member's session has revoked it; for a member whose
+session the read does not reach, such a record leaves its slots at once and
+its `delivery` reads `owed` until the new snapshot is recorded) the `desired`,
+`recorded` and
 `effective` views and the slot's `state` (as above, or `blocked` with a
 `reason`), `effective_read` (`ok`, or `unreadable` with a `reason`: the
 member's session could not be read, and the page still answers; a placed

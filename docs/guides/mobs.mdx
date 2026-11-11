@@ -1661,12 +1661,36 @@ Dormant members are recorded at most 16 at a time by default
 (`MobBuilder::with_member_instruction_delivery_concurrency`); deliveries
 through live sessions run in their own lane. An exact repeat answers as a
 duplicate; a lower revision, the same revision with other content, a body
-over 256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
+over 256 KiB, a 65th record or more than 1 MiB of Active bodies in one
+member's snapshot, and a
 completed or destroyed mob are refused typed
 (`OperatorInstructionError::code`; on the wire `error.data.instruction_set_code`).
+
+A member's snapshot is the shared records (targeted at every member or at a
+profile) plus the member-targeted records that name the member. Another
+member's member-targeted record is not in it, so a member's session and its
+status row do not grow with the number of other members that hold a record.
+The two limits bound that snapshot, the shared records and the member's own
+together: at most 64 records (`slot_limit_exceeded`) and 1 MiB of Active
+bodies (`active_set_budget_exceeded`). A mob can therefore hold a
+member-targeted record for each of any number of members, such as one
+standing text per agent. Shared records are in every snapshot, so they stay
+within 64 records and 1 MiB as before, and a mob that already holds 64 shared
+records has no room for a member's own. A higher revision that would move a
+record into a full snapshot (a member's record retargeted to every member,
+or to a member whose snapshot is full) is refused the same way.
 A revoked slot keeps its record (its
-effect Absent), so it counts toward the 64 slots until a reset clears the
-records. Writes need the `AdminHost` scope and are never an agent tool. On a
+effect Absent), so it counts toward the 64 records of the snapshots it is in
+(every member's for a shared record, its one member's for a member-targeted
+record) until a reset clears the
+records. A record that names a member the mob no longer has is in no
+snapshot, but the limits still count it under the name it targets: they
+count a member-targeted record by its target, seated or not, so the records
+of a retired or never-seated name keep taking room from new shared records
+(a shared record must fit beside the most records any one name holds) until
+they are written with another target or a reset clears them. A refused
+shared write does not name the member whose snapshot is full; the status
+read's `desired` list shows each record's target. Writes need the `AdminHost` scope and are never an agent tool. On a
 governed runtime (a runtime with a native work authorization host) every
 write and revoke is refused `prepared_authorization_required` before anything
 is journaled: such a write needs prepared authorization, which this release
@@ -1676,7 +1700,8 @@ does not mint, so a retry is refused the same way.
 `ReadHistory`) reads the
 records and, per member, its residency, its delivery state (`current`,
 `owed` with the last retryable failure, or `blocked` with a reason), and per
-slot what the member should have, what its session recorded and the entry
+slot of its snapshot what the member should have, what its session recorded
+and the entry
 that put it in effect, with the reason a change is still pending (the
 session's next run start, a model that lowers System rows only in the
 leading prefix, or one that cannot carry them at all). It reads committed
@@ -1743,11 +1768,15 @@ again (or it is seated again). A placed member on a governed member host
 `prepared_authorization_required` before anything is written, since this
 release provides no prepared authorization for instruction writes. A
 snapshot whose record would not fit the supervisor bridge's frame (about
-1 MiB with its envelope, which the mob's 1 MiB active budget can reach) is
+1 MiB with its envelope, which a snapshot's 1 MiB active budget can reach) is
 not sent: the placed member is blocked `member_host_unsupported` until a
 write changes its snapshot. The status read reports a placed member's
 delivery but does not read its session on the member host
-(`effective_read` is `unreadable`). A mob that recorded operator
+(`effective_read` is `unreadable`). A member's status row lists a record
+that moved to another member until the member's session has revoked it;
+for a member whose session the read does not reach (a placed member, an
+unreadable session) such a record leaves the row at once, and the member's
+delivery reads `owed` until its new snapshot is recorded. A mob that recorded operator
 instructions journals
 them at mob event schema 10, which a release before operator instructions
 refuses for every mob of that realm, not only that one: see

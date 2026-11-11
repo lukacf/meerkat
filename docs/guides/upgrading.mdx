@@ -55,6 +55,81 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.14
+
+This section is for systems running 0.9.13 or 0.9.12. The full list of
+changes is in the CHANGELOG under `## [0.9.14]`.
+
+### Operator instruction limits bound a member's snapshot
+
+No action is needed to upgrade. A mob's operator instruction limits (64
+records and 1 MiB of Active bodies) now bound one member's snapshot, the
+shared records plus the member-targeted records that name the member, not
+the mob as a whole. A mob can hold a member-targeted record for each of any
+number of members, and a member's session and status row no longer list
+other members' member-targeted records. Shared records (targeted at every
+member or at a profile) keep the bound they had. See
+[Operator instructions](/guides/mobs#operator-instructions).
+
+Rust code that matches on the kernel's
+`meerkat_machine_kernels::generated::mob::TransitionId` by variant: the enum
+gains `SetOperatorInstructionAdvanceSlotLimitExceededRunning` and
+`SetOperatorInstructionAdvanceSlotLimitExceededStopped`, appended last, so
+an exhaustive match needs the two arms and no existing variant's
+discriminant moves.
+
+### Rolling back to 0.9.13
+
+0.9.13 and earlier releases read what 0.9.14 writes, with one exception: a
+mob whose operator instruction records are past what an earlier release
+holds in one mob. An earlier release bounds the mob as a whole at 64
+records and 1 MiB of Active bodies, and puts every record of the mob in
+every member's snapshot. Only 0.9.14 admits more, as member-targeted
+records, in two ways:
+
+- **more than 64 records** in the mob (a revoked record keeps its slot and
+  counts);
+- **more than 1 MiB of Active bodies** over all the mob's records together,
+  with 64 records or fewer (five members that each hold a 256 KiB record of
+  their own, for example).
+
+An earlier release does not refuse such a mob when it starts: its release
+build replays the journal without an error and the mob comes up with its
+members. It then cannot serve the mob, because every step that checks the
+mob's recovered state against the earlier bounds is refused:
+
+- every spawn into the mob is refused, with an internal error that says the
+  mob's state could not be recovered;
+- every flow run is refused before it starts, for the same reason;
+- with more than 64 records, every member's operator instruction delivery
+  is also refused by the member's session (`slot_limit_exceeded`) and
+  retried without end: the status read shows the member `owed` with that
+  `last_failure`, and no later write reaches it. What a member's session
+  already applied stays in effect. A member that needs a new session (a
+  rotation, the first wake of an unborn seat) fails to build, because the
+  mob cannot carry its snapshot into the session.
+
+Turns of the members that are already seated, the roster and the journal
+are not affected, and 0.9.14 serves the mob again without a repair. A mob
+within both totals is unaffected in either direction, whatever its records'
+targets.
+
+Before a rollback, run `rkat storage doctor` on 0.9.14: it lists each such
+mob database (`operator-instruction-mob-totals`, with its record count and
+its Active bytes). A revoke lowers the bytes but not the count: a revoked
+record keeps its slot. For each listed mob, do one of these first:
+
+- keep the processes that serve that mob on 0.9.14;
+- bring it back within both totals where only the bytes are over: revoke
+  records, or write shorter bodies, until the Active bodies of the whole
+  mob are at most 1 MiB;
+- reset the mob (`mob/lifecycle` with `reset`, `MobHandle::reset`), which
+  retires its members and clears its operator instruction records, then seat
+  its members and write the records it needs again, at most 64 records and
+  1 MiB in total;
+- destroy the mob, or move its database out of the mob root, as for a mob
+  an earlier release refuses.
+
 ## Upgrading to 0.9.12
 
 This section is for systems running 0.9.11. The full list of changes is in

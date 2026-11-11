@@ -626,6 +626,10 @@ findings, the sessions written at session envelope 5
 (`operator-instruction-envelope`) and the mob databases that hold
 operator-instruction events (`operator-instruction-mob-events`), which a
 release before 0.9.9 refuses.
+Since 0.9.14 it also lists the mob databases whose journal holds more than
+64 operator instruction records or more than 1 MiB of Active bodies in
+total (`operator-instruction-mob-totals`, informational, with both totals),
+which a release before 0.9.14 cannot serve.
 Since 0.9.10 it also reports `identity-store-rows`, an informational finding
 with counts only (the total and the archived, tombstone and unreadable rows),
 for each mob database that holds identity-store rows of schema version 2 or

@@ -1901,6 +1901,44 @@ mod tests {
         .machine_key()
     }
 
+    /// The stored form of a committed record and of a reset names what the
+    /// storage doctor's census of a mob's totals reads without this crate
+    /// (`meerkat_store::doctor::operator_instruction_mob_totals`): the
+    /// kind's type tag, the slot, the effect and the body bytes.
+    #[test]
+    fn the_stored_rows_name_what_the_storage_doctor_counts() {
+        let stored = |event: &MobEvent| -> serde_json::Value {
+            serde_json::from_slice(
+                &crate::event::encode_stored_mob_event(event).expect("the row encodes"),
+            )
+            .expect("the stored row is JSON")
+        };
+        let active = stored(&committed_row(
+            4,
+            "agent-a",
+            1,
+            Some("You are agent a."),
+            member("a"),
+            1,
+        ));
+        let kind = &active["event"]["kind"];
+        assert_eq!(kind["type"], "operator_instruction_committed");
+        assert_eq!(kind["slot"]["namespace"], "app.example");
+        assert_eq!(kind["slot"]["key"], "agent-a");
+        assert_eq!(kind["effect"], "active");
+        assert_eq!(kind["body_bytes"], 16);
+        let revoked = stored(&committed_row(5, "agent-a", 2, None, member("a"), 2));
+        assert_eq!(revoked["event"]["kind"]["effect"], "absent");
+        assert_eq!(revoked["event"]["kind"]["body_bytes"], 0);
+        let reset = stored(&MobEvent {
+            cursor: 6,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::MobReset,
+        });
+        assert_eq!(reset["event"]["kind"]["type"], "mob_reset");
+    }
+
     /// The body store holds the shared records' bodies and only locates the
     /// member-targeted ones: a member's body is read from its journal row
     /// for that member's snapshot, a revoked or superseded body is gone, a

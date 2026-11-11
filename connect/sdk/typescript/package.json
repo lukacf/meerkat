@@ -103,8 +103,8 @@
     "typescript": "5.8.3"
   },
   "peerDependencies": {
-    "@rkat/meta-sdk": ">=0.9.11 <0.10.0",
-    "@rkat/sdk": ">=0.9.11 <0.10.0"
+    "@rkat/meta-sdk": ">=0.9.12 <0.10.0",
+    "@rkat/sdk": ">=0.9.12 <0.10.0"
   },
   "peerDependenciesMeta": {
     "@rkat/sdk": {

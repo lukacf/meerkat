@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use meerkat_mob::temporary_council::{TEMPORARY_COUNCIL_MOB_ID_PREFIX, TemporaryCouncilId};
 
-use super::RuntimeEntry;
+use super::{ConsoleFrameMemberProvenance, RuntimeEntry};
 
 /// Whether a council recorded in `state`'s council store owns the mob
 /// `mob_id` as its temporary mob. One read of the council store, for a mob
@@ -71,4 +71,21 @@ pub(super) async fn frame_source_is_council_mob(entry: &RuntimeEntry, source_mob
         .unwrap_or_default()
         .iter()
         .any(|(mob_id, _)| mob_id.as_str() == source_mob_id)
+}
+
+/// Whether a stored frame with the captured `provenance` is decided as a
+/// council participant's while the console has no runtime registered: its
+/// last runtime was unregistered, and the frames it stored stay readable.
+///
+/// No council store and no mob set can be asked then, so the id's form
+/// decides, as it does for a mob the runtime no longer holds: a frame whose
+/// captured source mob has the council form stays unserved. The mob the
+/// frame captured as its runtime's primary mob is no council's.
+pub(super) fn frame_without_runtime_is_council_mob(
+    provenance: &ConsoleFrameMemberProvenance,
+) -> bool {
+    provenance
+        .source_mob_id
+        .starts_with(TEMPORARY_COUNCIL_MOB_ID_PREFIX)
+        && provenance.source_mob_id != provenance.primary_mob_id
 }

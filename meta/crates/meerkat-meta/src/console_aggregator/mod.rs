@@ -10418,7 +10418,15 @@ async fn frame_is_visible_cached(
             .read()
             .map_err(|_| runtime_registry_lock_error())?;
         if entries.is_empty() {
-            return Ok(true);
+            // No runtime is registered to decide the frame's member, and
+            // the frames the console stored stay readable: all but one a
+            // council participant wrote, which no registry state serves.
+            let council = frame
+                .source
+                .member_provenance
+                .as_ref()
+                .is_some_and(council::frame_without_runtime_is_council_mob);
+            return Ok(!council);
         }
         let Some(entry) = entries.get(&frame.runtime_key) else {
             return Ok(false);

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The `meerkat-meta` crate is published without its integration test
+  directory (`tests/`), which brings the package back under the registry's
+  10 MiB limit (8.4 MiB). Meta 0.9.12's crate was 44 KB over that limit, the
+  registry refused it, and `meerkat-meta` 0.9.12 was never published on
+  crates.io. The pull request and release checks now fail when a packaged
+  crate exceeds 9.5 MiB.
+
 ## [0.9.12] - 2026-11-10
 
 Meta 0.9.12 is part of Meerkat 0.9.12 (Core 0.9.12, Meta 0.9.12 and Connect

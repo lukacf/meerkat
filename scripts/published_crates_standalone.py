@@ -77,8 +77,8 @@ scripts/release-rust-crates.sh lists.
           `cargo build --workspace --lib --bins` (--mode release). Test
           targets are not part of a published crate's contract, and a
           product's packaged tests may read files its package does not ship
-          (Meta's lib tests read tests/fixtures, which its package excludes;
-          its integration tests read the repository's docs).
+          (Meta's lib tests read its tests/ directory, which its package
+          leaves out).
       Writes floor.json to --out, with the sha256 of the scratch workspace's
       resolved Cargo.lock (lock_sha256) once resolution succeeded. Exit 1
       names the first failing stage. --no-build stops after the resolve

@@ -19,8 +19,46 @@
 //! so the file never exists with a wider one and holds no byte before it has
 //! it; the rename then publishes that file. No directory's mode is changed.
 //! Other platforms create the file as they create any file.
+//!
+//! [`replace`] is the one place that writes such a file and publishes it: a
+//! write that fails publishes nothing and leaves no temporary file behind.
 
 use std::path::Path;
+
+/// Replace `document` with `bytes` through the temporary file `temporary`
+/// beside it, which must not exist: create it with the document's mode
+/// ([`create_replacement`]), write, sync, and rename it over the document.
+///
+/// A write, sync or rename that fails publishes nothing, removes the
+/// temporary file and returns the error: the document stays as it was, and
+/// retries against a full disk leave nothing behind.
+pub(crate) async fn replace(
+    temporary: &Path,
+    document: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut file = create_replacement(temporary, document).await?;
+    let published = async move {
+        file.write_all(bytes).await?;
+        // The write's own result. The sync below waits for the write but
+        // does not report its failure (a file size limit, a quota, a full
+        // filesystem, an I/O error), so without this a write the filesystem
+        // refused would publish an empty document as saved.
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(temporary, document).await
+    }
+    .await;
+    if published.is_err() {
+        // The caller gets the write's error; a temporary file that cannot be
+        // removed either is all that is left to it.
+        let _ = tokio::fs::remove_file(temporary).await;
+    }
+    published
+}
 
 /// Create `temporary`, which must not exist, as the file a rename will
 /// publish as `document`, with the mode of the module's rule (Unix).

@@ -2041,28 +2041,22 @@ async fn write_mcp_document_atomic(
 /// created with a config document's mode ([`crate::document_file`]). A
 /// leftover of a crashed or older write would keep its own mode and bytes
 /// if it were reused, so it is removed first and the write creates its own
-/// file.
+/// file, which it removes again when the write fails.
 #[cfg(not(target_arch = "wasm32"))]
 async fn replace_mcp_file(
     path: &Path,
     temporary: &Path,
     bytes: &[u8],
 ) -> Result<(), McpConfigError> {
-    use tokio::io::AsyncWriteExt as _;
-
     let failed = |err: std::io::Error| McpConfigError::Io(err.to_string());
     match tokio::fs::remove_file(temporary).await {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => return Err(failed(err)),
     }
-    let mut file = crate::document_file::create_replacement(temporary, path)
+    crate::document_file::replace(temporary, path, bytes)
         .await
-        .map_err(failed)?;
-    file.write_all(bytes).await.map_err(failed)?;
-    file.flush().await.map_err(failed)?;
-    drop(file);
-    tokio::fs::rename(temporary, path).await.map_err(failed)
+        .map_err(failed)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

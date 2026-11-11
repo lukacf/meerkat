@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 /// Resolved paths attached to a config store context.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -900,7 +899,8 @@ impl FileConfigStore {
     /// nothing written): write a sibling temp file, sync it, rename it over
     /// the document. The temp file is created with a config document's
     /// mode (`document_file`: owner-only on Unix, whatever the umask), which
-    /// the rename gives the document; the directory keeps its own.
+    /// the rename gives the document; the directory keeps its own. A write
+    /// that fails publishes nothing and removes its temp file.
     async fn write_content(
         &self,
         guard: &AdmissionGuard,
@@ -910,15 +910,7 @@ impl FileConfigStore {
         let parent = parent_directory(&self.path);
         tokio::fs::create_dir_all(&parent).await?;
         let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
-        let mut tmp = crate::document_file::create_replacement(&tmp_path, &self.path).await?;
-        tmp.write_all(content.as_bytes()).await?;
-        // The write's own result. The sync below waits for the write but
-        // does not report its failure, so without this a write the
-        // filesystem refused would publish an empty document as saved.
-        tmp.flush().await?;
-        tmp.sync_all().await?;
-        drop(tmp);
-        tokio::fs::rename(&tmp_path, &self.path).await?;
+        crate::document_file::replace(&tmp_path, &self.path, content.as_bytes()).await?;
         Ok(())
     }
 

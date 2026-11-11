@@ -10977,4 +10977,26 @@ fn where_an_identitys_record_lives_is_asked_in_one_module() {
              only runtime/created.rs does"
         );
     }
+    // The session bridge is the one other place: it answers the seam's reads
+    // of Core, and it requests a seat as Core seats the identity. Its one
+    // read of an entry's custody (`entry_custody_of`) is asked where a seat
+    // is requested (the fresh life's rotation) and where a wake reads the
+    // identity's intent, and nowhere else: a third caller is a third place
+    // that keys on where the record lives.
+    let bridge = production_code(include_str!("../bridge.rs"));
+    let custody_reads = bridge.matches("entry_custody_of(").count()
+        - bridge.matches("fn entry_custody_of(").count();
+    assert_eq!(
+        custody_reads, 3,
+        "identity_first/bridge.rs reads an entry's custody in {custody_reads} places; 3 are \
+         its own (the entry-custody answer, the rotation's seat request and the wake's intent \
+         read)"
+    );
+    assert_eq!(
+        bridge.matches("store_owned_seat_spec(").count()
+            - bridge.matches("fn store_owned_seat_spec(").count(),
+        1,
+        "identity_first/bridge.rs requests the seat of an identity whose record is its row in \
+         one place, the rotation"
+    );
 }

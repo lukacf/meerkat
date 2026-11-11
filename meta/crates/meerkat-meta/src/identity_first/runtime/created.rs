@@ -275,14 +275,18 @@ impl IdentityRuntime {
     ///
     /// Either way what the retirement owes is recorded before Core is asked,
     /// as a reload's: a successor on the same session owes no side effect.
-    /// `step` names the caller's step in a failure.
+    /// `step` names the caller's step in a failure. `Ok(true)` when Core
+    /// seated the successor already (the row's identity): the caller hands
+    /// that to its wake (`EmbodimentOverrides::successor_seated`), which
+    /// announces the successor as the wake that seats a roster identity's
+    /// does.
     pub(super) async fn end_incarnation_for_successor_locked(
         &self,
         identity: &AgentIdentity,
         live: &MemberRuntimeBinding,
         cause: SuccessorCause,
         step: &'static str,
-    ) -> Result<(), IdentityRuntimeError> {
+    ) -> Result<bool, IdentityRuntimeError> {
         let record = self.spec_record(identity).await?;
         let row_spec = match record {
             SpecRecord::Roster => None,
@@ -325,24 +329,9 @@ impl IdentityRuntime {
             )));
         }
         self.settle_lifecycle_retirement(prepared).await;
-        if row_spec.is_some() {
-            // The successor is seated already: the wake that materializes it
-            // announces it, as the wake that seats a roster identity's does.
-            self.seated_successors
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(identity.clone());
-        }
-        Ok(())
-    }
-
-    /// Whether Core seated `identity`'s successor in its previous
-    /// incarnation's place and no wake announced it yet; the answer is taken.
-    pub(super) fn take_seated_successor(&self, identity: &AgentIdentity) -> bool {
-        self.seated_successors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(identity)
+        // Seated already (the row's identity), or seated by the caller's
+        // wake (the roster's): the caller tells its wake which.
+        Ok(row_spec.is_some())
     }
 
     /// The roster pass's step for the identities whose record is their row:

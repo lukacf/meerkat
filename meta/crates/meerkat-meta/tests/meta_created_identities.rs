@@ -1841,6 +1841,45 @@ async fn a_deliverys_completion_is_observed_for_a_store_owned_identity_as_for_a_
     rig.shutdown().await;
 }
 
+/// A store-owned identity whose name the member-id encoding changes (the
+/// usual identity shape, with a `:`) is served under its own name: Core
+/// holds it under the comms-safe member id the name encodes to, and its
+/// deliveries, its respawn and its status go through that mapping.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_identity_with_an_encoded_name_is_served_under_its_name() {
+    const NAMED: &str = "team:keeper";
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id()).await;
+    let member = meerkat_meta::member_comms_id::mob_member_id(NAMED);
+    assert_ne!(member.as_str(), NAMED, "the encoding changes the name");
+    rig.create_request(
+        meerkat_mob::CreatedIdentityRequest::new(created_spec(member.as_str())),
+        member.as_str(),
+    )
+    .await;
+    assert!(
+        rig.turn(NAMED, "ENCODED-BEFORE").await,
+        "a delivery to its name runs"
+    );
+    let before = rig.life(NAMED).await;
+    let respawned = rig.verb("meta/respawn", NAMED).await;
+    assert!(
+        respawned["error"].is_null(),
+        "the respawn is served: {respawned:#?}"
+    );
+    let after = rig.life(NAMED).await;
+    assert_eq!(after.session, before.session, "on its own session");
+    assert!(
+        after.generation > before.generation,
+        "at the next generation"
+    );
+    assert!(
+        rig.turn(NAMED, "ENCODED-AFTER").await,
+        "it takes its next delivery"
+    );
+    rig.shutdown().await;
+}
+
 /// The peer rule the rows' owned edges are admitted under.
 fn peer_rule() -> meerkat_mob::OwnedEdgeAdmission {
     meerkat_mob::OwnedEdgeAdmission::rule("row-peers").expect("a peer rule id")

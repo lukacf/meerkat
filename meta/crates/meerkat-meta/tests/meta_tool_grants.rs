@@ -941,6 +941,63 @@ async fn meta_tool_grant_refusals_are_typed() {
     rig.shutdown().await;
 }
 
+/// A grant is a door of the identity: a store-owned identity created since
+/// the last roster pass, which no delivery or control door has named yet,
+/// takes a scoped tool grant all the same. The grant registers it from its
+/// row on demand.
+///
+/// RED before the grant door registered on demand: the grant answered
+/// `subject_unknown` until some other door had named the identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_registers_a_store_owned_identity_no_door_has_named_yet() {
+    const LATE: &str = "keeper-late";
+    let temp = tempfile::tempdir().unwrap();
+    let rig = boot(temp.path(), &fresh_mob_id()).await;
+    let created = rig
+        .runtime
+        .mob_handle()
+        .create_store_owned_identities(
+            meerkat_mob::StoreOwnedIdentityCreate::new(
+                meerkat_mob::IdentityOperation::new(
+                    "create-keeper-late",
+                    meerkat_core::approval::decision::Sha256Digest::of(b"create-keeper-late")
+                        .as_str(),
+                ),
+                meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                vec![meerkat_mob::CreatedIdentityRequest::new(
+                    meerkat_mob::CreatedIdentitySpec::new(LATE, "worker"),
+                )],
+            ),
+            meerkat_mob::IdentityChangeConsentInput::Policy(
+                meerkat_mob::IdentityPolicyOutcome::Allow,
+            ),
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(
+            created,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{created:?}"
+    );
+    let granted = rig
+        .grant(json!({
+            "identity": LATE,
+            "target": tool_target(),
+            "duration_ms": TEN_MINUTES_MS,
+        }))
+        .await;
+    assert_eq!(
+        (
+            &granted["grant"]["status"],
+            &granted["grant"]["subject"]["identity"]
+        ),
+        (&json!("active"), &json!(LATE)),
+        "the grant names the identity no door had named: {granted:#?}"
+    );
+}
+
 /// A store-owned identity takes a scoped tool grant as a configured one
 /// does: its gated tool is closed before the grant, the grant names it as
 /// its subject and opens the tool at its next turn, list shows the grant,

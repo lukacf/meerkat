@@ -7177,6 +7177,62 @@ mod tests {
         );
     }
 
+    /// The account capability gate stands in front of a route's adapter and
+    /// does not hide the route the adapter reports for the provider-neutral
+    /// `reasoning_effort` option; in front of an adapter that reports none
+    /// it reports none.
+    #[test]
+    fn the_capability_gate_forwards_its_clients_route() {
+        use meerkat_core::provider_matrix::OpenAiBackendKind;
+        use meerkat_core::{
+            AccountLevelStatement, ModelApi, ReasoningBackend, ReasoningRouteObservation,
+        };
+
+        struct ReportingClient(ReasoningRouteObservation);
+
+        #[async_trait]
+        impl meerkat_llm_core::LlmClient for ReportingClient {
+            fn reasoning_route(&self) -> Option<ReasoningRouteObservation> {
+                Some(self.0.clone())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::LlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                Box::pin(futures::stream::empty())
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                Ok(())
+            }
+        }
+
+        let reported = ReasoningRouteObservation {
+            backend: ReasoningBackend::OpenAi(OpenAiBackendKind::Copilot),
+            api: ModelApi::Responses,
+            account: AccountLevelStatement::NotApplicable,
+            operator_levels: None,
+        };
+        let gated = capability_gated_client(
+            Arc::new(ReportingClient(reported.clone())),
+            Some(crate::CopilotModelCapabilities::default()),
+        );
+        assert_eq!(gated.reasoning_route(), Some(reported));
+        assert_eq!(
+            capability_gated_client(
+                Arc::new(NoopLlmClient),
+                Some(crate::CopilotModelCapabilities::default()),
+            )
+            .reasoning_route(),
+            None
+        );
+    }
+
     /// A model the account lists with a policy state other than `enabled`
     /// is unavailable on the account's routes, and the refusal names the
     /// state the account states, with the models the account does offer.

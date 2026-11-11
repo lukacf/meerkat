@@ -856,6 +856,22 @@ mod tests {
         );
     }
 
+    // The route the wrapped client reports for the provider-neutral
+    // `reasoning_effort` option reaches the member's agent. The trait's
+    // default is no route, so a decorator that omits the forward compiles
+    // and leaves every level set on the member without a route to check it
+    // against.
+    #[test]
+    fn forwards_the_wrapped_clients_reasoning_route() {
+        use super::controller_test_support::{PinnedInner, reasoning_route};
+        let wrapped = TaintObservingLlmClient::new(
+            Arc::new(PinnedInner::default()),
+            "identity:r".to_string(),
+            DispatchTaintSlot::default(),
+        );
+        assert_eq!(wrapped.reasoning_route(), Some(reasoning_route()));
+    }
+
     #[test]
     fn member_identity_resolves_binding_to_the_write_gate_spelling() {
         // Identity-first internal member: the binding carries the ENCODED
@@ -1043,6 +1059,22 @@ pub(crate) mod controller_test_support {
         )
     }
 
+    /// The route the forwarding probes report for the provider-neutral
+    /// `reasoning_effort` option. A decorator that does not forward it
+    /// answers the trait's default, no route, and a level set on a member
+    /// whose client reports no route cannot be checked against anything.
+    pub(crate) fn reasoning_route() -> meerkat_core::ReasoningRouteObservation {
+        use meerkat_core::model_profile::capabilities::EffortLevel;
+        meerkat_core::ReasoningRouteObservation {
+            backend: meerkat_core::ReasoningBackend::SelfHosted(
+                meerkat_core::provider_matrix::SelfHostedBackendKind::SelfHosted,
+            ),
+            api: meerkat_core::ModelApi::Responses,
+            account: meerkat_core::AccountLevelStatement::NotApplicable,
+            operator_levels: Some(vec![EffortLevel::Low, EffortLevel::High]),
+        }
+    }
+
     struct RefusingPolicy;
 
     impl WorkAuthorization for RefusingPolicy {
@@ -1105,6 +1137,10 @@ pub(crate) mod controller_test_support {
     impl AgentLlmClient for PinnedInner {
         fn controller_model_selection(&self) -> Option<ControllerModelSelection> {
             Some(selection())
+        }
+
+        fn reasoning_route(&self) -> Option<meerkat_core::ReasoningRouteObservation> {
+            Some(reasoning_route())
         }
 
         fn controller_model_facts(

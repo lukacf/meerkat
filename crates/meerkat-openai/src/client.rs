@@ -3915,8 +3915,12 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
         | "unsupported_value"
         | "unsupported_parameter" => refused_request_error(error_code, error_message),
         // One code, one class, whatever carries it: over HTTP this code is a
-        // 404, and the realtime adapter maps it the same way.
-        "model_not_found" => LlmError::from_http_status(404, error_message.to_string(), None),
+        // 404 (`LlmError::from_http_status`), and the realtime adapter maps
+        // it the same way. Built here, not through the HTTP classifier: the
+        // message is text, never an error body to parse.
+        "model_not_found" => LlmError::ModelNotFound {
+            model: error_message.to_string(),
+        },
         _ => LlmError::Unknown {
             message: format!("{error_code}: {error_message}"),
         },
@@ -3925,11 +3929,14 @@ fn map_responses_stream_error(error_code: &str, error_message: &str) -> LlmError
 
 /// A refused request named by `error_code`, classified as the body of an
 /// HTTP 400 with `error_message` is: the invalid request with the code in
-/// front of the message, or the class the message itself names.
+/// front of the message, or the class the message itself names (a context
+/// overflow, an oversized request, exhausted quota). The message is text:
+/// one that is itself a JSON object naming a policy violation selects no
+/// policy stop, which only a structured code establishes.
 fn refused_request_error(error_code: &str, error_message: &str) -> LlmError {
     match LlmError::from_http_status(400, error_message.to_string(), None) {
-        LlmError::InvalidRequest { message } => LlmError::InvalidRequest {
-            message: format!("{error_code}: {message}"),
+        LlmError::InvalidRequest { .. } | LlmError::PolicyStop { .. } => LlmError::InvalidRequest {
+            message: format!("{error_code}: {error_message}"),
         },
         other => other,
     }
@@ -3937,8 +3944,12 @@ fn refused_request_error(error_code: &str, error_message: &str) -> LlmError {
 
 /// How many frames that are not the cause the client reads after a
 /// `response.failed` without an error object before it stops waiting for
-/// one. A count, not a timer: it ends the wait on a body that stays open and
-/// keeps sending frames, which no stream timeout would.
+/// one. A count, not a timer: it ends the wait on a body that keeps sending
+/// data frames without waiting for the stream-inactivity window, and where
+/// no window is configured. Comment lines are not frames and are not
+/// counted: a body that stays open and sends only those is ended by the
+/// stream-inactivity window (no liveness is reported while waiting), and
+/// where no window is configured this bound does not end it.
 const MAX_FRAMES_AWAITING_CAUSE: usize = 16;
 
 /// The cause a Responses stream event gives for a failed response.

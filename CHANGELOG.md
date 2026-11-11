@@ -51,8 +51,10 @@ them.
     between is read as output. When no cause comes (the stream ends, a frame
     cannot be read, or sixteen other frames follow) the response fails as
     `ServerError { status: 500 }` with a message that says so, retryable as
-    before. While it waits the client reports no stream liveness, so the
-    stream-inactivity window keeps running. This stream shape was not
+    before; an `error` event that carries nothing ends the wait as the
+    unknown class, and a reset connection as `ConnectionReset`, both
+    retryable too. While it waits the client reports no stream liveness, so
+    the stream-inactivity window keeps running. This stream shape was not
     observed from a live service and its rows are synthetic; a live request
     that the Copilot route refused was answered with HTTP 400 and the code
     `invalid_request_body`, which was terminal already.
@@ -70,16 +72,20 @@ them.
     non-retryable) with the message `<code>: <the service's message>`, or
     the context-overflow, oversized-request or exhausted-quota class when
     the message names one. `model_not_found` is `LlmError::ModelNotFound`
-    (reason `invalid_model`), the class of an HTTP 404 with that code and of
-    the realtime adapter. The turn fails once, on the LLM failure itself and
-    not on used-up retries. A code outside this list is classified the same
-    way, as the invalid request, when its error object's `type` is
-    `invalid_request_error`; with any other type, or with none, it is still
+    (`reason_type` `llm_invalid_model`), the class of an HTTP 404 with that
+    code and of the realtime adapter. The message is read as text: one that
+    is itself a JSON object never selects a policy stop. The turn fails
+    once, on the LLM failure itself and not on used-up retries. A code
+    outside this list is classified the same way, as the invalid request,
+    when its error object's `type` is `invalid_request_error` (this includes
+    a code that names an authentication fault: terminal, though not the
+    class an HTTP 401 has); with any other type, or with none, it is still
     the unknown class and is retried.
   - An error object that names no `code` is classified by its `type` when
     the type is `invalid_request_error` or an exhausted-quota code. Any
-    other type decides nothing, as before: a type alone is never a policy
-    stop, a rate limit or a server error.
+    other type selects no class: the event keeps its default, as before
+    (the retryable server error for a `response.failed`, the unknown class
+    for an `error` event), so a type alone is never a policy stop.
   - `usage_limit_reached` (the ChatGPT backend's plan usage limit) is now an
     exhausted-quota code wherever that list is read:
     `LlmError::QuotaExhausted`, non-retryable, as a Responses stream code or

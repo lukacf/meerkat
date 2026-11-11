@@ -22,6 +22,17 @@ use meerkat_rpc::session_runtime::SessionRuntime;
 use meerkat_store::MemoryBlobStore;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// A tool description that alone takes a registered callback tool over the
+/// deferred catalog's byte budget, so a session with it defers it and
+/// offers the catalog control tools. A few small registered tools stay in
+/// the request.
+fn over_catalog_budget(description: &str) -> String {
+    format!(
+        "{description} {}",
+        "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Mock LLM client
 // ---------------------------------------------------------------------------
@@ -380,7 +391,7 @@ async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_t
                     }
                 }, {
                     "name": "secret_audit",
-                    "description": "Audit a secret value through the same deferred catalog.",
+                    "description": over_catalog_budget("Audit a secret value through the same deferred catalog."),
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -772,7 +783,7 @@ async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_buil
             "params": {
                 "tools": [{
                     "name": "secret_audit",
-                    "description": "Audit a secret value through the same deferred catalog.",
+                    "description": over_catalog_budget("Audit a secret value through the same deferred catalog."),
                     "input_schema": {
                         "type": "object",
                         "properties": {

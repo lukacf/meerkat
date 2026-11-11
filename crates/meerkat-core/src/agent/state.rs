@@ -16557,6 +16557,16 @@ mod tests {
         }
     }
 
+    /// A description that alone puts a deferred-eligible tool over the
+    /// deferred catalog's byte budget, so a fixture with it selects the
+    /// deferred mode.
+    fn over_catalog_budget(text: &str) -> String {
+        format!(
+            "{text} {}",
+            "x".repeat(crate::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+        )
+    }
+
     struct DeferredLoadDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
         catalog: Arc<[crate::ToolCatalogEntry]>,
@@ -16580,9 +16590,9 @@ mod tests {
             let deferred_two = Arc::new(ToolDef {
                 audience: Default::default(),
                 name: "deferred_tool_two".into(),
-                description:
-                    "second deferred tool used only to keep the test dispatcher above the adaptive catalog threshold."
-                        .to_string(),
+                description: over_catalog_budget(
+                    "second deferred tool used only to keep the test dispatcher above the deferred catalog's byte budget.",
+                ),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,
@@ -16700,9 +16710,9 @@ mod tests {
             let deferred_two = Arc::new(ToolDef {
                 audience: Default::default(),
                 name: "deferred_tool_two".into(),
-                description:
-                    "second deferred tool used only to keep the direct builder dispatcher above the adaptive threshold."
-                        .to_string(),
+                description: over_catalog_budget(
+                    "second deferred tool used only to keep the direct builder dispatcher above the deferred catalog's byte budget.",
+                ),
                 input_schema: serde_json::json!({ "type": "object" }),
                 provenance: Some(crate::ToolProvenance {
                     kind: crate::ToolSourceKind::Callback,

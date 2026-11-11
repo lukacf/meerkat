@@ -26469,7 +26469,12 @@ mod prompt_tests {
         });
         let secret_audit = Arc::new(ToolDef {
             name: "secret_audit".into(),
-            description: "Audit a secret value".to_string(),
+            // Over the deferred catalog's byte budget, so the session starts
+            // deferred and its prompt explains the control tools.
+            description: format!(
+                "Audit a secret value {}",
+                "x".repeat(meerkat_core::tool_catalog::DEFERRED_CATALOG_SCHEMA_VOLUME_THRESHOLD)
+            ),
             input_schema: serde_json::json!({"type":"object"}),
             provenance: None,
             audience: Default::default(),

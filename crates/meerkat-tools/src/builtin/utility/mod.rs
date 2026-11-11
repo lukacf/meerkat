@@ -12,6 +12,8 @@ mod apply_patch;
 #[cfg(not(target_arch = "wasm32"))]
 mod blob_file;
 mod datetime;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod protected_paths;
 mod tool_set;
 #[cfg(not(target_arch = "wasm32"))]
 mod view_image;

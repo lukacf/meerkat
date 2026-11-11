@@ -797,6 +797,25 @@ impl HostConfinement {
         sources
     }
 
+    /// The documents a realm keeps at its root that decide what a host
+    /// built on it runs and authorizes: its config document
+    /// (`config.toml`), that document's generation sidecar
+    /// (`config_state.json`), the realm manifest (`realm_manifest.json`)
+    /// and the directory of the grant owner store (`authorization`). A host
+    /// passes them to [`crate::AgentFactory::with_protected_host_inputs`]
+    /// with its inputs and convention sources, so its in-process file tools
+    /// never write them, also where the tools' project root is the realm
+    /// directory itself and the state root as a whole does not apply. The
+    /// realm's stores (sessions, runtime, jobs and the rest) are not
+    /// documents and are not listed.
+    #[must_use]
+    pub fn realm_documents(realm_root: &Path) -> Vec<PathBuf> {
+        REALM_DOCUMENTS
+            .iter()
+            .map(|name| realm_root.join(name))
+            .collect()
+    }
+
     /// Log [`Self::startup_report`] in the host's log.
     pub fn log_startup(&self, inputs: &[(HostInput, PathBuf)], convention_sources: &[PathBuf]) {
         for notice in self.startup_report(inputs, convention_sources) {
@@ -816,6 +835,41 @@ fn backend_name(backend: ConfinementBackend) -> &'static str {
         _ => "the platform backend",
     }
 }
+
+/// The names, under a realm root, of [`HostConfinement::realm_documents`].
+const REALM_DOCUMENTS: &[&str] = &[
+    "config.toml",
+    "config_state.json",
+    "realm_manifest.json",
+    "authorization",
+];
+
+/// The names, under a realm root, of the realm's stores that the path
+/// authority (`meerkat_store::RealmPaths`) exposes, each with why it is not a
+/// realm document. The in-process file tools refuse them as part of the
+/// state root's subtree where that root lies inside the tools' project
+/// root; where the project root is the realm directory itself they are not
+/// refused. A path the authority gains belongs here or in
+/// [`REALM_DOCUMENTS`].
+#[cfg(test)]
+const REALM_STORES: &[(&str, &str)] = &[
+    (
+        "sessions.sqlite3",
+        "session rows: conversation content the host rewrites on every turn, read as data",
+    ),
+    (
+        "sessions_jsonl",
+        "the JSONL session store: the same content in files",
+    ),
+    (
+        "runtime.sqlite3",
+        "the runtime store: a binary database the host holds open and rewrites continuously",
+    ),
+    (
+        "jobs.sqlite3",
+        "the detached job store: a binary database the host holds open",
+    ),
+];
 
 impl std::fmt::Display for HostConfinement {
     /// One line naming each launch kind's mode, for a host's startup report.
@@ -1554,5 +1608,95 @@ mod tests {
             );
         }
         assert!(!host.untrusted_source(&home.join(".rkat").join("mcp.toml")));
+    }
+
+    /// The realm document list stays level with the path authority: every
+    /// path `RealmPaths` exposes under a realm root is a listed document or
+    /// a named store, never both and never neither, and the grant owner
+    /// store lies in a listed directory. The destructuring names every
+    /// field, so a path the authority gains must be classified here.
+    #[test]
+    fn realm_documents_cover_what_the_path_authority_names() {
+        let meerkat_store::RealmPaths {
+            root,
+            manifest_path,
+            config_path,
+            sessions_sqlite_path,
+            sessions_jsonl_dir,
+            runtime_sqlite_path,
+            jobs_sqlite_path,
+        } = meerkat_store::realm_paths_in(Path::new("/realms"), "realm-1");
+        let documents = HostConfinement::realm_documents(&root);
+        let stores: Vec<PathBuf> = REALM_STORES
+            .iter()
+            .map(|(name, reason)| {
+                assert!(!reason.is_empty(), "{name} states why it is a store");
+                root.join(name)
+            })
+            .collect();
+        for path in [
+            &manifest_path,
+            &config_path,
+            &sessions_sqlite_path,
+            &sessions_jsonl_dir,
+            &runtime_sqlite_path,
+            &jobs_sqlite_path,
+        ] {
+            assert!(
+                documents.contains(path) != stores.contains(path),
+                "{} is a realm document or a named store, exactly one of them",
+                path.display()
+            );
+        }
+        for document in [&config_path, &manifest_path] {
+            assert!(documents.contains(document), "{}", document.display());
+        }
+        let grant_owner = meerkat_store::grant_owner_store_path(&root);
+        assert!(
+            documents
+                .iter()
+                .any(|document| grant_owner.starts_with(document) && grant_owner != *document),
+            "the grant owner store {} lies in a listed directory",
+            grant_owner.display()
+        );
+        assert_eq!(documents.len(), REALM_DOCUMENTS.len());
+        assert!(documents.iter().all(|document| document.starts_with(&root)));
+    }
+
+    /// The generation sidecar the config runtime writes beside a realm's
+    /// config document is the one the list names.
+    #[tokio::test]
+    async fn realm_documents_name_the_config_generation_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let text = |path: PathBuf| path.display().to_string();
+        let store: std::sync::Arc<dyn meerkat_core::ConfigStore> =
+            std::sync::Arc::new(meerkat_core::TaggedConfigStore::new(
+                std::sync::Arc::new(meerkat_core::MemoryConfigStore::new(
+                    meerkat_core::Config::default(),
+                    meerkat_models::canonical(),
+                )),
+                meerkat_core::ConfigStoreMetadata {
+                    realm_id: Some("realm-1".into()),
+                    instance_id: None,
+                    backend: None,
+                    resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                        root: text(root.clone()),
+                        manifest_path: text(root.join("realm_manifest.json")),
+                        config_path: text(root.join("config.toml")),
+                        sessions_sqlite_path: None,
+                        sessions_jsonl_dir: text(root.join("sessions_jsonl")),
+                    }),
+                },
+            ));
+        let runtime = meerkat_core::ConfigRuntime::from_store_metadata(store)
+            .expect("a store with a resolved realm root");
+        runtime
+            .set(meerkat_core::Config::default(), None)
+            .await
+            .expect("a config write publishes its generation");
+        let sidecar = root.join("config_state.json");
+        assert!(sidecar.is_file(), "the config runtime wrote its sidecar");
+        assert!(HostConfinement::realm_documents(&root).contains(&sidecar));
     }
 }

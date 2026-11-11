@@ -88,6 +88,15 @@ pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_mins(1);
 /// a stalled refresh lands once that refresh has failed.
 pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_mins(1);
 
+/// Largest document an MCP OAuth flow reads from the servers it discovers,
+/// before any credential exists: the protected resource metadata, the
+/// authorization server metadata (RFC 8414 or OpenID Connect discovery, the
+/// account strategy's preflight included) and the dynamic client
+/// registration response. Real ones are a few KiB. The bytes are counted as
+/// they arrive: a larger answer is refused once this many have arrived, and
+/// the rest is never read.
+const MAX_OAUTH_DOCUMENT_BYTES: usize = 1024 * 1024;
+
 /// One network stage of an MCP OAuth start or completion, as named by
 /// [`McpOAuthError::NetworkTimedOut`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -749,17 +758,17 @@ impl OidcUserInfoAccountStrategy {
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
         );
-        let configuration: OpenIdConfiguration = self
+        let response = self
             .http_for(&configuration_url)?
             .get(&configuration_url)
             .send()
             .await
             .map_err(verification_send_error)?
             .error_for_status()
-            .map_err(unavailable)?
-            .json()
-            .await
             .map_err(unavailable)?;
+        let configuration: OpenIdConfiguration = read_oauth_document(response)
+            .await
+            .map_err(|_| ConnectorOAuthRefusal::VerificationUnavailable)?;
         if configuration.issuer != issuer {
             return Err(ConnectorOAuthRefusal::VerificationUnavailable);
         }
@@ -4535,7 +4544,7 @@ impl McpOAuthAuthority {
                     .await?
             }
         };
-        let resource: ProtectedResourceMetadata = self
+        let response = self
             .http_for(target, &resource_metadata_url)?
             .get(resource_metadata_url.clone())
             .send()
@@ -4552,14 +4561,13 @@ impl McpOAuthAuthority {
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
                 reason: error,
-            })?
-            .json()
-            .await
-            .map_err(|error| {
-                oauth_send_error(target, stage, error, |error| {
+            })?;
+        let resource: ProtectedResourceMetadata =
+            read_oauth_document(response).await.map_err(|error| {
+                error.into_stage_error(target, stage, "protected resource metadata", |reason| {
                     McpOAuthError::DiscoveryFailed {
                         server_name: target.server_name().to_string(),
-                        reason: format!("decode protected resource metadata: {error}"),
+                        reason,
                     }
                 })
             })?;
@@ -4615,19 +4623,18 @@ impl McpOAuthAuthority {
                     .to_string(),
             });
         };
-        let auth: AuthorizationServerMetadata = response
+        let response = response
             .error_for_status_refusing_redirects()
             .map_err(|error| McpOAuthError::DiscoveryFailed {
                 server_name: target.server_name().to_string(),
                 reason: error,
-            })?
-            .json()
-            .await
-            .map_err(|error| {
-                oauth_send_error(target, stage, error, |error| {
+            })?;
+        let auth: AuthorizationServerMetadata =
+            read_oauth_document(response).await.map_err(|error| {
+                error.into_stage_error(target, stage, "authorization server metadata", |reason| {
                     McpOAuthError::DiscoveryFailed {
                         server_name: target.server_name().to_string(),
-                        reason: format!("decode authorization server metadata: {error}"),
+                        reason,
                     }
                 })
             })?;
@@ -4779,7 +4786,7 @@ impl McpOAuthAuthority {
                         .to_string(),
                 }
             })?;
-        let wire: DynamicClientRegistrationResponse = self
+        let response = self
             .http_for(target, registration_endpoint)?
             .post(registration_endpoint)
             .json(&body)
@@ -4800,17 +4807,16 @@ impl McpOAuthAuthority {
             .map_err(|error| McpOAuthError::RegistrationFailed {
                 server_name: target.server_name().to_string(),
                 reason: error,
-            })?
-            .json()
-            .await
-            .map_err(|error| {
-                oauth_send_error(
+            })?;
+        let wire: DynamicClientRegistrationResponse =
+            read_oauth_document(response).await.map_err(|error| {
+                error.into_stage_error(
                     target,
                     McpOAuthNetworkStage::ClientRegistration,
-                    error,
-                    |error| McpOAuthError::RegistrationFailed {
+                    "registration response",
+                    |reason| McpOAuthError::RegistrationFailed {
                         server_name: target.server_name().to_string(),
-                        reason: format!("decode: {error}"),
+                        reason,
                     },
                 )
             })?;
@@ -5150,6 +5156,59 @@ impl RefuseRedirect for reqwest::Response {
         }
         self.error_for_status().map_err(|error| error.to_string())
     }
+}
+
+/// Why a bounded OAuth document read failed. No variant carries a byte of
+/// the answer.
+#[derive(Debug)]
+enum OAuthDocumentError {
+    /// More than [`MAX_OAUTH_DOCUMENT_BYTES`] arrived; the read stopped there.
+    TooLarge,
+    /// The body could not be read: a body still unread when its client's
+    /// bound passed included.
+    Read(reqwest::Error),
+    /// The body is not the expected JSON document.
+    Decode,
+}
+
+impl OAuthDocumentError {
+    /// This failed read of `document` as `stage`'s outcome for `target`. A
+    /// read the egress profile refused, or one that passed its client's
+    /// bound, keeps its type ([`oauth_send_error`]); otherwise `failed`
+    /// receives a reason that names no byte of the answer.
+    fn into_stage_error(
+        self,
+        target: &McpServerIdentity,
+        stage: McpOAuthNetworkStage,
+        document: &str,
+        failed: impl FnOnce(String) -> McpOAuthError,
+    ) -> McpOAuthError {
+        match self {
+            Self::TooLarge => failed(format!(
+                "{document} larger than {MAX_OAUTH_DOCUMENT_BYTES} bytes"
+            )),
+            Self::Read(error) => oauth_send_error(target, stage, error, |error| {
+                failed(format!("decode {document}: {error}"))
+            }),
+            Self::Decode => failed(format!("decode {document}: error decoding response body")),
+        }
+    }
+}
+
+/// `response`'s body as one JSON document of at most
+/// [`MAX_OAUTH_DOCUMENT_BYTES`], counted as it arrives: a larger one is
+/// refused before it is decoded, and nothing past the bound is read.
+async fn read_oauth_document<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+) -> Result<T, OAuthDocumentError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(OAuthDocumentError::Read)? {
+        if body.len().saturating_add(chunk.len()) > MAX_OAUTH_DOCUMENT_BYTES {
+            return Err(OAuthDocumentError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| OAuthDocumentError::Decode)
 }
 
 /// RFC 8252 section 7.3: the redirect must be an http loopback address.
@@ -7837,5 +7896,294 @@ mod tests {
             ))
         );
         assert_eq!(arrivals.load(Ordering::SeqCst), 0);
+    }
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// The documented bound on one discovery document or registration
+    /// response.
+    const DOCUMENT_BOUND_BYTES: usize = 1024 * 1024;
+    /// Length of each oversized document: far past the bound, and past what
+    /// loopback socket buffers hold once the client stops reading, so a
+    /// client that stops at the bound never lets the server finish.
+    const OVERSIZED_DOCUMENT_BYTES: usize = 64 * 1024 * 1024;
+    /// Fills each oversized document; no refusal may repeat any of it.
+    const DOCUMENT_FILL: &str = "oversized-document-canary.";
+
+    /// Reads one request: its head and, when it names one, its body.
+    async fn read_request(stream: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => read,
+            };
+            request.extend_from_slice(&buffer[..read]);
+            let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+            let body = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|length| length.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if request.len() >= end + 4 + body {
+                return;
+            }
+        }
+    }
+
+    /// One chunk of a chunked HTTP body.
+    async fn write_chunk(stream: &mut tokio::net::TcpStream, data: &[u8]) -> std::io::Result<()> {
+        stream
+            .write_all(format!("{:x}\r\n", data.len()).as_bytes())
+            .await?;
+        stream.write_all(data).await?;
+        stream.write_all(b"\r\n").await
+    }
+
+    /// Answers the first request on `listener` with the small JSON `body`.
+    #[cfg(feature = "workspace-tests")]
+    fn serve_document(listener: TcpListener, body: String) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                read_request(&mut stream).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        })
+    }
+
+    /// Answers the first request on `listener` with the JSON document
+    /// `{"padding":"<fill>",<fields>}`, exactly [`OVERSIZED_DOCUMENT_BYTES`]
+    /// long and valid as a whole, so only its size can refuse it. It is
+    /// written chunked while it is generated, never held whole; the task
+    /// returns how many of its bytes the server handed over before its
+    /// client stopped reading.
+    fn serve_oversized_document(
+        listener: TcpListener,
+        fields: String,
+    ) -> tokio::task::JoinHandle<usize> {
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return 0;
+            };
+            read_request(&mut stream).await;
+            let prefix = b"{\"padding\":\"";
+            let suffix = format!("\",{fields}}}").into_bytes();
+            let block: Vec<u8> = DOCUMENT_FILL.bytes().cycle().take(64 * 1024).collect();
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                        transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            if stream.write_all(head.as_bytes()).await.is_err()
+                || write_chunk(&mut stream, prefix).await.is_err()
+            {
+                return 0;
+            }
+            let mut sent = prefix.len();
+            let mut padding = OVERSIZED_DOCUMENT_BYTES - prefix.len() - suffix.len();
+            while padding > 0 {
+                let take = padding.min(block.len());
+                if write_chunk(&mut stream, &block[..take]).await.is_err() {
+                    return sent;
+                }
+                sent += take;
+                padding -= take;
+            }
+            if write_chunk(&mut stream, &suffix).await.is_err() {
+                return sent;
+            }
+            sent += suffix.len();
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+            sent
+        })
+    }
+
+    /// The bytes the oversized document's server handed over, once it ended.
+    async fn bytes_sent(server: tokio::task::JoinHandle<usize>) -> usize {
+        tokio::time::timeout(Duration::from_mins(2), server)
+            .await
+            .expect("the document server ends once its client stops reading")
+            .expect("the document server task")
+    }
+
+    /// The client read the oversized document up to the bound and stopped
+    /// there: it never read, let alone held, the whole document.
+    fn assert_read_stopped_at_the_bound(sent: usize) {
+        assert!(
+            sent < OVERSIZED_DOCUMENT_BYTES,
+            "the client read the whole {OVERSIZED_DOCUMENT_BYTES}-byte document ({sent} bytes sent)"
+        );
+        assert!(
+            sent > DOCUMENT_BOUND_BYTES / 2,
+            "the read stopped after {sent} bytes, well before the {DOCUMENT_BOUND_BYTES}-byte bound"
+        );
+    }
+
+    /// A refusal names none of the refused document's content.
+    #[cfg(feature = "workspace-tests")]
+    fn assert_names_no_document_content(error: &McpOAuthError) {
+        let rendered = format!("{error} {error:?}");
+        assert!(
+            !rendered.contains("canary"),
+            "the refusal repeats the document: {rendered}"
+        );
+    }
+
+    /// Protected resource metadata past the bound is refused, typed, once
+    /// the bound has arrived: the rest is never read.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn protected_resource_metadata_past_the_bound_is_refused_at_the_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_oversized_document(
+            listener,
+            format!(r#""resource":"{base}/mcp","authorization_servers":["{base}"]"#),
+        );
+        let target =
+            McpServerIdentity::from_server_config("bounded-resource", format!("{base}/mcp"));
+        let challenge = format!(
+            r#"Bearer resource_metadata="{base}/.well-known/oauth-protected-resource/mcp""#
+        );
+        let authority =
+            ce_refresh_authority(Arc::new(EphemeralTokenStore::new()), test_auth_lease());
+
+        let result = authority
+            .discover(
+                &target,
+                Some(&challenge),
+                tokio::time::Instant::now() + MCP_OAUTH_START_BOUND,
+                None,
+            )
+            .await;
+
+        assert_read_stopped_at_the_bound(bytes_sent(server).await);
+        let Err(error) = result else {
+            panic!("the oversized document was accepted");
+        };
+        assert_names_no_document_content(&error);
+        assert!(
+            matches!(&error, McpOAuthError::DiscoveryFailed { reason, .. }
+                if reason == "protected resource metadata larger than 1048576 bytes"),
+            "{error:?}"
+        );
+    }
+
+    /// Authorization server metadata past the bound is refused, typed, once
+    /// the bound has arrived: the rest is never read.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn authorization_server_metadata_past_the_bound_is_refused_at_the_bound() {
+        let issuer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", issuer_listener.local_addr().unwrap());
+        let server = serve_oversized_document(
+            issuer_listener,
+            format!(
+                r#""issuer":"{issuer}","code_challenge_methods_supported":["S256"],"authorization_endpoint":"/authorize","token_endpoint":"/token","registration_endpoint":"/register""#
+            ),
+        );
+        let resource_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resource = format!("http://{}", resource_listener.local_addr().unwrap());
+        let _resource_server = serve_document(
+            resource_listener,
+            format!(r#"{{"resource":"{resource}/mcp","authorization_servers":["{issuer}"]}}"#),
+        );
+        let target =
+            McpServerIdentity::from_server_config("bounded-issuer", format!("{resource}/mcp"));
+        let challenge = format!(
+            r#"Bearer resource_metadata="{resource}/.well-known/oauth-protected-resource/mcp""#
+        );
+        let authority =
+            ce_refresh_authority(Arc::new(EphemeralTokenStore::new()), test_auth_lease());
+
+        let result = authority
+            .discover(
+                &target,
+                Some(&challenge),
+                tokio::time::Instant::now() + MCP_OAUTH_START_BOUND,
+                None,
+            )
+            .await;
+
+        assert_read_stopped_at_the_bound(bytes_sent(server).await);
+        let Err(error) = result else {
+            panic!("the oversized document was accepted");
+        };
+        assert_names_no_document_content(&error);
+        assert!(
+            matches!(&error, McpOAuthError::DiscoveryFailed { reason, .. }
+                if reason == "authorization server metadata larger than 1048576 bytes"),
+            "{error:?}"
+        );
+    }
+
+    /// A dynamic client registration response past the bound is refused,
+    /// typed, once the bound has arrived: the rest is never read.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_registration_response_past_the_bound_is_refused_at_the_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_oversized_document(
+            listener,
+            r#""client_id":"client-123","token_endpoint_auth_method":"none""#.to_owned(),
+        );
+        let target =
+            McpServerIdentity::from_server_config("bounded-registration", format!("{base}/mcp"));
+        let discovery = StoredMcpOAuthDiscovery {
+            resource: target.server_url().to_string(),
+            resource_metadata_url: format!("{base}/.well-known/oauth-protected-resource/mcp"),
+            authorization_server: base.clone(),
+            authorization_metadata_url: format!("{base}/.well-known/oauth-authorization-server"),
+            authorization_endpoint: format!("{base}/authorize"),
+            token_endpoint: format!("{base}/token"),
+            registration_endpoint: Some(format!("{base}/register")),
+            scopes: Vec::new(),
+        };
+        let authority =
+            ce_refresh_authority(Arc::new(EphemeralTokenStore::new()), test_auth_lease());
+
+        let result = authority
+            .register_client(
+                &target,
+                &discovery,
+                "http://127.0.0.1:1/mcp/oauth/callback",
+                RedirectMode::Loopback,
+            )
+            .await;
+
+        assert_read_stopped_at_the_bound(bytes_sent(server).await);
+        let Err(error) = result else {
+            panic!("the oversized response was accepted");
+        };
+        assert_names_no_document_content(&error);
+        assert!(
+            matches!(&error, McpOAuthError::RegistrationFailed { reason, .. }
+                if reason == "registration response larger than 1048576 bytes"),
+            "{error:?}"
+        );
+    }
+
+    /// The account strategy's OpenID Connect configuration past the bound is
+    /// refused once the bound has arrived: the rest is never read.
+    #[tokio::test]
+    async fn an_openid_configuration_past_the_bound_is_refused_at_the_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_oversized_document(
+            listener,
+            format!(r#""issuer":"{issuer}","userinfo_endpoint":"{issuer}/userinfo""#),
+        );
+
+        let refused = OidcUserInfoAccountStrategy::new().preflight(&issuer).await;
+
+        assert_read_stopped_at_the_bound(bytes_sent(server).await);
+        assert_eq!(refused, Err(ConnectorOAuthRefusal::VerificationUnavailable));
     }
 }

@@ -22,7 +22,7 @@ import re
 import zipfile
 import zlib
 
-SELECTED_VERSION = "0.9.11"
+SELECTED_VERSION = "0.9.13"
 DISTRIBUTION = "meerkat-meta"
 MAX_WHEEL_BYTES = 32 * 1024 * 1024
 # The largest dist-info entry verify() reads, METADATA or WHEEL. The client

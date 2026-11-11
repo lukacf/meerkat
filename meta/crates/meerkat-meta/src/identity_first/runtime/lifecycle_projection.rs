@@ -2923,7 +2923,8 @@ impl IdentityRuntime {
     /// before that retirement ends it, as for a retire Meta asks for. The
     /// step holds these identities' lifecycle locks, so the projection takes
     /// what is kept once the step answered. Nothing is read when no
-    /// retirement hook is installed.
+    /// retirement hook is installed, and nothing for an identity created at
+    /// runtime, which Core's seal never unlists.
     pub(super) async fn keep_unlisting_incarnations(
         &self,
         specs: &[DurableAgentSpec],
@@ -2939,9 +2940,9 @@ impl IdentityRuntime {
             .entries
             .read()
             .await
-            .keys()
-            .filter(|identity| !listed.contains(identity))
-            .cloned()
+            .iter()
+            .filter(|(identity, entry)| !entry.created && !listed.contains(identity))
+            .map(|(identity, _)| identity.clone())
             .collect::<Vec<_>>();
         let mut kept = Vec::new();
         for identity in unlisted {

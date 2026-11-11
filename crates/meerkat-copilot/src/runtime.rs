@@ -34,9 +34,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::protocol::{
     CopilotAccountIdentity, CopilotBackendConfig, CopilotCredentialMode, CopilotEndpoint,
-    CopilotModelSnapshot, CopilotModelsEnvelope, CopilotTokenEnvelope, CopilotTokenErrorEnvelope,
-    CopilotUserEnvelope, DEFAULT_COPILOT_API_BASE, GitHubErrorEnvelope, GitHubTokenKind,
-    copilot_user_url,
+    CopilotModelMatch, CopilotModelOffering, CopilotModelSnapshot, CopilotModelsEnvelope,
+    CopilotTokenEnvelope, CopilotTokenErrorEnvelope, CopilotUserEnvelope, DEFAULT_COPILOT_API_BASE,
+    GitHubErrorEnvelope, GitHubTokenKind, copilot_user_url,
 };
 
 const CAPI_EXPIRY_SKEW_SECONDS: i64 = 300;
@@ -672,6 +672,52 @@ impl CopilotRuntime {
         resolve_route_for_state(&state, provider, model)
     }
 
+    /// Test support for the route rows of the provider crates; not part of
+    /// the supported API. Seats an account on this runtime that holds
+    /// `models` as its model list and serves on `api_base`, for the
+    /// connections of `credential_identity` whose authorizer reports
+    /// `persistence_id`. Nothing is requested and no token is minted: such
+    /// a connection signs with its own authorizer, and the routes resolve
+    /// against the seated list exactly as against a discovered one. The
+    /// runtime keeps the account only while the returned handle lives.
+    #[doc(hidden)]
+    pub fn seat_account_for_tests(
+        &self,
+        persistence_id: meerkat_core::auth::ProviderAuthPersistenceId,
+        credential_identity: &AuthCredentialIdentity,
+        api_base: &str,
+        models: Vec<crate::CopilotModel>,
+    ) -> Result<CopilotSeatedAccount, crate::protocol::CopilotProtocolError> {
+        let models = CopilotModelSnapshot::from_models(models)?;
+        let state = Arc::new(CopilotAccountState::with_pacing(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::OperatorToken,
+            Arc::default(),
+        ));
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: state.next_generation.fetch_add(1, Ordering::Relaxed),
+            token: String::new(),
+            source_generation: 0,
+            source_published_at_millis: None,
+            source_expires_at: None,
+            refresh_at: DateTime::<Utc>::MAX_UTC,
+            expires_at: DateTime::<Utc>::MAX_UTC,
+            api_base: api_base.to_string(),
+            models: Some(Arc::new(models)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        self.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: credential_identity.clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        Ok(CopilotSeatedAccount { _state: state })
+    }
+
     /// The account state `connection`'s Copilot authorizer shares.
     fn connection_state(
         &self,
@@ -743,23 +789,26 @@ fn resolve_route_for_state(
 ) -> Option<CopilotRouteResolution> {
     let cache = state.cache.read();
     let cached = cache.as_ref()?;
-    let (access, capabilities, available_models) = match cached.models.as_ref() {
+    // The entry `model` names in the account's list, and the account's own
+    // id for it: the id the route's requests name. A model the list does not
+    // resolve, and an account whose list is not loaded, keep the requested
+    // id.
+    let (access, capabilities, available_models, wire_model) = match cached.models.as_ref() {
         Some(snapshot) => {
-            let model = snapshot.model(model);
-            let access = model.map_or(CopilotModelAccess::Unavailable, |model| {
-                model
-                    .route_for(provider)
-                    .map_or(CopilotModelAccess::Unavailable, |endpoint| {
-                        CopilotModelAccess::Available { endpoint }
-                    })
-            });
+            let (wire_model, offering) = match snapshot.resolve(model) {
+                CopilotModelMatch::Listed { id, offering } => (id, Some(offering)),
+                CopilotModelMatch::Ambiguous(_) | CopilotModelMatch::Absent => (model, None),
+            };
             (
-                access,
-                model.map(|model| model.capabilities.clone()),
+                offering.map_or(CopilotModelAccess::Unavailable, |offering| {
+                    model_access(offering, provider)
+                }),
+                offering.map(|offering| offering.capabilities.clone()),
                 Some(Arc::clone(snapshot)),
+                wire_model.to_string(),
             )
         }
-        None => (CopilotModelAccess::Unknown, None, None),
+        None => (CopilotModelAccess::Unknown, None, None, model.to_string()),
     };
     Some(CopilotRouteResolution {
         access,
@@ -769,13 +818,31 @@ fn resolve_route_for_state(
         state: Arc::downgrade(state),
         provider,
         model: model.to_string(),
+        wire_model,
     })
+}
+
+/// How `provider`'s family reaches a model the account lists.
+fn model_access(offering: &CopilotModelOffering, provider: Provider) -> CopilotModelAccess {
+    offering
+        .route_for(provider)
+        .map_or(CopilotModelAccess::Unavailable, |endpoint| {
+            CopilotModelAccess::Available { endpoint }
+        })
 }
 
 impl Default for CopilotRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// An account seated by [`CopilotRuntime::seat_account_for_tests`]: the
+/// runtime serves it while this handle lives.
+#[doc(hidden)]
+#[must_use = "the runtime serves the seated account only while this handle lives"]
+pub struct CopilotSeatedAccount {
+    _state: Arc<CopilotAccountState>,
 }
 
 #[derive(Clone)]
@@ -805,14 +872,12 @@ impl CopilotResolvedAuth {
         let Some(snapshot) = self.model_snapshot() else {
             return CopilotModelAccess::Unknown;
         };
-        let Some(model_access) = snapshot.model(model) else {
-            return CopilotModelAccess::Unavailable;
-        };
-        model_access
-            .route_for(provider)
-            .map_or(CopilotModelAccess::Unavailable, |endpoint| {
-                CopilotModelAccess::Available { endpoint }
-            })
+        match snapshot.resolve(model) {
+            CopilotModelMatch::Listed { offering, .. } => model_access(offering, provider),
+            CopilotModelMatch::Ambiguous(_) | CopilotModelMatch::Absent => {
+                CopilotModelAccess::Unavailable
+            }
+        }
     }
 }
 
@@ -831,9 +896,22 @@ pub struct CopilotRouteResolution {
     state: Weak<CopilotAccountState>,
     provider: Provider,
     model: String,
+    wire_model: String,
 }
 
 impl CopilotRouteResolution {
+    /// The id the account lists the route's model under: the id a request
+    /// on this route names. It is the requested id unless the account lists
+    /// the model under another spelling of it
+    /// ([`crate::same_account_model_id`]), and while the account's model
+    /// list is not loaded or does not resolve the model. The session keeps
+    /// the requested id as its model; only the request to Copilot names
+    /// this one.
+    #[must_use]
+    pub fn wire_model(&self) -> &str {
+        &self.wire_model
+    }
+
     pub fn bind_authorizer(&self, inner: Arc<dyn HttpAuthorizer>) -> Arc<dyn HttpAuthorizer> {
         Arc::new(CopilotRouteBoundAuthorizer {
             inner,
@@ -850,13 +928,26 @@ impl CopilotRouteResolution {
         model: &str,
         endpoint: CopilotEndpoint,
     ) -> String {
+        // A model that more than one entry of the account's list names, and
+        // none exactly, is refused by naming those entries.
         // A model the account lists under a policy that is not `enabled` is
         // refused by naming the state the account states.
         // So is a model it lists with an empty endpoint list.
-        let listed = self
+        let listed = match self
             .available_models
             .as_ref()
-            .and_then(|snapshot| snapshot.model(model));
+            .map(|snapshot| snapshot.resolve(model))
+        {
+            Some(CopilotModelMatch::Listed { offering, .. }) => Some(offering),
+            Some(CopilotModelMatch::Ambiguous(candidates)) => {
+                return format!(
+                    "Copilot account lists more than one model matching {} model '{model}': {}",
+                    provider.as_str(),
+                    candidates.join(", "),
+                );
+            }
+            Some(CopilotModelMatch::Absent) | None => None,
+        };
         let refusing_state = listed.and_then(|offering| offering.refusing_policy_state());
         let mut message = match refusing_state {
             Some(state) => format!(
@@ -1006,6 +1097,14 @@ pub fn routed_client(
                 "Copilot route was not initialized during auth resolution".to_string(),
             )
         })?;
+    if route.wire_model != model {
+        tracing::debug!(
+            provider = provider.as_str(),
+            model = %model,
+            account_model = %route.wire_model,
+            "Copilot route requests name the account's id for the model"
+        );
+    }
     let fingerprint = CopilotRouteFingerprint::from(&route);
     let capabilities = route.capabilities.clone();
     let schema_compiler = factory(&route, &connection)?;
@@ -1030,6 +1129,9 @@ struct CopilotRouteFingerprint {
     access: CopilotModelAccess,
     api_base: String,
     capabilities: Option<crate::protocol::CopilotModelCapabilities>,
+    /// The account's id for the model: a client is built to name it, so a
+    /// list that moves the model to another id needs a new client.
+    wire_model: String,
 }
 
 impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
@@ -1038,6 +1140,7 @@ impl From<&CopilotRouteResolution> for CopilotRouteFingerprint {
             access: route.access,
             api_base: route.api_base.clone(),
             capabilities: route.capabilities.clone(),
+            wire_model: route.wire_model.clone(),
         }
     }
 }
@@ -1255,9 +1358,11 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
     ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
         self.refresh_prepared_route().map_err(Self::client_error)?;
         let prepared = self.prepared_route.read().clone();
-        let messages = prepared.client.project_replay_messages(messages)?;
-        Ok(meerkat_llm_core::LlmReplayProjection::new(messages)
-            .with_route_witness(meerkat_llm_core::LlmRequestRouteWitness::new(prepared)))
+        // The route client's projection (through the capability gate, which
+        // forwards it) carries its own replay decision; the route witness
+        // is added beside it.
+        let projection = prepared.client.project_replay_request(messages)?;
+        Ok(projection.with_route_witness(meerkat_llm_core::LlmRequestRouteWitness::new(prepared)))
     }
 
     fn project_replay_messages(
@@ -1282,7 +1387,9 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
             .route_witness::<PreparedCopilotRoute>()
             .ok_or_else(Self::missing_route_witness)?;
         self.ensure_prepared_route_current(prepared)?;
-        prepared.client.request_pressure(request.request())
+        // The prepared form: the route client measures the body its own
+        // projection decided, not one decided again now.
+        prepared.client.prepared_request_pressure(request)
     }
 
     fn authored_cache_breakpoints(
@@ -1304,7 +1411,7 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.ensure_prepared_route_current(prepared)?;
         prepared
             .client
-            .authored_cache_breakpoints(request.request(), canonical_messages)
+            .prepared_cache_breakpoints(request, canonical_messages)
     }
 
     fn stream<'a>(
@@ -1407,6 +1514,31 @@ struct CopilotCapabilityGatedClient {
 }
 
 impl CopilotCapabilityGatedClient {
+    /// The account's prompt limit over a measurement of `request`. A prompt
+    /// the provider measured over the account's limit is a context refusal,
+    /// the class the agent compacts on. Copilot's own answer to such a
+    /// prompt is not known, so none is assumed.
+    fn gate_pressure(
+        &self,
+        request: &meerkat_llm_core::LlmRequest,
+        pressure: Option<meerkat_core::ProviderRequestPressure>,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
+        let measured = pressure
+            .as_ref()
+            .and_then(|value| value.provider_issued_input_tokens);
+        let prompt_limit =
+            account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
+        if let (Some(measured), Some(limit)) = (measured, prompt_limit)
+            && measured > limit
+        {
+            return Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
+                max: usize::try_from(limit).unwrap_or(usize::MAX),
+                requested: usize::try_from(measured).unwrap_or(usize::MAX),
+            });
+        }
+        Ok(pressure)
+    }
+
     fn validate_request(
         &self,
         request: &meerkat_llm_core::LlmRequest,
@@ -1562,6 +1694,16 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .or_else(|| self.inner.prompt_token_limit(output_budget))
     }
 
+    /// The route client's own projection, with whatever it decided for the
+    /// request (an OpenAI-wire client's replay decision): the gate adds
+    /// nothing to a projection and must not lose that decision.
+    fn project_replay_request(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
+        self.inner.project_replay_request(messages)
+    }
+
     fn project_replay_messages(
         &self,
         messages: &[meerkat_core::Message],
@@ -1574,27 +1716,20 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
         request: &meerkat_llm_core::LlmRequest,
     ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
         self.validate_request(request)?;
-        let pressure = self.inner.request_pressure(request)?;
-        if let Some(measured) = pressure.as_ref().and_then(|value| {
-            value
-                .provider_issued_input_tokens
-                .map(|tokens| (tokens, value))
-        }) {
-            let prompt_limit =
-                account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
-            // A prompt the provider measured over the account's limit is a
-            // context refusal, the class the agent compacts on. Copilot's own
-            // answer to such a prompt is not known, so none is assumed.
-            if let Some(limit) = prompt_limit
-                && measured.0 > limit
-            {
-                return Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
-                    max: usize::try_from(limit).unwrap_or(usize::MAX),
-                    requested: usize::try_from(measured.0).unwrap_or(usize::MAX),
-                });
-            }
-        }
-        Ok(pressure)
+        self.gate_pressure(request, self.inner.request_pressure(request)?)
+    }
+
+    /// The same gate over the route client's measurement of the prepared
+    /// request, so the measurement is of the body its projection decided.
+    fn prepared_request_pressure(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+    ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError> {
+        self.validate_request(request.request())?;
+        self.gate_pressure(
+            request.request(),
+            self.inner.prepared_request_pressure(request)?,
+        )
     }
 
     fn authored_cache_breakpoints(
@@ -1604,6 +1739,15 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError> {
         self.inner
             .authored_cache_breakpoints(request, canonical_messages)
+    }
+
+    fn prepared_cache_breakpoints(
+        &self,
+        request: &meerkat_llm_core::PreparedLlmRequest,
+        canonical_messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError> {
+        self.inner
+            .prepared_cache_breakpoints(request, canonical_messages)
     }
 
     fn stream<'a>(
@@ -4430,6 +4574,462 @@ async fn refresh_github_tokens(
 mod tests {
     use super::*;
 
+    /// A Copilot account lists Claude models that carry a minor version with
+    /// a dot (`claude-opus-5.5`), while the model catalog writes the same
+    /// models with a hyphen (`claude-opus-5-5`). Two ids name the same model
+    /// on an account when they are equal after every `.` is read as `-`; an
+    /// exact entry always wins. The account list here is hand-written.
+    mod separator_insensitive_model_ids {
+        use super::*;
+
+        /// One entry of the account's list. Its output limit tells the
+        /// entries apart in a route's capabilities.
+        fn listed(
+            id: &str,
+            endpoints: &[CopilotEndpoint],
+            max_output_tokens: u32,
+        ) -> crate::CopilotModel {
+            crate::CopilotModel {
+                id: id.to_string(),
+                vendor: None,
+                name: None,
+                version: None,
+                model_picker_enabled: Some(true),
+                capabilities: crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_output_tokens: Some(max_output_tokens),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                policy: None,
+                supported_endpoints: Some(endpoints.to_vec()),
+            }
+        }
+
+        /// An account list as Copilot writes one: dotted Claude and OpenAI
+        /// ids, a Claude id with no minor version, a Gemini id.
+        fn account_list() -> Vec<crate::CopilotModel> {
+            vec![
+                listed("claude-opus-5.5", &[CopilotEndpoint::Messages], 55_000),
+                listed("claude-fable-5.2", &[CopilotEndpoint::Messages], 52_000),
+                listed("claude-sonnet-5.5", &[CopilotEndpoint::Messages], 45_000),
+                listed("claude-opus-5", &[CopilotEndpoint::Messages], 50_000),
+                listed("gpt-5.5", &[CopilotEndpoint::Responses], 35_000),
+                listed(
+                    "gpt-5.4-mini",
+                    &[CopilotEndpoint::Responses, CopilotEndpoint::ChatCompletions],
+                    34_000,
+                ),
+                listed(
+                    "gemini-3.8-flash",
+                    &[CopilotEndpoint::ChatCompletions],
+                    38_000,
+                ),
+            ]
+        }
+
+        /// An account state that holds `models` as its loaded list.
+        fn account_with(models: Vec<crate::CopilotModel>) -> Arc<CopilotAccountState> {
+            let state = Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::OperatorToken,
+            ));
+            *state.cache.write() = Some(CachedCopilotToken {
+                generation: 1,
+                token: "fixture".to_string(),
+                source_generation: 1,
+                source_published_at_millis: None,
+                source_expires_at: None,
+                refresh_at: Utc::now() + Duration::hours(1),
+                expires_at: Utc::now() + Duration::hours(2),
+                api_base: "https://copilot.example.test".to_string(),
+                models: Some(Arc::new(
+                    CopilotModelSnapshot::from_models(models).expect("unique model ids"),
+                )),
+                model_discovery_refresh_at: None,
+                identity: None,
+                exchange_unavailable: None,
+            });
+            state
+        }
+
+        fn route(
+            state: &Arc<CopilotAccountState>,
+            provider: Provider,
+            model: &str,
+        ) -> CopilotRouteResolution {
+            resolve_route_for_state(state, provider, model).expect("the account holds a token")
+        }
+
+        fn output_limit(route: &CopilotRouteResolution) -> Option<u32> {
+            route
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.limits.max_output_tokens)
+        }
+
+        /// A catalog id resolves on the Anthropic route to the entry the
+        /// account writes with a dot, and the route carries that entry's
+        /// capabilities. `claude-opus-5-5` is also the model a Copilot
+        /// Anthropic route runs when a request names none.
+        #[test]
+        fn a_catalog_id_resolves_to_the_entry_the_account_writes_with_a_dot() {
+            let state = account_with(account_list());
+            for (catalog_id, entry_limit) in [
+                ("claude-opus-5-5", 55_000),
+                ("claude-fable-5-2", 52_000),
+                ("claude-sonnet-5-5", 45_000),
+            ] {
+                let route = route(&state, Provider::Anthropic, catalog_id);
+                assert_eq!(
+                    route.access,
+                    CopilotModelAccess::Available {
+                        endpoint: CopilotEndpoint::Messages
+                    },
+                    "{catalog_id}"
+                );
+                assert_eq!(output_limit(&route), Some(entry_limit), "{catalog_id}");
+            }
+        }
+
+        /// The account's own spelling keeps resolving, as it did.
+        #[test]
+        fn the_accounts_own_spelling_resolves_as_before() {
+            let state = account_with(account_list());
+            for (account_id, provider, endpoint, entry_limit) in [
+                (
+                    "claude-opus-5.5",
+                    Provider::Anthropic,
+                    CopilotEndpoint::Messages,
+                    55_000,
+                ),
+                (
+                    "claude-opus-5",
+                    Provider::Anthropic,
+                    CopilotEndpoint::Messages,
+                    50_000,
+                ),
+                (
+                    "gpt-5.5",
+                    Provider::OpenAI,
+                    CopilotEndpoint::Responses,
+                    35_000,
+                ),
+                (
+                    "gpt-5.4-mini",
+                    Provider::OpenAI,
+                    CopilotEndpoint::Responses,
+                    34_000,
+                ),
+                (
+                    "gemini-3.8-flash",
+                    Provider::Gemini,
+                    CopilotEndpoint::ChatCompletions,
+                    38_000,
+                ),
+            ] {
+                let route = route(&state, provider, account_id);
+                assert_eq!(
+                    route.access,
+                    CopilotModelAccess::Available { endpoint },
+                    "{account_id}"
+                );
+                assert_eq!(output_limit(&route), Some(entry_limit), "{account_id}");
+            }
+        }
+
+        /// An id the account lists exactly resolves to that entry, also when
+        /// another entry matches it separator-insensitively.
+        #[test]
+        fn an_exact_entry_wins_over_a_separator_insensitive_one() {
+            let mut models = account_list();
+            models.push(listed(
+                "claude-opus-5-5",
+                &[CopilotEndpoint::Messages],
+                11_000,
+            ));
+            let state = account_with(models);
+            assert_eq!(
+                output_limit(&route(&state, Provider::Anthropic, "claude-opus-5-5")),
+                Some(11_000)
+            );
+            assert_eq!(
+                output_limit(&route(&state, Provider::Anthropic, "claude-opus-5.5")),
+                Some(55_000)
+            );
+        }
+
+        /// Two entries match an id separator-insensitively and none exactly:
+        /// the route is refused, and the refusal names both.
+        #[test]
+        fn two_separator_insensitive_entries_are_refused_by_name() {
+            let mut models = account_list();
+            models.push(listed(
+                "claude-opus.5.5",
+                &[CopilotEndpoint::Messages],
+                12_000,
+            ));
+            let state = account_with(models);
+            let route = route(&state, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(route.access, CopilotModelAccess::Unavailable);
+            assert_eq!(route.capabilities, None);
+            assert_eq!(
+                route.unavailable_message(
+                    Provider::Anthropic,
+                    "claude-opus-5-5",
+                    CopilotEndpoint::Messages
+                ),
+                "Copilot account lists more than one model matching anthropic model \
+                 'claude-opus-5-5': claude-opus-5.5, claude-opus.5.5"
+            );
+        }
+
+        /// A model the account does not list under any spelling is refused
+        /// with the text it always had.
+        #[test]
+        fn an_absent_model_keeps_its_refusal_text() {
+            let state = account_with(account_list());
+            let anthropic = route(&state, Provider::Anthropic, "claude-opus-4-5");
+            assert_eq!(anthropic.access, CopilotModelAccess::Unavailable);
+            assert_eq!(
+                anthropic.unavailable_message(
+                    Provider::Anthropic,
+                    "claude-opus-4-5",
+                    CopilotEndpoint::Messages
+                ),
+                "Copilot account does not expose /v1/messages for anthropic model \
+                 'claude-opus-4-5'; available account models: claude-fable-5.2, claude-opus-5, \
+                 claude-opus-5.5, claude-sonnet-5.5"
+            );
+            let openai = route(&state, Provider::OpenAI, "gpt-5.6");
+            assert_eq!(openai.access, CopilotModelAccess::Unavailable);
+            assert_eq!(
+                openai.unavailable_message(Provider::OpenAI, "gpt-5.6", CopilotEndpoint::Responses),
+                "Copilot account does not expose /responses for openai model 'gpt-5.6'; \
+                 available account models: gemini-3.8-flash, gpt-5.4-mini, gpt-5.5"
+            );
+        }
+
+        /// The id a route's requests name is the account's own id for the
+        /// model, whichever spelling the request used: the dotted entry for
+        /// a catalog id, the same id for the account's own spelling and for
+        /// OpenAI and Gemini ids the account lists as the catalog does. A
+        /// model the list does not resolve keeps the requested id.
+        #[test]
+        fn a_route_names_the_accounts_id_for_its_model() {
+            let state = account_with(account_list());
+            for (provider, requested, account_id) in [
+                (Provider::Anthropic, "claude-opus-5-5", "claude-opus-5.5"),
+                (Provider::Anthropic, "claude-fable-5-2", "claude-fable-5.2"),
+                (Provider::Anthropic, "claude-opus-5.5", "claude-opus-5.5"),
+                (Provider::Anthropic, "claude-opus-5", "claude-opus-5"),
+                (Provider::OpenAI, "gpt-5.5", "gpt-5.5"),
+                (Provider::OpenAI, "gpt-5.4-mini", "gpt-5.4-mini"),
+                (Provider::OpenAI, "gpt-5-5", "gpt-5.5"),
+                (Provider::Gemini, "gemini-3.8-flash", "gemini-3.8-flash"),
+                (Provider::Anthropic, "claude-opus-4-5", "claude-opus-4-5"),
+            ] {
+                assert_eq!(
+                    route(&state, provider, requested).wire_model(),
+                    account_id,
+                    "{requested}"
+                );
+            }
+
+            let mut ambiguous = account_list();
+            ambiguous.push(listed(
+                "claude-opus.5.5",
+                &[CopilotEndpoint::Messages],
+                12_000,
+            ));
+            assert_eq!(
+                route(
+                    &account_with(ambiguous),
+                    Provider::Anthropic,
+                    "claude-opus-5-5"
+                )
+                .wire_model(),
+                "claude-opus-5-5"
+            );
+        }
+
+        /// The route a resolved auth reports for a model reads the same
+        /// lookup: either spelling of a model the account lists, and no
+        /// route for a model it does not list.
+        #[tokio::test]
+        async fn a_resolved_auth_reports_the_route_of_either_spelling() {
+            let (auth_binding, binding) = validated_binding();
+            let (env, _) = resolver_environment(&auth_binding).await;
+            let resolved = CopilotResolvedAuth {
+                authorizer: Arc::new(CopilotAuthorizer {
+                    state: account_with(account_list()),
+                    binding,
+                    env,
+                    transport: Arc::new(ScriptedTransport::new([])),
+                }),
+                metadata: AuthMetadata::default(),
+            };
+            for spelling in ["claude-opus-5-5", "claude-opus-5.5"] {
+                assert_eq!(
+                    resolved.route_for(Provider::Anthropic, spelling),
+                    CopilotModelAccess::Available {
+                        endpoint: CopilotEndpoint::Messages
+                    },
+                    "{spelling}"
+                );
+            }
+            assert_eq!(
+                resolved.route_for(Provider::Anthropic, "claude-opus-4-5"),
+                CopilotModelAccess::Unavailable
+            );
+        }
+
+        /// While an account holds a token and no model list (its first
+        /// listing failed, or a mint's listing failed without refusing the
+        /// token), its routes know nothing about its models: access is
+        /// unknown, no account capabilities apply, and a request names the
+        /// id the session asked for, the catalog spelling included. Pinned
+        /// as it is, so that a change to this state is a deliberate one.
+        #[test]
+        fn an_account_without_its_list_names_the_requested_id() {
+            let unlisted = account_with(Vec::new());
+            unlisted.cache.write().as_mut().expect("cache").models = None;
+            for (provider, requested) in [
+                (Provider::Anthropic, "claude-opus-5-5"),
+                (Provider::Anthropic, "claude-opus-5.5"),
+                (Provider::OpenAI, "gpt-5.5"),
+                (Provider::Gemini, "gemini-3.8-flash"),
+            ] {
+                let unknown = route(&unlisted, provider, requested);
+                assert_eq!(unknown.access, CopilotModelAccess::Unknown, "{requested}");
+                assert_eq!(unknown.capabilities, None, "{requested}");
+                assert_eq!(unknown.wire_model(), requested);
+            }
+        }
+
+        /// An account that lists both spellings of one id serves each
+        /// request on the entry it names exactly. A build that names the
+        /// dotted entry runs as the catalog row (the session's model is the
+        /// catalog id), so its requests name the hyphen entry: by the rule
+        /// the two entries are one model.
+        #[test]
+        fn an_account_listing_both_spellings_serves_the_exact_entry() {
+            let mut models = account_list();
+            models.push(listed(
+                "claude-opus-5-5",
+                &[CopilotEndpoint::Messages],
+                11_000,
+            ));
+            let state = account_with(models);
+            assert_eq!(
+                route(&state, Provider::Anthropic, "claude-opus-5-5").wire_model(),
+                "claude-opus-5-5"
+            );
+            assert_eq!(
+                route(&state, Provider::Anthropic, "claude-opus-5.5").wire_model(),
+                "claude-opus-5.5"
+            );
+        }
+
+        /// A route's client is built to name the account's id, so a model
+        /// list that moves the model to another id is a route change: the
+        /// route's fingerprint differs, which rebuilds the client.
+        #[test]
+        fn a_list_that_moves_the_accounts_id_changes_the_route() {
+            let state = account_with(account_list());
+            let before = route(&state, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(before.wire_model(), "claude-opus-5.5");
+
+            let mut models = account_list();
+            for model in &mut models {
+                if model.id == "claude-opus-5.5" {
+                    model.id = "claude-opus-5-5".to_string();
+                }
+            }
+            state.cache.write().as_mut().expect("cache").models = Some(Arc::new(
+                CopilotModelSnapshot::from_models(models).expect("unique model ids"),
+            ));
+            let after = route(&state, Provider::Anthropic, "claude-opus-5-5");
+            assert_eq!(after.wire_model(), "claude-opus-5-5");
+            assert_eq!(after.access, before.access);
+            assert_eq!(after.capabilities, before.capabilities);
+            assert!(
+                CopilotRouteFingerprint::from(&after) != CopilotRouteFingerprint::from(&before),
+                "the account's id is part of the route"
+            );
+        }
+
+        /// The rule itself: two ids are the same model on an account when
+        /// they are equal once every `.` is read as `-`, and only then.
+        #[test]
+        fn two_ids_name_one_model_when_only_their_separators_differ() {
+            for (left, right, same) in [
+                ("claude-opus-5-5", "claude-opus-5.5", true),
+                ("claude-opus-5.5", "claude-opus-5-5", true),
+                ("claude.opus.5.5", "claude-opus-5-5", true),
+                ("gpt-5.5", "gpt-5.5", true),
+                ("gpt-5.5", "gpt-5.6", false),
+                ("claude-opus-55", "claude-opus-5.5", false),
+                ("claude-opus-5-5", "claude-opus-5-5-fast", false),
+                ("claude-opus-5-5", "claude_opus_5_5", false),
+                ("Claude-Opus-5-5", "claude-opus-5.5", false),
+                ("", "", true),
+            ] {
+                assert_eq!(
+                    crate::same_account_model_id(left, right),
+                    same,
+                    "{left} / {right}"
+                );
+            }
+        }
+
+        /// The model list answers a build about a model the registry does
+        /// not define the same way: the entry the account writes with a dot
+        /// is offered under the hyphen spelling too, and an id that matches
+        /// two entries and none exactly is not offered.
+        #[test]
+        fn the_account_model_lookup_reads_the_same_rule() {
+            use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+            let credential = account_identity();
+            let mut models = account_list();
+            models.push(listed(
+                "account-model-1.5",
+                &[CopilotEndpoint::Responses],
+                15_000,
+            ));
+            let snapshot =
+                CopilotModelSnapshot::from_models(models.clone()).expect("unique model ids");
+            for spelling in ["account-model-1.5", "account-model-1-5"] {
+                match snapshot.account_model(&credential, spelling) {
+                    AccountModelLookup::Offered(definition) => {
+                        assert_eq!(definition.provider, Provider::OpenAI, "{spelling}");
+                        assert_eq!(definition.max_output_tokens, Some(15_000), "{spelling}");
+                    }
+                    other => panic!("{spelling} is offered: {other:?}"),
+                }
+            }
+
+            models.push(listed(
+                "account-model.1-5",
+                &[CopilotEndpoint::Responses],
+                16_000,
+            ));
+            let snapshot = CopilotModelSnapshot::from_models(models).expect("unique model ids");
+            match snapshot.account_model(&credential, "account-model-1-5") {
+                AccountModelLookup::Refused(refusal @ AccountModelRefusal::NotOffered { .. }) => {
+                    let text = refusal.to_string();
+                    assert!(
+                        text.contains("account-model-1.5") && text.contains("account-model.1-5"),
+                        "{text}"
+                    );
+                }
+                other => panic!("an id that matches two entries is not offered: {other:?}"),
+            }
+        }
+    }
+
     mod redirect_fixture {
         #![allow(clippy::unwrap_used)]
         /// A credential endpoint that answers every request with a `302` to a
@@ -5415,6 +6015,362 @@ mod tests {
             observed.lock().as_slice(),
             ["https://first.example.test", "https://second.example.test"]
         );
+    }
+
+    /// What a route client that decides at projection was asked, and under
+    /// which decision it answered.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RouteClientCall {
+        what: &'static str,
+        /// The request carried the decision its projection made.
+        carried_decision: bool,
+        /// The step is lowered as the service returned it.
+        native: bool,
+    }
+
+    /// The decision a projection made: whether the step is one this process
+    /// received from the route's service.
+    struct FrozenReplayDecision(bool);
+
+    /// A route client that decides as an OpenAI-wire client does. Its
+    /// projection asks the replay owner whether this process received the
+    /// transcript's step from its service and freezes the answer with the
+    /// projection. Measuring, authoring cache claims and sending use the
+    /// frozen answer when the request carries it and ask the ledger again
+    /// when it does not, and record which of the two happened.
+    struct DecidingRouteClient {
+        target: meerkat_core::OpenAiContinuityTarget,
+        calls: Arc<Mutex<Vec<RouteClientCall>>>,
+    }
+
+    impl DecidingRouteClient {
+        fn received(&self, messages: &[meerkat_core::Message]) -> bool {
+            messages.iter().any(|message| match message {
+                meerkat_core::Message::BlockAssistant(step) => {
+                    meerkat_core::ReplayStepAdmission::of(
+                        meerkat_core::ReplayWireFamily::OpenAi,
+                        Some(&self.target),
+                        &step.blocks,
+                    )
+                    .admits_provider_items()
+                }
+                _ => false,
+            })
+        }
+
+        /// Answer `what` for `messages`, under the decision `prepared`
+        /// carries or, without one, under what the ledger says now.
+        fn answer(
+            &self,
+            what: &'static str,
+            messages: &[meerkat_core::Message],
+            prepared: Option<&meerkat_llm_core::PreparedLlmRequest>,
+        ) -> bool {
+            let frozen = prepared
+                .and_then(|request| request.replay_witness::<FrozenReplayDecision>())
+                .map(|decision| decision.0);
+            let native = frozen.unwrap_or_else(|| self.received(messages));
+            self.calls.lock().push(RouteClientCall {
+                what,
+                carried_decision: frozen.is_some(),
+                native,
+            });
+            native
+        }
+
+        fn pressure(native: bool) -> meerkat_core::ProviderRequestPressure {
+            meerkat_core::ProviderRequestPressure::new(if native { 900 } else { 300 }, None)
+        }
+    }
+
+    #[async_trait]
+    impl meerkat_llm_core::LlmClient for DecidingRouteClient {
+        fn project_replay_request(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<meerkat_llm_core::LlmReplayProjection, meerkat_llm_core::LlmError> {
+            Ok(
+                meerkat_llm_core::LlmReplayProjection::new(messages.to_vec()).with_replay_witness(
+                    meerkat_llm_core::LlmRequestRouteWitness::new(FrozenReplayDecision(
+                        self.received(messages),
+                    )),
+                ),
+            )
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn request_pressure(
+            &self,
+            request: &meerkat_llm_core::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            Ok(Some(Self::pressure(self.answer(
+                "pressure",
+                &request.messages,
+                None,
+            ))))
+        }
+
+        fn prepared_request_pressure(
+            &self,
+            request: &meerkat_llm_core::PreparedLlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            Ok(Some(Self::pressure(self.answer(
+                "pressure",
+                &request.request().messages,
+                Some(request),
+            ))))
+        }
+
+        fn authored_cache_breakpoints(
+            &self,
+            request: &meerkat_llm_core::LlmRequest,
+            _canonical_messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError>
+        {
+            self.answer("cache claims", &request.messages, None);
+            Ok(Vec::new())
+        }
+
+        fn prepared_cache_breakpoints(
+            &self,
+            request: &meerkat_llm_core::PreparedLlmRequest,
+            _canonical_messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, meerkat_llm_core::LlmError>
+        {
+            self.answer("cache claims", &request.request().messages, Some(request));
+            Ok(Vec::new())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_llm_core::LlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            self.answer("send", &request.messages, None);
+            Box::pin(futures::stream::empty())
+        }
+
+        fn stream_prepared<'a>(
+            &'a self,
+            request: &'a meerkat_llm_core::PreparedLlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            self.answer("send", &request.request().messages, Some(request));
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// One decision per request on the Copilot route. The route client
+    /// decides at projection which steps the process received from its
+    /// service; the routed client and the account's capability gate carry
+    /// that decision with the prepared request, so what is measured, what
+    /// cache claims are authored for and what is sent are one body, whatever
+    /// the process ledger learns or forgets in between. Here, between the
+    /// preparation and the send, the ledger forgets the step (a generation
+    /// rotates) or another service returns the same material (a double
+    /// claim): asked now, the route client would lower the step in the
+    /// dropped form, and the prepared request still goes out as measured.
+    #[tokio::test]
+    async fn a_request_prepared_on_the_routed_client_keeps_its_replay_decision() {
+        for change in [
+            "a generation rotates",
+            "another service returns the same material",
+        ] {
+            let runtime = Arc::new(CopilotRuntime::new());
+            let (auth_binding, binding) = validated_binding();
+            let (env, auth_lease) = resolver_environment(&auth_binding).await;
+            let persistence_id = env
+                .provider_auth_persistence()
+                .expect("test persistence")
+                .authority_id();
+            let state = runtime
+                .account_state(
+                    persistence_id,
+                    binding.credential_identity(),
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::DeviceSignIn,
+                )
+                .expect("account state");
+            let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+                id: "gpt-test".to_string(),
+                vendor: None,
+                name: None,
+                version: None,
+                model_picker_enabled: None,
+                capabilities: crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_context_window_tokens: Some(128_000),
+                        max_output_tokens: Some(16_000),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                policy: None,
+                supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+            }])
+            .expect("model snapshot");
+            *state.cache.write() = Some(CachedCopilotToken {
+                generation: 1,
+                token: "derived".to_string(),
+                source_generation: 1,
+                source_published_at_millis: stored_record_published_at(&auth_lease),
+                source_expires_at: None,
+                refresh_at: Utc::now() + Duration::hours(1),
+                expires_at: Utc::now() + Duration::hours(2),
+                api_base: "https://first.example.test".to_string(),
+                models: Some(Arc::new(snapshot)),
+                model_discovery_refresh_at: None,
+                identity: None,
+                exchange_unavailable: None,
+            });
+            let authorizer = Arc::new(CopilotAuthorizer {
+                state: Arc::clone(&state),
+                binding: binding.clone(),
+                env,
+                transport: Arc::new(ScriptedTransport::new([])),
+            });
+            let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: binding.backend(),
+                backend_profile: binding.backend_profile().clone(),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        authorizer,
+                        AuthMetadata::default(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            };
+            runtime.accounts.lock().insert(
+                CopilotAccountCacheKey {
+                    persistence_id,
+                    credential_identity: binding.credential_identity().clone(),
+                },
+                Arc::downgrade(&state),
+            );
+            let ledger = Arc::new(meerkat_core::OpenAiContinuityLedger::with_generation(2));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let issuer_of = |api_base: &str| {
+                meerkat_core::OpenAiContinuityIssuer::at_base_url(
+                    meerkat_core::OpenAiContinuityService::Copilot,
+                    api_base,
+                )
+            };
+            let factory: CopilotRouteClientFactory = {
+                let ledger = Arc::clone(&ledger);
+                let calls = Arc::clone(&calls);
+                Arc::new(move |route, _| {
+                    Ok(Arc::new(DecidingRouteClient {
+                        target: meerkat_core::OpenAiContinuityTarget::new(
+                            issuer_of(&route.api_base),
+                            Arc::clone(&ledger),
+                        ),
+                        calls: Arc::clone(&calls),
+                    }))
+                })
+            };
+            let client = routed_client(
+                Arc::clone(&runtime),
+                connection,
+                Provider::OpenAI,
+                "gpt-test".to_string(),
+                factory,
+            )
+            .expect("routed client");
+            assert!(
+                client.prompt_token_limit(32_000).is_some(),
+                "the route client is behind the account's capability gate"
+            );
+
+            let reasoning = |id: &str| meerkat_core::AssistantBlock::Reasoning {
+                text: String::new(),
+                meta: Some(Box::new(meerkat_core::ProviderMeta::OpenAi {
+                    id: id.to_string(),
+                    encrypted_content: Some(format!("ciphertext-{id}")),
+                    phase: None,
+                    response_id: Some(format!("resp-{id}")),
+                })),
+            };
+            let route = issuer_of("https://first.example.test");
+            let step = vec![reasoning("rs_step")];
+            ledger.record_step(&route, &step);
+            let transcript = vec![meerkat_core::Message::BlockAssistant(
+                meerkat_core::BlockAssistantMessage::new(
+                    step.clone(),
+                    meerkat_core::StopReason::EndTurn,
+                ),
+            )];
+
+            let projection = client
+                .project_replay_request(&transcript)
+                .expect("route projection");
+            let prepared = meerkat_llm_core::PreparedLlmRequest::from_projection(
+                meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new()),
+                projection,
+            );
+            let measured = client
+                .prepared_request_pressure(&prepared)
+                .expect("pressure")
+                .expect("the route client measures its request")
+                .encoded_bytes;
+
+            if change == "a generation rotates" {
+                ledger.record_step(&route, &[reasoning("rs_later_1")]);
+                ledger.record_step(&route, &[reasoning("rs_later_2")]);
+                ledger.record_step(&route, &[reasoning("rs_later_3")]);
+            } else {
+                ledger.record_step(&issuer_of("https://elsewhere.example.test"), &step);
+            }
+            assert!(
+                !ledger.received_step_from(&route, &step),
+                "{change}: asked now, the ledger no longer knows the step as the route's"
+            );
+
+            client
+                .prepared_cache_breakpoints(&prepared, &transcript)
+                .expect("cache claims");
+            let sent = client.stream_prepared(&prepared).collect::<Vec<_>>().await;
+            assert!(sent.is_empty(), "{change}: the request is sent: {sent:?}");
+            assert_eq!(
+                client
+                    .prepared_request_pressure(&prepared)
+                    .expect("pressure")
+                    .expect("the route client measures its request")
+                    .encoded_bytes,
+                measured,
+                "{change}: the measured request is the sent request"
+            );
+            let native = |what| RouteClientCall {
+                what,
+                carried_decision: true,
+                native: true,
+            };
+            assert_eq!(
+                calls.lock().as_slice(),
+                [
+                    native("pressure"),
+                    native("cache claims"),
+                    native("send"),
+                    native("pressure"),
+                ],
+                "{change}: every use of the prepared request carries the decision of its projection"
+            );
+        }
     }
 
     /// The account model of a resolved Copilot route comes from the model

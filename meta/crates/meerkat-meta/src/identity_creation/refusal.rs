@@ -185,14 +185,16 @@ pub enum NameTakenBy {
 impl NameTakenBy {
     /// The stable token (`identity`, `removed`, ...).
     pub fn token(self) -> &'static str {
-        match self {
-            Self::Identity => "identity",
-            Self::Removed => "removed",
-            Self::Worker => "worker",
-            Self::Unreadable => "unreadable",
-        }
+        self.listed_token()
     }
 }
+
+closed_tokens!(NameTakenBy {
+    Identity => "identity",
+    Removed => "removed",
+    Worker => "worker",
+    Unreadable => "unreadable",
+});
 
 /// Why an adoption takes no agent of a shape (`not_adoptable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -223,16 +225,7 @@ pub enum NotAdoptableReason {
 impl NotAdoptableReason {
     /// The stable token (`nothing_to_adopt`, `placed`, ...).
     pub fn token(self) -> &'static str {
-        match self {
-            Self::NothingToAdopt => "nothing_to_adopt",
-            Self::NotAnAgent => "not_an_agent",
-            Self::Placed => "placed",
-            Self::NoSession => "no_session",
-            Self::HostedOnFirstUse => "hosted_on_first_use",
-            Self::AwaitingHeldCreation => "awaiting_held_creation",
-            Self::AwaitingHostPreparation => "awaiting_host_preparation",
-            Self::ProfileOverride => "profile_override",
-        }
+        self.listed_token()
     }
 
     /// Whether an adoption refused for this reason may commit later
@@ -245,6 +238,17 @@ impl NotAdoptableReason {
         )
     }
 }
+
+closed_tokens!(NotAdoptableReason {
+    NothingToAdopt => "nothing_to_adopt",
+    NotAnAgent => "not_an_agent",
+    Placed => "placed",
+    NoSession => "no_session",
+    HostedOnFirstUse => "hosted_on_first_use",
+    AwaitingHeldCreation => "awaiting_held_creation",
+    AwaitingHostPreparation => "awaiting_host_preparation",
+    ProfileOverride => "profile_override",
+});
 
 /// What is wrong with the shape of a request that is well typed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -426,65 +430,7 @@ pub enum IdentityRefusalKind {
 impl IdentityRefusalKind {
     /// The kind's stable token, the wire's `data.kind`.
     pub fn token(&self) -> &'static str {
-        match self {
-            Self::ProfileUnknown { .. } => "profile_unknown",
-            Self::ProfileNotAllowed { .. } => "profile_not_allowed",
-            Self::PrivilegedField { .. } => "privileged_field",
-            Self::GrantRevoked => "grant_revoked",
-            Self::ReservedKey { .. } => "reserved_key",
-            Self::AuthorityFieldNeedsApproval { .. } => "authority_field_needs_approval",
-            Self::AuthorityFieldInvalid { .. } => "authority_field_invalid",
-            Self::TextTooLarge { .. } => "text_too_large",
-            Self::ConsequencesUnavailable => "consequences_unavailable",
-            Self::InvalidRequest { .. } => "invalid_request",
-            Self::InvalidName => "invalid_name",
-            Self::NameTaken { .. } => "name_taken",
-            Self::PeerNotAllowed { .. } => "peer_not_allowed",
-            Self::PeerUnknown => "peer_unknown",
-            Self::BatchTooLarge { .. } => "batch_too_large",
-            Self::ValidationRefused { .. } => "validation_refused",
-            Self::ChangeDenied { .. } => "change_denied",
-            Self::Unsupported { .. } => "unsupported",
-            Self::IdentityUnknown => "identity_unknown",
-            Self::SelfChangeRefused => "self_change_refused",
-            Self::PrivateRequester => "private_requester",
-            Self::StaleSpec { .. } => "stale_spec",
-            Self::OperationReused => "operation_reused",
-            Self::OwnerReadOnly => "owner_read_only",
-            Self::NotAdoptable { .. } => "not_adoptable",
-            Self::NotArchived => "not_archived",
-            Self::DeclaredApplyOpen => "declared_apply_open",
-            Self::AdmissionUnsettled { .. } => "admission_unsettled",
-            Self::PredecessorMismatch => "predecessor_mismatch",
-            Self::ImportRefused => "import_refused",
-            Self::PurgeRefused { .. } => "purge_refused",
-            Self::PreparationNotPending => "preparation_not_pending",
-            Self::PreparationMismatch => "preparation_mismatch",
-            Self::ConstructionOpen => "construction_open",
-            Self::StaleAttempt { .. } => "stale_attempt",
-            Self::NotConstructed => "not_constructed",
-            Self::ConstructionRequired => "construction_required",
-            Self::ActivationPending { .. } => "activation_pending",
-            Self::ApprovalUnavailable => "approval_unavailable",
-            Self::DecisionOpen { .. } => "decision_open",
-            Self::SubjectWidened => "subject_widened",
-            Self::DecisionClosed { .. } => "decision_closed",
-            Self::DecisionNotFound => "decision_not_found",
-            Self::EvidenceRequired => "evidence_required",
-            Self::SubjectChanged => "subject_changed",
-            Self::PresentationIncomplete => "presentation_incomplete",
-            Self::RequesterCannotDecide => "requester_cannot_decide",
-            Self::ApproverNotEligible => "approver_not_eligible",
-            Self::DecidedBeforePresentation => "decided_before_presentation",
-            Self::ChangesHeld => "changes_held",
-            Self::HostPreparationPending => "host_preparation_pending",
-            Self::CandidateLaunch => "candidate_launch",
-            Self::IdentityMember => "identity_member",
-            Self::StorageUnsupported => "storage_unsupported",
-            Self::MobNotRunning => "mob_not_running",
-            Self::Purged => "purged",
-            Self::ConstructionRefused { .. } => "construction_refused",
-        }
+        self.listed_token()
     }
 
     /// Whether the same request may succeed later unchanged: changes held,
@@ -724,6 +670,66 @@ impl IdentityRefusalKind {
         }
     }
 }
+
+closed_tokens!(IdentityRefusalKind {
+    ProfileUnknown => "profile_unknown",
+    ProfileNotAllowed => "profile_not_allowed",
+    PrivilegedField => "privileged_field",
+    GrantRevoked => "grant_revoked",
+    ReservedKey => "reserved_key",
+    AuthorityFieldNeedsApproval => "authority_field_needs_approval",
+    AuthorityFieldInvalid => "authority_field_invalid",
+    TextTooLarge => "text_too_large",
+    ConsequencesUnavailable => "consequences_unavailable",
+    InvalidRequest => "invalid_request",
+    InvalidName => "invalid_name",
+    NameTaken => "name_taken",
+    PeerNotAllowed => "peer_not_allowed",
+    PeerUnknown => "peer_unknown",
+    BatchTooLarge => "batch_too_large",
+    ValidationRefused => "validation_refused",
+    ChangeDenied => "change_denied",
+    Unsupported => "unsupported",
+    IdentityUnknown => "identity_unknown",
+    SelfChangeRefused => "self_change_refused",
+    PrivateRequester => "private_requester",
+    StaleSpec => "stale_spec",
+    OperationReused => "operation_reused",
+    OwnerReadOnly => "owner_read_only",
+    NotAdoptable => "not_adoptable",
+    NotArchived => "not_archived",
+    DeclaredApplyOpen => "declared_apply_open",
+    AdmissionUnsettled => "admission_unsettled",
+    PredecessorMismatch => "predecessor_mismatch",
+    ImportRefused => "import_refused",
+    PurgeRefused => "purge_refused",
+    PreparationNotPending => "preparation_not_pending",
+    PreparationMismatch => "preparation_mismatch",
+    ConstructionOpen => "construction_open",
+    StaleAttempt => "stale_attempt",
+    NotConstructed => "not_constructed",
+    ConstructionRequired => "construction_required",
+    ActivationPending => "activation_pending",
+    ApprovalUnavailable => "approval_unavailable",
+    DecisionOpen => "decision_open",
+    SubjectWidened => "subject_widened",
+    DecisionClosed => "decision_closed",
+    DecisionNotFound => "decision_not_found",
+    EvidenceRequired => "evidence_required",
+    SubjectChanged => "subject_changed",
+    PresentationIncomplete => "presentation_incomplete",
+    RequesterCannotDecide => "requester_cannot_decide",
+    ApproverNotEligible => "approver_not_eligible",
+    DecidedBeforePresentation => "decided_before_presentation",
+    ChangesHeld => "changes_held",
+    HostPreparationPending => "host_preparation_pending",
+    CandidateLaunch => "candidate_launch",
+    IdentityMember => "identity_member",
+    StorageUnsupported => "storage_unsupported",
+    MobNotRunning => "mob_not_running",
+    Purged => "purged",
+    ConstructionRefused => "construction_refused",
+});
 
 /// Why an identity policy is refused, with where in it. The path is
 /// relative to the policy object (`authority_fields.clearance.values`); the

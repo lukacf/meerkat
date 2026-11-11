@@ -85,6 +85,7 @@ runtime_mode = "turn_driven"
 
 [profiles.analyst.tools]
 comms = true
+builtins = true
 "#
     ))
     .expect("parse the definition")
@@ -745,18 +746,6 @@ async fn a_member_mutation_of_an_identity_created_at_runtime_is_answered_by_its_
     let mut rig = boot(temp.path(), &fresh_mob_id()).await;
     rig.create(CREATED).await;
 
-    let reload = rig
-        .rpc("meta/reload_member", json!({"member_id": CREATED}))
-        .await;
-    assert!(
-        reload["error"].is_null() && !reload["result"].is_null(),
-        "the identity's door serves the reload: {reload:#?}"
-    );
-    assert!(
-        rig.registered(CREATED).await,
-        "the door registered the identity from its row"
-    );
-
     let retire = rig
         .rpc("meta/retire_member", json!({"member_id": CREATED}))
         .await;
@@ -764,16 +753,23 @@ async fn a_member_mutation_of_an_identity_created_at_runtime_is_answered_by_its_
         retire["error"].is_null(),
         "the identity's door serves the retire: {retire:#?}"
     );
-
+    assert!(
+        rig.registered(CREATED).await,
+        "the door registered the identity from its row"
+    );
     assert!(
         rig.seated(CREATED),
         "the retire released the member and kept it seated"
     );
-    let sent = rig.send(CREATED, "CREATED-AFTER-MUTATION").await;
-    assert!(sent["error"].is_null(), "{sent:#?}");
     assert!(
-        rig.asked("CREATED-AFTER-MUTATION").await,
+        rig.turn(CREATED, "CREATED-AFTER-MUTATION").await,
         "the created identity still serves its sends"
+    );
+
+    let reload = rig.verb("meta/reload_member", CREATED).await;
+    assert!(
+        reload["error"].is_null() && !reload["result"].is_null(),
+        "the identity's door serves the reload: {reload:#?}"
     );
     rig.shutdown().await;
 }
@@ -1400,7 +1396,7 @@ impl Rig {
             .unwrap_or_else(|error| panic!("{name}: the status reads: {error}"));
         Life {
             session: status.session_id.map(|session| session.to_string()),
-            generation: status.generation.map(|generation| generation.get()),
+            generation: status.generation.map(meerkat_mob::Generation::get),
             state: format!("{:?}", status.state),
         }
     }
@@ -1429,11 +1425,10 @@ impl Rig {
     async fn verb(&self, verb: &str, name: &str) -> Value {
         let mut response = self.verb_once(verb, name).await;
         for _ in 0..40 {
-            let retryable = response["error"]["data"]["retryable"] == json!(true)
-                || response["error"]["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("work in flight"));
-            if !retryable {
+            let settling = response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("work in flight"));
+            if !settling {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1696,7 +1691,7 @@ async fn a_respawn_seats_a_store_owned_identity_with_its_rows_current_spec() {
         .expect("the status reads");
     assert_eq!(
         (
-            status.profile.as_ref().map(|profile| profile.as_str()),
+            status.profile.as_ref().map(ProfileName::as_str),
             &status.labels
         ),
         (Some("analyst"), &labels),
@@ -1709,11 +1704,29 @@ async fn a_respawn_seats_a_store_owned_identity_with_its_rows_current_spec() {
     let request = rig
         .request_with("AFTER-ROW-RESPAWN")
         .expect("the successor's turn");
-    assert!(
-        request.contains("gpt-5.4"),
-        "the successor's turn runs the row's profile's model: {request}"
+    let before_request = rig
+        .request_with("BEFORE-ROW-CHANGE")
+        .expect("the turn before the row changed");
+    assert_ne!(
+        tool_names(&request),
+        tool_names(&before_request),
+        "the successor is built with the row's profile's tools, which the profile it was \
+         created under does not offer"
     );
     rig.shutdown().await;
+}
+
+/// The names of the tools `request` offers, sorted.
+fn tool_names(request: &str) -> Vec<String> {
+    let request: Value = serde_json::from_str(request).unwrap_or_default();
+    let mut names: Vec<String> = request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    names
 }
 
 /// The peer rule the rows' owned edges are admitted under.
@@ -2023,13 +2036,13 @@ async fn the_managed_topology_keeps_a_rows_owned_edge_and_prunes_an_undeclared_o
 }
 
 /// The first build of a new store-owned identity carries the host
-/// customizer's tools: an identity created with a first message is built by
-/// Core for its kickoff, before any roster pass or door named it, and that
-/// kickoff turn is offered the tool.
+/// customizer's tools: Core wakes the member of an identity no roster pass
+/// or door named yet, which is its first build, and the turn that build
+/// runs next is offered the tool.
 ///
-/// RED before the first build attached the identity's tool dispatcher: the
-/// kickoff turn offered no customizer tool (only the member's next build
-/// carried it).
+/// RED before the first build attached the identity's tool dispatcher: that
+/// build offered no customizer tool (only the member's next build carried
+/// it).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_build_of_a_new_identity_carries_customizer_tools() {
     let temp = tempfile::tempdir().unwrap();
@@ -2039,20 +2052,30 @@ async fn the_first_build_of_a_new_identity_carries_customizer_tools() {
         Some(Arc::new(ToolCustomizer) as Arc<dyn AgentCustomizer>),
     )
     .await;
-    rig.create_request(
-        meerkat_mob::CreatedIdentityRequest::new(created_spec(CREATED).with_initial_message(
-            meerkat_core::ContentInput::Text("FIRST-MESSAGE".to_string()),
-        )),
-        CREATED,
-    )
-    .await;
+    rig.create(CREATED).await;
     assert!(
-        rig.asked("FIRST-MESSAGE").await,
-        "the kickoff turn of the new identity runs"
+        !rig.registered(CREATED).await,
+        "no roster pass or door named the new identity yet"
+    );
+    rig.runtime
+        .mob_handle()
+        .ensure_member_live(&meerkat_mob::AgentIdentity::from(CREATED))
+        .await
+        .expect("Core wakes the new identity's member: its first build");
+    let generation = rig.life(CREATED).await.generation;
+
+    assert!(
+        rig.turn(CREATED, "FIRST-BUILD-TURN").await,
+        "the first build runs a turn"
+    );
+    assert_eq!(
+        rig.life(CREATED).await.generation,
+        generation,
+        "the turn ran on the first build's incarnation"
     );
     let request = rig
-        .request_with("FIRST-MESSAGE")
-        .expect("the kickoff turn's request");
+        .request_with("FIRST-BUILD-TURN")
+        .expect("the first build's turn");
     assert!(
         offers_tool(&request),
         "the first build's turn is offered the host customizer's tool: {request}"

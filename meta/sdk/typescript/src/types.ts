@@ -4024,9 +4024,9 @@ export interface IdentityStatus {
   /**
    * `true` when Core drives the identity itself, so Meta's lifecycle verbs
    * refuse it: a host intent declaration in Core manages it (the verbs throw
-   * `IdentityHostAdoptedError`), or it is store-owned, created at runtime or
-   * adopted into store custody (they throw a plain `RpcError`, `-32603` with
-   * `data.kind` `"identity_store_owned"`).
+   * `IdentityHostAdoptedError`). `false` for every other identity: one
+   * created at run time, or adopted into the mob's identity store, is served
+   * by the verbs as a configured one is (it read `true` through 0.9.13).
    */
   readonly intentManaged: boolean;
   /** Core's convergence status, when `intentManaged` is set and Core could read it. */

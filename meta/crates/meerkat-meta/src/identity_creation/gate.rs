@@ -1703,6 +1703,11 @@ pub struct IdentityFamilyOptions {
     /// Where the notice of a decision that ended goes: without it no
     /// requester is told, and each reads its operation's state.
     pub decision_notices: Option<Arc<dyn IdentityDecisionNotices>>,
+    /// The realm's profiles, which a profile of the mob may be bound to by
+    /// reference: the store the members' builds resolve them from. A held
+    /// change of an agent on such a profile shows what the realm profile
+    /// declares; without the store it is refused `unsupported`.
+    pub realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
 }
 
 impl IdentityFamilyOptions {
@@ -1733,6 +1738,16 @@ impl IdentityFamilyOptions {
         self.decision_notices = Some(notices);
         self
     }
+
+    /// These options, reading the realm's profiles from `realm_profiles`.
+    #[must_use]
+    pub fn with_realm_profiles(
+        mut self,
+        realm_profiles: Arc<dyn meerkat_mob::RealmProfileStore>,
+    ) -> Self {
+        self.realm_profiles = Some(realm_profiles);
+        self
+    }
 }
 
 impl std::fmt::Debug for IdentityFamilyOptions {
@@ -1742,6 +1757,7 @@ impl std::fmt::Debug for IdentityFamilyOptions {
             .field("hooks", &self.hooks.is_some())
             .field("instruction_step", &self.instruction_step.is_some())
             .field("decision_notices", &self.decision_notices.is_some())
+            .field("realm_profiles", &self.realm_profiles.is_some())
             .finish()
     }
 }
@@ -1843,13 +1859,19 @@ impl IdentityChangeExecutor for DecidedExecutor {
 }
 
 /// What the holder of decisions reads through: the mob the identity
-/// runtime serves, and an agent as the gate reads it.
-struct HeldReads(IdentityGate);
+/// runtime serves, an agent as the gate reads it, and a realm profile as
+/// the realm's own store holds it.
+struct HeldReads {
+    rules: IdentityGate,
+    /// The realm's profiles, which a profile of the mob may be bound to by
+    /// reference: the store the members' builds resolve them from.
+    realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+}
 
 #[async_trait]
 impl HeldChangeHost for HeldReads {
     fn mob(&self, mob_id: &str) -> Option<MobHandle> {
-        self.0
+        self.rules
             .identities
             .upgrade()?
             .family_mob_handle()
@@ -1861,14 +1883,37 @@ impl HeldChangeHost for HeldReads {
         mob: &MobHandle,
         identity: &str,
     ) -> Result<Option<HeldTarget>, IdentityRefusal> {
-        let Some(policy) = self.0.policy.as_deref() else {
+        let Some(policy) = self.rules.policy.as_deref() else {
             return Ok(None);
         };
         Ok(self
-            .0
+            .rules
             .agent(mob, identity)
             .await?
             .map(|agent| HeldTarget::new(agent.entry(policy), agent.configured)))
+    }
+
+    async fn realm_profile(
+        &self,
+        _mob: &MobHandle,
+        name: &str,
+    ) -> Result<Option<meerkat_mob::Profile>, IdentityRefusal> {
+        // Without the realm's store, and for a profile it cannot read now,
+        // nobody can show the profile: the holder refuses the change.
+        let Some(realm_profiles) = &self.realm_profiles else {
+            return Ok(None);
+        };
+        match realm_profiles.get(name).await {
+            Ok(stored) => Ok(stored.map(|stored| stored.profile)),
+            Err(error) => {
+                tracing::warn!(
+                    realm_profile = name,
+                    %error,
+                    "a realm profile could not be read for a held change of agents"
+                );
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1921,7 +1966,14 @@ impl crate::UnifiedRuntime {
             // driver that runs only on a launch that serves changes. The
             // holder reads through a copy of the gate that holds no
             // decisions, so nothing here holds itself.
-            let held: Arc<dyn HeldChangeHost> = Arc::new(HeldReads(gate.clone()));
+            let held: Arc<dyn HeldChangeHost> = Arc::new(HeldReads {
+                rules: gate.clone(),
+                realm_profiles: options.realm_profiles.clone().or_else(|| {
+                    self.mob_runtime()
+                        .agent_mob_mcp_state()
+                        .and_then(|state| state.realm_profile_store().cloned())
+                }),
+            });
             let decided: Arc<dyn IdentityChangeExecutor> = Arc::new(DecidedExecutor {
                 rules: gate.clone(),
                 launch: executor,

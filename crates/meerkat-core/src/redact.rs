@@ -556,20 +556,22 @@ const SECRET_TOKEN_PREFIXES: &[&str] = &[
 ];
 
 /// A token with a well-known secret prefix, or a JSON web token: its end.
+///
+/// Every such token starts with a known prefix, so a run of token bytes is
+/// read only where one stands, and then only once. `/`, `+` and `=` belong
+/// to a run and are also boundaries inside it: reading a run from each of
+/// them made one long line (a megabyte of base64, or a line that repeats a
+/// prefix after each of them) cost its length squared.
 fn secret_token_at(line: &str, start: usize) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let rest = &bytes[start..];
-    // Every such token starts with one of the prefixes, so without one here
-    // the run is not measured. `/`, `+` and `=` are part of a run and also
-    // boundaries inside it: measuring from each of them made one long line
-    // (a megabyte of base64) cost its length squared.
-    if !rest.starts_with(JSON_WEB_TOKEN_PREFIX)
-        && !SECRET_TOKEN_PREFIXES
-            .iter()
-            .any(|prefix| rest.starts_with(prefix.as_bytes()))
+    let rest = &line.as_bytes()[start..];
+    if !SECRET_TOKEN_PREFIXES
+        .iter()
+        .any(|prefix| rest.starts_with(prefix.as_bytes()))
     {
-        return None;
+        return json_web_token_len(rest).map(|len| start + len);
     }
+    // The whole run. A run long enough for a second reading to matter is a
+    // token, and the scan continues after it.
     let token_len = rest
         .iter()
         .take_while(|byte| is_token_byte(**byte) || matches!(**byte, b'/' | b'+' | b'='))
@@ -577,14 +579,38 @@ fn secret_token_at(line: &str, start: usize) -> Option<usize> {
     #[cfg(test)]
     tests::note_measured_token_run(token_len);
     let token = &rest[..token_len];
-    let prefixed = SECRET_TOKEN_PREFIXES.iter().any(|prefix| {
-        token.starts_with(prefix.as_bytes()) && token.len() >= prefix.len() + MIN_TOKEN_BODY_BYTES
-    });
-    (prefixed || is_json_web_token(token)).then_some(start + token_len)
+    SECRET_TOKEN_PREFIXES
+        .iter()
+        .any(|prefix| {
+            token.starts_with(prefix.as_bytes())
+                && token.len() >= prefix.len() + MIN_TOKEN_BODY_BYTES
+        })
+        .then_some(start + token_len)
 }
 
 /// What the header of a JSON web token starts with (`{"` in base64url).
 const JSON_WEB_TOKEN_PREFIX: &[u8] = b"eyJ";
+
+/// The length of the run of token bytes `rest` starts with, when that run
+/// is a JSON web token. `/`, `+` and `=` continue a run and cannot be in a
+/// web token, so the run is given up at the first of them and no part of it
+/// is read again from a later boundary.
+fn json_web_token_len(rest: &[u8]) -> Option<usize> {
+    if !rest.starts_with(JSON_WEB_TOKEN_PREFIX) {
+        return None;
+    }
+    let mut len = 0;
+    for byte in rest {
+        match byte {
+            b'/' | b'+' | b'=' => return None,
+            byte if is_token_byte(*byte) => len += 1,
+            _ => break,
+        }
+    }
+    #[cfg(test)]
+    tests::note_measured_token_run(len);
+    is_json_web_token(&rest[..len]).then_some(len)
+}
 
 /// `eyJ` then three dot-separated base64url parts, each non-empty.
 fn is_json_web_token(token: &[u8]) -> bool {

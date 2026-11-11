@@ -1913,6 +1913,11 @@ impl UnifiedRuntime {
         context
             .runtime
             .install_member_binding_observer(self.identity_binding_wake.clone());
+        // The family of changes and reads of the mob's long-term agents is
+        // attached with the identity authority: its reads are served from
+        // here on, and its changes once the launch attaches its identity
+        // policy. It builds one value and starts nothing.
+        self.attach_identity_reads(&context.runtime);
         self.identity_first_context = Some(context);
         if let Some(projection) = self.console_projection.get() {
             projection.update_identity_authority("default", self.identity_runtime_ref().cloned());

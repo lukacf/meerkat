@@ -1287,13 +1287,15 @@ pub async fn console_json_handler(
     }
     if response.status == 200 && uri.path() == "/console/experience" {
         // Whether this console serves changes of the mob's long-term agents
-        // to the caller, and which of them the caller's grants admit.
+        // to the caller (its launch has an enabled identity policy and the
+        // console is not read-only), and which of them the caller's grants
+        // admit.
         let identity_changes_available = !state.decisions.console.read_only
             && state
                 .runtime
                 .as_ref()
                 .and_then(MobRuntime::installed_identity_runtime)
-                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some());
+                .is_some_and(|identity_runtime| identity_runtime.identity_changes_enabled());
         crate::runtime::apply_identity_changes_to_experience(
             &mut response.body,
             caller.as_ref().map(|caller| &caller.audience),
@@ -13131,9 +13133,15 @@ async fn handle_console_runtime_rpc_with_visibility(
     // that person by, or the host on its console surface when the caller is
     // no verified person; never the host's operator.
     if crate::rpc::identity_methods::is_identity_family_method(request.method.as_str())
-        && let Some(family) = identity_runtime
-            .as_ref()
-            .and_then(|identity_runtime| identity_runtime.identity_family())
+        && let Some(family) = identity_runtime.as_ref().and_then(|identity_runtime| {
+            // A caller under access rules names only the peers it may view.
+            match access_view {
+                Some(view) => identity_runtime.identity_family_seen_by(Arc::new(
+                    crate::rpc::identity_methods::ViewedAgents(view.clone()),
+                )),
+                None => identity_runtime.identity_family(),
+            }
+        })
     {
         let handle = runtime.handle();
         let person = governance
@@ -36567,6 +36575,97 @@ mod tool_grant_console_access_tests {
         for method in ["meta/tool_grants/grant", "meta/tool_grants/revoke"] {
             assert!(is_console_mutating_rpc_method(method), "{method}");
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_family_console_access_tests {
+    use super::*;
+    use crate::rpc::identity_methods::{
+        IDENTITY_FAMILY_METHODS, is_identity_family_mutating_method,
+    };
+
+    /// On the console a create needs `agent.identity.create`, a change of
+    /// one agent `agent.identity.manage` on that agent, its removal
+    /// `agent.identity.remove` on it and the hold of the mob's changes
+    /// `runtime.admin`; the reads need `agent.view`, a get on the agent it
+    /// names. A read-only console refuses exactly the family's writers, and
+    /// every method names its members in the member field table, a create
+    /// the agents it creates.
+    #[test]
+    fn the_console_gates_identity_changes_on_their_actions_and_reads_on_view() {
+        let named = json!({
+            "request_id": "r-1",
+            "name": "scout",
+            "expected_spec_digest": "sha256:00",
+        });
+        let scout = Some("scout".to_string());
+        assert_eq!(
+            console_rpc_access_requirements(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout", "profile": "worker" }] })
+            ),
+            Some(vec![("agent.identity.create", None)])
+        );
+        for method in [
+            "meta/identity/update",
+            "meta/identity/archive",
+            "meta/identity/unarchive",
+            "meta/identity/adopt",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &named),
+                Some(vec![("agent.identity.manage", scout.clone())]),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/remove", &named),
+            Some(vec![("agent.identity.remove", scout.clone())])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/changes_hold", &json!({ "held": true })),
+            Some(vec![(ACTION_RUNTIME_ADMIN, None)])
+        );
+        assert_eq!(
+            console_rpc_access_requirements("meta/identity/get", &json!({ "name": "scout" })),
+            Some(vec![(ACTION_AGENT_VIEW, scout)])
+        );
+        for method in [
+            "meta/identity/list",
+            "meta/identity/directory",
+            "meta/identity/operation",
+            "meta/identity/plan",
+            "meta/identity/withdraw",
+        ] {
+            assert_eq!(
+                console_rpc_access_requirements(method, &json!({})),
+                Some(vec![(ACTION_AGENT_VIEW, None)]),
+                "{method}"
+            );
+        }
+        for method in IDENTITY_FAMILY_METHODS {
+            assert_eq!(
+                is_console_mutating_rpc_method(method),
+                is_identity_family_mutating_method(method),
+                "{method}"
+            );
+            assert!(
+                console_method_member_fields(method).is_some(),
+                "{method} is in the member field table"
+            );
+        }
+        assert_eq!(
+            console_method_members(
+                "meta/identity/create",
+                &json!({ "agents": [{ "name": "scout" }, { "name": "ledger" }] })
+            ),
+            ["scout", "ledger"]
+        );
+        assert_eq!(
+            console_method_members("meta/identity/remove", &named),
+            ["scout"]
+        );
     }
 }
 

@@ -153,6 +153,17 @@ pub(crate) fn console_requester(person: Option<&str>) -> ChangeRequester {
     }
 }
 
+/// The agents a Console caller may view, as the family asks which agents a
+/// caller may see: a peer the caller may not view is answered as a name no
+/// agent holds.
+pub(crate) struct ViewedAgents(pub(crate) AccessView);
+
+impl crate::identity_creation::PeerVisibility for ViewedAgents {
+    fn sees(&self, name: &str) -> bool {
+        self.0.can_view_agent(name)
+    }
+}
+
 /// What the surface a call arrived on hands the family.
 pub(crate) struct IdentityFamilySurface<'a> {
     /// The mob the call acts in.
@@ -472,6 +483,39 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A Console caller may name as a peer exactly the agents its access
+    /// rules let it view: every agent while access control is not
+    /// enforced, and under enforced rules the agents a rule grants
+    /// `agent.view` on.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_console_caller_sees_the_agents_its_rules_let_it_view() {
+        use crate::access::{ACTION_AGENT_VIEW, AccessControlConfig, AccessController, AccessRule};
+        use crate::identity_creation::PeerVisibility;
+
+        let open = AccessController::new(AccessControlConfig::default()).expect("controller");
+        let everyone = ViewedAgents(open.view_for_subject(Some("person@example.test")));
+        assert!(everyone.sees("scout") && everyone.sees("ledger"));
+
+        let enforced = AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![AccessRule {
+                id: "views-scout".to_string(),
+                actions: vec![ACTION_AGENT_VIEW.to_string()],
+                agents: vec!["scout".to_string()],
+                ..AccessRule::default()
+            }],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller");
+        let person = ViewedAgents(enforced.view_for_subject(Some("person@example.test")));
+        assert!(person.sees("scout"));
+        assert!(!person.sees("ledger"), "no rule lets the caller view it");
+        let admin = ViewedAgents(enforced.view_for_subject(Some("root@example.test")));
+        assert!(admin.sees("ledger"), "an admin views every agent");
+    }
     use crate::identity_creation::{AgentChangeState, AgentOutcome, Requester, Sha256Digest};
 
     const DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000001";

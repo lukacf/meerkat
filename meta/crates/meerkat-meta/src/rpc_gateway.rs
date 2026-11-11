@@ -830,6 +830,27 @@ fn launch_identity_creation_policy(
     .map_err(|refusal| refusal.to_string())
 }
 
+/// The native host composition's own check of an identity request and
+/// its consequence lines, as the identity family asks them.
+struct HostIdentityHooks(Arc<dyn GatewayHostComposition>);
+
+impl crate::identity_creation::IdentityHostHooks for HostIdentityHooks {
+    fn validate(
+        &self,
+        request: &crate::identity_creation::IdentityRequest,
+    ) -> Result<(), crate::identity_creation::ValidationRefusal> {
+        self.0.validate_identity_request(request)
+    }
+
+    fn consequences(
+        &self,
+        request: &crate::identity_creation::IdentityRequest,
+    ) -> Result<Vec<crate::identity_creation::ConsequenceLine>, crate::identity_creation::HookRefusal>
+    {
+        self.0.identity_consequences(request)
+    }
+}
+
 #[derive(Default)]
 struct InMemoryEventLogStore {
     events: std::sync::Mutex<Vec<PersistedEvent>>,
@@ -18128,8 +18149,9 @@ external_addressable = true
     // The identity policy, settled before the durable phase: the native
     // host's Rust form or the init option, never both, checked against the
     // definition's profiles, and refused on a launch without persistence.
-    // Nothing acts on it yet; the operation executor takes it from here.
-    let _identity_creation = launch_identity_creation_policy(
+    // The launch attaches it to its identity runtime, below, before the
+    // identity bootstrap.
+    let identity_creation = launch_identity_creation_policy(
         host,
         std::mem::take(&mut gateway_options.identity_creation),
         &definition,
@@ -20382,6 +20404,18 @@ external_addressable = true
         // identity supervisors. A refusal fails init before that bootstrap,
         // and the existing init cleanup shuts the runtime down.
         runtime.install_identity_first_context(Arc::clone(&identity_context));
+        // The launch's identity policy, attached once: from here on the
+        // runtime serves the changes of its long-term agents under it, and
+        // the agents' identity tools are mounted. A launch without a
+        // policy keeps the family its identity install attached: the reads
+        // are served and every change is refused.
+        if let Some(policy) = identity_creation.clone() {
+            let mut options = crate::identity_creation::IdentityFamilyOptions::new();
+            if let Some(host) = host {
+                options = options.with_host_hooks(Arc::new(HostIdentityHooks(Arc::clone(host))));
+            }
+            runtime.attach_identity_policy(policy, options);
+        }
         if let Some(host) = host {
             host.bind_identity_runtime(runtime)
                 .await

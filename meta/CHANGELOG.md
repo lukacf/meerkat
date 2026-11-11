@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- A mob that a member private to a person creates with its own `mob_create`
+  stays private to that person after a restart, so every member spawned into
+  it after the restart is private to that person too, as the members spawned
+  before it are. The restart reads who each such mob is private to from the
+  mob's creation record, and in 0.9.11 through 0.9.13 (0.9.11 is the first
+  release with members private to a person) it read the creating member
+  only from the record of a create a host makes for a member's session
+  (`MobProvenance::Member`):
+  a member's own `mob_create` (`MobProvenance::OperatorMember`) came back
+  private to no one, so a member spawned into that mob after the restart
+  carried no private owner, the label that hides it from other people. Both
+  records now name the creating member, and the mob is private to whoever
+  that member is private to. A mob whose record names no member (a host's
+  create, a session that is no member's) stays private to no one, as does a
+  mob a shared member creates. A mob whose record says that several rosters
+  named the session that created it, and picks none
+  (`MobProvenance::Ambiguous`), no longer comes back private to no one: the
+  restart cannot read who it is private to, so a spawn into it is refused
+  from then on, and the members already seated in it keep the owner their
+  own spawn gave them.
+
 - A console whose visibility policy includes nested members listed the
   participants of a running temporary council as members and read their
   history into the timeline. The `ConsoleVisibilityPolicy` trait default and
@@ -34,6 +55,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   nested members are listed and served as before. Frames a console stored
   for participants before this release stay in its console store, unserved.
   Affected: 0.8.27 through 0.9.13.
+
+### Fixed
+
+- On Linux, a runtime that starts in a process whose previous runtime on the
+  same state directory is still alive (shut down, its handles still in
+  scope) could miss another process that holds the directory's runtime
+  custody, and start beside it. For such a start the custody check reads
+  the kernel's lock table (`/proc/locks`) to see whether anyone but this
+  process holds `runtime.sqlite.execution-custody`, and it decided from one
+  read. The kernel hands that table out at most a page per read call and
+  resumes by position, so when the table takes more than one read call and
+  a lock elsewhere on the host is released between two calls, one entry
+  drops out of the read; when that entry was the other holder's, the check
+  answered that there was none. It took both at once: such a same-process
+  start, and a holder that does not run this check itself (a release before
+  0.9.4, or a Core-only tool on the directory). Under heavy file-lock churn
+  on the host a read could miss a held lock; on a quiet host it did not.
+  Meta 0.9.4 through 0.9.13. The check now reads the table up to three
+  times, each read split at other entries, and refuses the start as soon as
+  any read names another holder; it admits the start only when no read
+  does. That makes a miss far less likely, not impossible: after a read
+  that missed, the next read named the holder in every measured case. Where
+  the table names no holder at all (macOS, Windows, and on Linux btrfs
+  subvolumes and overlayfs, the 0.9.4 known limitation), nothing changes.
 
 ## [0.9.13] - 2026-11-11
 

@@ -91,10 +91,16 @@ version in the tree: a ceiling at or below it, a strict floor at it (`>0.9.11`
 at 0.9.11), or a floor or an exact version above it. `--write` moves such a
 floor or exact version down to the version in the tree and makes a strict
 floor at it inclusive.
-Files that pin a published release's assets by digest (Forge's release inputs,
-listed under `published_release_inputs`) can name a release only once it is
-published, so they may name the version in the tree or the release before it,
-nothing older.
+Files that record a published release (Forge's release inputs and the Meta
+runtime the installer selects, listed under `published_release_inputs`) pin
+that release's assets by digest: they can name a release only once it is
+published, and move only after a publication. The check judges them together
+instead: they all name one release (the one the version constant among them
+names), and none names a release newer than the version in the tree; either
+fails the check. A selected release older than the version in the tree is a
+warning line with the number of pins and the release, and the check still
+passes, so a version bump does not fail on records it cannot move. A pin in a
+file beside them that the list does not name follows the ordinary rule.
 
 ## Release Checks
 

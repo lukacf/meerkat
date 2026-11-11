@@ -44,15 +44,26 @@ temporary entry names, in `removed_by`, the change that removes its pins;
 when that change lands the entry is stale and goes.
 
 Published release inputs (`published_release_inputs` in the configuration,
-with its reason) are files that pin published assets of an in-repo release
-by digest. Those cannot name a version before its release is published, so a
-pin there may name the version in this tree or the release before it (the
-newest release heading below that version in the product's CHANGELOG.md),
-nothing older and nothing newer. A listed path may come with a `match`: the
-rule then applies to the pins it matches only, the file's other pins follow
-the ordinary rule, and the path is stale when it applies to no pin. Such a
-file is read even where a whole-file allow entry covers its directory. A
-listed path that matches no tracked file is stale. `version_constants` names
+with its reason) are files that record a published release of an in-repo
+product: they pin its assets by digest, so they can name a release only once
+it is published and move only after a publication. They are judged as one
+class, per product, apart from the ordinary rule:
+  - they all name one release, the selected one: the release a version
+    constant among them names (the newest, should two constants differ),
+    or, where no constant names the product, the newest release they name.
+    An input that names another release fails the check;
+  - an input that names a release newer than the version in this tree, or no
+    single release, fails the check;
+  - a selected release older than the version in this tree is a warning
+    (one line per product with the number of pins and the release), and the
+    exit code stays 0: a version bump does not fail on records that only a
+    publication can move.
+A listed path may come with a `match`: the class then holds the pins it
+matches only, the file's other pins follow the ordinary rule, and the path is
+stale when it applies to no pin. Such a file is read even where a whole-file
+allow entry covers its directory, and an allow entry with a `match` or a `key`
+still covers an input that names another release, with its reason. A listed
+path that matches no tracked file is stale. `version_constants` names
 the package of a version constant whose name names no product
 (`VERSION = "0.9.11"` in a given file); a configured constant the file no
 longer holds is stale.
@@ -71,7 +82,8 @@ findings, as do pins in prose and code, which the docs stamper or a person
 moves.
 
 usage: check_inrepo_version_pins.py [--root DIR] [--config FILE] [--write]
-Exit 0 when clean, 1 on a finding or a stale allowlist entry, 2 on an error.
+Exit 0 when clean (a warning about published release inputs leaves it 0), 1 on
+a finding or a stale allowlist entry, 2 on an error.
 """
 
 from __future__ import annotations
@@ -236,9 +248,12 @@ class Finding:
     pinned: str
     expected: str
     movable: bool = False
-    # A pin of a published release input, and the release before `expected` it may also name.
+    # A pin of a published release input: the product whose release it names and, once the
+    # inputs are judged together, the release they select and what selects it.
     published: bool = False
-    previous: str = ""
+    product: str = ""
+    selected: str = ""
+    selected_by: str = ""
     # A range or an exact pin that shuts out `expected`: a ceiling at or below it, a strict
     # floor at it, or a floor above it.
     excludes: bool = False
@@ -257,18 +272,16 @@ class Finding:
             return (f"{where}: {self.shape} {self.pin}: admits no {self.package} {self.expected}, its version in this "
                     f"tree (a bound shuts it out)")
         if self.published:
-            allowed = (f"a published release input names {self.expected} or the release before it, {self.previous}"
-                       if self.previous else
-                       f"a published release input names {self.expected} or the release before it, and the "
-                       f"product's CHANGELOG.md has none")
-            if self.pinned and below(self.expected, self.pinned):
-                relation = f"above its version {self.expected}"
-            elif self.previous:
-                relation = f"older than the release before its version {self.expected}"
-            else:
-                relation = f"below its version {self.expected}"
-            return (f"{where}: {self.shape} {self.pin}: pins {self.package} {self.pinned or 'an open range'}, "
-                    f"{relation} in this tree ({allowed})")
+            if version_key(self.pinned) is None:
+                return (f"{where}: {self.shape} {self.pin}: pins {self.package} {self.pinned or 'an open range'}; "
+                        f"a published release input names one published release")
+            if below(self.expected, self.pinned):
+                return (f"{where}: {self.shape} {self.pin}: pins {self.package} {self.pinned}, above its version "
+                        f"{self.expected} in this tree (a published release input names a release that is "
+                        f"published, never one newer than the tree)")
+            return (f"{where}: {self.shape} {self.pin}: pins {self.package} {self.pinned}, not {self.selected}, the "
+                    f"release of {self.product} the published release inputs select ({self.selected_by}); every "
+                    f"input names that one release")
         if not self.pinned:
             return (f"{where}: {self.shape} {self.pin}: admits {self.package} below {self.expected}; "
                     f"pin {self.expected} or use a same-commit reference")
@@ -284,11 +297,9 @@ class Inventory:
         self.packages: dict[tuple[str, str], Package] = {}
         self.tag_prefixes: list[tuple[str, tuple[str, str]]] = []
         self.assets: dict[str, tuple[str, str]] = {}
-        # Each product's root and CHANGELOG.md, and the packages configured as products of their own.
+        # Each product's root, and the packages configured as products of their own.
         self.product_roots: dict[str, str] = {}
-        self.changelogs: dict[str, str] = {}
         self.product_packages: dict[tuple[str, str], str] = {}
-        self._headings: dict[str, list[str]] = {}
         self._load_cargo()
         self._load_manifests(tracked)
         self._load_products()
@@ -362,7 +373,6 @@ class Inventory:
             if not isinstance(name, str) or not isinstance(root, str) or not isinstance(prefix, str):
                 raise PinError(f"{PRODUCTS} lists a product without a name, root and tag_prefix")
             self.product_roots[name] = root
-            self.changelogs[name] = f"{root}/CHANGELOG.md" if root else "CHANGELOG.md"
             if root == "":
                 version = ((self._root_manifest().get("workspace") or {}).get("package") or {}).get("version")
                 versions = {version} if version else set()
@@ -391,10 +401,9 @@ class Inventory:
         for name, target in (config.get("products") or {}).items():
             key = self.target(target, f"product {name}")
             self.packages[("product", name)] = dataclasses.replace(self.packages[key], ecosystem="product")
-            # A product of its own inside another product's root (Forge in meta/) keeps
-            # its CHANGELOG.md beside its manifest.
+            # A product of its own inside another product's root (Forge in meta/): its
+            # packages release with it, not with the product that owns the root.
             self.product_packages[key] = name
-            self.changelogs[name] = PurePosixPath(self.packages[key].source).parent.joinpath("CHANGELOG.md").as_posix()
         for prefix, target in (config.get("release_tags") or {}).items():
             self.tag_prefixes.append((prefix, self.target(target, f"release tag {prefix}")))
         # Longest prefix first: meta-installer-v before meta-v before v.
@@ -427,19 +436,6 @@ class Inventory:
             return self.product_packages[key]
         package = self.packages.get(key)
         return self._owner(package.source, self.product_roots) if package is not None else None
-
-    def previous_release(self, key: tuple[str, str]):
-        """The newest release heading of the package's product CHANGELOG.md below its version here."""
-        path = self.changelogs.get(self.product_of(key))
-        if path is None:
-            return None
-        if path not in self._headings:
-            full = self.root / path
-            text = full.read_text(encoding="utf-8") if full.is_file() else ""
-            self._headings[path] = re.findall(rf"^## \[({VERSION})\]", text, re.M)
-        expected = self.packages[key].version
-        earlier = [version for version in self._headings[path] if below(version, expected)]
-        return max(earlier, key=version_key) if earlier else None
 
     def tag(self, tag: str):
         for prefix, key in self.tag_prefixes:
@@ -510,6 +506,8 @@ class Scanner:
         self.constants = constants or {}
         self.constants_seen: set[tuple[str, str]] = set()
         self.findings: list[Finding] = []
+        # Every pin of a published release input; judge_published reads them as one class.
+        self.published_pins: list[Finding] = []
         packages = inventory.packages.values()
         pypi = "|".join(re.sub(r"(?:\\-|_|\\\.)", "[-_.]", re.escape(name))
                         for name in sorted({p.name for p in packages if p.ecosystem == "pypi"}, key=len, reverse=True))
@@ -543,15 +541,10 @@ class Scanner:
         published = next((entry for entry in self.published if entry.applies(path, pin)), None)
         if published is not None:
             published.used += 1
-            # A published asset pinned by digest: this tree's version, or the release
-            # before it until this version's release is published; never older or newer.
-            if pinned == expected:
-                return
-            previous = self.inventory.previous_release(key)
-            if pinned is not None and pinned == previous:
-                return
-            self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, False,
-                                         published=True, previous=previous or ""))
+            # A record of a published release: it is judged with the other inputs of its
+            # product once every file is read, not against the version here alone.
+            self.published_pins.append(Finding(path, line, shape, pin, name, pinned or "", expected, False,
+                                               published=True, product=self.inventory.product_of(key) or name))
             return
         # A requirement must also admit the version here: a ceiling at or below it, a strict
         # floor at it, or a floor or an exact pin above it shuts it out.
@@ -957,6 +950,45 @@ def covering(finding: Finding, allowlist: list[AllowEntry]) -> list[AllowEntry]:
             and (entry.key is None or (finding.key is not None and entry.key.search(finding.key)))]
 
 
+def judge_published(pins: list[Finding]) -> tuple[list[Finding], list[str]]:
+    """Judge the published release inputs as one class, product by product.
+
+    The inputs of a product all name the release they select: the one a version constant
+    among them names, else the newest they name. Returns the pins that fail the check (one
+    that names another release, a release newer than the tree, or no single release) and
+    one warning line per product whose selected release is older than the tree's version:
+    such inputs move only after a publication, so their lag fails nothing.
+    """
+    refused: list[Finding] = []
+    warnings: list[str] = []
+    by_product: dict[str, list[Finding]] = {}
+    for pin in pins:
+        by_product.setdefault(pin.product, []).append(pin)
+    for product, items in sorted(by_product.items()):
+        named = [pin for pin in items if version_key(pin.pinned) is not None]
+        constants = [pin for pin in named if pin.shape == "constant"]
+        # max keeps the first of equals: the first such pin in path order.
+        selecting = max(constants or named, key=lambda pin: version_key(pin.pinned), default=None)
+        if selecting is None:
+            refused.extend(items)
+            continue
+        where = f"{selecting.path}:{selecting.line}" if selecting.line else selecting.path
+        selected_by = ("the version constant at " if constants else "the newest release they name, at ") + where
+        behind = []
+        for pin in items:
+            pin.selected, pin.selected_by = selecting.pinned, selected_by
+            if version_key(pin.pinned) != version_key(selecting.pinned) or below(pin.expected, pin.pinned):
+                refused.append(pin)
+            elif below(pin.pinned, pin.expected):
+                behind.append(pin)
+        if behind:
+            warnings.append(
+                f"check_inrepo_version_pins: WARNING: {len(behind)} published release input pin(s) name {product} "
+                f"{selecting.pinned}, the release the inputs select ({selected_by}), older than "
+                f"{behind[0].expected} in this tree; they move when the inputs are refreshed after a publication")
+    return refused, warnings
+
+
 def manifest_file(path: str) -> bool:
     """The files --write edits: dependency manifests and locks, never prose or code."""
     name = PurePosixPath(path).name
@@ -1012,7 +1044,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         published = load_published(config)
         constants = load_constants(config, inventory)
         scanner = scan(root, inventory, tracked, allowlist, published, constants)
-        attach_keys(root, scanner.findings, allowlist)
+        attach_keys(root, scanner.findings + scanner.published_pins, allowlist)
         if write:
             # An allowed pin (an upgrade fixture, or a pin another change removes)
             # stays as it is: only the pins the check would report move.
@@ -1022,7 +1054,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             allowlist = load_allowlist(config)
             published = load_published(config)
             scanner = scan(root, inventory, tracked, allowlist, published, constants)
-            attach_keys(root, scanner.findings, allowlist)
+            attach_keys(root, scanner.findings + scanner.published_pins, allowlist)
         findings = scanner.findings
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)
@@ -1034,6 +1066,18 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             entry.used += 1
         if not entries:
             reported.append(finding)
+    # An allow entry covers a published release input that names another release than the
+    # tree's, with its reason, as it covers any other pin; the rest are judged together.
+    judged = []
+    for pin in scanner.published_pins:
+        entries = covering(pin, allowlist) if pin.pinned != pin.expected else []
+        for entry in entries:
+            entry.used += 1
+        if not entries:
+            judged.append(pin)
+    refused, warnings = judge_published(judged)
+    reported.extend(refused)
+    reported.sort(key=lambda finding: finding.path)
     stale = [entry for entry in allowlist if entry.used == 0]
     stale_paths = [entry.label() for entry in published if not any(entry.path.match(path) for path in tracked)]
     stale_matches = [entry.label() for entry in published
@@ -1050,10 +1094,13 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         print(f"{CONFIG}: published release input {text} applies to no pin; delete it", file=err)
     for path, name in stale_constants:
         print(f"{CONFIG}: version constant {name} of {path} is not in that file; delete it", file=err)
+    # A warning changes no exit code.
+    for warning in warnings:
+        print(warning, file=err)
     if reported or stale or stale_paths or stale_matches or stale_constants:
         count = len(stale) + len(stale_paths) + len(stale_matches) + len(stale_constants)
         print(f"check_inrepo_version_pins: {len(reported)} pin(s) below, or shutting out, the version of the in-repo "
-              f"package they pin, "
+              f"package they pin, or failing the rule for published release inputs, "
               f"{count} stale allow entr{'y' if count == 1 else 'ies'}. Pin the version in this tree, use a "
               f"same-commit reference, or allow the pin in {CONFIG} with its reason.", file=err)
         return 1

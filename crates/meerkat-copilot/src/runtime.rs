@@ -7249,6 +7249,105 @@ mod tests {
         );
     }
 
+    /// The client identity and the API versions a Copilot route sends when
+    /// its backend options set none, pinned value by value. The Copilot API
+    /// answers a model listing whose `Editor-Version` is too old with a
+    /// `client_version_deprecated` warning on every entry, and a listing
+    /// without `X-GitHub-Api-Version` with reduced limits, so a change of any
+    /// of these values is a deliberate one, made with a live list read.
+    const PINNED_CLIENT_IDENTITY: [(&str, &str); 3] = [
+        ("user-agent", "GitHubCopilotChat/0.73.0"),
+        ("editor-version", "vscode/1.145.2"),
+        ("editor-plugin-version", "copilot-chat/0.73.0"),
+    ];
+    /// `X-GitHub-Api-Version` of a model listing and of inference.
+    const PINNED_INFERENCE_API_VERSION: &str = "2026-08-01";
+    /// `X-GitHub-Api-Version` of the token exchange and the identity lookup.
+    const PINNED_GITHUB_API_VERSION: &str = "2025-04-01";
+
+    /// The header `name` of `headers`, a request the transport recorded.
+    fn recorded_header(headers: &HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
+
+    /// The header `name` among `headers`, the headers an authorizer signed.
+    fn signed_value(headers: &[(String, String)], name: &str) -> Option<String> {
+        headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
+
+    /// The device sign-in sends the pinned client identity on its token
+    /// exchange, its model listing and inference, and the pinned API version
+    /// on each: GitHub's on the token exchange, the Copilot API's on the
+    /// listing (discovery) and on inference.
+    #[tokio::test]
+    async fn device_sign_in_sends_the_pinned_client_identity_and_api_versions() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, _auth_lease) = resolver_environment(&auth_binding).await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-identity"),
+            models_response(),
+        ]));
+        let runtime = CopilotRuntime::with_transport(transport.clone());
+        let resolved = runtime
+            .resolve(&binding, &env)
+            .await
+            .expect("the device route resolves");
+        let mut signed = Vec::new();
+        resolved
+            .concrete_authorizer()
+            .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                method: "POST",
+                url: "https://copilot.example.test/responses",
+                headers: &mut signed,
+            })
+            .await
+            .expect("authorize a Copilot request");
+
+        let requests = transport.requests.lock();
+        assert_eq!(requests.len(), 2, "token exchange, model listing");
+        let (_, exchange) = &requests[0];
+        let (listing_url, listing) = &requests[1];
+        assert!(listing_url.ends_with("/models"), "{listing_url}");
+        for (name, value) in PINNED_CLIENT_IDENTITY {
+            assert_eq!(
+                recorded_header(exchange, name).as_deref(),
+                Some(value),
+                "token exchange: {name}"
+            );
+            assert_eq!(
+                recorded_header(listing, name).as_deref(),
+                Some(value),
+                "model listing: {name}"
+            );
+            assert_eq!(
+                signed_value(&signed, name).as_deref(),
+                Some(value),
+                "inference: {name}"
+            );
+        }
+        assert_eq!(
+            recorded_header(exchange, "x-github-api-version").as_deref(),
+            Some(PINNED_GITHUB_API_VERSION),
+            "token exchange"
+        );
+        assert_eq!(
+            recorded_header(listing, "x-github-api-version").as_deref(),
+            Some(PINNED_INFERENCE_API_VERSION),
+            "model listing"
+        );
+        assert_eq!(
+            signed_value(&signed, "x-github-api-version").as_deref(),
+            Some(PINNED_INFERENCE_API_VERSION),
+            "inference"
+        );
+    }
+
     /// Inference names who initiated each request in `X-Initiator`: `agent`
     /// when the agent continues its own work, `user` otherwise. An image
     /// request still names vision.
@@ -8552,6 +8651,81 @@ mod tests {
                     Some("enterprise-approved".to_string())
                 ],
                 "identity lookup, model listing, inference"
+            );
+        }
+
+        /// A token route sends the pinned client identity on its model
+        /// listing and on inference, with the Copilot API's version on both:
+        /// the listing (discovery) states an account's full limits only when
+        /// it carries `X-GitHub-Api-Version`. GitHub's identity lookup gets
+        /// the User-Agent and GitHub's own API version, and no editor header.
+        #[tokio::test]
+        async fn token_routes_send_the_pinned_client_identity_and_api_versions() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("identity"));
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+            let mut signed = Vec::new();
+            resolved
+                .concrete_authorizer()
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url: &format!("{BUSINESS_API}/responses"),
+                    headers: &mut signed,
+                })
+                .await
+                .expect("authorize a Copilot request");
+            assert_eq!(
+                harness.transport.urls(),
+                [
+                    GITHUB_COPILOT_USER_URL.to_string(),
+                    format!("{BUSINESS_API}/models")
+                ]
+            );
+
+            for (name, value) in PINNED_CLIENT_IDENTITY {
+                assert_eq!(
+                    harness.transport.header(1, name).as_deref(),
+                    Some(value),
+                    "model listing: {name}"
+                );
+                assert_eq!(
+                    signed_value(&signed, name).as_deref(),
+                    Some(value),
+                    "inference: {name}"
+                );
+            }
+            assert_eq!(
+                harness
+                    .transport
+                    .header(1, "x-github-api-version")
+                    .as_deref(),
+                Some(PINNED_INFERENCE_API_VERSION),
+                "model listing"
+            );
+            assert_eq!(
+                signed_value(&signed, "x-github-api-version").as_deref(),
+                Some(PINNED_INFERENCE_API_VERSION),
+                "inference"
+            );
+            assert_eq!(
+                [
+                    harness.transport.header(0, "user-agent"),
+                    harness.transport.header(0, "x-github-api-version"),
+                    harness.transport.header(0, "editor-version"),
+                    harness.transport.header(0, "editor-plugin-version"),
+                ],
+                [
+                    Some(PINNED_CLIENT_IDENTITY[0].1.to_string()),
+                    Some(PINNED_GITHUB_API_VERSION.to_string()),
+                    None,
+                    None,
+                ],
+                "identity lookup"
             );
         }
 

@@ -105,6 +105,26 @@ class GuardTest(unittest.TestCase):
             self.assertIn(needle, err)
         return err
 
+    def assertNoWarning(self):
+        """The check passes and reports nothing at all."""
+        code, out, err = self.repo.run()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
+        return out
+
+    def assertWarning(self, *needles):
+        """The check passes, and everything it reports is a warning line."""
+        code, out, err = self.repo.run()
+        self.assertEqual(code, 0, err)
+        self.assertIn("every in-repo pin names its version", out)
+        lines = err.splitlines()
+        self.assertTrue(lines, "the check printed no warning")
+        for line in lines:
+            self.assertTrue(line.startswith("check_inrepo_version_pins: WARNING: "), line)
+        for needle in needles:
+            self.assertIn(needle, err)
+        return err
+
 
 class InventoryTests(GuardTest):
     def test_versions_come_from_the_tree(self):
@@ -512,12 +532,15 @@ class WriteTests(GuardTest):
 
 
 class PublishedInputTests(GuardTest):
-    """Published release inputs pin assets by digest: this tree's version or the release before it."""
+    """Published release inputs record one published release of a product.
+
+    They all name that release, it is never newer than the tree, and one older
+    than the tree is a warning: such inputs move only after a publication, so
+    a version bump must not fail on them.
+    """
 
     def setUp(self):
         super().setUp()
-        self.repo.write("meta/CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [1.4.2] - 2026-01-03\n\n"
-                        "## [1.4.1] - 2026-01-02\n\n## [1.4.0] - 2026-01-01\n")
         self.repo.config["published_release_inputs"] = {
             "reason": "Published assets pinned by digest move after their release.",
             "paths": ["meta/tool/release/**"]}
@@ -528,44 +551,124 @@ class PublishedInputTests(GuardTest):
                f"demo-gateway-{version}-x86_64.tar.gz")
         self.repo.write(path, json.dumps({"gateway": {"url": url, "sha256": HEX}}, indent=2) + "\n")
 
+    def runtime(self, version, path="meta/tool/release/runtime.py"):
+        """A version constant among the inputs: the release they select."""
+        self.repo.config["version_constants"] = {path: {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        self.repo.write(path, f'VERSION = "{version}"\nWHEEL_SHA256 = "{HEX}"\n')
+
+    def bump_meta(self, version):
+        self.repo.write("meta/crates/demo-meta-rs/Cargo.toml", f'[package]\nname = "demo-meta-rs"\nversion = "{version}"\n')
+        self.repo.write("meta/sdk/package.json", json.dumps({"name": "@rkat/demo-meta", "version": version}))
+        self.repo.write("meta/sdk/pyproject.toml", f'[project]\nname = "demo-meta"\nversion = "{version}"\n')
+
     def test_the_version_in_the_tree_passes(self):
         self.inputs("1.4.2")
-        self.assertIn("1 published release input paths", self.assertClean())
+        self.runtime("1.4.2")
+        self.assertIn("1 published release input paths", self.assertNoWarning())
 
-    def test_the_release_before_it_passes(self):
+    def test_an_older_release_is_a_warning_and_the_check_passes(self):
+        # One release back, two back, and a release far behind: none fails the check.
+        for version in ("1.4.1", "1.4.0", "1.2.0"):
+            with self.subTest(version=version):
+                self.inputs(version)
+                self.runtime(version)
+                self.assertWarning(f"WARNING: 3 published release input pin(s) name meta {version}, the release the "
+                                   "inputs select (the version constant at meta/tool/release/runtime.py:1), older "
+                                   "than 1.4.2 in this tree")
+
+    def test_an_input_that_names_another_release_than_the_selected_one_is_refused(self):
+        # The version constant selects 1.4.1; a file that names any other release, the
+        # tree's own version included, is a refresh that moved one file and not the rest.
+        self.runtime("1.4.1")
+        for version in ("1.4.2", "1.4.0"):
+            with self.subTest(version=version):
+                self.inputs(version)
+                err = self.assertFindings(
+                    f"meta/tool/release/inputs.json:3: release lukacf/meerkat release meta-v{version}: pins meta "
+                    f"{version}, not 1.4.1, the release of meta the published release inputs select (the version "
+                    "constant at meta/tool/release/runtime.py:1)",
+                    f"meta/tool/release/inputs.json:3: asset demo-gateway-{version}: pins meta {version}, not 1.4.1, "
+                    "the release of meta the published release inputs select")
+                self.assertNotIn("runtime.py:1: constant", err)
         self.inputs("1.4.1")
-        self.assertClean()
+        self.assertWarning("WARNING: 3 published release input pin(s) name meta 1.4.1")
 
-    def test_two_releases_back_is_refused(self):
-        self.inputs("1.4.0")
-        self.assertFindings("asset demo-gateway-1.4.0: pins meta 1.4.0, older than the release before its version "
-                            "1.4.2 in this tree (a published release input names 1.4.2 or the release before it, "
-                            "1.4.1)", "release lukacf/meerkat release meta-v1.4.0")
+    def test_inputs_without_a_version_constant_agree_on_the_newest_release_they_name(self):
+        self.inputs("1.4.1", path="meta/tool/release/a.json")
+        self.inputs("1.4.0", path="meta/tool/release/b.json")
+        err = self.assertFindings(
+            "meta/tool/release/b.json:3: asset demo-gateway-1.4.0: pins meta 1.4.0, not 1.4.1, the release of meta "
+            "the published release inputs select (the newest release they name, at meta/tool/release/a.json:3)")
+        self.assertNotIn("a.json:3: asset", err)
+        self.inputs("1.4.1", path="meta/tool/release/b.json")
+        self.assertWarning("WARNING: 4 published release input pin(s) name meta 1.4.1, the release the inputs "
+                           "select (the newest release they name, at meta/tool/release/a.json:3), older than 1.4.2")
 
     def test_a_version_newer_than_the_tree_is_refused(self):
         self.inputs("1.4.3")
         self.assertFindings("asset demo-gateway-1.4.3: pins meta 1.4.3, above its version 1.4.2 in this tree")
+        # Also when every input agrees on it: no selection makes an unpublished release a published one.
+        self.runtime("1.4.3")
+        err = self.assertFindings(
+            'constant VERSION = "1.4.3": pins demo-meta 1.4.3, above its version 1.4.2 in this tree',
+            "asset demo-gateway-1.4.3: pins meta 1.4.3, above its version 1.4.2 in this tree")
+        self.assertNotIn("WARNING", err)
 
     def test_the_release_before_it_outside_the_inputs_is_refused(self):
         self.inputs("1.4.1", path="meta/tool/other/inputs.json")
         self.assertFindings("asset demo-gateway-1.4.1: pins meta 1.4.1, below its version 1.4.2 in this tree")
 
-    def test_a_requirement_follows_its_package_product(self):
-        catalog = self.repo.write("meta/tool/release/catalog.json", json.dumps({"requires": "demo-meta==1.4.1"}))
-        self.assertClean()
-        catalog.write_text(json.dumps({"requires": "demo-meta==1.4.0"}), encoding="utf-8")
-        self.assertFindings("requirement demo-meta==1.4.0: pins demo-meta 1.4.0, older than the release before")
+    def test_a_pin_beside_the_inputs_follows_the_ordinary_rule(self):
+        # The class is the configured paths and matches, nothing wider: a pin in another file
+        # of the same directory, and a pin on another line of a file listed with a match,
+        # are refused below the version in the tree, also while the inputs lag behind it.
+        self.repo.config["published_release_inputs"]["paths"] = [
+            {"path": "meta/tool/launch/runtime.py", "match": "^VERSION = "}, "meta/tool/launch/catalog_*.json"]
+        self.runtime("1.4.1", path="meta/tool/launch/runtime.py")
+        self.repo.write("meta/tool/launch/catalog_1_4_1.json", json.dumps({"requires": "demo-meta==1.4.1"}))
+        beside = self.repo.write("meta/tool/launch/other.json", json.dumps({"requires": "demo-meta==1.4.1"}))
+        self.assertFindings("meta/tool/launch/other.json:1: requirement demo-meta==1.4.1: pins demo-meta 1.4.1, "
+                            "below its version 1.4.2 in this tree\n")
+        beside.unlink()
+        self.repo.write("meta/tool/launch/runtime.py",
+                        f'VERSION = "1.4.1"\nWHEEL_SHA256 = "{HEX}"\nCORE_REQUIREMENT = "=1.4.1"\n')
+        self.assertFindings('meta/tool/launch/runtime.py:3: constant CORE_REQUIREMENT = "=1.4.1": pins core '
+                            '1.4.1, below its version 1.4.2 in this tree\n')
 
-    def test_a_product_of_its_own_reads_its_own_changelog(self):
-        # demo-tool is the forge product inside meta/: its releases are in meta/tool/CHANGELOG.md.
-        pins = self.repo.write("meta/tool/release/tool.json", json.dumps({"requires": "demo-tool==0.3.0"}))
-        self.assertFindings("requirement demo-tool==0.3.0: pins demo-tool 0.3.0, below its version 0.3.1 in this "
-                            "tree (a published release input names 0.3.1 or the release before it, and the "
-                            "product's CHANGELOG.md has none)")
-        self.repo.write("meta/tool/CHANGELOG.md", "## [0.3.1] - 2026-01-02\n\n## [0.3.0] - 2026-01-01\n")
-        self.assertClean()
-        pins.write_text(json.dumps({"requires": "demo-tool==0.2.9"}), encoding="utf-8")
-        self.assertFindings("pins demo-tool 0.2.9, older than the release before its version 0.3.1")
+    def test_a_requirement_counts_with_its_package_product(self):
+        self.inputs("1.4.1")
+        catalog = self.repo.write("meta/tool/release/catalog.json", json.dumps({"requires": "demo-meta==1.4.1"}))
+        self.assertWarning("WARNING: 3 published release input pin(s) name meta 1.4.1")
+        catalog.write_text(json.dumps({"requires": "demo-meta==1.4.0"}), encoding="utf-8")
+        self.assertFindings("requirement demo-meta==1.4.0: pins demo-meta 1.4.0, not 1.4.1, the release of meta the "
+                            "published release inputs select")
+
+    def test_a_product_of_its_own_selects_its_own_release(self):
+        # demo-tool is the forge product inside meta/: its inputs name its release, not Meta's.
+        self.inputs("1.4.1")
+        self.repo.write("meta/tool/release/tool.json", json.dumps({"requires": "demo-tool==0.3.0"}))
+        self.assertWarning("WARNING: 2 published release input pin(s) name meta 1.4.1",
+                           "WARNING: 1 published release input pin(s) name forge 0.3.0",
+                           "older than 0.3.1 in this tree")
+
+    def test_an_input_that_names_no_single_release_is_refused(self):
+        self.inputs("1.4.2")
+        self.repo.write("meta/tool/release/bundle/package.json", json.dumps(
+            {"name": "@rkat/demo-bundle", "peerDependencies": {"@rkat/demo-meta": "*"}}, indent=2))
+        self.assertFindings("peerDependencies @rkat/demo-meta@*: pins @rkat/demo-meta an open range")
+
+    def test_an_allowed_pin_is_left_out_of_the_judgment(self):
+        # An allow entry covers an input that names another release, with its reason, as before:
+        # that pin neither disagrees with the selection nor counts in the warning.
+        self.inputs("1.4.1")
+        self.inputs("1.4.0", path="meta/tool/release/product.json")
+        self.repo.allow(path="meta/tool/release/**", match=r"1\.4\.0", key="^gateway/",
+                        reason="A product row that another change moves.", removed_by="the change that moves it")
+        err = self.assertWarning("WARNING: 2 published release input pin(s) name meta 1.4.1")
+        self.assertNotIn("covers nothing", err)
+        self.inputs("1.4.1", path="meta/tool/release/product.json")
+        self.assertFindings("meta/tool/release/** (1\\.4\\.0) [key ^gateway/] covers nothing; delete it")
 
     def test_an_input_path_that_matches_nothing_is_stale(self):
         self.repo.config["published_release_inputs"]["paths"].append("meta/gone/**")
@@ -579,24 +682,24 @@ class PublishedInputTests(GuardTest):
         self.inputs("1.4.2")
         self.assertFindings("published_release_inputs needs its reason", code=2)
 
-    def test_a_bump_leaves_values_filled_in_after_a_release_one_release_behind(self):
-        # Digests, a wheel hash and a recorded catalog are filled in after their release
-        # is published: at a bump they name the release before the new version.
-        self.repo.config["version_constants"] = {"meta/tool/release/runtime.py": {"VERSION": "pypi:demo-meta"}}
-        self.repo.save_config()
+    def test_a_bump_does_not_fail_on_inputs_that_move_after_a_publication(self):
+        # Digests, a wheel hash and a recorded catalog are filled in after their release is
+        # published: a bump, and the bump after it, leave them behind and still pass.
         self.inputs("1.4.2")
-        self.repo.write("meta/tool/release/runtime.py", f'VERSION = "1.4.2"\nWHEEL_SHA256 = "{HEX}"\n')
-        self.assertClean()
-        self.repo.write("meta/crates/demo-meta-rs/Cargo.toml", '[package]\nname = "demo-meta-rs"\nversion = "1.4.3"\n')
-        self.repo.write("meta/sdk/package.json", json.dumps({"name": "@rkat/demo-meta", "version": "1.4.3"}))
-        self.repo.write("meta/sdk/pyproject.toml", '[project]\nname = "demo-meta"\nversion = "1.4.3"\n')
-        self.repo.write("meta/CHANGELOG.md", "## [Unreleased]\n\n## [1.4.3] - 2026-01-04\n\n## [1.4.2] - 2026-01-03\n\n"
-                        "## [1.4.1] - 2026-01-02\n")
-        self.assertClean()
-        self.repo.write("meta/tool/release/runtime.py", f'VERSION = "1.4.1"\nWHEEL_SHA256 = "{HEX}"\n')
-        self.assertFindings('constant VERSION = "1.4.1": pins demo-meta 1.4.1, older than the release before its '
-                            'version 1.4.3 in this tree (a published release input names 1.4.3 or the release before '
-                            'it, 1.4.2)')
+        self.runtime("1.4.2")
+        self.assertNoWarning()
+        for bumped in ("1.4.3", "1.4.4"):
+            with self.subTest(bumped=bumped):
+                self.bump_meta(bumped)
+                self.assertWarning("WARNING: 3 published release input pin(s) name meta 1.4.2, the release the "
+                                   "inputs select (the version constant at meta/tool/release/runtime.py:1), older "
+                                   f"than {bumped} in this tree")
+        # The refresh after the publication moves every input: one left behind is refused.
+        self.runtime("1.4.4")
+        self.assertFindings("asset demo-gateway-1.4.2: pins meta 1.4.2, not 1.4.4, the release of meta the "
+                            "published release inputs select")
+        self.inputs("1.4.4")
+        self.assertNoWarning()
 
     def test_a_bare_version_constant_is_a_pin_only_where_configured(self):
         self.inputs("1.4.2")
@@ -616,17 +719,20 @@ class PublishedInputTests(GuardTest):
 
     def test_a_published_input_is_read_under_a_whole_file_entry(self):
         self.repo.allow(path="meta/tool/**", reason="Fixtures and tests of the tool.")
+        self.inputs("1.4.3")
+        self.assertFindings("asset demo-gateway-1.4.3: pins meta 1.4.3, above its version 1.4.2 in this tree")
         self.inputs("1.4.0")
-        self.assertFindings("asset demo-gateway-1.4.0: pins meta 1.4.0, older than the release before")
+        self.assertWarning("WARNING: 2 published release input pin(s) name meta 1.4.0")
 
     def test_a_published_path_with_a_match_that_applies_to_no_pin_is_stale(self):
         self.repo.config["published_release_inputs"]["paths"].append(
             {"path": "meta/tool/runtime.py", "match": "^VERSION = "})
         self.repo.config["version_constants"] = {"meta/tool/runtime.py": {"VERSION": "pypi:demo-meta"}}
         self.repo.save_config()
-        self.inputs("1.4.2")
+        self.inputs("1.4.1")
         self.repo.write("meta/tool/runtime.py", 'VERSION = "1.4.1"\n')
-        self.assertClean()
+        self.assertWarning("WARNING: 3 published release input pin(s) name meta 1.4.1, the release the inputs "
+                           "select (the version constant at meta/tool/runtime.py:1)")
         self.repo.config["published_release_inputs"]["paths"][1]["match"] = "^RELEASE = "
         self.repo.save_config()
         self.assertFindings('meta/tool/runtime.py:1: constant VERSION = "1.4.1": pins demo-meta 1.4.1, below its '
@@ -691,48 +797,77 @@ class ConfiguredEntryTests(GuardTest):
 
     def test_the_forge_product_input_entry_leaves_a_guide_row_to_the_check(self):
         # The ordinary gateway and the Guide's gateway have the same URL shape in Forge's
-        # release inputs. Two releases past 0.9.10, the temporary entry for Forge's product
-        # inputs covers the ordinary gateway at 0.9.10, and a Guide row fallen back to it is refused.
+        # release inputs. The temporary entry for Forge's product inputs covers the ordinary
+        # gateway at 0.9.10; a Guide row fallen back to it names another release than the
+        # one the inputs select, and is refused.
         entries = [entry for entry in self.configured()["allow"]
                    if entry["path"].startswith("meta/installer/release/")]
         self.assertTrue(entries)
         self.repo = Repo(self.repo.root, version="0.9.12")
-        self.repo.write("meta/CHANGELOG.md", "## [0.9.12] - 2026-01-03\n\n## [0.9.11] - 2026-01-02\n\n"
-                        "## [0.9.10] - 2026-01-01\n")
         self.repo.config["published_release_inputs"] = {
             "reason": "Published assets pinned by digest move after their release.",
             "paths": ["meta/installer/release/**"]}
         self.repo.config["allow"] = entries
         self.repo.save_config()
-        url = ("https://github.com/lukacf/meerkat/releases/download/meta-v0.9.10/"
-               "demo-gateway-0.9.10-x86_64-unknown-linux-gnu.tar.gz")
+
+        def url(version):
+            return (f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}/"
+                    f"demo-gateway-{version}-x86_64-unknown-linux-gnu.tar.gz")
+
         inputs = {"targets": {"linux-x86_64": {"files": {
-            "guide/rpc_gateway": {"url": url, "sha256": HEX},
-            "ordinary/rpc_gateway": {"url": url, "sha256": HEX}}}}}
+            "guide/rpc_gateway": {"url": url("0.9.10"), "sha256": HEX},
+            "ordinary/rpc_gateway": {"url": url("0.9.10"), "sha256": HEX},
+            "guide/gateway": {"url": url("0.9.11"), "sha256": HEX}}}}}
         self.repo.write("meta/installer/release/forge-release-inputs.json", json.dumps(inputs, indent=2) + "\n")
         err = self.assertFindings("meta/installer/release/forge-release-inputs.json:6: release lukacf/meerkat "
-                                  "release meta-v0.9.10: pins meta 0.9.10, older than the release before")
+                                  "release meta-v0.9.10: pins meta 0.9.10, not 0.9.11, the release of meta the "
+                                  "published release inputs select")
         self.assertNotIn("forge-release-inputs.json:10:", err)
+        self.assertNotIn("forge-release-inputs.json:14: release", err)
         self.assertNotIn("covers nothing", err)
 
     def test_the_agent_team_runtime_follows_the_published_rule_on_its_version_line_only(self):
-        # The agent-team runtime's VERSION sits beside its wheel's SHA-256 and may lag a bump
-        # by one release; any other pin in that file names the version in this tree.
+        # The agent-team runtime's VERSION sits beside its wheel's SHA-256 and moves after a
+        # publication; any other pin in that file names the version in this tree.
         runtime = "meta/installer/launchkit/public_meta_runtime.py"
         configured = [path for path in self.configured()["published_release_inputs"]["paths"]
                       if (path if isinstance(path, str) else path["path"]) == runtime]
         self.assertEqual(len(configured), 1)
-        for changelog in ("CHANGELOG.md", "meta/CHANGELOG.md"):
-            self.repo.write(changelog, "## [1.4.2] - 2026-01-03\n\n## [1.4.1] - 2026-01-02\n")
         self.repo.config["published_release_inputs"] = {
             "reason": "Published assets pinned by digest move after their release.", "paths": configured}
         self.repo.config["version_constants"] = {runtime: {"VERSION": "pypi:demo-meta"}}
         self.repo.save_config()
         self.repo.write(runtime, f'VERSION = "1.4.1"\nSDK_WHEEL_SHA256 = "{HEX}"\n')
-        self.assertClean()
+        self.assertWarning(f"WARNING: 1 published release input pin(s) name meta 1.4.1, the release the inputs "
+                           f"select (the version constant at {runtime}:1), older than 1.4.2 in this tree")
         self.repo.write(runtime, f'VERSION = "1.4.1"\nSDK_WHEEL_SHA256 = "{HEX}"\nCORE_REQUIREMENT = "=1.4.1"\n')
         self.assertFindings(f'{runtime}:3: constant CORE_REQUIREMENT = "=1.4.1": pins core 1.4.1, below its version '
                             '1.4.2 in this tree\n')
+
+    def test_a_pin_beside_this_repository_s_published_inputs_is_still_refused(self):
+        # This repository's own published release input paths, on a synthetic tree whose
+        # inputs lag one release: a pin in a file beside them that no listed path names
+        # follows the ordinary rule and fails the check.
+        published = self.configured()["published_release_inputs"]
+        runtime = "meta/installer/launchkit/public_meta_runtime.py"
+        self.repo.config["published_release_inputs"] = published
+        self.repo.config["version_constants"] = {runtime: {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        url = "https://github.com/lukacf/meerkat/releases/download/meta-v1.4.1/demo-gateway-1.4.1-x86_64.tar.gz"
+        self.repo.write(runtime, f'VERSION = "1.4.1"\nSDK_WHEEL_SHA256 = "{HEX}"\n')
+        self.repo.write("meta/installer/launchkit/meta_model_catalog_1_4_1.json",
+                        json.dumps({"requires": "demo-meta==1.4.1"}))
+        self.repo.write("meta/installer/release/inputs/stable-inputs.json", json.dumps({"url": url, "sha256": HEX}))
+        self.repo.write("meta/installer/tests/fixtures/meta_release_1_4_1/checksums.sha256",
+                        f"{HEX}  demo-gateway-1.4.1-x86_64.tar.gz\n")
+        for beside in ("meta/installer/launchkit/other_catalog.json", "meta/installer/launchkit/notes.txt",
+                       "meta/installer/inputs.json", "meta/installer/tests/fixtures/other_release/SOURCE.json"):
+            with self.subTest(beside=beside):
+                added = self.repo.write(beside, json.dumps({"requires": "demo-meta==1.4.1"}))
+                err = self.assertFindings(f"{beside}:1: requirement demo-meta==1.4.1: pins demo-meta 1.4.1, below "
+                                          "its version 1.4.2 in this tree\n")
+                self.assertNotIn(" not 1.4.1", err)
+                added.unlink()
 
 
 class CommandTests(unittest.TestCase):

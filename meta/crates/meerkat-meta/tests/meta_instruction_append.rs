@@ -171,7 +171,8 @@ fn controller() -> meerkat_core::ControllerModelSelection {
 /// The members' model: each request's last message (past Core's system
 /// notices) is sent on the row's channel, each whole request is kept, and
 /// every request answers. A request whose last message holds [`HOLD`] waits
-/// until the row releases it.
+/// until the row releases it; one that holds [`FORK_OFF`] answers with that
+/// tool call once.
 #[derive(Clone)]
 struct RecordingClient {
     asked: mpsc::UnboundedSender<String>,
@@ -204,14 +205,23 @@ impl meerkat_client::LlmClient for RecordingClient {
             .map(|last| serde_json::to_string(last).unwrap_or_default())
             .unwrap_or_default();
         let held = last.contains(HOLD);
-        // A turn asked to fork answers with one `fork_off` call, then ends.
-        let forks = last.contains(FORK_OFF)
-            && !matches!(request.messages.last(), Some(Message::ToolResults { .. }));
+        // A turn asked to fork answers with that one tool call, then ends.
+        let answered = matches!(request.messages.last(), Some(Message::ToolResults { .. }));
+        let call = if answered {
+            None
+        } else if last.contains(FORK_OFF) {
+            Some((
+                "fork_off",
+                serde_json::json!({"member_id": FORK_CHILD, "task": FORK_TASK}),
+            ))
+        } else {
+            None
+        };
         let _ = self.asked.send(last);
         let [usage, done] = llm_usage::usage_then_done(
             request,
             meerkat::Provider::OpenAI,
-            if forks {
+            if call.is_some() {
                 StopReason::ToolUse
             } else {
                 StopReason::EndTurn
@@ -222,11 +232,11 @@ impl meerkat_client::LlmClient for RecordingClient {
             if held {
                 let _ = released.wait_for(|released| *released).await;
             }
-            if forks {
+            if let Some((name, args)) = call {
                 yield Ok(LlmEvent::ToolCallComplete {
-                    id: "call-fork".to_string(),
-                    name: "fork_off".to_string(),
-                    args: serde_json::json!({"member_id": FORK_CHILD, "task": FORK_TASK}),
+                    id: format!("call-{name}"),
+                    name: name.to_string(),
+                    args,
                     meta: None,
                 });
             } else {
@@ -1731,6 +1741,9 @@ async fn a_fork_off_child_of_an_edited_agent_starts_from_the_first_prompt() {
 
 /// The durable fork (`UnifiedRuntime::fork_member`, which `meta/fork_member`
 /// and a console side chat run): the child's first request, as it is today.
+/// The child reads the source's entry row as an inherited header that names
+/// the record and its digest and holds no text: it is told an instruction
+/// exists that it cannot read. Pinned as it is.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_durable_fork_of_an_edited_agent_starts_from_the_first_prompt() {
     let temp = tempfile::tempdir().unwrap();

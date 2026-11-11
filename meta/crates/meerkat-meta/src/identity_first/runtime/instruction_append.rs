@@ -135,6 +135,11 @@ mod interface_stand_in {
     }
 }
 
+/// A step's future, heap-placed: the future of a caller that awaits it holds
+/// a pointer, not the step's whole state machine. A roster pass and a door
+/// await these inside futures that are deep already.
+type BoxedStep<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
 /// What the caller observed of an agent's instructions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InstructionCheck<'a> {
@@ -431,15 +436,16 @@ impl IdentityRuntime {
         let Ok(identity) = AgentIdentity::parse(&change.identity) else {
             return InstructionOutcome::Unchanged;
         };
-        self.append_changed_instructions(
-            mob,
-            &identity,
-            InstructionCheck::Changed {
-                previous: &change.previous,
-                current: &change.current,
-            },
-        )
-        .await
+        let comparison: BoxedStep<'_, InstructionOutcome> =
+            Box::pin(self.append_changed_instructions(
+                mob,
+                &identity,
+                InstructionCheck::Changed {
+                    previous: &change.previous,
+                    current: &change.current,
+                },
+            ));
+        comparison.await
     }
 
     /// After the committed removal of an agent, and on a replay of it: the
@@ -497,34 +503,36 @@ impl IdentityRuntime {
     /// registration, under the identity's lifecycle lock: when the one it
     /// replaces holds other instructions, the comparison runs with both
     /// texts. A first registration observes no change.
-    pub(super) async fn append_changed_instructions_on_registration(
-        &self,
-        spec: &DurableAgentSpec,
-    ) {
-        let Some(previous) = self
-            .entries
-            .read()
-            .await
-            .get(&spec.identity)
-            .map(|entry| entry.spec.additional_instructions.clone())
-        else {
-            return;
-        };
-        if sections(&previous) == sections(&spec.additional_instructions) {
-            return;
-        }
-        let Some(mob) = self.runtime_services.mob_handle() else {
-            return;
-        };
-        self.append_changed_instructions(
-            &mob,
-            &spec.identity,
-            InstructionCheck::Registered {
-                previous: &previous,
-                current: &spec.additional_instructions,
-            },
-        )
-        .await;
+    pub(super) fn append_changed_instructions_on_registration<'a>(
+        &'a self,
+        spec: &'a DurableAgentSpec,
+    ) -> BoxedStep<'a, ()> {
+        Box::pin(async move {
+            let Some(previous) = self
+                .entries
+                .read()
+                .await
+                .get(&spec.identity)
+                .map(|entry| entry.spec.additional_instructions.clone())
+            else {
+                return;
+            };
+            if sections(&previous) == sections(&spec.additional_instructions) {
+                return;
+            }
+            let Some(mob) = self.runtime_services.mob_handle() else {
+                return;
+            };
+            self.append_changed_instructions(
+                &mob,
+                &spec.identity,
+                InstructionCheck::Registered {
+                    previous: &previous,
+                    current: &spec.additional_instructions,
+                },
+            )
+            .await;
+        })
     }
 
     /// The start check, after this process's first roster pass
@@ -532,53 +540,60 @@ impl IdentityRuntime {
     /// is compared, so a text that changed before the stop without its
     /// record written is recorded now. One read of the mob's records, and
     /// no session is read.
-    pub(crate) async fn append_changed_instructions_at_start(&self, generation: u64) {
-        if generation != 1 || self.is_candidate_launch() {
-            return;
-        }
-        let Some(mob) = self.runtime_services.mob_handle() else {
-            return;
-        };
-        let Ok(namespace) = InstructionNamespace::new(INSTRUCTIONS_NAMESPACE) else {
-            return;
-        };
-        let recorded = match instruction_records(&mob, namespace, None).await {
-            Ok(records) => records
-                .into_iter()
-                .map(|record| record.slot.key)
-                .collect::<BTreeSet<_>>(),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "the mob's instruction records could not be read at start; an agent's next \
-                     observed change of instructions compares them"
-                );
+    pub(crate) fn append_changed_instructions_at_start(
+        &self,
+        generation: u64,
+    ) -> BoxedStep<'_, ()> {
+        Box::pin(async move {
+            if generation != 1 || self.is_candidate_launch() {
                 return;
             }
-        };
-        if recorded.is_empty() {
-            return;
-        }
-        let registered = self
-            .entries
-            .read()
-            .await
-            .iter()
-            .map(|(identity, entry)| (identity.clone(), entry.spec.additional_instructions.clone()))
-            .collect::<Vec<_>>();
-        for (identity, current) in registered {
-            let holds_record = instruction_slot(identity.as_str())
-                .is_some_and(|slot| recorded.contains(&slot.key));
-            if !holds_record {
-                continue;
+            let Some(mob) = self.runtime_services.mob_handle() else {
+                return;
+            };
+            let Ok(namespace) = InstructionNamespace::new(INSTRUCTIONS_NAMESPACE) else {
+                return;
+            };
+            let recorded = match instruction_records(&mob, namespace, None).await {
+                Ok(records) => records
+                    .into_iter()
+                    .map(|record| record.slot.key)
+                    .collect::<BTreeSet<_>>(),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the mob's instruction records could not be read at start; an agent's next \
+                         observed change of instructions compares them"
+                    );
+                    return;
+                }
+            };
+            if recorded.is_empty() {
+                return;
             }
-            self.append_changed_instructions(
-                &mob,
-                &identity,
-                InstructionCheck::Reconcile { current: &current },
-            )
-            .await;
-        }
+            let registered = self
+                .entries
+                .read()
+                .await
+                .iter()
+                .map(|(identity, entry)| {
+                    (identity.clone(), entry.spec.additional_instructions.clone())
+                })
+                .collect::<Vec<_>>();
+            for (identity, current) in registered {
+                let holds_record = instruction_slot(identity.as_str())
+                    .is_some_and(|slot| recorded.contains(&slot.key));
+                if !holds_record {
+                    continue;
+                }
+                self.append_changed_instructions(
+                    &mob,
+                    &identity,
+                    InstructionCheck::Reconcile { current: &current },
+                )
+                .await;
+            }
+        })
     }
 }
 

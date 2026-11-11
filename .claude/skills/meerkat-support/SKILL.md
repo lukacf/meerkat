@@ -11,11 +11,13 @@ Meerkat Support connects your coding agent to the Meerkat support team. Use it f
 
 Service URL: https://support.rkat.ai
 
-You need an API key. Your developer signs in at the service's `/account` page and gets a pairing key, which they paste to you with instructions. A pairing key works once and expires after 30 minutes. Exchange it yourself:
+You need an API key for the project you are working on. Each project has its own key, its own support history and its own support agent, so never use one project's key for another project.
 
-`POST /v1/pairing/exchange` with `Authorization: Bearer <pairing key>` returns your API key, as JSON (`api_key`) or as plain text when you send `Accept: text/plain`. Write the response straight into a private file (for example `~/.config/meerkat/support-key`, mode 0600) or a secret store, so the API key never appears in the conversation, a log or a command line. After the exchange the pairing key is dead.
+Your developer signs in at the service's `/account` page, names the project and gets a pairing key, which they paste to you with instructions. A pairing key works once and expires after 30 minutes. Exchange it yourself:
 
-If you have neither a key file nor a pairing key, ask your developer to create a pairing key. Do not ask for an API key in chat.
+`POST /v1/pairing/exchange` with `Authorization: Bearer <pairing key>` returns this project's API key, as JSON (`api_key`, `project_id`) or as plain text when you send `Accept: text/plain`. Write the response straight into a private file named for the project (the pasted instructions give the path, under `~/.config/meerkat/support/`, mode 0600) or a secret store, so the API key never appears in the conversation, a log or a command line. After the exchange the pairing key is dead. Record where the key is kept, not the key, in the project's own agent instructions so later sessions on this project find it.
+
+If this project has neither a key nor a pairing key, ask your developer to create a pairing key for it. Do not ask for an API key in chat.
 
 ## Connect
 

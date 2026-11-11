@@ -1679,6 +1679,19 @@ mod tests {
         }
     }
 
+    /// The ChatGPT backend's plan usage limit, named as the `type` of its
+    /// 429 error object and as a stream error code: exhausted quota, which
+    /// no retry inside a turn clears.
+    #[test]
+    fn chatgpt_usage_limit_reached_is_quota_exhaustion() {
+        assert!(LlmError::code_signals_quota_exhausted(
+            "usage_limit_reached"
+        ));
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":78366}}"#;
+        let err = LlmError::from_http_status(429, body.to_string(), Some(1000));
+        assert_quota_exhausted_is_terminal(&err, "openai");
+    }
+
     #[test]
     fn openai_transient_429_bodies_keep_the_rate_limit_class_and_hint() {
         for body in [

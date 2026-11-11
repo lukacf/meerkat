@@ -310,6 +310,10 @@ async fn every_request_refusal_code_is_a_terminal_invalid_request() {
                     vec![failed_without_error(), flat_error(code, REFUSAL_TEXT)],
                 ),
                 (
+                    "nested error after a failure without one",
+                    vec![failed_without_error(), nested_error(code, REFUSAL_TEXT)],
+                ),
+                (
                     "failed with its error",
                     vec![failed_with(code, REFUSAL_TEXT)],
                 ),
@@ -859,6 +863,16 @@ async fn the_cause_is_read_from_every_place_the_same_way_as_before() {
                 "type": "error",
                 "code": "rate_limit_exceeded",
                 "error": {"type": "invalid_request_error", "message": "nested"},
+            })],
+            |error| matches!(error, LlmError::RateLimited { .. }),
+        ),
+        (
+            "error event: empty strings in the error object are absent",
+            vec![json!({
+                "type": "error",
+                "code": "rate_limit_exceeded",
+                "message": "flat",
+                "error": {"code": "", "type": "", "message": ""},
             })],
             |error| matches!(error, LlmError::RateLimited { .. }),
         ),

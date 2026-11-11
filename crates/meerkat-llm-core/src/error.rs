@@ -1694,6 +1694,10 @@ mod tests {
         let body = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":78366}}"#;
         let err = LlmError::from_http_status(429, body.to_string(), Some(1000));
         assert_quota_exhausted_is_terminal(&err, "openai");
+        // The list is read for every other 4xx body too: the same body under
+        // HTTP 400 is exhausted quota, not an invalid request.
+        let err = LlmError::from_http_status(400, body.to_string(), None);
+        assert_quota_exhausted_is_terminal(&err, "openai");
     }
 
     #[test]

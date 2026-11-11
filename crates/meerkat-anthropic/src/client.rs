@@ -2114,11 +2114,27 @@ impl AnthropicClient {
     /// echo the request's headers in an error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
         match &self.authorizer {
-            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
-            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
-                visit(&self.api_key);
-            }),
+            Some(authorizer) => {
+                authorizer.redact_response_diagnostic(diagnostic);
+                // A wasm32 build sends this client's `x-api-key` whatever
+                // the authorizer, so the key is named beside it.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    if !self.api_key.is_empty() {
+                        self.redact_own_api_key(diagnostic);
+                    }
+                }
+            }
+            None => self.redact_own_api_key(diagnostic),
         }
+    }
+
+    /// Remove this client's own API key, and credential shapes, from
+    /// `diagnostic`.
+    fn redact_own_api_key(&self, diagnostic: &mut String) {
+        meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+            visit(&self.api_key);
+        });
     }
 
     /// `diagnostic` redacted as [`Self::redact_diagnostic`] does, for a log

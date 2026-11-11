@@ -261,19 +261,23 @@ impl OpenAiCompatibleClient {
         self
     }
 
-    /// Remove from `diagnostic`, text a response carried, the credential
-    /// that signed the request: the authorizer's, or without an authorizer
-    /// this client's own static bearer. A provider, proxy or gateway can
-    /// echo the request's headers in an error.
+    /// Remove from `diagnostic`, text a response carried, the credentials
+    /// that signed the request: the authorizer's, and this client's own
+    /// static bearer, which is sent with or without an authorizer. A
+    /// provider, proxy or gateway can echo the request's headers in an
+    /// error.
     fn redact_diagnostic(&self, diagnostic: &mut String) {
-        match &self.authorizer {
-            Some(authorizer) => authorizer.redact_response_diagnostic(diagnostic),
-            None => meerkat_core::redact::redact_credentials(diagnostic, |visit| {
-                if let Some(bearer_token) = &self.bearer_token {
-                    visit(bearer_token);
-                }
-            }),
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+            if self.bearer_token.is_none() {
+                return;
+            }
         }
+        meerkat_core::redact::redact_credentials(diagnostic, |visit| {
+            if let Some(bearer_token) = &self.bearer_token {
+                visit(bearer_token);
+            }
+        });
     }
 
     /// `error` with every field that can carry provider text redacted as

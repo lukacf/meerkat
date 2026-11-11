@@ -38,23 +38,29 @@ them.
 ### Changed
 
 - `meerkat-copilot`, `meerkat-auth-core` (GitHub Copilot routes): the
-  default client identity a Copilot route sends is current again:
+  default client identity a Copilot route sends is a recent one again:
   `Editor-Version: vscode/1.145.2` (was `vscode/1.107.0`),
   `Editor-Plugin-Version: copilot-chat/0.73.0` (was `copilot-chat/0.35.0`)
   and `User-Agent: GitHubCopilotChat/0.73.0` (was
-  `GitHubCopilotChat/0.35.0`; the public constant
-  `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT`). With the
-  values sent through 0.9.13 the Copilot API answered a model listing with a
-  `client_version_deprecated` warning on every entry. Live list reads show
-  that the warning follows `Editor-Version` alone (`vscode/1.118.0` is
-  marked, `vscode/1.130.0` is not) and that the plugin and User-Agent
-  versions do not move it; all three are raised together so that the
-  identity stays one client. Nothing else in the listing changes with the
-  new values: the same entries and the same `capabilities.limits`. The
-  headers go on the token exchange, the identity lookup (User-Agent only),
-  the model listing and inference, as before, and a route whose backend
-  `options` set `user_agent`, `editor_version` or `editor_plugin_version`
-  keeps its own values. Two rows now pin the three values and the
+  `GitHubCopilotChat/0.35.0`). Two public values change with it: the
+  constant `meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT`
+  and what `meerkat_copilot::CopilotBackendConfig::default()` returns. With
+  the values sent through 0.9.13 the Copilot API answered a model listing
+  with a `client_version_deprecated` warning on every entry. Live list
+  reads show that the warning follows `Editor-Version` alone
+  (`vscode/1.118.0` is marked, `vscode/1.130.0` is not) and that the plugin
+  and User-Agent versions do not move it; all three are raised together so
+  that the identity stays one client (the plugin version is the one the
+  editor's public repository pairs with that editor release). Nothing else
+  in the listing changes with the new values: the same entries and the same
+  `capabilities.limits`. The headers go on the token exchange, the identity
+  lookup (User-Agent only), the model listing and inference, as before, and
+  on those requests a route whose backend `options` set `user_agent`,
+  `editor_version` or `editor_plugin_version` keeps its own values. The
+  device sign-in's own OAuth requests to GitHub, the device-code request
+  and the token poll among them, send the same User-Agent constant; no
+  backend option changes it there. Rows now pin the three values, the
+  User-Agent of the device sign-in's requests, and the
   `X-GitHub-Api-Version` of the model listing and of inference, which
   nothing asserted before.
 

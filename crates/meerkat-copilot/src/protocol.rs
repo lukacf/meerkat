@@ -28,11 +28,12 @@ const DEFAULT_USER_AGENT: &str = meerkat_auth_core::github_copilot::GITHUB_COPIL
 /// warning. Live list reads of 2026-11-11: `vscode/1.107.0` and
 /// `vscode/1.118.0` are marked, `vscode/1.130.0` and `vscode/1.145.2` are
 /// not, and the plugin and User-Agent versions do not move the warning. The
-/// plugin version keeps the pairing of the values before it (plugin minor =
-/// editor minor less 72, as `copilot-chat/0.35.0` was to `vscode/1.107.0`);
-/// it was not checked against a release list. Raise the three together,
-/// before the editor version falls behind the service's cut-off; rows in
-/// `runtime.rs` pin them.
+/// plugin version is the one the editor's public repository pairs with that
+/// editor release: the `version` of the built-in chat extension's
+/// `package.json` (`extensions/copilot/`) at the editor's release tag. Read
+/// the next pairing there. Raise the three together, since the editor
+/// version may fall behind the service's cut-off; rows in `runtime.rs` pin
+/// them.
 const DEFAULT_EDITOR_VERSION: &str = "vscode/1.145.2";
 const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.73.0";
 

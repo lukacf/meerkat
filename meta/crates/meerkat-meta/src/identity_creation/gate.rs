@@ -41,6 +41,11 @@
 //!    person approved it, the decisions' driver commits it through the same
 //!    seam. The driver runs exactly while the launch serves changes.
 //!
+//! A person's approval is evidence, never authority over the launch's
+//! policy: when a decided change is carried out, the policy the launch has
+//! then is asked again for the change, and one that denies it now refuses
+//! it `change_denied` with nothing executed ([`DecidedExecutor`]).
+//!
 //! Whoever commits a change (the gate at once, the driver after a
 //! decision), the launch's executor then has the identity runtime register
 //! each agent the change wrote from its record.
@@ -940,6 +945,114 @@ impl IdentityGate {
         }
     }
 
+    /// The refusal of `request`, asked by `requester`, under the policy
+    /// the launch has now: `change_denied` when its rules deny one of the
+    /// change classes the request touches (or the launch has no policy),
+    /// and `None` when they allow it or hold it for a person. The agents
+    /// are read as they stand now; a request whose agent is gone is left to
+    /// Core's commit, which refuses it under its own kind.
+    async fn denied_now(
+        &self,
+        mob: &MobHandle,
+        requester: &ChangeRequester,
+        request: &IdentityRequest,
+    ) -> Option<IdentityRefusal> {
+        let Some(policy) = self.policy.as_deref() else {
+            return Some(no_policy(ChangeClass::Create));
+        };
+        let facts = match self.requester_facts(mob, policy, requester).await {
+            Ok(facts) => facts,
+            Err(refusal) => return Some(refusal),
+        };
+        let authority = |labels: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+            labels
+                .iter()
+                .filter(|(key, _)| policy.authority_field(key).is_some())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        };
+        // The agents the rules select, by name: each with its profile and
+        // its authority labels.
+        let mut selected: Vec<(String, String, BTreeMap<String, String>)> = Vec::new();
+        let classes: BTreeSet<ChangeClass> = match &request.action {
+            RequestAction::Create { identities } => {
+                for created in identities {
+                    selected.push((
+                        created.spec.identity.as_str().to_owned(),
+                        created.spec.profile.as_str().to_owned(),
+                        authority(&created.spec.labels),
+                    ));
+                }
+                BTreeSet::from([ChangeClass::Create])
+            }
+            RequestAction::Update(update) => {
+                let current = self.agent(mob, &update.identity).await.ok().flatten()?;
+                let labels_now = current.authority_labels(policy);
+                selected.push((
+                    current.name.clone(),
+                    current.spec.profile.as_str().to_owned(),
+                    labels_now.clone(),
+                ));
+                // The agent as the update leaves it, too.
+                selected.push((
+                    current.name.clone(),
+                    update.profile.as_ref().map_or_else(
+                        || current.spec.profile.as_str().to_owned(),
+                        |change| change.to.as_str().to_owned(),
+                    ),
+                    update.authority_fields.clone().unwrap_or(labels_now),
+                ));
+                update.change_classes()
+            }
+            RequestAction::Archive { identity, .. } | RequestAction::Unarchive { identity, .. } => {
+                let current = self.agent(mob, identity).await.ok().flatten()?;
+                selected.push((
+                    current.name.clone(),
+                    current.spec.profile.as_str().to_owned(),
+                    current.authority_labels(policy),
+                ));
+                BTreeSet::from([ChangeClass::Archive])
+            }
+            RequestAction::Remove { identity, .. } => {
+                let current = self.agent(mob, identity).await.ok().flatten()?;
+                selected.push((
+                    current.name.clone(),
+                    current.spec.profile.as_str().to_owned(),
+                    current.authority_labels(policy),
+                ));
+                BTreeSet::from([ChangeClass::Remove])
+            }
+            RequestAction::Adopt { identity, .. } => {
+                let current = self.agent(mob, identity).await.ok().flatten()?;
+                selected.push((
+                    current.name.clone(),
+                    current.spec.profile.as_str().to_owned(),
+                    current.authority_labels(policy),
+                ));
+                BTreeSet::from([ChangeClass::Adopt])
+            }
+        };
+        let targets: Vec<PlanTarget<'_>> = selected
+            .iter()
+            .map(|(identity, profile, labels)| PlanTarget {
+                identity,
+                profile,
+                authority_labels: labels,
+            })
+            .collect();
+        plan_approval(
+            policy.approval(),
+            &facts,
+            &PlanRequest {
+                classes: &classes,
+                targets: &targets,
+                raise: false,
+                authority_field: None,
+            },
+        )
+        .err()
+    }
+
     /// The receipt of the change that committed as `operation_id`, if one
     /// did.
     async fn receipt(
@@ -1040,32 +1153,32 @@ impl IdentityGate {
         if let Some(receipt) = Self::receipt(mob, &call.operation_id).await? {
             return self.replayed(mob, policy, requester, call, &receipt).await;
         }
-        // An operation a decision holds, or held: the same request answers
-        // the decision as it stands, and another request under it is
-        // `operation_reused` (the holder compares them). A request that no
-        // longer normalizes because the agent moved since it was held is
-        // the same request, asked again.
-        if let Some(decisions) = &self.decisions
-            && let Some(state) = decisions.held(mob, &call.operation_id).await?
-        {
-            return match self.judge(mob, policy, requester, &call.change).await {
-                Ok(judged) if consent_of_plan(&judged.normalized.plan).is_none() => Ok(decisions
-                    .hold(mob, &call.operation_id, &judged.normalized)
-                    .await),
-                Ok(_) => Ok(state),
-                Err(refusal)
-                    if matches!(
-                        refusal.kind,
-                        IdentityRefusalKind::StaleSpec { .. }
-                            | IdentityRefusalKind::IdentityUnknown
-                    ) =>
-                {
-                    Ok(state)
-                }
-                Err(refusal) => Err(refusal),
-            };
-        }
-        let judged = self.judge(mob, policy, requester, &call.change).await?;
+        // An operation a decision holds, or held, goes through every check
+        // below like any request. What differs: a request that no longer
+        // normalizes because the agent moved since it was held is the same
+        // request asked again, and answers the decision as it stands; and
+        // the operation is never committed beside its decision.
+        let held = match &self.decisions {
+            Some(decisions) => decisions.held(mob, &call.operation_id).await?,
+            None => None,
+        };
+        let judged = match self.judge(mob, policy, requester, &call.change).await {
+            Ok(judged) => judged,
+            Err(refusal) => {
+                return match held {
+                    Some(state)
+                        if matches!(
+                            refusal.kind,
+                            IdentityRefusalKind::StaleSpec { .. }
+                                | IdentityRefusalKind::IdentityUnknown
+                        ) =>
+                    {
+                        Ok(state)
+                    }
+                    _ => Err(refusal),
+                };
+            }
+        };
         let request = &judged.normalized.request;
         let adopts_or_creates = matches!(
             request.action,
@@ -1079,7 +1192,9 @@ impl IdentityGate {
         }
         let Some(consent) = consent_of_plan(&judged.normalized.plan) else {
             // A person decides: the change is held, and nothing is written
-            // but its decision.
+            // but its decision. The holder answers the same request with
+            // the decision as it stands, and another request under the
+            // operation `operation_reused`.
             return match &self.decisions {
                 Some(decisions) => Ok(decisions
                     .hold(mob, &call.operation_id, &judged.normalized)
@@ -1089,6 +1204,11 @@ impl IdentityGate {
                 )),
             };
         };
+        // The rules allow the request now, and a decision holds its
+        // operation: it answers that decision, and commits nothing itself.
+        if let Some(state) = held {
+            return Ok(state);
+        }
         let commit = ChangeCommit::new(mob, &call.operation_id, requester, consent, request)
             .of_configured_target(judged.configured_target)
             .with_preparations(policy.preparations());
@@ -1531,6 +1651,32 @@ pub(crate) fn change_executor(
     })
 }
 
+/// The executor a decided change is carried out through: the launch's
+/// executor, behind the policy the launch has when the change is carried
+/// out. A person's approval is evidence, never authority over that policy:
+/// a change its rules deny now is refused `change_denied`, and the launch's
+/// executor is not asked.
+struct DecidedExecutor {
+    /// The launch's rules and reads: a copy of the gate that holds no
+    /// decisions.
+    rules: IdentityGate,
+    launch: Arc<dyn IdentityChangeExecutor>,
+}
+
+#[async_trait]
+impl IdentityChangeExecutor for DecidedExecutor {
+    async fn commit(&self, commit: ChangeCommit<'_>) -> Result<ChangeCommitted, ExecutorError> {
+        if let Some(refusal) = self
+            .rules
+            .denied_now(commit.mob, commit.requester, commit.request)
+            .await
+        {
+            return Ok(ChangeCommitted::refused(refusal));
+        }
+        self.launch.commit(commit).await
+    }
+}
+
 /// What the holder of decisions reads through: the mob the identity
 /// runtime serves, and an agent as the gate reads it.
 struct HeldReads(IdentityGate);
@@ -1611,7 +1757,11 @@ impl crate::UnifiedRuntime {
             // holder reads through a copy of the gate that holds no
             // decisions, so nothing here holds itself.
             let held: Arc<dyn HeldChangeHost> = Arc::new(HeldReads(gate.clone()));
-            let mut decisions = IdentityDecisions::new(self.durable_decisions(), executor, held);
+            let decided: Arc<dyn IdentityChangeExecutor> = Arc::new(DecidedExecutor {
+                rules: gate.clone(),
+                launch: executor,
+            });
+            let mut decisions = IdentityDecisions::new(self.durable_decisions(), decided, held);
             if let Some(hooks) = options.hooks {
                 decisions = decisions.with_consequences(host_consequences_of(
                     move |request: &IdentityRequest| hooks.consequences(request),

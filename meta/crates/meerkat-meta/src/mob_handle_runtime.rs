@@ -12051,9 +12051,15 @@ impl MobRuntime {
     /// persistent controller locks alive after failed construction.
     pub(crate) fn clear_identity_runtime_authority(&self) {
         if let Some(slot) = self.identity_runtime_slot.as_ref() {
-            *slot
+            let detached = slot
                 .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            // The family of the mob's long-term agents holds the identity
+            // runtime, which holds the family: it ends with the authority.
+            if let Some(identity_runtime) = detached {
+                identity_runtime.detach_identity_family();
+            }
         }
     }
 

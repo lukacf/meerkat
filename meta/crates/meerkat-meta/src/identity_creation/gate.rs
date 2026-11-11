@@ -1521,14 +1521,20 @@ impl IdentityFamily for IdentityGate {
         if self.policy.is_none() {
             return Err(no_policy(ChangeClass::Create));
         }
-        // The hold is the host's alone: an agent and a person hold nothing.
-        if !matches!(requester, ChangeRequester::Host { .. }) {
+        // The hold is the host's: its operator's, or a verified person's
+        // whom the host's surface admitted to it (the Console asks
+        // `runtime.admin` first). An agent holds nothing, and neither does a
+        // caller its surface could not verify.
+        if !matches!(
+            requester,
+            ChangeRequester::Host { operator: true, .. } | ChangeRequester::Human { .. }
+        ) {
             return Err(IdentityRefusal::new(IdentityRefusalKind::ChangeDenied {
                 change: ChangeClass::Create,
             })
             .with_detail(
-                "Only the host holds or releases the mob's changes of agents: nothing was \
-                 changed.",
+                "Only the host's operator, or a signed-in person the host admits to it, holds \
+                 or releases the mob's changes of agents: nothing was changed.",
             ));
         }
         mob.set_identity_changes_held(request.held)

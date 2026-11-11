@@ -161,7 +161,10 @@ export interface AgentSet {
  * A change of one agent as a whole: its archive, its unarchive, its removal
  * or its adoption. `expectedSpecDigest` is the agent's `specDigest` as you
  * read it (`get` or `list`): an agent that changed meanwhile refuses
- * `stale_spec` with the current one.
+ * `stale_spec` with the current one. There is one spec digest on every
+ * surface, the digest of the agent's record: the same value in `list`,
+ * `get`, a change's outcome and `stale_spec`'s `current_digest`. An adoption
+ * does not change it.
  */
 export interface AgentChangeOptions extends IdentityChangeOptions {
   expectedSpecDigest: string;

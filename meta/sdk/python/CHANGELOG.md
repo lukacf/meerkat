@@ -4,6 +4,29 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.identities` (`IdentitiesHandle`) calls the long-term agent
+  host methods (`meta/identity/*`): `create`, `update`, `archive`,
+  `unarchive`, `remove`, `adopt`, `withdraw`, `changes_hold`, `list`, `get`,
+  `operation`, `directory` and `plan`. Requests are built from `AgentSpec`,
+  `AgentSet`, `CreateAgents`, `UpdateAgent` and `AgentRef`
+  (`meerkat_meta.identities`); every change takes a `request_id`. A change
+  returns `IdentityDone`, `IdentityPendingDecision` or
+  `IdentityPendingPreparation`; `operation` also answers `IdentityRefused`
+  and `IdentityOperationUnknown`. Reads return `AgentPage`, `AgentRecord`,
+  `AgentDirectoryPage` and `IdentityChangePlan`.
+- `IdentityRefusedError` (`IDENTITY_REFUSED_CODE`, `-32058`) is the one
+  refusal error of those calls: `kind`, `field`, `detail`, `retryable`,
+  `details`, `known_kind`, and the `IdentityRefusal` as `refusal`.
+  `IDENTITY_REFUSAL_KINDS` is the closed vocabulary (57 kinds); the suite
+  fails when it differs from the gateway's. `IDENTITY_OUTCOMES`,
+  `INSTRUCTION_OUTCOME_KINDS`, `INSTRUCTION_NEXT_SESSION_REASONS` and
+  `AGENT_SEATS` are closed too. A value newer than the SDK reaches the
+  caller as its token; an outcome token the SDK cannot read raises
+  `ContractMismatchError`.
+- `MetaBuilder.identity_creation(policy)` sends the launch policy for
+  changes of long-term agents as `runtime_options.identity_creation`,
+  unchanged.
+
 ## 0.9.13
 
 No SDK API changes; released with Meta 0.9.13.

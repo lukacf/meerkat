@@ -299,6 +299,82 @@ identity); both are advisory. Every refusal rejects with
 `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
 [Scoped tool grants](/api/rpc#scoped-tool-grants).
 
+## Long-term agents
+
+`runtime.identities` reads and changes the mob's long-term agents, one call
+per `meta/identity/*` host method. Every agent is read and changed the same
+way, whoever asked for it and by whatever route it came to exist. The
+[guide](/guides/long-term-agents) walks through adopting an agent your
+configuration declares.
+
+```typescript
+import { IdentityRefusedError } from "@rkat/meta-sdk";
+
+const identities = runtime.identities;
+
+const record = await identities.get("scout"); // AgentRecord
+const page = await identities.list({ includeArchived: true }); // { agents, next }
+try {
+  const outcome = await identities.adopt("scout", {
+    expectedSpecDigest: record.specDigest,
+    requestId: "adopt-scout-1",
+  });
+  outcome.outcome; // "done", "pending_decision" or "pending_preparation"
+} catch (error) {
+  if (error instanceof IdentityRefusedError) {
+    error.kind, error.field, error.detail, error.retryable, error.details;
+  }
+}
+
+const state = await identities.operation({ requestId: "adopt-scout-1" });
+```
+
+| Call | Sends | Resolves |
+| --- | --- | --- |
+| `create(agents, { requestId, proposer?, sourceEvidence? })` | `agents`: `AgentSpec[]` (`name`, `profile`, `displayName`, `instructions`, `context`, `labels`, `firstMessage`, `peers`) | outcome |
+| `update(name, { expectedSpecDigest, requestId, set?, peersAdd?, peersRemove? })` | `set`: `AgentSet` (`displayName`, `instructions`, `context`, `labels`, `labelsRemove`, `profile`) | outcome |
+| `archive`, `unarchive`, `remove`, `adopt` `(name, { expectedSpecDigest, requestId })` | the agent and the spec digest you read | outcome |
+| `withdraw({ requestId } \| { operationId })` | exactly one of the two | `IdentityWithdrawn` |
+| `changesHold(held, { reason? })` | | `IdentityChangesHold` |
+| `list({ profile?, includeArchived?, after? })` | | `AgentPage` of `AgentSummary` |
+| `get(name)` | | `AgentRecord` |
+| `operation({ requestId } \| { operationId })` | exactly one of the two | `IdentityOperation` |
+| `directory({ query?, after? })` | | `AgentDirectoryPage` |
+| `plan(change, request)` | `change` and a `CreateAgents`, `UpdateAgent` or `AgentRef` | `IdentityChangePlan` |
+
+Options and answers are camelCase; the SDK spells the wire's names. A change
+needs your `requestId`: the same id and request return the same state and
+commit at most once. `expectedSpecDigest` is the agent's `specDigest` as you
+read it. There is one spec digest on every surface: the same value in `list`,
+`get`, an outcome and `stale_spec`'s `current_digest`.
+
+An outcome is a union discriminated by `outcome`: `done` (`operationId`,
+`agents`), `pending_decision` (`operationId`, `decisionId`, `deadlineMs`) or
+`pending_preparation`. A held decision is a normal answer. The SDK does not
+poll: read `operation` when you want the state; it also resolves `refused`
+(the operation ended refused) and `unknown`. Each `AgentOutcome` carries the
+agent's `specDigest` afterwards, a create's `seat` (`seated` or `owed`) and
+an update's `instructions` (`applies_at_next_run`,
+`applies_after_compaction`, `applies_at_next_session` with a `reason`, or
+`unchanged`).
+
+Every refusal of every call rejects with `IdentityRefusedError` (`-32058`);
+its kinds are the closed vocabulary `IDENTITY_REFUSAL_KINDS`
+(`IdentityRefusalKind`). A kind newer than the SDK is the same error with
+`knownKind` false. Only `operation` resolves a refusal as a value. A
+candidate launch refuses a change with the gateway-wide
+`AnnouncementRefusedError` (`kind` `candidate_launch`). `field` and the keys
+of `details` are in the wire's names (`agents[1].name`, `current_digest`).
+Advisory values (`readiness`, a change's `state`, provenance, directory
+verdicts) are kept as the gateway sent them.
+
+The gateway changes agents only under the host's policy:
+`MetaBuilder.identityCreation(policy)` sends it as
+`runtime_options.identity_creation`, in wire form. Without one every change
+is refused `change_denied`. The outcomes of this release are `allow`,
+`require_approval` and `deny`; a policy that names `notify` or `review` is
+refused at init.
+
 ## Realm MCP administration
 
 The stdio gateway lets its host administer the installation realm's own MCP

@@ -67,6 +67,7 @@
               "guides/unified-runtime",
               "guides/module-system",
               "guides/console",
+              "guides/long-term-agents",
               "guides/flow-editor",
               "guides/authentication",
               "guides/deployment",

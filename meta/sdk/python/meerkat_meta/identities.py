@@ -281,7 +281,9 @@ class UpdateAgent:
 
     ``expected_spec_digest`` is the agent's ``spec_digest`` as you read it
     (``get`` or ``list``): an agent that changed meanwhile refuses
-    ``stale_spec`` with the current one.
+    ``stale_spec`` with the current one. There is one spec digest on every
+    surface, the digest of the agent's record: the same value in ``list``,
+    ``get``, a change's outcome and ``stale_spec``'s ``current_digest``.
     """
 
     name: str
@@ -312,8 +314,14 @@ class UpdateAgent:
 @dataclass(frozen=True)
 class AgentRef:
     """A change of one agent as a whole: its archive, its unarchive, its
-    removal or its adoption. ``expected_spec_digest`` is the agent's
-    ``spec_digest`` as you read it."""
+    removal or its adoption.
+
+    ``expected_spec_digest`` is the agent's ``spec_digest`` as you read it
+    (``get`` or ``list``). There is one spec digest on every surface, the
+    digest of the agent's record: the same value in ``list``, ``get``, a
+    change's outcome and ``stale_spec``'s ``current_digest``. An adoption
+    does not change it.
+    """
 
     name: str
     expected_spec_digest: str
@@ -817,12 +825,12 @@ class IdentityChangePlan:
     """The plan of a change: the outcome and the rendering it would get.
     Nothing is held and nothing is written.
 
-    ``outcome`` is what the host's rules give it (advisory; today ``allow``,
-    ``notify``, ``require_approval``); a change they deny is refused, not
-    planned. ``change`` is the change class whose rule decided (advisory).
-    ``approver_id`` is who decides, or is notified, when the outcome names
-    one. ``subject_digest`` is the digest of ``rendering``, the text a
-    decider would be shown, whole: it is what a decision would bind.
+    ``outcome`` is what the host's rules give it (advisory; today ``allow``
+    and ``require_approval``); a change they deny is refused, not planned.
+    ``change`` is the change class whose rule decided (advisory).
+    ``approver_id`` is who decides, when the outcome names one.
+    ``subject_digest`` is the digest of ``rendering``, the text a decider
+    would be shown, whole: it is what a decision would bind.
     """
 
     outcome: str

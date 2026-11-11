@@ -128,6 +128,9 @@ struct Reached {
 
 /// How long the Finds have to settle: the hold they must outlast, then the
 /// fixture's ordinary deadline (`WAIT`) once for each Find the row makes.
+/// It bounds both the row's whole window and, inside it, the wait for the
+/// original's turn, which the fixture otherwise ends after one `WAIT` of
+/// its own.
 ///
 /// A hold is wall time by construction, so it is not part of what the
 /// deadline bounds: the Finds' own work. The refused-work row holds 5 s
@@ -221,8 +224,9 @@ pub(super) async fn finds_with_hold_at(
     }));
     // The production shape: the source's custody recovery runs.
     start_custody_recovery(&fixture);
+    let deadline = settle_deadline(hold, fresh_finds);
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        settle_deadline(hold, fresh_finds),
+        deadline,
         Box::pin(async {
             let before = helper_rows(&fixture).await;
             let first = fixture.submit().await;
@@ -260,7 +264,7 @@ pub(super) async fn finds_with_hold_at(
                 (Some(row), Some(effect))
             };
             let (finished, answered, (first_row, first_effect)) =
-                tokio::join!(fixture.finish(&first), answered, fresh);
+                tokio::join!(fixture.finish_within(&first, deadline), answered, fresh);
             let turn_completed = finished.is_ok();
             let (feedback, _, _) = script.observations();
             let (start, from) = reached

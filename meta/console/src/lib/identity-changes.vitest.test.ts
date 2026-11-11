@@ -186,16 +186,19 @@ describe("the requests a form writes", () => {
     expect("request" in built && built.request.set).toEqual({ display_name: "" });
   });
 
-  it("treats a display name that is only the agent's name as none", () => {
-    // The gateway writes the name where an agent has no display name: the
-    // form opens with an empty display name and, left alone, sends none.
-    const unnamed = record({ name: "night-desk", displayName: "night-desk" });
+  it("opens Edit with an empty display name for an agent that has none", () => {
+    // The record of an agent without a display name carries no such member:
+    // the form opens empty and, left alone, sends none.
+    const unnamed = record({ name: "night-desk", displayName: undefined });
     const draft = editDraftOf(unnamed);
     expect(draft.displayName).toBe("");
     const untouched = updateAgentRequest(unnamed, draft);
     expect("request" in untouched && untouched.changed).toBe(false);
     const named = updateAgentRequest(unnamed, { ...draft, displayName: "Night desk" });
     expect("request" in named && named.request.set).toEqual({ display_name: "Night desk" });
+    // A display name is a display name, whatever it says: one that reads
+    // like the agent's name opens as it is.
+    expect(editDraftOf(record({ name: "night-desk", displayName: "night-desk" })).displayName).toBe("night-desk");
   });
 
   it("names the agent and the digest its record reads for a change of the whole agent", () => {
@@ -433,12 +436,13 @@ describe("an outcome in words", () => {
 
   it("shows an agent by its display name, or by its name in words where it has none", () => {
     expect(agentShownName({ name: "warden", displayName: "The warden" })).toBe("The warden");
-    // The gateway writes the name where an agent has no display name: the
-    // console then names the agent as the roster does, never by the raw name.
-    expect(agentShownName({ name: "night-desk", displayName: "night-desk" })).toBe("Night desk");
+    // An agent without a display name reads as the roster names it, never
+    // by the raw name.
     expect(agentShownName({ name: "night-desk" })).toBe("Night desk");
-    expect(agentShownName({ name: "router:main", displayName: "router:main" }))
+    expect(agentShownName({ name: "router:main" }))
       .toBe(agentDisplayTitle({ label: "router:main", identity: "router:main", member_id: "router:main", agent_id: "router:main" }));
+    // A display name is shown as the gateway gives it.
+    expect(agentShownName({ name: "night-desk", displayName: "night-desk" })).toBe("night-desk");
   });
 
   it("asks before a change of the whole agent, and says a removal is for good", () => {

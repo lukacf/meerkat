@@ -3625,6 +3625,17 @@ one. The record keeps its target, and the members it selected drop the
 instruction at their next run start. The result and the refusals are those of
 `meta/set_instruction`.
 
+### Reserved namespaces
+
+The namespaces that start with `meerkat.identity.` are the platform's. The
+gateway keeps each agent's own changed instructions there, one record per
+agent in `meerkat.identity.instructions`, keyed by the agent's name (see
+[Changing an agent's instructions](/concepts/roster#changing-an-agents-instructions)).
+`meta/set_instruction` and `meta/revoke_instruction` refuse such a namespace
+with `-32602` and `instruction_set_code` `invalid_request`, and nothing is
+written: change the agent's instructions in its spec instead.
+`meta/instruction_status` shows these records like any other.
+
 ### `meta/instruction_status`
 
 Params, all optional: `namespace` and `key` (the records of one namespace or

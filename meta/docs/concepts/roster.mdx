@@ -343,6 +343,74 @@ or the member tool `spawn_member`) or into a child mob it creates
     their completion baselines, turn tickets and keyed sends, address
     identities only.
 
+## Changing an agent's instructions
+
+An agent's instructions (`additional_instructions` in its spec) are part of
+the first prompt of its conversation, and a restart resumes that
+conversation as it stands. When the text changes afterwards, the change
+reaches the agent at its next run; a run that starts within moments of the
+change may still use the earlier instructions; earlier instructions are never
+rewritten. The agent keeps its conversation: the whole current text arrives
+as one appended system entry that says it replaces the earlier version of
+the agent's standing instructions and that the rest of its system prompt is
+unchanged. The first prompt and every earlier entry stay as they are, and an
+agent that is not loaded is not woken for the change.
+
+This holds for every agent, whatever declares it:
+
+- **A configured agent.** Edit its instructions in the host's configuration.
+  A roster refresh (`meta/reconcile_identity`, or the refresh your host
+  runs) picks the edit up while the gateway runs.
+- **An agent created at run time.** Update its row; the update records the
+  change after its commit.
+
+How it works. The gateway keeps one operator instruction record per agent
+whose instructions changed, in the namespace `meerkat.identity.instructions`,
+keyed by the agent's name and targeted at that agent alone (see
+[Operator instructions](/api/rpc#operator-instructions)). Meerkat's mob owns
+the delivery: the record is durable in the mob's journal, each change is the
+record's next revision, and the agent applies it at its next run start. A
+restart neither loses nor repeats it. `meta/instruction_status` shows these
+records like any other. The namespaces that start with `meerkat.identity.`
+are the platform's: `meta/set_instruction` and `meta/revoke_instruction`
+refuse them (`invalid_request`).
+
+What to know:
+
+- **A run in flight is not touched.** The entry is appended at a run start,
+  never inside a run.
+- **A fresh conversation needs nothing.** `meta/reset` and a new agent build
+  their first prompt from the current text.
+- **Removing an agent** revokes its record. Archiving it keeps the record:
+  the agent comes back on its conversation with its instructions as they
+  were.
+- **Models that take a system instruction only ahead of the conversation**
+  (in today's model catalog: every Gemini model, the GPT Live models,
+  `claude-opus-4-7`, `claude-opus-4-5`, `claude-sonnet-5`,
+  `claude-sonnet-4-6`, `claude-sonnet-4-5` and `claude-haiku-4-5`) apply the
+  change once a compaction at a run's first request carries it, or with a
+  fresh conversation. A model whose wire carries no system row besides its
+  prompt applies it only with a fresh conversation.
+- **A change made while the gateway was down** is recorded at the next start
+  for an agent the gateway already keeps a record of. An agent with no
+  record yet takes its first record from a change the running gateway
+  observes (a roster refresh, an update).
+
+Limits of this release, each reported by `meta/instruction_status` or by the
+update's result:
+
+- A mob holds at most 64 operator instruction records, a host's own
+  included, and 1 MiB of their text. The change of an agent that would need
+  one more is not recorded (`slot_limit_exceeded`,
+  `active_set_budget_exceeded`); it applies from the agent's next fresh
+  conversation.
+- A governed runtime (one with a native work authorization host) takes no
+  operator instruction record (`prepared_authorization_required`): there, a
+  change applies from the agent's next fresh conversation.
+- A fork of an agent (`fork_off`, a council participant, a helper fork,
+  `meta/fork_member`, a console side chat) starts from the agent's first
+  prompt: it does not carry the agent's changed instructions.
+
 ## Deep member status
 
 `meta/member_status` serializes Meerkat's `MobMemberSnapshot`. It is a deep

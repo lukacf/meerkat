@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A change of an agent's instructions reaches the agent with its
+  conversation kept. When the instructions of an agent created at run time
+  are updated, or a configured agent's instructions are edited in the host's
+  configuration, the gateway records the whole current text as one operator
+  instruction for that agent alone (namespace `meerkat.identity.instructions`,
+  keyed by the agent's name), and Meerkat's mob delivers it: the change
+  reaches the agent at its next run; a run that starts within moments of the
+  change may still use the earlier instructions; earlier instructions are
+  never rewritten. An agent that is not loaded is not woken, a restart
+  neither loses nor repeats the change, and the removal of an agent revokes
+  its record. A model that takes a system instruction only ahead of the
+  conversation applies the change after a compaction or with a fresh
+  conversation. See
+  [Changing an agent's instructions](docs/concepts/roster.mdx#changing-an-agents-instructions),
+  with this release's limits (64 operator instruction records per mob,
+  governed runtimes, forks).
+
+### Changed
+
+- A configuration edit of a configured agent's instructions now reaches the
+  agent's live conversation as one appended system instruction, at the
+  agent's next run after a roster refresh picks the edit up. Before, the
+  agent kept the text of its first prompt until its conversation was
+  rebuilt (a reset).
+- `meta/set_instruction` and `meta/revoke_instruction` refuse a namespace
+  that starts with `meerkat.identity.` (`-32602`, `instruction_set_code`
+  `invalid_request`): those namespaces hold each agent's own instructions.
+  `meta/instruction_status` still reads them.
+
+### Known limitations
+
+- A configured agent whose instructions were edited while the gateway was
+  down, and that has no instruction record yet, keeps the text of its first
+  prompt until the running gateway observes a change of it (a roster
+  refresh with other text) or its conversation is rebuilt.
+
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

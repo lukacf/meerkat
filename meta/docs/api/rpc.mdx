@@ -1517,7 +1517,9 @@ that signs nobody in. `GET /console/experience` carries `identity_changes:
 {available, can_create, can_change, can_remove}` and, on each listed agent,
 `affordances.can_change_identity` and `affordances.can_remove_identity`, so
 a client offers only what its caller's grants admit; the policy still
-decides each change. `available` is true exactly when the launch has an
+decides each change. A peer the caller may not view (`agent.view`) is
+answered `peer_unknown`, as a name no agent holds. `available` is true
+exactly when the launch has an
 enabled identity policy and the Console is not read-only; the other flags
 are false whenever it is false.
 

@@ -125,6 +125,14 @@ and as the update leaves it, so a rule for either governs the update.
 | `require_approval` | The change is held for a person acting for `approver` (`{"id": "..."}`, or `{"label": "..."}` for the value of one of the requesting agent's authority labels). Nothing is written until it is decided; a person cannot approve their own request |
 | `deny` | The change is refused `change_denied` |
 
+A held change answers `pending_decision` and is a durable decision of kind
+`identity.<change>`: a person decides it through the
+[durable decision methods](/api/rpc#durable-decision-methods), and Meerkat
+then carries it out by itself, as the requester that asked. Its requester
+withdraws it with `meta/identity/withdraw`. An agent that asked is told
+the outcome by a message to itself; host code and a person read
+`meta/identity/operation`.
+
 Two more kinds are part of the policy's vocabulary and are **refused at init
 in this release**: `notify`, because no notice reaches an approver yet, and
 `review`, because no reviewer decides yet. Write `allow` where you would
@@ -195,6 +203,15 @@ being judged now and the agent being changed.
 An agent never changes itself (`self_change_refused`), and a member that is
 private to one person (a Console side chat, for example) asks for no change
 at all (`private_requester`).
+
+## Peers a caller may name
+
+A change names as peers only agents its caller may see. On the Console
+that is the agents the caller's access rules let it view (`agent.view`);
+a member private to one person is seen by nobody here. A peer the caller
+may not see is answered `peer_unknown`, exactly as a name no agent holds,
+and never `peer_not_allowed`: a peer rule speaks only to a caller that
+sees the peer.
 
 ## Adopting configured agents
 

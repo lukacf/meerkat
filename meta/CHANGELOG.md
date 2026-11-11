@@ -49,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sentence that says the launch gives no identity creation policy; its
   agents are unchanged. See the new policy reference,
   `docs/reference/identity-policy.mdx`.
+- A change whose rule says `require_approval` answers `pending_decision`
+  and is held as a durable decision; once a person approved it through
+  `meta/decisions/decide`, the launch carries it out by itself and
+  `meta/identity/operation` reads `done`. `meta/identity/withdraw` ends a
+  change that is still held. An agent that asked is told the outcome by a
+  keyed message to itself.
+- A change names as peers only agents its caller may see: on the Console a
+  peer the caller may not view is answered `peer_unknown`, as a name no
+  agent holds, and never `peer_not_allowed`.
 - Every refusal of the family is one JSON-RPC error, code `-32058`
   (`meerkat_meta::rpc::IDENTITY_REFUSED_CODE`), whose `data` is `{kind,
   field?, retryable, detail}` and the kind's own members; `kind` is a closed
@@ -80,7 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   IdentityFamilySlot, IdentityHostHooks}`;
   `IdentityCreationPolicy::check_served`;
   `IdentityRuntime::{attach_identity_family, attach_identity_reads,
-  identity_family, identity_changes_enabled}`.
+  identity_family, identity_family_seen_by, identity_changes_enabled}`;
+  `identity_creation::{PeerVisibility, AgentSpecs, AGENT_SPECS_NOT_GIVEN}`,
+  `CoreChangeExecutor::with_agent_specs` and
+  `IdentityFamilyOptions::with_decision_notices`.
 
 ### Changed
 
@@ -92,8 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `runtime_options.identity_creation`: an approval rule may name the change
   classes `archive` (an archive and an unarchive) and `adopt`, and
   `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
-  default). A launch that names them was refused at init before. Nothing
-  acts on the policy yet.
+  default). A launch that names them was refused at init before.
 
 - Meta serves an identity whose record is its row in the mob's identity
   store (one created at run time, or one a host adopted into the store) as

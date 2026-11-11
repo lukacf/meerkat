@@ -132,10 +132,32 @@ impl OpenAiLiveClient {
     }
 
     /// `error` with every field that can carry provider text redacted as
-    /// [`Self::redact_diagnostic`] does; its class is kept.
+    /// [`Self::redact_error_message`] does; its class is kept.
     fn redacted_error(&self, mut error: LlmError) -> LlmError {
-        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error.redact_diagnostics(|message| self.redact_error_message(message));
         error
+    }
+
+    /// Redact `message`, the message of a realtime error, as
+    /// [`Self::redact_diagnostic`] does, and keep what the session decides
+    /// from it. The session tells an acknowledgement from a failure by two
+    /// fixed phrases of such a message
+    /// ([`openai_response_already_active_message`],
+    /// [`openai_response_cancel_no_active_response_message`]). Those
+    /// decisions belong to the message as received: when the redaction
+    /// removes a phrase (a private-key marker takes its whole line), the
+    /// redacted message ends with that phrase, so the session decides as it
+    /// would on the original.
+    fn redact_error_message(&self, message: &mut String) {
+        let already_active = openai_response_already_active_message(message);
+        let cancel_not_active = openai_response_cancel_no_active_response_message(message);
+        self.redact_diagnostic(message);
+        if already_active && !openai_response_already_active_message(message) {
+            message.push_str(" (active response in progress)");
+        }
+        if cancel_not_active && !openai_response_cancel_no_active_response_message(message) {
+            message.push_str(" (cancellation failed: no active response found)");
+        }
     }
 
     /// The line the opt-in frame trace (`RKAT_OPENAI_REALTIME_TRACE_JSON`)
@@ -197,7 +219,7 @@ impl<S: OpenAiLiveSession> OpenAiLiveSession for KeyRedactingLiveSession<S> {
             .map_err(|error| self.client.redacted_error(error))?;
         match &mut event {
             Some(ServerEvent::Error { error, .. }) => {
-                self.client.redact_diagnostic(&mut error.message);
+                self.client.redact_error_message(&mut error.message);
             }
             Some(ServerEvent::ResponseDone { response, .. }) => {
                 if let Some(error) = response

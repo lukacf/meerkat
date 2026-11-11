@@ -1537,8 +1537,9 @@ impl LlmClient for OpenAiCompatibleClient {
             Ok(())
         } else {
             let headers = response.headers().clone();
-            let mut text = response.text().await.unwrap_or_default();
-            self.redact_diagnostic(&mut text);
+            let text = response.text().await.unwrap_or_default();
+            // Classified from the body as received, then redacted, as a
+            // refused model request is.
             Err(self.redacted_error(LlmError::from_http_response(status, text, &headers)))
         }
     }

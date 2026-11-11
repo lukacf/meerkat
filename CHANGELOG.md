@@ -35,6 +35,13 @@ them.
 
 ## [Unreleased]
 
+### Changed
+
+- No code changes. Core 0.9.13 is released so that Core, Meta and Connect keep
+  one version: the `meerkat-meta` 0.9.12 crate was larger than the crates.io
+  upload limit and was never published, so Meta and Connect are released
+  again as 0.9.13.
+
 ## [0.9.12] - 2026-11-10
 
 ### Highlights

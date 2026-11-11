@@ -115,14 +115,20 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// a message decoded from one, a log field): first every value
 /// `credentials` gives its visitor, by exact match, then credential
 /// shapes. Each is replaced by [`SECRET_REDACTION_MARKER`], which shows
-/// neither a value's length nor any part of it. Applying it again changes
-/// nothing.
+/// neither a value's length nor any part of it. Applying it again never
+/// shows what the first application removed and adds no text; it can
+/// replace more (an identifier left of a replaced value can itself read as
+/// a token).
 ///
 /// A value is what was sent: a key, a token, or a whole header value. A
 /// header value with a scheme (`Bearer <token>`, `Basic <pair>`) is also
 /// replaced without the scheme, so the credential goes whether a response
-/// repeats the header or the bare value. A value shorter than
-/// [`MIN_REDACTED_CREDENTIAL_BYTES`] is not replaced by exact match.
+/// repeats the header or the bare value. A value is matched as sent and as
+/// an encoder that wrote the response can spell it: every byte other than
+/// a letter, a digit, `-`, `.`, `_` and `~` also as its JSON escape (`\/`,
+/// `\"`, `\\`, `\u00XX`) or percent-encoded (`%XX`), hex in either case,
+/// alone or mixed. A value shorter than [`MIN_REDACTED_CREDENTIAL_BYTES`]
+/// is not replaced by exact match.
 ///
 /// The shape rules are the ones [`redact_secret_shapes`] applies, bounded
 /// for text a provider wrote for a reader: after `Bearer` or `Basic`, in an
@@ -134,11 +140,11 @@ pub const MIN_REDACTED_CREDENTIAL_BYTES: usize = 8;
 /// YOUR_KEY)" stays as it is. Well-known token prefixes, JSON web tokens,
 /// URL userinfo and PEM private-key blocks are replaced as there.
 ///
-/// The shape rules are a second line only. A credential a caller names is
-/// always removed (from the minimum length up); a secret no caller names,
-/// made of letters only and shorter than 32 bytes, may not be, and neither
-/// is one a response repeats in another encoding (percent-encoded, base64,
-/// cut short).
+/// Two limits. A named value is found in the spellings above and in no
+/// other form: not as base64 of it, not as the decoded pair of a `Basic`
+/// value, not cut short or masked. And the shape rules are a second line
+/// only: a secret no caller names is replaced only in the positions they
+/// read, and one made of letters only and shorter than 32 bytes is not.
 ///
 /// This is the one owner of response redaction:
 /// [`crate::HttpAuthorizer::redact_response_diagnostic`] calls it with the
@@ -166,9 +172,86 @@ fn redact_credential_value(text: &mut String, credential: &str) {
 }
 
 fn replace_credential(text: &mut String, credential: &str) {
-    if credential.len() >= MIN_REDACTED_CREDENTIAL_BYTES && text.contains(credential) {
+    if credential.len() < MIN_REDACTED_CREDENTIAL_BYTES {
+        return;
+    }
+    if text.contains(credential) {
         *text = text.replace(credential, SECRET_REDACTION_MARKER);
     }
+    // A value of plain bytes has one spelling; any other can come back as
+    // an encoder wrote it.
+    if credential.bytes().all(is_plain_byte) {
+        return;
+    }
+    if let Some(replaced) = replace_spelled(text, credential.as_bytes()) {
+        *text = replaced;
+    }
+}
+
+/// Bytes no encoder rewrites: letters, digits, `-`, `.`, `_` and `~`.
+fn is_plain_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// `text` with `credential` replaced wherever it stands in an encoder's
+/// spelling (see [`spelling_len`]); `None` when it stands nowhere.
+fn replace_spelled(text: &str, credential: &[u8]) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut output: Option<String> = None;
+    let mut copied = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        // A spelling starts and ends at a character boundary: it begins
+        // with the value's first byte or an ASCII escape, and repeats a
+        // character of the value whole.
+        match spelled_end(bytes, at, credential) {
+            Some(end) => {
+                let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+                output.push_str(&text[copied..at]);
+                output.push_str(SECRET_REDACTION_MARKER);
+                copied = end;
+                at = end;
+            }
+            None => at += 1,
+        }
+    }
+    let mut output = output?;
+    output.push_str(&text[copied..]);
+    Some(output)
+}
+
+/// The end of `credential` at `at`, when `text` holds it there with each
+/// byte in one of its spellings.
+fn spelled_end(text: &[u8], at: usize, credential: &[u8]) -> Option<usize> {
+    credential.iter().try_fold(at, |at, byte| {
+        Some(at + spelling_len(text.get(at..)?, *byte)?)
+    })
+}
+
+/// The length of the spelling of `byte` that `rest` starts with. A plain
+/// byte has one spelling, itself. Any other ASCII byte can also stand as
+/// its JSON escape (`\/`, `\"`, `\\`, or `\u00XX`) or percent-encoded
+/// (`%XX`), hex in either case; the escaped form is read first.
+fn spelling_len(rest: &[u8], byte: u8) -> Option<usize> {
+    if byte.is_ascii() && !is_plain_byte(byte) {
+        match rest {
+            [b'\\', escaped, ..] if *escaped == byte && matches!(byte, b'/' | b'"' | b'\\') => {
+                return Some(2);
+            }
+            [b'\\', b'u', b'0', b'0', high, low, ..] if hex_byte(*high, *low) == Some(byte) => {
+                return Some(6);
+            }
+            [b'%', high, low, ..] if hex_byte(*high, *low) == Some(byte) => return Some(3),
+            _ => {}
+        }
+    }
+    (rest.first() == Some(&byte)).then_some(1)
+}
+
+/// The byte two hex digits spell.
+fn hex_byte(high: u8, low: u8) -> Option<u8> {
+    let digit = |byte: u8| char::from(byte).to_digit(16);
+    u8::try_from(digit(high)? * 16 + digit(low)?).ok()
 }
 
 /// Which text the shape rules read.
@@ -785,10 +868,12 @@ mod tests {
         }
     }
 
-    /// Redacting again changes nothing: a client redacts a body, then the
-    /// error built from it.
+    /// The texts a client redacts twice (an error where it is built, then
+    /// again where its stream ends) are unchanged by the second
+    /// application. That holds for these, not for every text: see
+    /// `redact_credentials_applied_again_never_reveals`.
     #[test]
-    fn redact_credentials_is_idempotent() {
+    fn redact_credentials_applied_again_leaves_a_redacted_error_unchanged() {
         let credential = format!("madeup{}", "bearertoken".repeat(3));
         for text in [
             format!(r#"{{"error":{{"message":"header authorization: Bearer {credential}"}}}}"#),

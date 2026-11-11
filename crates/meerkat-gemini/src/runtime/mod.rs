@@ -2257,6 +2257,50 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn redacts_the_access_token_it_signed_with() {
+            use meerkat_core::HttpAuthorizer as _;
+            let fixture = fixture("echo", None).await;
+            let mut headers = Vec::new();
+            let mut request = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: "http://127.0.0.1:9/model",
+                headers: &mut headers,
+            };
+            fixture.authorizer.authorize(&mut request).await.unwrap();
+            let bearer = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.clone())
+                .unwrap();
+            let token = bearer.strip_prefix("Bearer ").unwrap();
+            assert!(!token.is_empty());
+            // A response that repeats the access token (its header as sent,
+            // the bare value, a URL carrying it) loses it in the
+            // authorizer's redaction.
+            for echo in [
+                format!("upstream echo: rejected request with header authorization: {bearer}"),
+                format!("upstream echo: value {bearer} was refused"),
+                format!("upstream echo: credential {token} was refused"),
+                format!(
+                    "upstream echo: GET http://upstream.invalid/v1/models?session={token}&page=2"
+                ),
+            ] {
+                let mut diagnostic = echo;
+                fixture
+                    .authorizer
+                    .redact_response_diagnostic(&mut diagnostic);
+                assert!(
+                    !diagnostic.contains(token),
+                    "a credential is left in: {diagnostic}"
+                );
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn optional_account_claim_may_be_absent_but_cannot_repin_the_authorizer() {
             let fixture = fixture("claims", Some("same-account")).await;
             let snapshot = fixture.owner.snapshot(&fixture.lease);

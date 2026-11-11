@@ -762,3 +762,70 @@ async fn missing_credentials_surface_missing_secret() {
 fn _ensure_imports() {
     let _: fn() -> axum::response::Response = || ().into_response();
 }
+
+/// Pass every echo of the request `authorizer` just signed (each header it
+/// added, as sent, in a header line and alone; each credential bare and in
+/// a URL) through its redaction: none of `credentials` is left, and the
+/// text around them is.
+fn assert_echoes_are_redacted(
+    authorizer: &dyn HttpAuthorizer,
+    headers: &[(String, String)],
+    credentials: &[&str],
+) {
+    let mut echoes = Vec::new();
+    for credential in credentials {
+        echoes.push(format!(
+            "upstream echo: credential {credential} was refused"
+        ));
+        echoes.push(format!(
+            "upstream echo: GET http://upstream.invalid/v1/models?session={credential}&page=2"
+        ));
+    }
+    for (name, value) in headers {
+        echoes.push(format!(
+            r#"{{"error":{{"message":"upstream echo: rejected request with header {name}: {value}","type":"invalid_request_error"}}}}"#
+        ));
+        echoes.push(format!("upstream echo: value {value} was refused"));
+    }
+    for echo in echoes {
+        let mut diagnostic = echo;
+        authorizer.redact_response_diagnostic(&mut diagnostic);
+        for credential in credentials {
+            assert!(
+                !diagnostic.contains(credential),
+                "{} left a credential in: {diagnostic}",
+                authorizer.label()
+            );
+        }
+        assert!(
+            diagnostic.contains("upstream echo"),
+            "the text around the credential is kept: {diagnostic}"
+        );
+    }
+}
+
+/// A response that repeats the Google access token loses it in the
+/// authorizer's redaction.
+#[tokio::test]
+async fn redacts_the_access_token_it_signed_with() {
+    let token = format!("google-{}", "madeupaccesstoken".repeat(3));
+    let mock = start_mock(&token).await;
+    let env_lookup =
+        Arc::new(|_: &str| None::<String>) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+    let (authorizer, _, _) = with_runtime_auth_lease(
+        GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::ComputeOnly, env_lookup)
+            .with_metadata_url_override(format!(
+                "{}/computeMetadata/v1/instance/service-accounts/default/token",
+                mock.base_url
+            )),
+        "google_metadata_echo",
+    );
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://generativelanguage.googleapis.com/v1/models",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+    assert_echoes_are_redacted(&authorizer, &headers, &[&token]);
+}

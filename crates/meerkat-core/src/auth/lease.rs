@@ -341,6 +341,46 @@ mod tests {
         assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 
+    /// An authorizer that implements only the required methods still loses
+    /// an authorization header a response repeats: the default redaction
+    /// removes credential shapes, and keeps the text around them.
+    #[test]
+    fn default_redaction_removes_an_echoed_authorization_header() {
+        struct RequiredMethodsOnly;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HttpAuthorizer for RequiredMethodsOnly {
+            async fn authorize(
+                &self,
+                _req: &mut HttpAuthorizationRequest<'_>,
+            ) -> Result<(), AuthError> {
+                Ok(())
+            }
+
+            fn label(&self) -> &'static str {
+                "required-methods-only"
+            }
+        }
+
+        let credential = format!("madeup{}", "bearer0123".repeat(3));
+        let mut diagnostic = format!(
+            r#"{{"error":{{"message":"upstream echo: rejected request with header authorization: Bearer {credential}","type":"invalid_request_error"}}}}"#
+        );
+        RequiredMethodsOnly.redact_response_diagnostic(&mut diagnostic);
+        assert_eq!(
+            diagnostic,
+            r#"{"error":{"message":"upstream echo: rejected request with header authorization: Bearer [REDACTED]","type":"invalid_request_error"}}"#
+        );
+
+        // An ordinary provider error that only talks about credentials is
+        // returned as it was.
+        let ordinary = r#"{"error":{"message":"You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY). See https://docs.upstream.invalid/v1/models?page=2","type":"invalid_request_error","param":null,"code":null}}"#;
+        let mut diagnostic = ordinary.to_string();
+        RequiredMethodsOnly.redact_response_diagnostic(&mut diagnostic);
+        assert_eq!(diagnostic, ordinary);
+    }
+
     #[test]
     fn refresh_reason_roundtrip() {
         let r = AuthRefreshReason::ExpiringSoon;

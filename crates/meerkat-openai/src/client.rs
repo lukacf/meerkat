@@ -5563,6 +5563,324 @@ mod tests {
         );
     }
 
+    /// How the upstream repeats the credential that signed the request.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialEcho {
+        /// HTTP 400 whose message names the credential header as sent.
+        HeaderLine,
+        /// HTTP 400 whose message carries the credential alone.
+        Bare,
+        /// HTTP 400 whose message carries a URL with the credential in it.
+        Url,
+        /// HTTP 200 stream whose `error` event names the header as sent.
+        StreamError,
+    }
+
+    /// The message an upstream that received the credential header `name`
+    /// with `value` answers with.
+    fn credential_echo_message(echo: CredentialEcho, name: &str, value: &str) -> String {
+        let bare = value.strip_prefix("Bearer ").unwrap_or(value);
+        match echo {
+            CredentialEcho::HeaderLine | CredentialEcho::StreamError => {
+                format!("upstream echo: rejected request with header {name}: {value}")
+            }
+            CredentialEcho::Bare => format!("upstream echo: credential {bare} was refused"),
+            CredentialEcho::Url => format!(
+                "upstream echo: GET http://upstream.invalid/v1/models?session={bare}&page=2 failed"
+            ),
+        }
+    }
+
+    /// Answers every request, whatever its path, by repeating the header
+    /// that carries its credential (`authorization`, or Azure's `api-key`).
+    async fn spawn_credential_echo_server(
+        echo: CredentialEcho,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(move |headers: HeaderMap| async move {
+            let (name, value) = ["authorization", "api-key"]
+                .into_iter()
+                .find_map(|name| {
+                    let value = headers.get(name)?.to_str().ok()?;
+                    Some((name, value.to_string()))
+                })
+                .unwrap_or(("authorization", String::new()));
+            let message = credential_echo_message(echo, name, &value);
+            match echo {
+                CredentialEcho::StreamError => {
+                    let event = serde_json::json!({
+                        "type": "error",
+                        "code": "server_error",
+                        "message": message,
+                    });
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\n"),
+                    )
+                        .into_response()
+                }
+                CredentialEcho::HeaderLine | CredentialEcho::Bare | CredentialEcho::Url => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {"message": message, "type": "invalid_request_error"},
+                    })),
+                )
+                    .into_response(),
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Who signs the request with the credential.
+    #[derive(Debug, Clone, Copy)]
+    enum CredentialSigner {
+        /// The client's own API key, sent as `Authorization: Bearer`: an
+        /// API-key route, which has no authorizer.
+        ClientApiKey,
+        /// The client's own API key on the Azure OpenAI wire, sent as
+        /// `api-key`.
+        ClientAzureApiKey,
+        /// A static bearer authorizer.
+        StaticBearerAuthorizer,
+    }
+
+    fn credential_signed_client(
+        signer: CredentialSigner,
+        base_url: String,
+        credential: &str,
+    ) -> OpenAiClient {
+        match signer {
+            CredentialSigner::ClientApiKey => {
+                OpenAiClient::new_with_base_url(credential.to_string(), base_url)
+            }
+            CredentialSigner::ClientAzureApiKey => {
+                OpenAiClient::new_with_base_url(credential.to_string(), base_url)
+                    .with_azure_openai_wire(AzureOpenAiWireConfig::default())
+            }
+            CredentialSigner::StaticBearerAuthorizer => {
+                OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+                    .with_authorizer(Arc::new(
+                        meerkat_auth_core::authorizers::StaticBearerAuthorizer::new(
+                            credential.to_string(),
+                            "static-bearer",
+                        ),
+                    ))
+            }
+        }
+    }
+
+    /// The failure of one request through `client` as the agent loop carries
+    /// it: the `AgentError` (`Display` and `Debug`), the typed turn error
+    /// (its `detail` and `reason`) and every event published for the attempt.
+    async fn agent_failure_forms(client: Arc<dyn LlmClient>) -> String {
+        use meerkat_core::AgentLlmClient as _;
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
+        let adapter =
+            LlmClientAdapter::with_event_channel(client, "gpt-5.4".to_string(), events_tx);
+        let error = match adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("hello"))],
+                &[],
+                256,
+                None,
+                None,
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("the request fails"),
+        };
+        let metadata = meerkat_core::TurnErrorMetadata::from_agent_error(&error)
+            .expect("a provider failure has typed turn error metadata");
+        let metadata = serde_json::to_value(&metadata).expect("metadata JSON");
+        assert!(
+            metadata["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("upstream echo")),
+            "the provider's answer reaches the typed detail: {metadata}"
+        );
+        let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect::<Vec<_>>();
+        format!("{error} {error:?} {metadata} {events:?}")
+    }
+
+    /// A provider, proxy or gateway that repeats the request's credential
+    /// (its header as sent, the bare value, a URL carrying it, or a stream
+    /// `error` event) never puts it in the error the Responses client
+    /// returns (`Display`, `Debug`, wire JSON) or in what the agent loop
+    /// derives from it (the `AgentError`, the typed turn error's `detail`
+    /// and `reason.provider_error.message`, published events), whether the
+    /// client's own API key (as a bearer, or as Azure's `api-key`) or an
+    /// authorizer signed the request. The server's answer still reaches the
+    /// error.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_responses_errors_for_every_signer() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [
+                CredentialEcho::HeaderLine,
+                CredentialEcho::Bare,
+                CredentialEcho::Url,
+                CredentialEcho::StreamError,
+            ] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let request =
+                    LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+                let events = client.stream(&request).collect::<Vec<_>>().await;
+                let error = events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        Err(error)
+                        | Ok(LlmEvent::Done {
+                            outcome: LlmDoneOutcome::Error { error },
+                        }) => Some(error),
+                        Ok(_) => None,
+                    })
+                    .unwrap_or_else(|| panic!("{signer:?} {echo:?}: the stream ends in an error"));
+                let rendered = format!(
+                    "{error} {error:?} {}",
+                    serde_json::to_string(&error).expect("error JSON")
+                );
+                let agent_forms = agent_failure_forms(Arc::new(client)).await;
+                server.abort();
+                for (surface, text) in [("client error", &rendered), ("agent", &agent_forms)] {
+                    assert!(
+                        !text.contains(&credential),
+                        "{signer:?} {echo:?}: the {surface} leaked the credential: {text}"
+                    );
+                    assert!(
+                        text.contains("upstream echo"),
+                        "{signer:?} {echo:?}: the server's answer reached the {surface}: {text}"
+                    );
+                }
+                if matches!(echo, CredentialEcho::HeaderLine) {
+                    // The rejection keeps its class, and the redaction removes
+                    // the credential and nothing else: the body is still the
+                    // JSON the server sent.
+                    let LlmError::InvalidRequest { message } = &error else {
+                        panic!("{signer:?}: the rejection keeps its class: {error:?}");
+                    };
+                    let body: serde_json::Value =
+                        serde_json::from_str(message).unwrap_or_else(|parse| {
+                            panic!("{signer:?}: the body is kept whole: {parse}: {message}")
+                        });
+                    assert!(
+                        body["error"]["message"].as_str().is_some_and(|echoed| {
+                            echoed.starts_with("upstream echo: rejected request with header ")
+                                && echoed.ends_with("[REDACTED]")
+                        }),
+                        "{signer:?}: only the credential is replaced: {message}"
+                    );
+                    assert!(
+                        body["error"]
+                            .as_object()
+                            .is_some_and(|fields| fields.len() > 1),
+                        "{signer:?}: the fields after the message are kept: {message}"
+                    );
+                    assert!(
+                        agent_forms.contains("\"provider_error\":{\"message\":"),
+                        "{signer:?}: the typed reason carries the provider message: {agent_forms}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An image request the provider refuses with a body that repeats the
+    /// request's credential reports the refusal without the credential.
+    #[tokio::test]
+    async fn echoed_credential_stays_out_of_an_image_request_failure() {
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            for echo in [CredentialEcho::HeaderLine, CredentialEcho::Bare] {
+                let (base_url, server) = spawn_credential_echo_server(echo).await;
+                let client = credential_signed_client(signer, base_url, &credential);
+                let output = client
+                    .execute_image_generation(
+                        image_executor_request_json(hosted_openai_plan_json()),
+                    )
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{signer:?} {echo:?}: a provider failure output: {error}")
+                    });
+                server.abort();
+                let rendered = format!("{:?}", output.warnings);
+                assert!(
+                    !rendered.contains(&credential),
+                    "{signer:?} {echo:?}: the warning leaked the credential: {rendered}"
+                );
+                assert!(
+                    rendered.contains("upstream echo"),
+                    "{signer:?} {echo:?}: the server's answer reached the warning: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// An ordinary provider error that carries no credential (a message, a
+    /// type, a code, a request id, a URL without credentials) reaches the
+    /// caller byte for byte, whoever signed the request.
+    #[tokio::test]
+    async fn an_error_without_a_credential_is_returned_unchanged() {
+        const BODY: &str = r#"{"error":{"message":"The model `gpt-5.4` does not exist or you do not have access to it. See https://docs.upstream.invalid/v1/models?page=2 for the list.","type":"invalid_request_error","param":"model","code":"model_not_found"},"request_id":"req_0123456789abcdef"}"#;
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                BODY,
+            )
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ordinary error server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve ordinary error server");
+        });
+        let credential = format!("responses-{}", "madeupcredential".repeat(3));
+        for signer in [
+            CredentialSigner::ClientApiKey,
+            CredentialSigner::ClientAzureApiKey,
+            CredentialSigner::StaticBearerAuthorizer,
+        ] {
+            let client = credential_signed_client(signer, format!("http://{addr}"), &credential);
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{signer:?}: the stream ends in an error"));
+            assert!(
+                matches!(&error, LlmError::InvalidRequest { message } if message == BODY),
+                "{signer:?}: {error:?}"
+            );
+        }
+        server.abort();
+    }
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
     /// tests can pin per-chunk wire behavior (lifecycle-only chunks etc.).
     async fn paced_responses_sse(State(chunks): State<Vec<String>>) -> impl IntoResponse {

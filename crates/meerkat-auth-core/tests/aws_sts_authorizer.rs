@@ -390,3 +390,101 @@ async fn sigv4_expired_lease_blocks_signing_with_typed_disposition() {
             .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
     );
 }
+
+/// Pass every echo of the request `authorizer` just signed (each header it
+/// added, as sent, in a header line and alone; each credential bare and in
+/// a URL) through its redaction: none of `credentials` is left, and the
+/// text around them is.
+fn assert_echoes_are_redacted(
+    authorizer: &dyn HttpAuthorizer,
+    headers: &[(String, String)],
+    credentials: &[&str],
+) {
+    let mut echoes = Vec::new();
+    for credential in credentials {
+        echoes.push(format!(
+            "upstream echo: credential {credential} was refused"
+        ));
+        echoes.push(format!(
+            "upstream echo: GET http://upstream.invalid/v1/models?session={credential}&page=2"
+        ));
+    }
+    for (name, value) in headers {
+        echoes.push(format!(
+            r#"{{"error":{{"message":"upstream echo: rejected request with header {name}: {value}","type":"invalid_request_error"}}}}"#
+        ));
+        echoes.push(format!("upstream echo: value {value} was refused"));
+    }
+    for echo in echoes {
+        let mut diagnostic = echo;
+        authorizer.redact_response_diagnostic(&mut diagnostic);
+        for credential in credentials {
+            assert!(
+                !diagnostic.contains(credential),
+                "{} left a credential in: {diagnostic}",
+                authorizer.label()
+            );
+        }
+        assert!(
+            diagnostic.contains("upstream echo"),
+            "the text around the credential is kept: {diagnostic}"
+        );
+    }
+}
+
+/// A response that repeats the Bedrock bearer token loses it in the
+/// authorizer's redaction.
+#[tokio::test]
+async fn bearer_token_mode_redacts_the_bearer_it_signed_with() {
+    let token = format!("bedrock-{}", "madeupbearer".repeat(3));
+    let authorizer = AwsStsAuthorizer::new(
+        "us-east-1",
+        AwsCredentialProvider::BearerToken(token.clone()),
+    );
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://bedrock-runtime.us-east-1.amazonaws.com/",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+    assert_echoes_are_redacted(&authorizer, &headers, &[&token]);
+}
+
+/// A response that repeats a SigV4-signed request loses the session token
+/// and the request's signature in the authorizer's redaction.
+#[tokio::test]
+async fn sigv4_redacts_the_session_token_and_signature_it_signed_with() {
+    let session_token = format!("FQoG{}", "MadeUpSessionToken".repeat(3));
+    let session_token_for_env = session_token.clone();
+    let provider = AwsCredentialProvider::from_env(move |k| match k {
+        "AWS_ACCESS_KEY_ID" => Some("AKIAFROMENV00000000".into()),
+        "AWS_SECRET_ACCESS_KEY" => Some("secretfromenvsecretfromenvsecretfromenv".into()),
+        "AWS_SESSION_TOKEN" => Some(session_token_for_env.clone()),
+        "AWS_CREDENTIAL_EXPIRATION" => Some("2999-01-01T00:00:00Z".into()),
+        _ => None,
+    });
+    let authorizer = with_test_observer(AwsStsAuthorizer::new("us-west-2", provider));
+    let mut headers = vec![(
+        "host".into(),
+        "bedrock-runtime.us-west-2.amazonaws.com".into(),
+    )];
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://bedrock-runtime.us-west-2.amazonaws.com/model/x/invoke",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+    let authorization = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.clone())
+        .unwrap();
+    let signature = authorization
+        .rsplit("Signature=")
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(signature.len(), 64, "{authorization}");
+    assert_echoes_are_redacted(&authorizer, &headers, &[&session_token, &signature]);
+}

@@ -69,4 +69,112 @@ mod tests {
         assert_eq!(headers[0].1, "Bearer tok-123");
         assert_eq!(authorizer.label(), "bedrock-bearer");
     }
+
+    /// What a provider, proxy or gateway that repeats a request can send
+    /// back: each header the authorizer added, as sent, in a header line and
+    /// alone; the bare credential; a URL carrying it.
+    fn echoes(headers: &[(String, String)], credential: &str) -> Vec<String> {
+        let mut echoes = vec![
+            format!("upstream echo: credential {credential} was refused"),
+            format!(
+                "upstream echo: GET http://upstream.invalid/v1/models?session={credential}&page=2"
+            ),
+        ];
+        for (name, value) in headers {
+            echoes.push(format!(
+                r#"{{"error":{{"message":"upstream echo: rejected request with header {name}: {value}","type":"invalid_request_error"}}}}"#
+            ));
+            echoes.push(format!("upstream echo: value {value} was refused"));
+        }
+        echoes
+    }
+
+    /// Sign one request with `authorizer`, then pass every echo of it
+    /// through the authorizer's redaction: none of `credentials` is left,
+    /// and the text around them is.
+    async fn assert_redacts_what_it_signed(authorizer: &dyn HttpAuthorizer, credentials: &[&str]) {
+        let mut headers: Vec<(String, String)> = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "http://upstream.invalid/v1/chat/completions",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+        assert!(!headers.is_empty(), "the authorizer signs the request");
+        for credential in credentials {
+            for echo in echoes(&headers, credential) {
+                let mut diagnostic = echo;
+                authorizer.redact_response_diagnostic(&mut diagnostic);
+                for credential in credentials {
+                    assert!(
+                        !diagnostic.contains(credential),
+                        "{} left a credential in: {diagnostic}",
+                        authorizer.label()
+                    );
+                }
+                assert!(
+                    diagnostic.contains("upstream echo"),
+                    "the text around the credential is kept: {diagnostic}"
+                );
+            }
+        }
+    }
+
+    /// A response that repeats the request's bearer, in a header line, alone
+    /// or in a URL, loses it in the authorizer's redaction.
+    #[tokio::test]
+    async fn redacts_the_bearer_it_signed_with() {
+        let token = format!("static-{}", "madeupbearer".repeat(3));
+        let authorizer = StaticBearerAuthorizer::new(token.clone(), "static-bearer");
+        assert_redacts_what_it_signed(&authorizer, &[&token]).await;
+    }
+
+    /// Static headers from an external resolver: a bearer, a Basic pair and
+    /// a key header are each redacted as sent and, for the two with a
+    /// scheme, without it.
+    #[tokio::test]
+    async fn static_headers_redact_every_value_they_sign_with() {
+        let bearer = format!("resolver-{}", "madeupbearer".repeat(3));
+        let basic = format!("{}==", "bWFkZXVwOnBhaXI".repeat(2));
+        let key = format!("resolver-{}", "madeupkey".repeat(3));
+        let authorizer = crate::resolver::StaticHeadersAuthorizer::new(
+            vec![
+                ("Authorization".to_string(), format!("Bearer {bearer}")),
+                ("Proxy-Authorization".to_string(), format!("Basic {basic}")),
+                ("x-api-key".to_string(), key.clone()),
+            ],
+            "external:static_headers",
+        );
+        assert_redacts_what_it_signed(&authorizer, &[&bearer, &basic, &key]).await;
+    }
+
+    /// Text that carries no credential is returned as it was, short words
+    /// and a short header value included: a value too short to be a
+    /// credential is never replaced.
+    #[tokio::test]
+    async fn redaction_leaves_text_without_a_credential_unchanged() {
+        let token = format!("static-{}", "madeupbearer".repeat(3));
+        let bearer = StaticBearerAuthorizer::new(token, "static-bearer");
+        let headers = crate::resolver::StaticHeadersAuthorizer::new(
+            vec![("x-tenant".to_string(), "acme".to_string())],
+            "external:static_headers",
+        );
+        for authorizer in [&bearer as &dyn HttpAuthorizer, &headers] {
+            for text in [
+                "model none is not served by tenant acme; basic plan, key rotation due\n",
+                // Ordinary provider errors that only talk about credentials,
+                // with a type, a code, a request id and a URL.
+                r#"{"error":{"message":"You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser. You can obtain an API key from https://docs.upstream.invalid/account/api-keys.","type":"invalid_request_error","param":null,"code":null}}"#,
+                r#"{"error":{"message":"Incorrect API key provided: sk-proj-********************abcd. You can find your API key at https://docs.upstream.invalid/account/api-keys.","type":"invalid_request_error","param":null,"code":"invalid_api_key"},"request_id":"req_0123456789abcdef"}"#,
+                r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CSHoEeqs5C35K2UUqR7Fy"}"#,
+                "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"API key not valid. Please pass a valid API key.\",\n    \"status\": \"INVALID_ARGUMENT\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"API_KEY_INVALID\",\n        \"domain\": \"googleapis.com\"\n      }\n    ]\n  }\n}\n",
+                r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 130112 tokens. Please reduce the length of the messages.","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#,
+                "Missing bearer authentication in header; basic authentication is not supported. See https://docs.upstream.invalid/v1/auth?section=2#tokens",
+            ] {
+                let mut diagnostic = text.to_string();
+                authorizer.redact_response_diagnostic(&mut diagnostic);
+                assert_eq!(diagnostic, text, "{}", authorizer.label());
+            }
+        }
+    }
 }

@@ -11968,6 +11968,17 @@ mod tests {
                 diagnostic,
                 "upstream echo: Bearer <redacted>, then Bearer <redacted>"
             );
+
+            // Only the bearers this account signed with are replaced: any
+            // other text, credential-shaped or not, is returned as it was.
+            let other = format!(
+                "upstream echo: authorization: Bearer {}, api_key={}",
+                ["notsignedbythisaccount", "0123"].concat(),
+                ["notsignedeither", "0123"].concat(),
+            );
+            let mut diagnostic = other.clone();
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(diagnostic, other);
         }
 
         /// T11: no token in any variable, or only whitespace, is

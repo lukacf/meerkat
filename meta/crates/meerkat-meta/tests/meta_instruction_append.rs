@@ -554,6 +554,15 @@ impl Rig {
             .expect("the roster pass runs");
     }
 
+    /// `meta/reset` of `name`: its next life starts on a fresh conversation.
+    async fn reset(&self, name: &str) {
+        let reset = self.rpc("meta/reset", json!({"identity": name})).await;
+        assert!(
+            reset["error"].is_null(),
+            "the reset is carried out: {reset:#?}"
+        );
+    }
+
     /// Create the store-owned agent with `instructions` through Core.
     async fn create(&self, instructions: &[&str]) {
         self.create_spec(created_spec(instructions)).await;
@@ -878,8 +887,8 @@ async fn the_same_change_twice_is_recorded_and_appended_once() {
     assert_eq!(
         rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
             .await,
-        InstructionOutcome::Unchanged,
-        "a replay of the step finds the record current"
+        InstructionOutcome::AppliesAtNextRun,
+        "a replay of the step finds the record current and answers as the step did"
     );
     let record = rig.record(CREATED).await.expect("the agent's record");
     assert_eq!(record["revision"], json!(1), "one revision: {record:#?}");
@@ -1500,6 +1509,436 @@ async fn a_start_revokes_the_record_of_an_agent_removed_without_its_step() {
         (record["revision"].clone(), record["effect"].clone()),
         (json!(1), json!("active")),
         "an archived agent keeps its record: {record:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A reset right after an edit of the configuration that no roster pass
+/// read: the fresh conversation is built from the edited text, and nothing
+/// presents the text the record held before the edit as the current one.
+///
+/// RED while a reset kept the record: the fresh conversation was born with
+/// the record's earlier text appended as "the current, complete text",
+/// after a first prompt built from the edited text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_after_an_unread_edit_never_presents_the_earlier_text_as_current() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(
+        temp.path(),
+        &fresh_mob_id(),
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+
+    // The host edits its configuration and resets before any roster pass.
+    rig.roster
+        .upsert(configured_spec(&["Answer in GAMMA style."]));
+    rig.reset(CONFIGURED).await;
+    rig.turn(CONFIGURED, "AFTER-RESET").await;
+    let prompt = rig.transcript(CONFIGURED).await[0]["content"]
+        .as_str()
+        .expect("the first prompt")
+        .to_string();
+    assert!(
+        prompt.contains("Answer in GAMMA style.") && !prompt.contains("Answer in BETA style."),
+        "the fresh conversation's first prompt is built from the edited text"
+    );
+    let request = entries(&rig.request_messages("AFTER-RESET"));
+    assert!(
+        request
+            .iter()
+            .all(|entry| !carries(entry, &["Answer in BETA style."])),
+        "nothing presents the earlier text as the current one: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A host that replaces a registered agent's spec through the runtime
+/// (`IdentityRuntime::update_spec`) with other instructions: the change is
+/// recorded like one a roster pass reads, and the agent's next run carries
+/// it.
+///
+/// RED while the runtime's own spec update replaced the registered spec
+/// without the comparison: nothing was recorded while the process ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spec_update_through_the_runtime_records_the_changed_instructions() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(
+        temp.path(),
+        &fresh_mob_id(),
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+
+    rig.roster
+        .upsert(configured_spec(&["Answer in BETA style."]));
+    let updated = rig
+        .runtime
+        .identity_runtime()
+        .expect("identity runtime installed")
+        .update_spec(configured_spec(&["Answer in BETA style."]))
+        .await;
+    assert!(updated.is_ok(), "the runtime takes the spec: {updated:?}");
+    let record = rig.record(CONFIGURED).await;
+    assert_eq!(
+        record.as_ref().map(|record| record["revision"].clone()),
+        Some(json!(1)),
+        "the spec update recorded the change: {record:#?}"
+    );
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(carries(&request[0], &["Answer in BETA style."]));
+    rig.shutdown().await;
+}
+
+/// A reset of an agent whose instructions changed revokes its record: the
+/// fresh conversation's first prompt is the current, complete text, and
+/// nothing is appended to it. A later change is the record's next revision
+/// and reaches the fresh conversation as one entry. The same for a
+/// configured agent and for one created at run time.
+///
+/// RED while a reset kept the record: the fresh conversation held the text
+/// twice, in its first prompt and as an appended entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_of_an_edited_agent_revokes_its_record_and_appends_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(
+        temp.path(),
+        &fresh_mob_id(),
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.create(&["Answer in ALPHA style."]).await;
+    rig.turn(CONFIGURED, "CONFIGURED-FIRST").await;
+    rig.turn(CREATED, "CREATED-FIRST").await;
+    rig.configure(&["Answer in BETA style."]).await;
+    rig.update(
+        "update-one",
+        &["Answer in ALPHA style."],
+        &["Answer in BETA style."],
+    )
+    .await;
+    rig.after_update(&["Answer in ALPHA style."], &["Answer in BETA style."])
+        .await;
+    for name in [CONFIGURED, CREATED] {
+        rig.recorded(name).await;
+        rig.turn(name, &format!("{name}-SECOND")).await;
+        assert_eq!(
+            entries(&rig.transcript(name).await).len(),
+            1,
+            "{name} ran on its changed instructions"
+        );
+
+        rig.reset(name).await;
+        let record = rig.record(name).await.expect("the revoked record");
+        assert_eq!(
+            (record["revision"].clone(), record["effect"].clone()),
+            (json!(2), json!("absent")),
+            "{name}'s reset revoked its record: {record:#?}"
+        );
+        rig.turn(name, &format!("{name}-AFTER-RESET")).await;
+        let transcript = rig.transcript(name).await;
+        assert!(
+            transcript[0]["content"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("Answer in BETA style.")
+                    && !prompt.contains("Answer in ALPHA style.")),
+            "{name}'s fresh conversation is built from the current text"
+        );
+        assert!(
+            entries(&transcript).is_empty(),
+            "nothing is appended to {name}'s fresh conversation: {transcript:#?}"
+        );
+    }
+
+    rig.configure(&["Answer in GAMMA style."]).await;
+    let record = rig.record(CONFIGURED).await.expect("the record");
+    assert_eq!(
+        (record["revision"].clone(), record["effect"].clone()),
+        (json!(3), json!("active")),
+        "a later change is the record's next revision: {record:#?}"
+    );
+    rig.recorded(CONFIGURED).await;
+    rig.turn(CONFIGURED, "CONFIGURED-THIRD").await;
+    let request = entries(&rig.request_messages("CONFIGURED-THIRD"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(carries(&request[0], &["Answer in GAMMA style."]));
+    rig.shutdown().await;
+}
+
+/// An agent the host's configuration drops and lists again with other
+/// instructions, in later roster passes of the same process: its next run
+/// is on the listed text, as the first prompt of a fresh conversation or as
+/// the entry appended to the conversation it comes back on. The comparison
+/// is not tied to the process's first roster pass.
+///
+/// RED while only a replaced registration and the first pass were compared:
+/// the agent came back on its conversation with the dropped text.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_listed_again_with_other_instructions_runs_on_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(
+        temp.path(),
+        &fresh_mob_id(),
+        vec![configured_spec(&["Answer in ALPHA style."])],
+    )
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+
+    rig.roster
+        .remove(&AgentIdentity::parse(CONFIGURED).expect("an identity"));
+    rig.roster_pass().await;
+    rig.configure(&["Answer in GAMMA style."]).await;
+    rig.turn(CONFIGURED, "AFTER-RELISTING").await;
+
+    let request = rig.request_messages("AFTER-RELISTING");
+    let whole = Value::Array(request.clone()).to_string();
+    let appended = entries(&request);
+    let fresh = appended.is_empty()
+        && whole.contains("Answer in GAMMA style.")
+        && !whole.contains("Answer in ALPHA style.");
+    let appended_to_its_conversation = appended
+        .last()
+        .is_some_and(|entry| carries(entry, &["Answer in GAMMA style."]));
+    assert!(
+        fresh || appended_to_its_conversation,
+        "the relisted agent runs on the listed text: {request:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// An edit of an archived agent, which has a conversation and no seated
+/// member: the change is recorded, the answer `applies_at_next_run` is
+/// true, nothing is woken, and the agent's first run after its unarchive
+/// carries the entry.
+///
+/// RED while an agent with no seated member was read as never built: the
+/// step answered `applies_at_next_run`, wrote nothing, and the unarchived
+/// agent ran on its earlier text.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_edit_of_an_archived_agent_reaches_it_after_its_unarchive() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    let archived = rig
+        .mob()
+        .archive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("archive"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            archived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{archived:?}"
+    );
+
+    rig.update(
+        "update-one",
+        &["Keep ALPHA records."],
+        &["Keep BETA records."],
+    )
+    .await;
+    assert_eq!(
+        rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
+            .await,
+        InstructionOutcome::AppliesAtNextRun
+    );
+    let record = rig.record(CREATED).await;
+    assert_eq!(
+        record
+            .as_ref()
+            .map(|record| (record["revision"].clone(), record["effect"].clone())),
+        Some((json!(1), json!("active"))),
+        "the change of the archived agent is recorded: {record:#?}"
+    );
+
+    let unarchived = rig
+        .mob()
+        .unarchive_identity(
+            meerkat_mob::IdentityArchiveChange::new(operation("unarchive"), host(), CREATED),
+            allow(),
+        )
+        .await;
+    assert!(
+        matches!(
+            unarchived,
+            Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+        ),
+        "{unarchived:?}"
+    );
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "AFTER-UNARCHIVE").await;
+    let request = entries(&rig.request_messages("AFTER-UNARCHIVE"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(
+        carries(&request[0], &["Keep BETA records."]),
+        "the unarchived agent's next run carries the change"
+    );
+    rig.shutdown().await;
+}
+
+/// An update whose change a delivery door recorded first (the door read the
+/// changed row between the update's commit and its step): the step still
+/// answers when the change applies, and writes nothing again.
+///
+/// RED while the step answered `unchanged` whenever the record already held
+/// the text: an update that did change the instructions told its caller
+/// nothing had changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_whose_change_a_door_recorded_first_answers_when_it_applies() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    rig.update(
+        "update-one",
+        &["Keep ALPHA records."],
+        &["Keep BETA records."],
+    )
+    .await;
+    rig.turn(CREATED, "DOOR-TURN").await;
+    assert_eq!(
+        rig.record(CREATED).await.expect("the door's record")["revision"],
+        json!(1),
+        "the door that read the changed row recorded it"
+    );
+
+    assert_eq!(
+        rig.after_update(&["Keep ALPHA records."], &["Keep BETA records."])
+            .await,
+        InstructionOutcome::AppliesAtNextRun,
+        "the update's step answers when its change applies"
+    );
+    assert_eq!(
+        rig.record(CREATED).await.expect("the record")["revision"],
+        json!(1),
+        "and writes nothing again"
+    );
+    rig.shutdown().await;
+}
+
+/// An update that leaves the sections that count as they are (other fields
+/// of the row changed, or only an empty section came or went) records
+/// nothing and answers `unchanged`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_that_leaves_the_sections_as_they_are_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot(temp.path(), &fresh_mob_id(), vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    assert_eq!(
+        rig.after_update(&["Keep ALPHA records.", ""], &["Keep ALPHA records."])
+            .await,
+        InstructionOutcome::Unchanged
+    );
+    assert_eq!(rig.record(CREATED).await, None, "nothing is recorded");
+    rig.turn(CREATED, "SECOND-TURN").await;
+    assert!(
+        entries(&rig.transcript(CREATED).await).is_empty(),
+        "and nothing is appended"
+    );
+    rig.shutdown().await;
+}
+
+/// A change of a store-owned agent's row that nothing reported before the
+/// gateway stopped: the next start compares the agent as it compares a
+/// configured one, records the change, wakes nothing, and the agent's next
+/// run carries the text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_owned_agents_change_made_before_a_stop_is_recorded_at_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    rig.create(&["Keep ALPHA records."]).await;
+    rig.turn(CREATED, "FIRST-TURN").await;
+    rig.update(
+        "update-one",
+        &["Keep ALPHA records."],
+        &["Keep BETA records."],
+    )
+    .await;
+    assert_eq!(
+        rig.record(CREATED).await,
+        None,
+        "nothing reported the change"
+    );
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot(temp.path(), &mob, vec![configured_spec(&[])]).await;
+    let record = rig.record(CREATED).await;
+    assert_eq!(
+        record.as_ref().map(|record| record["revision"].clone()),
+        Some(json!(1)),
+        "the start recorded the change: {record:#?}"
+    );
+    assert!(rig.dormant(CREATED), "the start woke nothing");
+    rig.recorded(CREATED).await;
+    rig.turn(CREATED, "SECOND-TURN").await;
+    let request = entries(&rig.request_messages("SECOND-TURN"));
+    assert_eq!(request.len(), 1, "{request:#?}");
+    assert!(carries(&request[0], &["Keep BETA records."]));
+    rig.shutdown().await;
+}
+
+/// A restart of an agent whose conversation was built with sections its
+/// host's build customizer added after the spec's own: its recorded build
+/// sections start with the spec's, so nothing is written at start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_of_an_agent_built_with_customizer_sections_writes_nothing() {
+    use meerkat_meta::identity_first::contracts::AgentCustomizer;
+    use meerkat_meta::identity_first::{AgentBuildContext, AgentBuildDraft, CustomizerError};
+
+    struct SectionCustomizer;
+
+    #[async_trait::async_trait]
+    impl AgentCustomizer for SectionCustomizer {
+        async fn customize_build(
+            &self,
+            _context: &AgentBuildContext,
+            _spec: &DurableAgentSpec,
+            draft: &mut AgentBuildDraft,
+        ) -> Result<(), CustomizerError> {
+            draft
+                .additional_instructions
+                .push("A SECTION THE HOST'S CUSTOMIZER ADDS.".to_string());
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let mob = fresh_mob_id();
+    let alpha = vec![configured_spec(&["Answer in ALPHA style."])];
+    let mut rig = boot_with(temp.path(), &mob, alpha.clone(), |builder| {
+        builder.agent_customizer(Arc::new(SectionCustomizer))
+    })
+    .await;
+    rig.turn(CONFIGURED, "FIRST-TURN").await;
+    rig.shutdown_for_reopen().await;
+
+    let mut rig = boot_with(temp.path(), &mob, alpha, |builder| {
+        builder.agent_customizer(Arc::new(SectionCustomizer))
+    })
+    .await;
+    assert_eq!(
+        rig.record(CONFIGURED).await,
+        None,
+        "the customizer's sections are no change of the agent's instructions"
+    );
+    rig.turn(CONFIGURED, "SECOND-TURN").await;
+    assert!(
+        entries(&rig.transcript(CONFIGURED).await).is_empty(),
+        "nothing is appended"
     );
     rig.shutdown().await;
 }
@@ -2141,7 +2580,7 @@ fn one_function_owns_the_instruction_records() {
         (
             ".append_changed_instructions_on_registration(",
             &[
-                ("identity_first/runtime.rs", 1),
+                ("identity_first/runtime.rs", 2),
                 ("identity_first/runtime/created.rs", 1),
             ],
         ),

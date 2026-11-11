@@ -91,6 +91,19 @@ pub(crate) struct EmbodimentTrace {
     pub(crate) bootstrap_generation: Option<u64>,
     pub(crate) cancelled: bool,
 }
+
+/// What one read of the rows of some edges' ends answered
+/// (`IdentityRuntime::row_declared_identity_edges`).
+#[derive(Default)]
+struct RowDeclaredEdges {
+    /// The edges a row was read to declare as an owned edge of an end.
+    declared: BTreeSet<(AgentIdentity, AgentIdentity)>,
+    /// The edges no row read declares that have an end whose row did not
+    /// read: their owner is unknown this time.
+    unread: BTreeSet<(AgentIdentity, AgentIdentity)>,
+    /// The first end whose row did not read, with the read's error.
+    unread_end: Option<(AgentIdentity, String)>,
+}
 fn durable_spec_uses_external_binding(spec: &DurableAgentSpec) -> bool {
     matches!(spec.backend, Some(meerkat_mob::MobBackendKind::External))
         || matches!(
@@ -6612,17 +6625,19 @@ impl IdentityRuntime {
     }
 
     /// Of `edges`, the edges a row in the mob's identity store declares as
-    /// an owned edge of one of their ends: they are the row's (its owner's
-    /// change declares and ends them, and Core realizes them), so the
-    /// topology never prunes them. One row read per end named, no actor
-    /// command and no wake. An end whose row does not read keeps its edges:
-    /// an edge whose owner could not be read is never pruned.
+    /// an owned edge of one of their ends (`declared`): they are the row's
+    /// (its owner's change declares and ends them, and Core realizes them),
+    /// so the topology never prunes them. One row read per end named, no
+    /// actor command and no wake. An edge with an end whose row did not read
+    /// is answered apart (`unread`, with the first failed read): its owner
+    /// is unknown, so it is neither pruned nor taken to be a row's.
     async fn row_declared_identity_edges(
         &self,
         edges: &BTreeSet<(AgentIdentity, AgentIdentity)>,
-    ) -> BTreeSet<(AgentIdentity, AgentIdentity)> {
+    ) -> RowDeclaredEdges {
+        let mut answer = RowDeclaredEdges::default();
         let Some(bridge) = self.bridge.as_ref() else {
-            return BTreeSet::new();
+            return answer;
         };
         let mut owned: BTreeMap<AgentIdentity, Option<BTreeSet<AgentIdentity>>> = BTreeMap::new();
         for end in edges.iter().flat_map(|(a, b)| [a, b]) {
@@ -6638,28 +6653,37 @@ impl IdentityRuntime {
                         "the edges an identity's row declares could not be read; the topology \
                          keeps its live edges this time"
                     );
+                    answer
+                        .unread_end
+                        .get_or_insert_with(|| (end.clone(), error.to_string()));
                     None
                 }
             };
             owned.insert(end.clone(), peers);
         }
-        let declares = |owner: &AgentIdentity, peer: &AgentIdentity| match owned.get(owner) {
-            Some(Some(peers)) => peers.contains(peer),
-            Some(None) => true,
-            None => false,
+        let declares = |owner: &AgentIdentity, peer: &AgentIdentity| {
+            owned
+                .get(owner)
+                .and_then(Option::as_ref)
+                .is_some_and(|peers| peers.contains(peer))
         };
-        edges
-            .iter()
-            .filter(|(a, b)| declares(a, b) || declares(b, a))
-            .cloned()
-            .collect()
+        let unread = |end: &AgentIdentity| matches!(owned.get(end), Some(None));
+        for (a, b) in edges {
+            if declares(a, b) || declares(b, a) {
+                answer.declared.insert((a.clone(), b.clone()));
+            } else if unread(a) || unread(b) {
+                answer.unread.insert((a.clone(), b.clone()));
+            }
+        }
+        answer
     }
 
     /// Of `edges`, live edges between two of this runtime's identities,
     /// those no other owner declares: neither the mob definition's wiring
     /// nor a row in the mob's identity store. When a topology provider owns
     /// the topology, these are the edges it may prune, between any two
-    /// identities alike.
+    /// identities alike. An edge whose owner could not be read this time is
+    /// not among them.
     pub(crate) async fn edges_without_another_owner(
         &self,
         edges: BTreeSet<(AgentIdentity, AgentIdentity)>,
@@ -6672,8 +6696,11 @@ impl IdentityRuntime {
             .difference(&definition_declared)
             .cloned()
             .collect::<BTreeSet<_>>();
-        let row_declared = self.row_declared_identity_edges(&unclaimed).await;
-        unclaimed.difference(&row_declared).cloned().collect()
+        let rows = self.row_declared_identity_edges(&unclaimed).await;
+        unclaimed
+            .into_iter()
+            .filter(|edge| !rows.declared.contains(edge) && !rows.unread.contains(edge))
+            .collect()
     }
 
     pub(crate) fn set_identity_edge_ownership(&self, ownership: IdentityEdgeOwnership) {
@@ -7285,7 +7312,10 @@ impl IdentityRuntime {
         };
         // A managed edge a row has come to declare since this runtime wired
         // it is the row's now: it leaves the managed set and stays wired.
-        let handed_to_rows = self
+        // Only an edge a row was READ to declare is handed over. One whose
+        // owner could not be read stays wired and managed this pass, and the
+        // pass reports the failed read once everything else is settled.
+        let rows_of_stale = self
             .row_declared_identity_edges(
                 &managed_snapshot
                     .iter()
@@ -7294,12 +7324,16 @@ impl IdentityRuntime {
                     .collect(),
             )
             .await;
+        let handed_to_rows = rows_of_stale.declared;
+        let owner_unread = rows_of_stale.unread;
+        let unread_end = rows_of_stale.unread_end;
         let stale: Vec<(AgentIdentity, AgentIdentity)> = managed_snapshot
             .iter()
             .chain(live_owned_edges.iter())
             .filter(|edge| !desired.contains(*edge))
             .filter(|edge| !unsettled.contains(*edge))
             .filter(|edge| !handed_to_rows.contains(*edge))
+            .filter(|edge| !owner_unread.contains(*edge))
             .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -7468,6 +7502,19 @@ impl IdentityRuntime {
                         IdentityRuntimeError::Internal(format!("bridge unwire_peer: {e}"))
                     })?;
                     managed.remove(&(a, b));
+                }
+                // A row that did not read is this pass's error: every edge
+                // whose owner it left unknown stayed wired and managed.
+                if let Some((identity, detail)) = unread_end.filter(|_| !owner_unread.is_empty()) {
+                    return Err(IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity,
+                        detail: format!(
+                            "the peer edges its row declares could not be read ({detail}); {} \
+                             managed edge(s) no longer wanted stay wired and managed until a \
+                             pass reads it",
+                            owner_unread.len()
+                        ),
+                    });
                 }
                 Ok::<(), IdentityRuntimeError>(())
             })
@@ -19604,12 +19651,15 @@ mod admission_first_topology_tests {
         core: crate::identity_first::core_test_members::CoreTestMembers,
         /// The peer edges each identity's row declares.
         row_edges: StdTestMutex<BTreeMap<AgentIdentity, BTreeSet<AgentIdentity>>>,
+        /// The identities whose row does not read.
+        unreadable_rows: StdTestMutex<BTreeSet<AgentIdentity>>,
     }
 
     impl WedgeableTopologyBridge {
         fn new(gate: watch::Receiver<bool>) -> Self {
             Self {
                 row_edges: StdTestMutex::new(BTreeMap::new()),
+                unreadable_rows: StdTestMutex::new(BTreeSet::new()),
                 gate,
                 wedge_inspection: false,
                 wedge_first_wire: false,
@@ -19709,6 +19759,16 @@ mod admission_first_topology_tests {
             &self,
             identity: &AgentIdentity,
         ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
+            if self
+                .unreadable_rows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(identity)
+            {
+                return Err(BridgeError::Mob(format!(
+                    "the row of {identity} does not read"
+                )));
+            }
             Ok(self
                 .row_edges
                 .lock()
@@ -20638,6 +20698,88 @@ model = "gpt-5.5"
         assert!(
             !unwired_pair(&member_rt, &created_rt),
             "the edge the row declares is kept: {unwired:?}"
+        );
+        Ok(())
+    }
+
+    /// A managed edge the topology withdrew goes to a row only when that row
+    /// was READ to declare it: it then leaves the managed set without being
+    /// unwired, and is no longer this runtime's to unwire. A withdrawn
+    /// managed edge whose end's row does not read is neither pruned nor
+    /// handed over: it stays wired and managed, the pass answers the failed
+    /// read, and the pass that reads the row again unwires it.
+    #[tokio::test]
+    async fn a_withdrawn_managed_edge_goes_to_a_row_only_when_the_row_was_read_to_declare_it()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let planner = AgentIdentity::parse("identity:planner")?;
+        let member = AgentIdentity::parse("identity:member")?;
+        let helper = AgentIdentity::parse("identity:helper")?;
+        let (_open_gate, gate) = watch::channel(false);
+        let bridge = Arc::new(WedgeableTopologyBridge::new(gate));
+        let runtime = runtime_with(bridge.clone(), "edge-handed-to-row")?;
+        let planner_rt = register_active(&runtime, &bridge, &planner, 0).await?;
+        let member_rt = register_active(&runtime, &bridge, &member, 0).await?;
+        let helper_rt = register_active(&runtime, &bridge, &helper, 0).await?;
+        runtime
+            .reconcile_managed_peer_edges(&[
+                ManagedPeerEdge::new(planner.clone(), member.clone())?,
+                ManagedPeerEdge::new(planner.clone(), helper.clone())?,
+            ])
+            .await?;
+
+        // The topology withdraws both edges. The member's row has come to
+        // declare its edge; the helper's row does not read.
+        bridge
+            .row_edges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(member.clone(), BTreeSet::from([planner.clone()]));
+        bridge
+            .unreadable_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(helper.clone());
+        let pass = runtime.reconcile_managed_peer_edges(&[]).await;
+        assert!(
+            matches!(
+                &pass,
+                Err(IdentityRuntimeError::IdentityHistoryUnavailable { identity, .. })
+                    if identity == &helper
+            ),
+            "the pass answers the row that did not read: {pass:?}"
+        );
+        assert!(
+            bridge.unwire_calls().is_empty(),
+            "neither edge is unwired: {:?}",
+            bridge.unwire_calls()
+        );
+
+        // The helper's row reads again and declares nothing, and the
+        // member's row no longer declares its edge.
+        bridge
+            .unreadable_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        bridge
+            .row_edges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        runtime.reconcile_managed_peer_edges(&[]).await?;
+        let unwired = bridge.unwire_calls();
+        let unwired_pair = |x: &AgentRuntimeId, y: &AgentRuntimeId| {
+            unwired
+                .iter()
+                .any(|(a, b)| (a == x && b == y) || (a == y && b == x))
+        };
+        assert!(
+            unwired_pair(&planner_rt, &helper_rt),
+            "the edge whose owner was unknown stayed managed, and is unwired now: {unwired:?}"
+        );
+        assert!(
+            !unwired_pair(&planner_rt, &member_rt),
+            "the edge handed to a row is no longer this runtime's to unwire: {unwired:?}"
         );
         Ok(())
     }

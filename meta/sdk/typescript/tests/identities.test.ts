@@ -670,23 +670,16 @@ describe("identity family: typed answers", () => {
       {
         result: {
           profiles: [
-            { profile: "researcher", verdict: { verdict: "allowed" } },
+            { profile: "researcher", verdict: "allowed" },
             {
               profile: "operator",
-              verdict: {
-                verdict: "needs_decision",
-                lines: ["An operator can run shell commands."],
-              },
+              verdict: "needs_decision",
+              lines: ["An operator can run shell commands."],
             },
-            { profile: "admin", verdict: { verdict: "not_allowed", reason: "host only" } },
+            { profile: "admin", verdict: "not_allowed", reason: "host only" },
           ],
           peers: [
-            {
-              name: "editor",
-              display_name: "Editor",
-              profile: "writer",
-              verdict: { verdict: "not_allowed" },
-            },
+            { name: "editor", display_name: "Editor", profile: "writer", verdict: "not_allowed" },
           ],
           next: "editor",
         },
@@ -710,43 +703,23 @@ describe("identity family: typed answers", () => {
     assert.deepEqual(await identities.changesHold(true), { held: true });
     assert.deepEqual(await identities.directory(), {
       profiles: [
-        {
-          profile: "researcher",
-          verdict: { verdict: "allowed", lines: [], reason: null, raw: { verdict: "allowed" } },
-        },
+        { profile: "researcher", verdict: "allowed", lines: [], reason: null },
         {
           profile: "operator",
-          verdict: {
-            verdict: "needs_decision",
-            lines: ["An operator can run shell commands."],
-            reason: null,
-            raw: {
-              verdict: "needs_decision",
-              lines: ["An operator can run shell commands."],
-            },
-          },
+          verdict: "needs_decision",
+          lines: ["An operator can run shell commands."],
+          reason: null,
         },
-        {
-          profile: "admin",
-          verdict: {
-            verdict: "not_allowed",
-            lines: [],
-            reason: "host only",
-            raw: { verdict: "not_allowed", reason: "host only" },
-          },
-        },
+        { profile: "admin", verdict: "not_allowed", lines: [], reason: "host only" },
       ],
       peers: [
         {
           name: "editor",
           profile: "writer",
           displayName: "Editor",
-          verdict: {
-            verdict: "not_allowed",
-            lines: [],
-            reason: null,
-            raw: { verdict: "not_allowed" },
-          },
+          verdict: "not_allowed",
+          lines: [],
+          reason: null,
         },
       ],
       next: "editor",
@@ -816,10 +789,16 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
       refusal("changes_held", { retryable: true, detail: "Retry later." }),
       refusal("owner_read_only"),
       refusal("invalid_request", {
+        field: "custody",
+        retryable: false,
+        detail: "What was wrong, and what to send instead.",
+        problem: "malformed",
+      }),
+      refusal("invalid_request", {
         field: "request_id",
         retryable: false,
-        detail: "A change names its request_id.",
-        problem: "malformed",
+        detail: "A change names its operation: send a request_id.",
+        problem: "empty",
       }),
     ]);
     const options = { expectedSpecDigest: DIGEST, requestId: "r" };
@@ -841,12 +820,19 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
     assert.equal(bare.detail, "refused: owner_read_only");
     assert.equal(bare.retryable, null);
 
-    // Params the gateway cannot read are the same error, never -32602.
+    // Params the gateway cannot read are the same error, never -32602:
+    // `malformed` for an unknown member or a wrong type, `empty` for a
+    // change without its request id.
     const malformed = await rejection(identities.adopt("scout", options));
     assert.ok(malformed instanceof IdentityRefusedError);
     assert.equal(malformed.kind, "invalid_request");
-    assert.equal(malformed.field, "request_id");
+    assert.equal(malformed.field, "custody");
     assert.deepEqual(malformed.details, { problem: "malformed" });
+    const unnamed = await rejection(identities.adopt("scout", options));
+    assert.ok(unnamed instanceof IdentityRefusedError);
+    assert.equal(unnamed.kind, "invalid_request");
+    assert.equal(unnamed.field, "request_id");
+    assert.deepEqual(unnamed.details, { problem: "empty" });
   });
 
   it("only the family's code with a kind is an identity refusal", async () => {
@@ -859,7 +845,7 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
       {
         error: {
           code: ANNOUNCEMENT_REFUSED_CODE,
-          message: "meta/identity/get is refused: this gateway is a candidate launch",
+          message: "meta/identity/adopt is refused: this gateway is a candidate launch",
           data: { kind: "candidate_launch" },
         },
       },
@@ -871,7 +857,9 @@ describe("identity family: one refusal error, a closed vocabulary", () => {
     }
     // A candidate launch refuses every writer before the family is reached,
     // with the gateway-wide code: it keeps the class the SDK gives that code.
-    const candidate = await rejection(identities.get("scout"));
+    const candidate = await rejection(
+      identities.adopt("scout", { expectedSpecDigest: DIGEST, requestId: "r" }),
+    );
     assert.ok(candidate instanceof AnnouncementRefusedError);
     assert.ok(!(candidate instanceof IdentityRefusedError));
     assert.equal(candidate.kind, "candidate_launch");
@@ -1021,12 +1009,7 @@ describe("identity family: tolerance", () => {
       },
       {
         result: {
-          profiles: [
-            {
-              profile: "researcher",
-              verdict: { verdict: "needs_review", reviewer: "editor" },
-            },
-          ],
+          profiles: [{ profile: "researcher", verdict: "needs_review", reviewer: "editor" }],
           peers: [],
         },
       },
@@ -1040,10 +1023,11 @@ describe("identity family: tolerance", () => {
     assert.equal(agent.provenance?.consentForm, "reviewed");
 
     const directory = await identities.directory();
-    assert.equal(directory.profiles[0].verdict.verdict, "needs_review");
-    assert.deepEqual(directory.profiles[0].verdict.raw, {
+    assert.deepEqual(directory.profiles[0], {
+      profile: "researcher",
       verdict: "needs_review",
-      reviewer: "editor",
+      lines: [],
+      reason: null,
     });
 
     const outcome = parseIdentityOutcome({

@@ -745,7 +745,6 @@ async def test_withdraw_changes_hold_directory_and_plan_answers_are_typed():
         AgentRef,
         DirectoryPeer,
         DirectoryProfile,
-        DirectoryVerdict,
         IdentityChangePlan,
         IdentityChangesHold,
         IdentityWithdrawn,
@@ -769,25 +768,20 @@ async def test_withdraw_changes_hold_directory_and_plan_answers_are_typed():
             "meta/identity/changes_hold": {"held": True},
             "meta/identity/directory": {
                 "profiles": [
-                    {"profile": "researcher", "verdict": {"verdict": "allowed"}},
+                    {"profile": "researcher", "verdict": "allowed"},
                     {
                         "profile": "operator",
-                        "verdict": {
-                            "verdict": "needs_decision",
-                            "lines": ["An operator can run shell commands."],
-                        },
+                        "verdict": "needs_decision",
+                        "lines": ["An operator can run shell commands."],
                     },
-                    {
-                        "profile": "admin",
-                        "verdict": {"verdict": "not_allowed", "reason": "host only"},
-                    },
+                    {"profile": "admin", "verdict": "not_allowed", "reason": "host only"},
                 ],
                 "peers": [
                     {
                         "name": "editor",
                         "display_name": "Editor",
                         "profile": "writer",
-                        "verdict": {"verdict": "not_allowed"},
+                        "verdict": "not_allowed",
                     }
                 ],
                 "next": "editor",
@@ -801,23 +795,19 @@ async def test_withdraw_changes_hold_directory_and_plan_answers_are_typed():
     assert await identities.changes_hold(True) == IdentityChangesHold(held=True)
     assert await identities.directory() == AgentDirectoryPage(
         profiles=(
-            DirectoryProfile(profile="researcher", verdict=DirectoryVerdict("allowed")),
+            DirectoryProfile(profile="researcher", verdict="allowed"),
             DirectoryProfile(
                 profile="operator",
-                verdict=DirectoryVerdict(
-                    "needs_decision", lines=("An operator can run shell commands.",)
-                ),
+                verdict="needs_decision",
+                lines=("An operator can run shell commands.",),
             ),
-            DirectoryProfile(
-                profile="admin",
-                verdict=DirectoryVerdict("not_allowed", reason="host only"),
-            ),
+            DirectoryProfile(profile="admin", verdict="not_allowed", reason="host only"),
         ),
         peers=(
             DirectoryPeer(
                 name="editor",
                 profile="writer",
-                verdict=DirectoryVerdict("not_allowed"),
+                verdict="not_allowed",
                 display_name="Editor",
             ),
         ),
@@ -936,26 +926,28 @@ def test_only_the_family_code_with_a_kind_is_an_identity_refusal():
 
 
 def test_params_the_gateway_cannot_read_are_the_same_typed_error():
-    """Params that do not parse (an unknown member, a wrong type, a missing
-    ``request_id``) are refused ``invalid_request`` on the family's code,
-    never as JSON-RPC invalid params."""
+    """Params that do not parse (an unknown member, a wrong type) are refused
+    ``invalid_request`` with problem ``malformed`` on the family's code, and
+    a change without its ``request_id`` with problem ``empty``: never as
+    JSON-RPC invalid params."""
     from meerkat_meta import IdentityRefusedError
 
-    error = _rpc_error_from_payload(
-        refusal_error(
-            "invalid_request",
-            field="request_id",
-            retryable=False,
-            detail="A change names its request_id.",
-            problem="malformed",
-        ),
-        request_id="1",
-        method="meta/identity/adopt",
-    )
-    assert isinstance(error, IdentityRefusedError)
-    assert error.kind == "invalid_request"
-    assert error.field == "request_id"
-    assert error.details == {"problem": "malformed"}
+    for field, problem in (("custody", "malformed"), ("request_id", "empty")):
+        error = _rpc_error_from_payload(
+            refusal_error(
+                "invalid_request",
+                field=field,
+                retryable=False,
+                detail="What was wrong, and what to send instead.",
+                problem=problem,
+            ),
+            request_id="1",
+            method="meta/identity/adopt",
+        )
+        assert isinstance(error, IdentityRefusedError)
+        assert error.kind == "invalid_request"
+        assert error.field == field
+        assert error.details == {"problem": problem}
 
 
 def test_a_candidate_launch_refuses_a_change_with_the_gateway_wide_error():
@@ -1159,7 +1151,8 @@ async def test_an_unknown_advisory_value_is_kept_raw():
                 "profiles": [
                     {
                         "profile": "researcher",
-                        "verdict": {"verdict": "needs_review", "reviewer": "editor"},
+                        "verdict": "needs_review",
+                        "reviewer": "editor",
                     }
                 ],
                 "peers": [],
@@ -1175,11 +1168,9 @@ async def test_an_unknown_advisory_value_is_kept_raw():
     assert agent.provenance.consent_form == "reviewed"
 
     directory = await identities.directory()
-    assert directory.profiles[0].verdict.verdict == "needs_review"
-    assert directory.profiles[0].verdict.raw == {
-        "verdict": "needs_review",
-        "reviewer": "editor",
-    }
+    assert directory.profiles[0].verdict == "needs_review"
+    assert directory.profiles[0].lines == ()
+    assert directory.profiles[0].reason is None
 
     outcome = identity_outcome_from_dict(
         {

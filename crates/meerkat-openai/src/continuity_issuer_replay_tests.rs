@@ -1571,6 +1571,113 @@ async fn an_undeclared_self_hosted_server_is_its_base_url() {
     }
 }
 
+/// One address under two kinds of service is two issuers: a self-hosted
+/// client and a public-wire client pointed at the same base URL do not
+/// replay each other's material. (The self-hosted client's Responses
+/// delegate speaks the public wire; it is not the public API.)
+#[tokio::test]
+async fn one_address_under_two_service_kinds_is_two_issuers() {
+    let process = new_process();
+    let public_wire = |ledger: &Ledger| -> Arc<dyn LlmClient> {
+        Arc::new(
+            OpenAiClient::new_with_base_url("test-key".to_string(), endpoint("shared-address"))
+                .with_continuity_ledger(Arc::clone(ledger)),
+        )
+    };
+    let history = vec![user(QUESTION)];
+    let (_, blocks) = stored_step(
+        undeclared_self_hosted("shared-address", &process),
+        &history,
+        &tool_step_response("s"),
+    )
+    .await;
+    let from_self_hosted = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("s"),
+    ];
+    let body = body_on_the_wire(public_wire(&process), from_self_hosted).await;
+    assert_wholly_dropped("self-hosted -> public wire, one address", &body);
+
+    let (_, blocks) = stored_step(public_wire(&process), &history, &tool_step_response("w")).await;
+    let from_public_wire = vec![
+        user(QUESTION),
+        Message::BlockAssistant(BlockAssistantMessage::new(blocks, StopReason::ToolUse)),
+        tool_output("w"),
+    ];
+    let body = body_on_the_wire(
+        undeclared_self_hosted("shared-address", &process),
+        from_public_wire,
+    )
+    .await;
+    assert_wholly_dropped("public wire -> self-hosted, one address", &body);
+}
+
+// ---------------------------------------------------------------------------
+// The lowering asks the owner too
+// ---------------------------------------------------------------------------
+
+/// The body builder a host can call directly, and the continuation plan,
+/// ask the replay owner themselves: handed a canonical transcript that was
+/// never projected, they lower no material the process did not receive
+/// from the client's service, and name no response id of it.
+#[tokio::test]
+async fn lowering_an_unprojected_transcript_asks_the_owner() {
+    let earlier = new_process();
+    let stored = then_asked(
+        served_turn(Service::OpenAiApi, &earlier, "t").await,
+        NEXT_QUESTION,
+    );
+    let process = new_process();
+    let foreign = then_asked(
+        served_turn(Service::Copilot, &process, "f").await,
+        NEXT_QUESTION,
+    );
+    let own = then_asked(
+        served_turn(Service::OpenAiApi, &process, "o").await,
+        NEXT_QUESTION,
+    );
+    let client = OpenAiClient::new_with_base_url("test-key".to_string(), endpoint("OpenAiApi"))
+        .with_continuity_ledger(Arc::clone(&process));
+
+    for (case, transcript, turn) in [
+        ("a stored turn", stored, "t"),
+        ("another service's turn", foreign, "f"),
+    ] {
+        let body = client
+            .build_request_body(&request(transcript.clone()))
+            .expect("request body");
+        assert_wholly_dropped(case, &body);
+        assert_eq!(
+            body["input"],
+            input_of([dropped_turn(turn, QUESTION), vec![user_item(NEXT_QUESTION)]]),
+            "{case}"
+        );
+        let (body, plan) = client
+            .build_request_body_with_continuation(&continuation_request(transcript))
+            .expect("continuation body");
+        assert!(
+            plan.is_none(),
+            "{case}: no continuation from a step that is not the target's"
+        );
+        assert_wholly_dropped(case, &body);
+    }
+
+    let body = client
+        .build_request_body(&request(own.clone()))
+        .expect("request body");
+    assert_eq!(
+        body["input"],
+        input_of([native_turn("o", QUESTION), vec![user_item(NEXT_QUESTION)]]),
+        "its own turn is lowered as the service returned it"
+    );
+    let (body, plan) = client
+        .build_request_body_with_continuation(&continuation_request(own))
+        .expect("continuation body");
+    assert!(plan.is_some());
+    assert_eq!(body["previous_response_id"], "resp_o_2");
+}
+
 // ---------------------------------------------------------------------------
 // What is recorded is what is stored
 // ---------------------------------------------------------------------------

@@ -334,7 +334,7 @@ impl ResponsesCacheBreakpoints {
 // string.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OpenAiContinuationPlan {
+pub(crate) struct OpenAiContinuationPlan {
     previous_response_id: String,
     replay_from_message_index: usize,
 }
@@ -1141,7 +1141,7 @@ impl OpenAiClient {
     /// For the self-hosted client's Responses delegate: it is a
     /// self-hosted server, the configured one `server` names when the
     /// client was given it.
-    pub(crate) fn as_self_hosted_delegate(mut self, server: Option<String>) -> Self {
+    pub(crate) fn into_self_hosted_delegate(mut self, server: Option<String>) -> Self {
         self.continuity_identity = ContinuityIdentity::SelfHosted { server };
         self
     }
@@ -1213,9 +1213,11 @@ impl OpenAiClient {
                 }
             };
             match &event {
-                Ok(LlmEvent::TextDelta { meta, .. })
-                | Ok(LlmEvent::ReasoningComplete { meta, .. })
-                | Ok(LlmEvent::ToolCallComplete { meta, .. }) => receive(meta.as_deref(), None),
+                Ok(
+                    LlmEvent::TextDelta { meta, .. }
+                    | LlmEvent::ReasoningComplete { meta, .. }
+                    | LlmEvent::ToolCallComplete { meta, .. },
+                ) => receive(meta.as_deref(), None),
                 Ok(LlmEvent::ServerToolContent { content, meta, .. }) => {
                     receive(meta.as_deref(), Some(content));
                 }
@@ -1865,7 +1867,7 @@ impl OpenAiClient {
     /// transcript directly; a request in flight is lowered under the decision
     /// it was prepared with).
     #[cfg(test)]
-    fn build_request_body_with_continuation(
+    pub(crate) fn build_request_body_with_continuation(
         &self,
         request: &LlmRequest,
     ) -> Result<(Value, Option<OpenAiContinuationPlan>), LlmError> {

@@ -153,7 +153,12 @@ async fn spawn_search_stub(
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve test server");
     });
-    let client = OpenAiClient::new_with_base_url("test-key".to_string(), format!("http://{addr}"));
+    // Every stub serves the same answer, ids included, from an address of
+    // its own. In one test process that is the same material from several
+    // services, which belongs to none of them; each client therefore keeps
+    // its own record of what it received.
+    let client = OpenAiClient::new_with_base_url("test-key".to_string(), format!("http://{addr}"))
+        .with_continuity_ledger(Arc::new(meerkat_core::OpenAiContinuityLedger::new()));
     (client, seen, server)
 }
 

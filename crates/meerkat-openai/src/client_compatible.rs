@@ -165,7 +165,7 @@ impl OpenAiCompatibleClient {
                 bearer_token.clone(),
                 trim_v1_suffix(&base_url),
             )
-            .as_self_hosted_delegate(None)
+            .into_self_hosted_delegate(None)
         });
         Self {
             mode,
@@ -202,7 +202,7 @@ impl OpenAiCompatibleClient {
         self.responses_delegate = self
             .responses_delegate
             .take()
-            .map(|delegate| delegate.as_self_hosted_delegate(Some(server)));
+            .map(|delegate| delegate.into_self_hosted_delegate(Some(server)));
         self
     }
 

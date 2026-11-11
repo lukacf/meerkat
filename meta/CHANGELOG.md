@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`record: Default::default()`). The status as written on the wire is
   unchanged while the record's members are unset.
 
+### Changed
+
+- `runtime_options.identity_creation`: an approval rule may name the change
+  classes `archive` (an archive and an unarchive) and `adopt`, and
+  `approval.timeouts_ms` takes `archive` and `adopt` (4 hours each by
+  default). A launch that names them was refused at init before. Nothing
+  acts on the policy yet.
+
 ## [0.9.13] - 2026-11-11
 
 Meta 0.9.13 is part of Meerkat 0.9.13 (Core 0.9.13, Meta 0.9.13 and Connect

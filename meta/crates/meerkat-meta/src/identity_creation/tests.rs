@@ -1174,40 +1174,40 @@ fn normalization_refuses_typed() {
         spec_case(
             |spec| set_profile(spec, "ghost"),
             json!({"kind": "profile_unknown", "profile": "ghost",
-                   "field": "identities[0].spec.profile"}),
+                   "field": "agents[0].profile"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("team", "x")]),
-            json!({"kind": "reserved_key", "key": "team", "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": "team", "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("role", "x")]),
-            json!({"kind": "reserved_key", "key": "role", "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": "role", "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("bad key", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("note\u{202E}", "x")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("note", "a\nb")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels.note"}),
+                   "field": "agents[0].labels.note"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("clearance", "top")]),
             json!({"kind": "authority_field_invalid", "key": "clearance",
-                   "field": "identities[0].spec.labels"}),
+                   "field": "agents[0].labels"}),
         ),
         spec_case(
             |spec| {
@@ -1220,21 +1220,21 @@ fn normalization_refuses_typed() {
                 );
             },
             json!({"kind": "unsupported", "feature": "a bootstrap token in an identity request",
-                   "field": "identities[0].spec.binding"}),
+                   "field": "agents[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["ghost".to_owned()],
-            json!({"kind": "peer_unknown", "field": "identities[0].peers[0]"}),
+            json!({"kind": "peer_unknown", "field": "agents[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["stranger".to_owned()],
             json!({"kind": "peer_not_allowed", "identity": "stranger",
-                   "field": "identities[0].peers[0]"}),
+                   "field": "agents[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["helper".to_owned()],
             json!({"kind": "peer_not_allowed", "identity": "helper",
-                   "field": "identities[0].peers[0]"}),
+                   "field": "agents[0].peers[0]"}),
         ),
     ];
     for (change, expected) in cases {
@@ -1249,7 +1249,7 @@ fn normalization_refuses_typed() {
         create(&policy(), &lead(), &[spec("helper"), spec("helper")]).expect_err("a duplicate");
     assert_eq!(
         refusal.to_data(),
-        json!({"kind": "name_taken", "by": "identity", "field": "identities[1].spec.identity"})
+        json!({"kind": "name_taken", "by": "identity", "field": "agents[1].name"})
     );
 
     let refusal = create(&policy(), &lead(), &[]).expect_err("nothing to create");
@@ -1289,7 +1289,7 @@ fn normalization_refuses_typed() {
         update(&RequesterFacts::host("gateway"), &entry, &meta_key)
             .unwrap_err()
             .to_data(),
-        json!({"kind": "reserved_key", "key": "role", "field": "set.authority_fields"})
+        json!({"kind": "reserved_key", "key": "role", "field": "set.labels"})
     );
 }
 
@@ -1457,7 +1457,7 @@ fn a_label_key_a_selector_reads_is_reserved() {
         set_labels(&mut request, &[(key, "x")]);
         assert_eq!(
             create(&policy, &host, &[request]).unwrap_err().to_data(),
-            json!({"kind": "reserved_key", "key": key, "field": "identities[0].spec.labels"}),
+            json!({"kind": "reserved_key", "key": key, "field": "agents[0].labels"}),
             "{key}"
         );
         let mut set = json!({"descriptive_labels": {}});
@@ -1467,7 +1467,7 @@ fn a_label_key_a_selector_reads_is_reserved() {
             update_with(&policy, &host, &entry, &relabel)
                 .unwrap_err()
                 .to_data(),
-            json!({"kind": "reserved_key", "key": key, "field": "set.descriptive_labels"}),
+            json!({"kind": "reserved_key", "key": key, "field": "set.labels"}),
             "{key}"
         );
     }
@@ -3516,11 +3516,11 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::ProfileNotAllowed {
                 profile: "ghost".to_owned(),
             })
-            .at("identities[0].spec.profile"),
+            .at("agents[0].profile"),
             json!({
                 "kind": "profile_not_allowed",
                 "profile": "ghost",
-                "field": "identities[0].spec.profile"
+                "field": "agents[0].profile"
             }),
         ),
         (
@@ -3563,11 +3563,11 @@ fn refusal_data_carries_the_kind_its_field_and_its_payload() {
             IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
                 problem: RequestProblem::Malformed,
             })
-            .at("identities[0].spec.labels"),
+            .at("agents[0].labels"),
             json!({
                 "kind": "invalid_request",
                 "problem": "malformed",
-                "field": "identities[0].spec.labels"
+                "field": "agents[0].labels"
             }),
         ),
     ];

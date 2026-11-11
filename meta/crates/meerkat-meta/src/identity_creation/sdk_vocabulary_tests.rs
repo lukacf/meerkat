@@ -87,49 +87,61 @@ fn rust(tokens: &[&str]) -> BTreeSet<String> {
     listed
 }
 
+/// One closed vocabulary: the family's tokens, and where each SDK lists
+/// them.
+struct Vocabulary {
+    what: &'static str,
+    family: &'static [&'static str],
+    python: (&'static str, &'static str),
+    typescript: (&'static str, &'static str),
+}
+
 #[test]
 fn the_sdks_closed_vocabularies_are_the_familys() {
-    let vocabularies: [(&str, &[&str], BTreeSet<String>, BTreeSet<String>); 5] = [
-        (
-            "refusal kinds",
-            IdentityRefusalKind::ALL_TOKENS,
-            python(PYTHON_ERRORS, "IDENTITY_REFUSAL_KINDS"),
-            typescript(TYPESCRIPT_ERRORS, "IDENTITY_REFUSAL_KIND_TOKENS"),
-        ),
-        (
-            "outcome tokens",
-            IdentityOutcome::ALL_TOKENS,
-            python(PYTHON_IDENTITIES, "IDENTITY_OUTCOMES"),
-            typescript(TYPESCRIPT_IDENTITIES, "IDENTITY_OUTCOMES"),
-        ),
-        (
-            "instruction outcome kinds",
-            InstructionOutcome::ALL_TOKENS,
-            python(PYTHON_IDENTITIES, "INSTRUCTION_OUTCOME_KINDS"),
-            typescript(TYPESCRIPT_IDENTITIES, "INSTRUCTION_OUTCOME_KINDS"),
-        ),
-        (
-            "instruction next-session reasons",
-            InstructionNextSessionReason::ALL_TOKENS,
-            python(PYTHON_IDENTITIES, "INSTRUCTION_NEXT_SESSION_REASONS"),
-            typescript(TYPESCRIPT_IDENTITIES, "INSTRUCTION_NEXT_SESSION_REASONS"),
-        ),
-        (
-            "seats",
-            AgentSeat::ALL_TOKENS,
-            python(PYTHON_IDENTITIES, "AGENT_SEATS"),
-            typescript(TYPESCRIPT_IDENTITIES, "AGENT_SEATS"),
-        ),
+    let vocabularies = [
+        Vocabulary {
+            what: "refusal kinds",
+            family: IdentityRefusalKind::ALL_TOKENS,
+            python: (PYTHON_ERRORS, "IDENTITY_REFUSAL_KINDS"),
+            typescript: (TYPESCRIPT_ERRORS, "IDENTITY_REFUSAL_KIND_TOKENS"),
+        },
+        Vocabulary {
+            what: "outcome tokens",
+            family: IdentityOutcome::ALL_TOKENS,
+            python: (PYTHON_IDENTITIES, "IDENTITY_OUTCOMES"),
+            typescript: (TYPESCRIPT_IDENTITIES, "IDENTITY_OUTCOMES"),
+        },
+        Vocabulary {
+            what: "instruction outcome kinds",
+            family: InstructionOutcome::ALL_TOKENS,
+            python: (PYTHON_IDENTITIES, "INSTRUCTION_OUTCOME_KINDS"),
+            typescript: (TYPESCRIPT_IDENTITIES, "INSTRUCTION_OUTCOME_KINDS"),
+        },
+        Vocabulary {
+            what: "instruction next-session reasons",
+            family: InstructionNextSessionReason::ALL_TOKENS,
+            python: (PYTHON_IDENTITIES, "INSTRUCTION_NEXT_SESSION_REASONS"),
+            typescript: (TYPESCRIPT_IDENTITIES, "INSTRUCTION_NEXT_SESSION_REASONS"),
+        },
+        Vocabulary {
+            what: "seats",
+            family: AgentSeat::ALL_TOKENS,
+            python: (PYTHON_IDENTITIES, "AGENT_SEATS"),
+            typescript: (TYPESCRIPT_IDENTITIES, "AGENT_SEATS"),
+        },
     ];
-    for (what, tokens, python, typescript) in vocabularies {
-        let family = rust(tokens);
+    for vocabulary in vocabularies {
+        let what = vocabulary.what;
+        let family = rust(vocabulary.family);
         assert_eq!(
-            python, family,
+            python(vocabulary.python.0, vocabulary.python.1),
+            family,
             "the Python SDK's {what} differ from the family's: change both, and the change is \
              Breaking for the SDK"
         );
         assert_eq!(
-            typescript, family,
+            typescript(vocabulary.typescript.0, vocabulary.typescript.1),
+            family,
             "the TypeScript SDK's {what} differ from the family's: change both, and the change \
              is Breaking for the SDK"
         );

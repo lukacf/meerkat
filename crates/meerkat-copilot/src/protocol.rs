@@ -21,8 +21,20 @@ const DEFAULT_INTEGRATION_ID: &str = "vscode-chat";
 /// sign-in's default, for such a token.
 const OPERATOR_TOKEN_INTEGRATION_ID: &str = "copilot-developer-cli";
 const DEFAULT_USER_AGENT: &str = meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT;
-const DEFAULT_EDITOR_VERSION: &str = "vscode/1.107.0";
-const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+/// The client identity a route sends when its backend options set none: an
+/// editor version, a chat plugin version and the User-Agent, which carries
+/// the plugin version. The Copilot API marks every entry of a model listing
+/// whose `Editor-Version` is too old with a `client_version_deprecated`
+/// warning. Live list reads of 2026-11-11: `vscode/1.107.0` and
+/// `vscode/1.118.0` are marked, `vscode/1.130.0` and `vscode/1.145.2` are
+/// not, and the plugin and User-Agent versions do not move the warning. The
+/// plugin version keeps the pairing of the values before it (plugin minor =
+/// editor minor less 72, as `copilot-chat/0.35.0` was to `vscode/1.107.0`);
+/// it was not checked against a release list. Raise the three together,
+/// before the editor version falls behind the service's cut-off; rows in
+/// `runtime.rs` pin them.
+const DEFAULT_EDITOR_VERSION: &str = "vscode/1.145.2";
+const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.73.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopilotProviderRoute {

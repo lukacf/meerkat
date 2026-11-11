@@ -621,6 +621,137 @@ describe("long-term agents in the console", () => {
     view.unmount();
   }, 60_000);
 
+  it("an_agent_that_changed_under_a_form_is_read_again_and_nothing_is_sent_on_its_own", async () => {
+    const family = createScriptedIdentityFamily();
+    const { view, harness } = await openRoster(family);
+    const reads = () => calls(family, "meta/identity/get").filter((params) => params.name === "warden").length;
+    const digestNow = () => family.handle("meta/identity/get", { name: "warden" }).result.spec_digest as string;
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:edit"));
+    const edit = await find(view, "identity-edit:warden");
+    await within(edit).findByTestId("identity-field:display_name", undefined, { timeout: 5_000 });
+    const opened = digestNow();
+
+    // Somebody else changes the agent while the form is open.
+    family.agents.get("warden").instructions = ["Guard the vault."];
+    const moved = digestNow();
+    expect(moved).not.toBe(opened);
+    setField(edit, "identity-field:display_name", "Chief warden");
+    fireEvent.submit(edit);
+    let notice = await find(view, "identity-notice");
+    // The refusal is shown with Read it again, and nothing else: no Try
+    // again, and no second request with the digest the refusal names.
+    expect(notice.querySelector("[data-outcome='refused']")).not.toBeNull();
+    expect(notice.textContent).not.toContain("stale_spec");
+    expect(notice.textContent).not.toContain(moved);
+    expect(within(notice).queryByTestId("identity-retry")).toBeNull();
+    await settle(50);
+    let updates = calls(family, "meta/identity/update");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].expected_spec_digest).toBe(opened);
+    expect(family.agents.get("warden").display_name).toBe("The warden");
+
+    // Read it again reads the record: the form shows what the agent is now.
+    const before = reads();
+    fireEvent.click(within(notice).getByTestId("identity-reload"));
+    await waitFor(() => expect(reads()).toBe(before + 1), { timeout: 5_000 });
+    await waitFor(() => expect((within(edit).getByTestId("identity-field:instructions:0") as HTMLTextAreaElement).value).toBe("Guard the vault."), { timeout: 5_000 });
+    expect(present(view, "identity-notice")).toBe(false);
+    expect(calls(family, "meta/identity/update")).toHaveLength(1);
+    // The next Save is another request: the record's digest, a new id.
+    setField(edit, "identity-field:display_name", "Chief warden");
+    fireEvent.submit(edit);
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("is updated"), { timeout: 5_000 });
+    updates = calls(family, "meta/identity/update");
+    expect(updates).toHaveLength(2);
+    expect(updates[1].expected_spec_digest).toBe(moved);
+    expect(updates[1].request_id).not.toBe(updates[0].request_id);
+    fireEvent.click(view.getByTestId("identity-cancel"));
+
+    // A confirmation: the agent changes between its read and its change.
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:archive"));
+    const confirm = await find(view, "identity-confirm:warden:archive");
+    const read = digestNow();
+    const execute = harness.executeCommand!;
+    let changed = false;
+    harness.executeCommand = async (input) => {
+      if (!changed && consoleCommandMethod(input.command) === "meta/identity/archive") {
+        changed = true;
+        family.agents.get("warden").labels = { team: "vault" };
+      }
+      return execute(input);
+    };
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    notice = await find(view, "identity-notice");
+    expect(notice.querySelector("[data-outcome='refused']")).not.toBeNull();
+    expect(within(notice).queryByTestId("identity-retry")).toBeNull();
+    await settle(50);
+    let archives = calls(family, "meta/identity/archive");
+    expect(archives).toHaveLength(1);
+    expect(archives[0].expected_spec_digest).toBe(read);
+    expect(family.agents.get("warden").archived).toBe(false);
+    // Read it again brings the question back; confirming reads the record
+    // and sends another request.
+    const readsBefore = reads();
+    fireEvent.click(within(notice).getByTestId("identity-reload"));
+    await gone(view, "identity-notice");
+    expect(confirm.textContent).toContain("Archive Chief warden?");
+    expect(calls(family, "meta/identity/archive")).toHaveLength(1);
+    fireEvent.click(within(confirm).getByTestId("identity-confirm-yes"));
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("Chief warden is archived"), { timeout: 5_000 });
+    expect(reads()).toBe(readsBefore + 1);
+    archives = calls(family, "meta/identity/archive");
+    expect(archives).toHaveLength(2);
+    expect(archives[1].expected_spec_digest).not.toBe(read);
+    expect(archives[1].request_id).not.toBe(archives[0].request_id);
+    view.unmount();
+  }, 60_000);
+
+  it("a_peer_the_directory_does_not_allow_cannot_be_added_and_one_the_agent_has_can_be_taken_away", async () => {
+    const family = createScriptedIdentityFamily();
+    family.seed({ name: "courier", display_name: "The courier", profile: "worker" });
+    family.setPeerVerdict("helper", { verdict: "not_allowed", reason: "The host's rules keep the helper to its own desk." });
+    family.setPeerVerdict("courier", { verdict: "needs_decision", lines: ["A person decides each link to the courier."] });
+    const { view } = await openRoster(family);
+    const form = await openNewAgent(view);
+    const peers = within(form).getByTestId("identity-field:peers");
+    // A peer the rules do not allow is shown with the rule's reason and
+    // cannot be picked; one that needs a decision can, with its line; an
+    // allowed one carries no mark.
+    expect((within(form).getByTestId("identity-peer:helper") as HTMLInputElement).disabled).toBe(true);
+    expect(peers.textContent).toContain("Not allowed");
+    expect(peers.textContent).toContain("The host's rules keep the helper to its own desk.");
+    expect((within(form).getByTestId("identity-peer:courier") as HTMLInputElement).disabled).toBe(false);
+    expect(peers.textContent).toContain("Needs a decision");
+    expect(peers.textContent).toContain("A person decides each link to the courier.");
+    expect((within(form).getByTestId("identity-peer:warden") as HTMLInputElement).disabled).toBe(false);
+    expect(peers.textContent).not.toContain("Allowed");
+    fireEvent.click(view.getByTestId("identity-cancel"));
+
+    // The warden has the helper as a peer already: that link can be taken
+    // away, and once it is, it cannot be added back.
+    await selectAgent(view, "warden");
+    fireEvent.click(view.getByTestId("roster-action:warden:edit"));
+    const edit = await find(view, "identity-edit:warden");
+    const helper = await within(edit).findByTestId("identity-peer:helper", undefined, { timeout: 5_000 }) as HTMLInputElement;
+    expect(helper.checked).toBe(true);
+    expect(helper.disabled).toBe(false);
+    fireEvent.click(helper);
+    expect(helper.checked).toBe(false);
+    expect(helper.disabled).toBe(true);
+    fireEvent.submit(edit);
+    await waitFor(() => expect(noticeWords(view.getByTestId("identity-notice"))).toContain("is updated"), { timeout: 5_000 });
+    expect(calls(family, "meta/identity/update")).toEqual([{
+      request_id: expect.stringMatching(/\S/),
+      name: "warden",
+      expected_spec_digest: expect.stringMatching(/^sha256:/),
+      set: {},
+      peers_remove: ["helper"],
+    }]);
+    view.unmount();
+  }, 60_000);
+
   it("an_agents_details_offer_the_same_changes_and_read_its_record_again", async () => {
     const family = createScriptedIdentityFamily();
     seedDock({ id: "inspect:warden", kind: "identity-inspect", title: "The warden details", identity: "warden", memberId: "warden" });

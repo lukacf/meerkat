@@ -1020,8 +1020,9 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     turn_on(&realm.fixture, &reused, REUSE_MEMBER, REUSE_TURN).await;
 
     // What a console holds under that mob id: frames stored for the
-    // council's seats (the second under a session the record never held),
-    // and one stored for the ordinary mob's member.
+    // council's seats (the second under a session the record never held,
+    // the third on a seat's fork session under a name the record never
+    // held), and one stored for the ordinary mob's member.
     let seeds = [
         (
             "settled-council-seat",
@@ -1039,6 +1040,16 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
                 PARTICIPANTS[1],
                 "unrecorded-seat-session",
                 "council_p1",
+                &primary,
+                &council.mob,
+            ),
+        ),
+        (
+            "settled-council-seat-by-session",
+            captured(
+                "unrecorded-seat-name",
+                &fork_session,
+                "council_p0",
                 &primary,
                 &council.mob,
             ),
@@ -1087,7 +1098,7 @@ async fn an_ordinary_mob_under_a_settled_councils_mob_id_is_listed_and_its_frame
     backfill(&aggregator).await;
 
     let mut names = realm.names();
-    names.push(REUSE_MEMBER);
+    names.extend([REUSE_MEMBER, "unrecorded-seat-name"]);
     let ordinary = BTreeSet::from(["ordinary-member".to_string()]);
     let controller = controller(deny_source_by_identity());
     let administrator = served(&aggregator, &controller, Some(ROOT), &names).await;

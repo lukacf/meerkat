@@ -1286,6 +1286,19 @@ pub async fn console_json_handler(
         attach_console_storage_scope(&mut response.body, auth.principal.as_deref());
     }
     if response.status == 200 && uri.path() == "/console/experience" {
+        // Whether this console serves changes of the mob's long-term agents
+        // to the caller, and which of them the caller's grants admit.
+        let identity_changes_available = !state.decisions.console.read_only
+            && state
+                .runtime
+                .as_ref()
+                .and_then(MobRuntime::installed_identity_runtime)
+                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some());
+        crate::runtime::apply_identity_changes_to_experience(
+            &mut response.body,
+            caller.as_ref().map(|caller| &caller.audience),
+            identity_changes_available,
+        );
         attach_console_send_dedupe(&mut response.body, state.console_aggregator.as_ref());
         if let Some(runtimes) = panel_runtimes {
             response.body["panel_runtimes"] = json!(
@@ -5172,6 +5185,9 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
     if crate::rpc::tool_grant_methods::is_tool_grant_mutating_method(method) {
         return true;
     }
+    if crate::rpc::identity_methods::is_identity_family_mutating_method(method) {
+        return true;
+    }
     if crate::rpc::topology_methods::is_topology_mutating_method(method) {
         return true;
     }
@@ -5937,6 +5953,33 @@ fn console_rpc_access_requirements(
         }
         crate::rpc::tool_grant_methods::TOOL_GRANTS_LIST
         | crate::rpc::tool_grant_methods::TOOL_GRANTS_AUDIT => one(ACTION_AGENT_VIEW, identity),
+        // The changes of the mob's long-term agents. A create names no
+        // existing agent; a change of one agent is judged on that agent,
+        // and its removal, which is permanent, under an action of its own.
+        // Holding the mob's changes is the runtime's administration. A
+        // withdrawal names its caller's own operation, which only a caller
+        // that may ask for a change has, so it needs what viewing needs.
+        crate::rpc::identity_methods::IDENTITY_CREATE => {
+            one(crate::access::ACTION_AGENT_IDENTITY_CREATE, None)
+        }
+        crate::rpc::identity_methods::IDENTITY_UPDATE
+        | crate::rpc::identity_methods::IDENTITY_ARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_ADOPT => {
+            one(crate::access::ACTION_AGENT_IDENTITY_MANAGE, target)
+        }
+        crate::rpc::identity_methods::IDENTITY_REMOVE => {
+            one(crate::access::ACTION_AGENT_IDENTITY_REMOVE, target)
+        }
+        crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => one(ACTION_RUNTIME_ADMIN, None),
+        // The reads: one agent is judged on that agent; a list and the
+        // directory leave out the agents the caller may not view.
+        crate::rpc::identity_methods::IDENTITY_GET => one(ACTION_AGENT_VIEW, target),
+        crate::rpc::identity_methods::IDENTITY_LIST
+        | crate::rpc::identity_methods::IDENTITY_DIRECTORY
+        | crate::rpc::identity_methods::IDENTITY_OPERATION
+        | crate::rpc::identity_methods::IDENTITY_PLAN
+        | crate::rpc::identity_methods::IDENTITY_WITHDRAW => one(ACTION_AGENT_VIEW, None),
         // Recovering a send answers only the caller's own sends to the
         // identity, so it needs exactly what sending there needs.
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
@@ -6246,6 +6289,12 @@ const NEW_MEMBER: &[ConsoleMemberField] = &[recorded(&["agent_identity"])];
 /// The identity a method records something for under its `identity`.
 const RECORDED_IDENTITY: &[ConsoleMemberField] = &[recorded(&["identity"])];
 
+/// The agent a change or a read of the identity family names.
+const NAMED_AGENT: &[ConsoleMemberField] = &[subject(&["name"])];
+
+/// The agents a create of the identity family names.
+const NEW_AGENTS: &[ConsoleMemberField] = &[recorded(&["agents", "*", "name"])];
+
 /// A fork's child, which it creates, and its source, which it reads.
 const FORK_MEMBERS: &[ConsoleMemberField] = &[
     recorded(&["agent_identity"]),
@@ -6357,6 +6406,23 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         | "meta/tool_grants/list"
         | "meta/tool_grants/audit"
         | "meta/tool_grants/revoke" => SUBJECT_MEMBER,
+        // The identity family: a create names the agents it creates, a
+        // change or a read of one agent names it under `name`, and the
+        // others name none (their handlers leave out the agents the caller
+        // may not view).
+        crate::rpc::identity_methods::IDENTITY_CREATE => NEW_AGENTS,
+        crate::rpc::identity_methods::IDENTITY_UPDATE
+        | crate::rpc::identity_methods::IDENTITY_ARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_UNARCHIVE
+        | crate::rpc::identity_methods::IDENTITY_REMOVE
+        | crate::rpc::identity_methods::IDENTITY_ADOPT
+        | crate::rpc::identity_methods::IDENTITY_GET => NAMED_AGENT,
+        crate::rpc::identity_methods::IDENTITY_LIST
+        | crate::rpc::identity_methods::IDENTITY_DIRECTORY
+        | crate::rpc::identity_methods::IDENTITY_OPERATION
+        | crate::rpc::identity_methods::IDENTITY_PLAN
+        | crate::rpc::identity_methods::IDENTITY_WITHDRAW
+        | crate::rpc::identity_methods::IDENTITY_CHANGES_HOLD => NO_MEMBER,
         // The voice and live channel methods name the member they speak
         // for.
         method
@@ -13059,6 +13125,44 @@ async fn handle_console_runtime_rpc_with_visibility(
         }
     }
 
+    // The family of changes and reads of the mob's long-term agents, served
+    // by the same handlers as the stdin surface, after the gates above. Its
+    // requester is the verified person, under the key a decision records
+    // that person by, or the host on its console surface when the caller is
+    // no verified person; never the host's operator.
+    if crate::rpc::identity_methods::is_identity_family_method(request.method.as_str())
+        && let Some(family) = identity_runtime
+            .as_ref()
+            .and_then(|identity_runtime| identity_runtime.identity_family())
+    {
+        let handle = runtime.handle();
+        let person = governance
+            .human
+            .as_ref()
+            .and_then(|human| human.principal().ok())
+            .and_then(|principal| {
+                meerkat_core::approval::decision::DecisionPrincipalKey::of(&principal).ok()
+            });
+        let surface = crate::rpc::identity_methods::IdentityFamilySurface {
+            mob: &handle,
+            family: family.as_ref(),
+            requester: crate::rpc::identity_methods::console_requester(
+                person.as_ref().map(|person| person.as_str()),
+            ),
+            access: access_view,
+        };
+        if let Some(response) = crate::rpc::identity_methods::handle_identity_family_rpc(
+            &surface,
+            request.method.as_str(),
+            response_id.clone(),
+            &request.params,
+        )
+        .await
+        {
+            return response_value(response_id, response.result, response.error);
+        }
+    }
+
     match request.method.as_str() {
         "meta/capabilities" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             // A decision (a gate, a quarantine review, a goal confirmation)
@@ -13114,6 +13218,24 @@ async fn handle_console_runtime_rpc_with_visibility(
                             )
                     }),
             );
+            // The identity family, derived from its registry and split by
+            // its own classifier: advertised by the runtime that serves it.
+            if identity_runtime
+                .as_ref()
+                .is_some_and(|identity_runtime| identity_runtime.identity_family().is_some())
+            {
+                methods.extend(
+                    crate::rpc::identity_methods::IDENTITY_FAMILY_METHODS
+                        .iter()
+                        .copied()
+                        .filter(|method| {
+                            can_mutate
+                                || !crate::rpc::identity_methods::is_identity_family_mutating_method(
+                                    method,
+                                )
+                        }),
+                );
+            }
             if identity_runtime.is_some() {
                 methods.extend_from_slice(&[
                     "meta/status_identity",
